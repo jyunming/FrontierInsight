@@ -278,7 +278,25 @@ def _drawn(calls, panel, a, fmt, ctx):
             return None
     elif not _pairs(s):
         return None
-    return f"{_label(s)} is drawn{_where(calls, panel)}", {}
+    return f"{_label(s)} is drawn{_where(calls, panel)}{_of_levels(panel, s)}", {}
+
+
+def _of_levels(panel: dict[str, Any], s: dict[str, Any]) -> str:
+    """A curve FI drew for one level of a setting is one of the panel's curves, one per level: "Size = 1 is drawn" alone reads as
+    though 1 were the only size the figure draws. When the panel holds the curves of several levels of that setting, the sentence
+    says how many, from FI's record of the drawing (a level drawn as a line and as points counts once)."""
+    level = s.get("level") if isinstance(s.get("level"), dict) else None
+    if level is None or not level.get("setting"):
+        return ""
+    group = [x for x in panel.get("series") or []
+             if isinstance(x, dict) and isinstance(x.get("level"), dict) and x["level"].get("setting") == level["setting"]
+             and x.get("kind") != "image"]
+    levels = {str(x["level"].get("text")) for x in group}
+    if len(levels) < 2:
+        return ""
+    kinds = {x.get("kind") for x in group}
+    unit = {"points": "series of points", "bars": "series of bars"}.get(next(iter(kinds)), "curves") if len(kinds) == 1 else "curves"
+    return f", one of {len(levels)} {unit}, one per {level.get('setting_label') or level['setting']}"
 
 
 def _image_values(s: dict[str, Any]) -> list[float]:

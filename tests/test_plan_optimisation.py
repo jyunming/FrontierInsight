@@ -92,7 +92,7 @@ def test_the_plan_file_round_trips_the_block_and_the_study_type() -> None:
     ({"numerical_settings": {"elements": {"search": 100, "check": [50], "finer": "larger"}}}, "is not finer than 100"),
     ({"evaluation_budget": {"starts": 0, "per_start": 60}}, "whole number of at least 1"),
     ({"search_method": "simulated_annealing"}, "scipy:<function>"),
-    ({"objective": {"quantity": "max_base_temperature", "direction": "lower"}}, "`minimise` or `maximise`"),
+    ({"objective": {"quantity": "max_base_temperature", "direction": "lower"}}, "must be exactly one of minimise, maximise"),
     ({"fixed": {"fin_count": 12}}, "also a design variable"),
     ({"grid": {"fin_spacing": [0.5, 2.0]}}, "inside that variable's range"),
 ])

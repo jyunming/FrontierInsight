@@ -1275,12 +1275,12 @@ def test_calls_are_recorded_with_the_real_recorder_and_agree_with_it(tmp_path):
             declared = ["growth"]
             def keys(self): return ["size=1", "size=2"]
             def setting(self, key): return {"size": float(key.split("=")[1])}
-            _references = {"limit": {"size=1": 1.5, "size=2": 1.5}}  # a plan reference: the constant 1.5 below is it
+            _references = {"limit": {"size=1": 1.5, "size=2": 1.5}}  # a plan reference: drawn by its id below
         def figure_g(fig, table):
             fig.line(0, "fast", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2])
             fig.points(0, "slow", [1, 2], [2.0, 1.0], "growth")
             fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
-            fig.ref(0, value=1.5)
+            fig.ref(0, "limit")
             fig.bars(1, "fast", [1, 2], [1.0, 2.0], "growth")
             fig.axes[1].plot([0, 1], [0, 1])
         ns = types.SimpleNamespace(figure_g=figure_g, COMPARED={"speed": ["fast", "slow"]})
@@ -1426,7 +1426,7 @@ def test_a_body_using_only_fi_calls_stays_verified(tmp_path, frame5):
         _drawn(fig, table, 0)
         fig.line(0, "slow", [1, 2], [2.0, 1.0], "growth", yerr=[0.1, 0.2])
         fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
-        fig.ref(0, value=1.5)
+        fig.ref(0, "limit")
         fig.note(0, what="mean growth: {growth}", key="size=1")
         _drawn(fig, table, 1)
         fig.bars(1, "slow", [1, 2], [1.0, 2.0], "growth")
@@ -1833,7 +1833,7 @@ def test_a_reference_line_changed_to_a_slope_after_fi_drew_it_is_not_verified(tm
     def sloped(fig, table):
         _drawn(fig, table, 0)
         _drawn(fig, table, 1)
-        line = fig.ref(0, value=1.5)
+        line = fig.ref(0, "limit")
         assert line is not None
         line.set_ydata([1.5, 9.0])
 
@@ -1845,7 +1845,7 @@ def test_a_reference_line_changed_to_a_slope_after_fi_drew_it_is_not_verified(tm
     def honest(fig, table):
         _drawn(fig, table, 0)
         _drawn(fig, table, 1)
-        assert fig.ref(0, value=1.5) is not None
+        assert fig.ref(0, "limit") is not None
 
     assert _calls_run(tmp_path, honest, table=_LimitTable())["status"] == "ok"
     panels = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]

@@ -650,12 +650,14 @@ def test_uneven_error_bars_are_recorded_and_their_meaning_is_checked_against_the
     assert h.axes[0].get_ylim()[1] > 6.0
 
 
-def test_ref_has_two_sources_and_a_typed_constant_takes_the_plan_reference_it_equals():
+def test_ref_has_two_sources_and_a_typed_constant_is_never_bound_to_a_plan_reference():
     h = _host_by_x()
     h.ref(0, "limit")
     h.ref(0, at="growth", key="size=2")
-    h.ref(0, value=3.0)  # the plan's `limit` typed as a number: that reference, already drawn, so one line
-    h.ref(1, value=3.0)  # on a panel without it: the plan's `limit`, named by the plan
+    h.ref(0, "limit")  # the same reference by its id again: one line
+    with pytest.raises(ValueError, match="never matched"):
+        h.ref(1, value=3.0)  # equal to the plan's `limit`, but a typed number is not bound to it by its value
+    h.ref(1, "limit")  # on a panel without it: the plan's `limit`, named by the plan
     with pytest.raises(ValueError):
         h.ref(0, value=1.5)  # no reference of the plan: FI cannot name it, so it is not drawn
     with pytest.raises(ValueError):
@@ -782,3 +784,30 @@ def test_y_form_names_the_statistic_drawn():
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth", form="sd")  # the identity table has no spread equal to y
     h.line(0, "slow", [1, 2], [1.0, 2.0], "growth", form="no_such_form")
     assert [s["what"] for s in h.record()["panels"][0]["series"]] == ["other", "other"]
+
+
+def test_a_name_the_plan_does_not_declare_raises_the_typed_unknown_result():
+    # The gate tells FI's own refusal of a name (wrong on any number of trials) from a data-dependent failure by the
+    # exception's type, never by its words; it is still a ValueError for a body that catches that.
+    h = _Host()
+    reads = [lambda: h.line(0, "fast", [1, 2], [1, 2], "speed"),
+             lambda: h.line(0, "Weighted estimator", [1, 2], [1, 2], "growth"),
+             lambda: h._table_read("speed", "mean", None),
+             lambda: h.line(0, "fast", ("nothing", [1, 2]), [1, 2], "growth")]
+    for read in reads:
+        with pytest.raises(ValueError) as e:
+            read()
+        assert type(e.value).__name__ == "UnknownResult"
+    with pytest.raises(ValueError) as e:  # an argument that is not a name stays a plain ValueError
+        h.line(0, "fast", [1, 2], [1], "growth")
+    assert type(e.value).__name__ == "ValueError"
+
+
+def test_a_value_outside_a_closed_list_raises_the_typed_bad_argument():
+    h = _Host()
+    reads = [lambda: h.line(0, "fast", [1, 2], [1, 2], "growth", yerr_meaning="nonsense"),
+             lambda: h._table_read("growth", "nonsense", None)]
+    for read in reads:
+        with pytest.raises(ValueError) as e:
+            read()
+        assert type(e.value).__name__ == "BadArgument"

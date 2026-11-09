@@ -55,6 +55,55 @@ BUILT_IN_METHODS = {
     "global_then_local": "a search over the whole range first, then a local search from the best point found",
     "exhaustive": "every combination is evaluated (only when the variables take few values)",
 }
+
+
+#: The fields of the search block that take exactly one value out of a closed list, each with that list (the validator's own
+#: constants): ``(field as the request names it, the values)``. A request that asks for the block shows them
+#: (:func:`closed_choices_note`), so the answer writes the bare value.
+CLOSED_CHOICES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("search_method", (*BUILT_IN_METHODS, "scipy:<function>", "optuna:<sampler>")),
+    ("objective.direction", tuple(dict.fromkeys(DIRECTIONS.values()))),
+    ("design_variables[].kind", KINDS),
+    ("improvement_tolerance.mode", ("absolute", "relative")),
+)
+
+
+def closed_values(field: str) -> tuple[str, ...]:
+    """The values of a closed-choice field, read from :data:`CLOSED_CHOICES` when asked (so a value added to the table is
+    both shown and accepted)."""
+    return dict(CLOSED_CHOICES)[field]
+
+
+def in_closed_choices(field: str, value: str) -> bool:
+    """Whether ``value`` is one of the field's values in :data:`CLOSED_CHOICES`. A table entry written ``prefix:<what>`` stands
+    for any ``prefix:`` followed by a name (a library function or sampler)."""
+    for allowed in closed_values(field):
+        if "<" in allowed:
+            if re.fullmatch(re.escape(allowed.split(":", 1)[0]) + r":[A-Za-z][A-Za-z0-9_.-]*", value):
+                return True
+        elif value == allowed:
+            return True
+    return False
+
+
+def choice_refusal(field: str, given: Any = None) -> str:
+    """The reason a closed-choice field is refused, for every field of :data:`CLOSED_CHOICES`: the field as the request names
+    it and the values it takes, quoted from the table (the one list the checks and the ask both read)."""
+    values = dict(CLOSED_CHOICES)[field]
+    seen = "" if given is None else f" (you wrote {' '.join(str(given).split())[:120]!r})"
+    return f"{_P}.{field}` must be exactly one of {', '.join(values)}{seen}"
+
+
+def closed_choices_note(parts: Any = ("optimisation",)) -> str:
+    """For the closed-choice fields of the parts a request asks for, the values each takes and where an explanation goes
+    (empty when the asked parts have none)."""
+    if "optimisation" not in set(parts):
+        return ""
+    fields = "; ".join(f"`{name}` is one of {', '.join(values)}" for name, values in CLOSED_CHOICES)
+    return (f"In the search block each of these fields takes exactly one of the values listed, written bare: {fields}. "
+            "Write any explanation in your `simplifications` entry, never in these fields.")
+
+
 # A method from a library the quest's environment may have: ``scipy:<function>`` or ``optuna:<sampler>``.
 _LIBRARY_METHOD = re.compile(r"^(scipy|optuna):([A-Za-z][A-Za-z0-9_.-]*)$")
 _LIMIT = re.compile(r"^\s*(<=|>=|<|>|≤|≥|=<|=>)\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*$")
@@ -222,9 +271,10 @@ def read_kind(value: Any) -> tuple[str | None, str | None]:
     nothing of a set of values; else ``(None, why)`` with the exact reason, which is what the plan's model is shown."""
     text = " ".join(str(value).split())
     shown = text if len(text) <= 160 else text[:160] + " ..."
-    if text.lower() in KINDS:
+    values = closed_values("design_variables[].kind")
+    if text.lower() in values:
         return text.lower(), None
-    named = [k for k in KINDS if re.search(rf"\b{k}\b", text, re.IGNORECASE)]
+    named = [k for k in values if re.search(rf"\b{k}\b", text, re.IGNORECASE)]
     if _ARRAY_WORDS.search(text):
         return None, (f"`kind` is “{shown}”, which says the variable is an array of values; the search changes one "
                       "number per variable, so FI does not read it as `" + (named[0] if named else "continuous")
@@ -232,8 +282,8 @@ def read_kind(value: Any) -> tuple[str | None, str | None]:
     if len(named) == 1:
         return named[0], None
     if not named:
-        return None, f"`kind` is “{shown}”; it must be exactly `continuous`, `integer` or `choice`"
-    return None, (f"`kind` is “{shown}”, which names more than one of `continuous`, `integer`, `choice`; "
+        return None, f"`kind` is “{shown}”; it must be exactly one of {', '.join(values)}"
+    return None, (f"`kind` is “{shown}”, which names more than one of {', '.join(values)}; "
                   "it must be exactly one of them")
 
 
@@ -514,9 +564,10 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not _text(objective.get("quantity")):
         return None, f"{_P}.objective` has no `quantity` (the name the simulation returns it under)"
     objective["quantity"] = _text(objective["quantity"])
-    direction = DIRECTIONS.get(str(objective.get("direction") or "").strip().lower())
-    if direction is None:
-        return None, f"{_P}.objective.direction` must be `minimise` or `maximise`"
+    word = str(objective.get("direction") or "").strip().lower()
+    direction = DIRECTIONS.get(word, word)
+    if direction not in closed_values("objective.direction"):
+        return None, choice_refusal("objective.direction", objective.get("direction"))
     objective["direction"] = direction
     for key in ("unit", "meaning"):
         if objective.get(key) is not None and not isinstance(objective[key], (str, int, float)):
@@ -614,9 +665,8 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     method = out.get("search_method")
     if method is not None:
         name = str(method).strip() if isinstance(method, str) else ""
-        if name not in BUILT_IN_METHODS and not _LIBRARY_METHOD.match(name):
-            return None, (f"{_P}.search_method` must be one of {', '.join(BUILT_IN_METHODS)}, or a library method "
-                          "written as `scipy:<function>` or `optuna:<sampler>`")
+        if not in_closed_choices("search_method", name):
+            return None, choice_refusal("search_method", method)
         out["search_method"] = name
 
     tolerance = out.get("improvement_tolerance")
@@ -625,8 +675,8 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
             value, mode = tolerance.get("value"), str(tolerance.get("mode") or "absolute").strip().lower()
             if not _number(value) or value < 0:
                 return None, f"{_P}.improvement_tolerance.value` must be a number of at least 0"
-            if mode not in ("absolute", "relative"):
-                return None, f"{_P}.improvement_tolerance.mode` must be `absolute` or `relative`"
+            if mode not in closed_values("improvement_tolerance.mode"):
+                return None, choice_refusal("improvement_tolerance.mode", tolerance.get("mode"))
             if mode == "relative" and value > 1:
                 return None, (f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means 5%); "
                               f"{_fmt(value)} would mean more than 100%")

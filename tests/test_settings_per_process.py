@@ -490,9 +490,9 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
 
     # sha256 of HARNESS_SOURCE (it is part of the keys of FI's search records); it was a0cea43c... on 894a9265. The text
     # includes core/in_run.py whole; commits 2a36c0db and 92494b76 only ADD helpers there (level_first, settle_missing,
-    # per_run_names, unplaced; no line removed or changed), so the worker's own text is unchanged and the pin moves on purpose.
+    # per_run_names, unplaced; no line removed or changed), so the worker's own text is unchanged and the pin moves on purpose. It moves again for `LevelsRefused` (the type every refusal of a per-value result is raised as, which a case's retry and the repair rule read in place of the message), so the search records keyed on the old text are not matched.
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "6fe2ccf1140f5532d00b39d169b5a427c2e6dab86cccaac529c3df78f25e3f10")
+        "831539879b828b617986db62e3137e8d6026958d2463d008c5eea4fb53019f9c")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 

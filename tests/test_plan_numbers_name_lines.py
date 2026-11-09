@@ -18,11 +18,13 @@ def _host(references):
     return h
 
 
-def test_a_typed_constant_equal_to_one_fixed_number_of_the_plan_is_drawn_and_named_by_it():
+def test_a_fixed_number_of_the_plan_is_drawn_and_named_by_its_id_and_a_typed_equal_is_not():
     h = _host({"alpha": {"value": 0.05, "label": "alpha = 0.05", "fixed": True},
                "rate_b": {"value": 0.07, "label": "Rate b"}})
     h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
-    h.ref(0, value=0.05)
+    with pytest.raises(ValueError, match="never matched"):
+        h.ref(0, value=0.05)  # equal to alpha, but a typed number is not bound to it by its value
+    h.ref(0, "alpha")
     refs = h.record()["panels"][0]["refs"]
     assert [(r["id"], r["label"]) for r in refs] == [("alpha", "alpha = 0.05")], refs
     assert not h.record().get("removed")
@@ -32,7 +34,7 @@ def test_two_fixed_numbers_with_the_same_value_still_leave_the_line_unnamed():
     h = _host({"alpha": {"value": 0.05, "label": "alpha = 0.05", "fixed": True},
                "limit_b": {"value": 0.05, "label": "limit_b = 0.05", "fixed": True}})
     h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
-    with pytest.raises(ValueError, match="several references"):
+    with pytest.raises(ValueError, match="never matched"):
         h.ref(0, value=0.05)
 
 

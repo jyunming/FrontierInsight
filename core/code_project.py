@@ -134,7 +134,7 @@ def run_cell_child(study, index, out_path):
             value = fn(given) if entry == "run_cell" else fn(given, trial, seed)
             kept, why = read_returned(value, levels, entry)
             if kept is None:
-                raise TypeError(why)
+                raise refusal_error(why)
             rows.append({"trial": trial, "ok": True, "values": kept,
                          **({WHY_MISSING: missing_reasons(value, kept)} if missing_reasons(value, kept) else {})})
         except BaseException as exc:
@@ -179,7 +179,7 @@ def evaluate_child(spec_path, out_path):
             # why_missing are kept on the row, and a per-value result is read when the spec names its levels.
             kept, why = read_returned(value, levels, entry)
             if kept is None:
-                raise TypeError(why)
+                raise refusal_error(why)
             reasons = missing_reasons(value, kept)
             rows.append({"trial": trial["trial"], "ok": True, "values": kept, **({WHY_MISSING: reasons} if reasons else {})})
         except BaseException as exc:

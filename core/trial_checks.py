@@ -66,6 +66,7 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any, Iterable
 
+from . import in_run as _in_run
 from . import metric_spec as _metric_spec
 from .frame_table import hits as _table_hits
 from . import stats as _stats
@@ -339,9 +340,10 @@ def failures(cells: list[dict[str, Any]], reasons: dict[str, Counter] | None = N
 
 
 def is_level_fault(reason):
-    """True when ``reason`` is FI's own message about a run's result per compared value (``read_returned`` writes it as
-    ``"{entry}() returned `{name}` ..."``): a value given for some of the compared values and not for all."""
-    return "() returned `" in str(reason)
+    """True when ``reason`` is FI's own refusal of a run's result per compared value (:class:`core.in_run.LevelsRefused`: a
+    value given for some of the compared values and not for all, or in a form FI does not read). A failure's reason starts
+    with the name of its exception type; the wording after it is not read."""
+    return str(reason).startswith(f"{_in_run.LevelsRefused.__name__}:")
 
 
 def failures_directive(bad: list[SettingFailures], level_rule: str = "") -> str:

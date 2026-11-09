@@ -543,7 +543,7 @@ def disagrees(value: float, expected: float, limit: float) -> bool:
 
 
 #: A value written with fewer significant digits than a float holds is known only to the digits it is written to
-#: (0.367879 for exp(-1), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
+#: (1.41421 for sqrt(2), 0.04978); a value of 13 digits or more is full precision. An exact one (0.5, 2, 0.25) is
 #: taken out earlier (:func:`written_precision`).
 _TRUNCATED_DIGITS = (1, 13)
 
@@ -887,11 +887,8 @@ def _plain_number(value: Any) -> float | None:
     return float(value)
 
 
-def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
-    """The plan's fixed numeric settings by name, from the structured places a plan states them (a threshold is a pass or fail limit, not a quantity of the model, so
-    it is never one): a ``protocol.grid`` parameter with one value and ``protocol.optimisation.baseline.values`` (a design's controls given
-    as ``{name, value}`` are added by :func:`fixed_settings_of_design`). Prose is never read. A name given two different
-    numbers is dropped: it cannot be told which is meant."""
+def _scan_fixed(protocol: dict[str, Any] | None) -> tuple[dict[str, float], set[str]]:
+    """``(settings by name, names given two different numbers)`` of a plan; see :func:`fixed_settings`."""
     found: dict[str, float] = {}
     clash: set[str] = set()
 
@@ -918,21 +915,34 @@ def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
         values = baseline.get("values") if isinstance(baseline, dict) else None
         for name, value in (values.items() if isinstance(values, dict) else []):
             take(name, value)
+    return found, clash
+
+
+def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
+    """The plan's fixed numeric settings by name, from the structured places a plan states them (a threshold is a pass or fail limit, not a quantity of the model, so
+    it is never one): a ``protocol.grid`` parameter with one value and ``protocol.optimisation.baseline.values`` (a design's controls given
+    as ``{name, value}`` are added by :func:`fixed_settings_of_design`). Prose is never read. A name given two different
+    numbers is dropped: it cannot be told which is meant."""
+    found, clash = _scan_fixed(protocol)
     return {k: v for k, v in found.items() if k not in clash}
 
 
 def fixed_settings_of_design(design: dict[str, Any] | None) -> dict[str, float]:
-    """:func:`fixed_settings` of a design, with the controls of its ``variables`` given as ``{name, value}``."""
+    """:func:`fixed_settings` of a design, with the controls of its ``variables`` given as ``{name, value}``. A name
+    given two different numbers anywhere (the plan, or a control) is left out whole, never decided by read order."""
     if not isinstance(design, dict):
         return {}
     protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
-    found = fixed_settings(protocol)
+    found, clash = _scan_fixed(protocol)
     variables = design.get("variables")
     controls = variables.get("controls") if isinstance(variables, dict) else None
     for item in (controls if isinstance(controls, list) else []):
         if isinstance(item, dict) and str(item.get("name") or "").strip() and _plain_number(item.get("value")) is not None:
-            found.setdefault(str(item["name"]).strip(), float(item["value"]))
-    return found
+            key, number = str(item["name"]).strip(), float(item["value"])
+            if key in found and found[key] != number:
+                clash.add(key)
+            found.setdefault(key, number)
+    return {k: v for k, v in found.items() if k not in clash}
 
 
 def _kept(name: str) -> str:

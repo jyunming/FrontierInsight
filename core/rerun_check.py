@@ -84,13 +84,14 @@ class Verdict:
     files: list[str] = field(default_factory=list)
     crashed: bool = False  # could_not because the repaired code did not run (not for time, not for a missing record)
     unplaced: list[str] = field(default_factory=list)  # changed numbers that belong to no result FI can name
-    unwritten: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write (not compared)
+    unwritten: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write that the changed code can affect
+    carried: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write and no changed code writes: kept as delivered
     redrawn: bool = False  # the repair changes how random numbers are drawn (changes are judged against their uncertainty)
 
     def record(self) -> dict[str, Any]:
         return {"status": self.status, "why": self.why, "metrics": self.metrics[:20], "keys": self.keys[:12],
                 "notes": self.notes[:6], "mode": self.mode, "seconds": round(self.seconds, 1), "source": self.source,
-                "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8], "unwritten": self.unwritten[:8],
+                "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8], "unwritten": self.unwritten[:8], "carried": self.carried[:8],
                 "redrawn": self.redrawn}
 
 
@@ -474,6 +475,19 @@ def _names(key: str, quantity: str) -> bool:
     return metric_of(key)[0] == quantity or re.search(r"(?<![\w])" + re.escape(quantity) + r"(?![\w])", key) is not None
 
 
+def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
+    """Which of the delivered result files ``names`` the rerun can affect, from FI's record of which step wrote each one
+    (``core/step_writes.py``). A file is affected when the step that wrote it is a step the rerun reran, or reads the output
+    of one: the analysis-only rerun reran the analysis; a whole-study rerun reran every step. The analysis reads what the
+    simulation wrote, so a file the simulation wrote is not affected by a rerun of the analysis alone. A file FI recorded no
+    writer for is not known to be safe: it counts as affected (the rerun then says it was not compared)."""
+    from . import step_writes as _steps
+
+    wrote = _steps.read(root)
+    reran = {_steps.ANALYSIS} if mode == "analysis only" else {_steps.ANALYSIS, _steps.SIMULATION}
+    return {n for n in names if wrote.get(n) is None or wrote[n] in reran}
+
+
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
                 derived: str = "data/results/derived.json", disputed: list[str] | None = None) -> Verdict:
@@ -499,6 +513,9 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         unwritten = await asyncio.to_thread(result_files, base_root, derived)
         unwritten -= await asyncio.to_thread(result_files, out)
         base = {k: v for k, v in base.items() if not any(k.startswith(f"file:{n}") for n in unwritten)}
+        # Only a file the changed code can affect is left uncompared; one that no changed code writes is carried as delivered.
+        carried = unwritten - await asyncio.to_thread(affected_files, base_root, unwritten, mode)
+        unwritten -= carried
         # a rerun that wrote no result at all is a rerun that could not be compared
         if not base or not new:
             return Verdict("could_not", "the delivered or the repaired results hold no numbers to compare", mode=mode,
@@ -527,6 +544,11 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                                + (", ".join(disputed) or "the disputed quantity") + (": " + ", ".join(left[:4]) if left else
                                                                                        " (none holds it)"),
                                notes=notes, mode=mode, seconds=secs, source=source, files=files)
+        if keep and unwritten:
+            # a file the changed code writes and the repaired run did not: its delivered numbers are in the finding's reach
+            gone = [{"key": k, "old": v, "new": None} for k, v in delivered.items() if any(k.startswith(f"file:{n}") for n in unwritten)]
+            keep = [*keep, *gone]
+            keys = [c["key"] for c in keep]
         loose = [k for k in keys if metric_of(k)[0] is None]
         metrics = sorted({m for m in (metric_of(k)[0] for k in keys) if m})
         if loose and not metrics:
@@ -542,9 +564,9 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
             # run did not write was not, so it is never shipped as "unchanged" (a "changed" answer stays one: it already moved)
             return Verdict("could_not", "the rerun did not write " + ", ".join(left_alone[:4])
                            + ", so the numbers delivered in it were not compared", notes=notes, mode=mode, seconds=secs,
-                           source=source, files=files, unwritten=sorted(unwritten))
+                           source=source, files=files, unwritten=sorted(unwritten), carried=sorted(carried))
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
-                       source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), redrawn=bool(redrawn))
+                       source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), carried=sorted(carried), redrawn=bool(redrawn))
     finally:
         shutil.rmtree(work, ignore_errors=True)
         if work.exists():

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import hashlib
 import logging
@@ -152,15 +153,42 @@ def _rewritten(quest_root: Path, states: dict[str, list[int]]) -> set[str]:
 _active: dict[str, dict[int, bool]] = {}
 
 
-def begin_run(quest_root: Path | str) -> int:
+#: The run (scope) a step of the code now running belongs to: set by a ``begin_run(..., scope=True)`` and seen by every
+#: run begun inside it (a task or thread started from there copies it).
+_current_scope: contextvars.ContextVar[int | None] = contextvars.ContextVar("fi_run_scope", default=None)
+#: For each registered run, the scope it began inside (None for a top-level run), and for a scope the value to restore.
+_parent: dict[int, int | None] = {}
+_scope_before: dict[int, int | None] = {}
+
+
+def _ancestors(token: int | None) -> set[int]:
+    out: set[int] = set()
+    while token is not None and token not in out:
+        out.add(token)
+        token = _parent.get(token)
+    return out
+
+
+def begin_run(quest_root: Path | str, *, scope: bool = False) -> int:
     """Note that a run began in this quest; the token to give :func:`end_run`. Every run already running is marked as
-    overlapped, and so is this one when another runs."""
+    overlapped, and so is this one when another runs, except a run the new one is nested in: a ``scope=True`` run is a
+    whole study whose steps start their own runs inside it, and those steps are the same run, not another one beside it.
+    Runs inside one scope still overlap each other when they run at the same time."""
     with _record_lock:
         runs = _active.setdefault(str(Path(quest_root).resolve()), {})
-        for other in runs:
+        parent = _current_scope.get()
+        if scope or parent not in runs:  # a study never nests in another: two studies at once are two runs
+            parent = None
+        mine = _ancestors(parent)
+        beside = [o for o in runs if o not in mine]
+        for other in beside:
             runs[other] = True
         token = uuid.uuid4().int
-        runs[token] = bool(runs)
+        runs[token] = bool(beside)
+        _parent[token] = parent
+        if scope:
+            _scope_before[token] = _current_scope.get()
+            _current_scope.set(token)
         return token
 
 
@@ -176,6 +204,11 @@ def end_run(quest_root: Path | str, token: int) -> bool:
         key = str(Path(quest_root).resolve())
         runs = _active.get(key, {})
         overlapped = runs.pop(token, False)
+        _parent.pop(token, None)
+        if token in _scope_before:
+            before = _scope_before.pop(token)
+            if _current_scope.get() == token:
+                _current_scope.set(before)
         if not runs:
             _active.pop(key, None)
         return overlapped

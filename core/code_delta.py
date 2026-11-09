@@ -107,7 +107,8 @@ def describe(delta: Delta, limit: int = SHOWN_CHARS) -> str:
     return "\n\n".join(blocks)
 
 
-def splice_functions(old: str, reply: str, *, scope: set[str] | None = None) -> tuple[str | None, list[str], str]:
+def splice_functions(old: str, reply: str, *, scope: set[str] | None = None, code: Path | None = None,
+                     rel: str = "") -> tuple[str | None, list[str], str]:
     """The one helper any repair of a code file uses to put a model's reply in: ``(new text, names put in, why not)``.
 
     ``reply`` holds the functions to replace or add (a fenced block or bare source, each ``def`` whole). Each function the
@@ -116,7 +117,10 @@ def splice_functions(old: str, reply: str, *, scope: set[str] | None = None) -> 
     with a reason that can be sent back to the model, when the reply holds no function, does not parse, changes a
     function's parameters (only trailing parameters with defaults may be added), names none of ``scope``, or would leave
     a file that does not parse. Classes and module-level statements are not spliced (a reply that needs them is a
-    whole-file reply)."""
+    whole-file reply).
+
+    ``code`` (the study's code folder) and ``rel`` (the file's path in it) make FI read the other files that use the
+    functions, so a changed signature is accepted when every use binds to it; without them the parameters stay."""
     from . import finding_repair as _finding
 
-    return _finding.splice(old, reply, scope, None, limit=None)
+    return _finding.splice(old, reply, scope, None, limit=None, **_finding.other_files_for(code, rel, reply))

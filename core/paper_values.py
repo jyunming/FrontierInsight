@@ -46,6 +46,7 @@ import ast
 import bisect
 import itertools
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -57,6 +58,8 @@ from . import reference_values as _refs
 from . import results_by_setting as _rbs
 from . import stats as _stats
 from . import trial_table as _tt
+
+_log = logging.getLogger(__name__)
 
 NOT_RECORDED = "not recorded"
 FORMS = ("mean", "mean_ci", "ci", "pm", "sd", "sd_ci", "se", "n", "count", "failed", "ref", "corr", "corr_ci")
@@ -129,6 +132,59 @@ def sig(x: float, digits: int = 4) -> str:
     return _clean(f"{round(x, -place):.{max(0, -place)}f}")
 
 
+def _shift(x: float, scale: float) -> float:
+    """``x * scale`` in decimal, so a percent (x 100) adds no float noise to a value the record holds."""
+    from decimal import Decimal
+    return float(Decimal(repr(float(x))) * Decimal(repr(float(scale)))) if scale != 1.0 else x
+
+
+def exact_text(x: float) -> str:
+    """``x`` as the record holds it: an integer-valued number in full, any other as its shortest round-trip digits
+    (``repr``), so a result with no spread is never changed by rounding, not even past 12 digits."""
+    if not math.isfinite(x):
+        raise _Unfilled("the value is not a finite number")
+    if x == int(x):
+        return str(int(x))
+    return _clean(repr(float(x)))
+
+
+def _rounding_changes(x: float) -> bool:
+    """Whether four significant figures would change the value the record holds for ``x`` (14281 is not 14280; 0.1160 and 50.00
+    are held by four figures already). Float noise (50.00000000000001) is not a digit the record holds."""
+    if not math.isfinite(x):
+        return False
+    x = float(f"{x:.12g}")
+    return float(sig(x, 4)) != x
+
+
+def declared_exact(rec: "Records", metric: str) -> bool | None:
+    """What the plan says of ``metric``: ``True`` (a count or a share of counts: not an estimate), ``False`` (a
+    measurement), ``None`` (the plan does not say: a plan written before ``exact`` existed)."""
+    metrics = rec.protocol.get("metrics") if isinstance(rec.protocol, dict) else None
+    for m in metrics if isinstance(metrics, list) else []:
+        if isinstance(m, dict) and m.get("id") == metric and isinstance(m.get("exact"), bool):
+            return m["exact"]
+    return None
+
+
+def _exact_kind(rec: "Records", metric: str, cells: list[dict[str, Any]], values: list[float]) -> str | None:
+    """How ``metric``'s value here is written when no trial differs from another: ``"exact"`` (the plan says it is a count or a
+    share of counts, and FI's own record agrees: every trial of every setting gave the same value) is written as
+    the record holds it. A plan that does not say (written before ``exact`` existed) gets ``"whole"``: a value every trial gave
+    identically that is a whole number is never rewritten as another whole number (14281 is not 14280); any other value keeps
+    four figures. A plan that says it is a measurement is believed (``None``)."""
+    said = declared_exact(rec, metric)
+    if said is False or not values:
+        return None
+    if not (all(len(set(_trials([c], metric))) <= 1 for c in cells) and len(set(values)) == 1):
+        if said:
+            _log.warning("[paper_values] %s is declared exact, but its trials differ: it is written as a measured value", metric)
+        return None
+    if said:
+        return "exact"
+    return "whole" if values[0] == int(values[0]) else None
+
+
 def interval_places(value: float, lower: float, upper: float) -> tuple[str, str, str]:
     """``(value, lower, upper)`` all to one decimal place: that of the larger half-width at two significant figures."""
     half = max(value - lower, upper - value, 0.0)
@@ -146,7 +202,7 @@ class Measured:
     """A computed number as FI holds it, before it is written: ``kind`` says which rounding it gets."""
 
     value: float
-    kind: str = "plain"  # plain | ratio | int | count | interval | words | over_settings (n = settings, one run each)
+    kind: str = "plain"  # plain | ratio | int | count | interval | words | over_settings (n = settings, one run each) | exact | whole
     lower: float | None = None
     upper: float | None = None
     method: str = ""  # "95% Wilson interval"
@@ -166,6 +222,10 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False, bare: bool = Fal
         return m.words
     if m.kind == "int":
         return f"{int(m.value)}"
+    if m.kind in ("exact", "whole"):  # every trial gave this one value: it is printed as the record holds it (a percent shifts the point)
+        v = _shift(m.value, 100.0) if percent else m.value
+        # an exact result (the plan says so and every trial holds it) is written as the record holds it, nothing rounds it
+        return (exact_text(v) if m.kind == "exact" or _rounding_changes(v) else sig(v, 4)) + ("%" if percent else "")
     if m.kind == "count":
         return f"{m.successes} of {m.n}"
     scale = 100.0 if percent else 1.0
@@ -1116,17 +1176,24 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             raise _Unfilled("the record does not say how many trials failed there")
         return Measured(sum(counts), "int")
     summary = _tt.summary(values)
+    # No spread: every trial (one or more) gave the same value, so it is that value; it is printed as the record holds it
+    # when the usual four figures would change it (14281 is not 14280), and as before when they would not (0.1160).
+    exact = _exact_kind(rec, metric, cells, values)
     if form == "count":
         if not summary["binary"]:
             raise _Unfilled(f"{metric} is not a 0/1 value, so there is no count of successes")
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form in ("mean", "mean_ci") and (ran := _one_run_each(cells, metric)):
+        if exact:
+            return Measured(values[0], exact)
         if len({sig(v) for v in values}) == 1:
             # Every setting gave the same value at the places printed: it is that one value (a deterministic result),
             # not a mean of different ones, so it is printed as it is.
             return Measured(values[0])
         return Measured(_tt.summary(values)["mean"], "over_settings", n=ran)
     if form == "mean":
+        if exact:
+            return Measured(values[0], exact)
         return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form in ("mean_ci", "ci", "pm"):
         mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
@@ -1330,6 +1397,8 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     xs = [m.value for m in results]
     r = key.reducer
     kind = results[0].kind if key.op == "" else ("ratio" if key.op == "ratio" else "plain")
+    if key.op == "" and any(m.kind in ("exact", "whole") for m in results):
+        kind = "exact" if any(m.kind == "exact" for m in results) else "whole"  # a value picked from settings, one of which is exact, is written exactly where four figures change it
     if r == "count_where":
         if key.form != "mean" or key.op:
             raise _Unfilled("count_where compares each setting's mean with the plan's reference; use form mean, no op")
@@ -1554,6 +1623,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
         plan = _typed.plan_numbers(protocol, topic)
+        named = _typed.declared_names(protocol)
         levels, counts = _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
         # its own however it is spelled.
@@ -1583,6 +1653,11 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 of_the_plan += 0 if small else 1
             elif not small:
                 own.append(repr(node.value))
+        # A name the plan declares (a constant or a threshold) is the plan's number however small: FI puts its value in.
+        called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        used = {n.id: named[n.id] for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and id(n) not in called and n.id in named}
+        of_the_plan += len(used)
         if own:
             raise _Unfilled(f"it uses {', '.join(dict.fromkeys(own))}, which the plan and the topic do not state; write it "
                             "from the plan's own numbers as the plan writes them (a two-sided level is 1 - alpha / 2 with "
@@ -1592,7 +1667,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         if not of_the_plan:
             raise _Unfilled("it uses none of the plan's or the topic's numbers, so it is not a number the plan fixes; type "
                             "a whole number as it is, or say the number in words")
-        ev = _forms.evaluate(expression, {}, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
+        ev = _forms.evaluate(expression, used, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
                                                       "t_quantile": _stats.t_quantile})
         if ev.value is None:
             why = (f"it names {', '.join(ev.missing)}, which is no number" if ev.missing
@@ -1664,7 +1739,11 @@ def resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: boo
             if how == "range" and measured.parts:
                 scale = 100.0 if key.percent else 1.0
                 digits = 3 if measured.kind == "ratio" else 4
-                out = " to ".join(sig(x * scale, digits) + tail for x in measured.parts)
+                # a range with an exact end is written at the places that end needs, both ends alike (41 to 52817)
+                exactly = measured.kind == "exact" or (measured.kind == "whole" and any(_rounding_changes(x * scale) for x in measured.parts))
+                out = " to ".join((exact_text(_shift(x, scale)) if exactly and (measured.kind == "exact" or float(_shift(x, scale)).is_integer())
+                                   else sig(x * scale, digits)) + tail
+                                  for x in measured.parts)
             else:
                 out = fmt(measured, key.form, key.percent and measured.kind != "words")
             out += measured.note

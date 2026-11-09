@@ -204,3 +204,107 @@ def scale_notes(root: Path) -> list[dict[str, Any]]:
         if said:
             out.append({"file": name, "said": "; ".join(said), "record": rec_path.relative_to(root).as_posix()})
     return out
+
+
+# ---- a reference the plan gives for a result the figure draws ---------------------------------------------------------------------
+
+def planned_references(protocol: Any) -> dict[str, dict[str, Any]]:
+    """The reference the plan declares for each of its metrics, from the frozen protocol (``metrics[].reference``): ``{result id:
+    {"ids", "value", "label", "formula"}}``. ``ids`` are the names a line of it drawn from the plan's records may carry: the result's
+    own id, the reference's name (its ``value`` when that is a name, as a plan gives ``rate_theory`` for ``rate``) and, when the
+    reference is a level the plan names (a ``formula`` that is one bare identifier, which the frame draws under that name), that
+    name. A metric with no reference, or one that names neither a formula nor a value, has none."""
+    out: dict[str, dict[str, Any]] = {}
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    for m in metrics if isinstance(metrics, list) else []:
+        ref = m.get("reference") if isinstance(m, dict) else None
+        if not isinstance(ref, dict) or not m.get("id") or not (ref.get("formula") or ref.get("value") is not None):
+            continue
+        value = ref.get("value")
+        named = value if isinstance(value, str) and value.strip() else None
+        formula = str(ref.get("formula") or "")
+        level = formula if re.fullmatch(r"[A-Za-z_]\w*", formula) else None
+        out[str(m["id"])] = {"ids": [i for i in dict.fromkeys([str(m["id"]), named, level]) if i], "value": value,
+                             "label": str(m.get("label") or m["id"]), "formula": formula}
+    return out
+
+
+def _result_panels(panels: list[dict[str, Any]], rid: str) -> list[dict[str, Any]]:
+    """The panels (not custom drawings) in which a series of FI's record is the result ``rid``."""
+    return [p for p in panels if not p.get("raw") and any(
+        isinstance(s, dict) and s.get("kind") != "image" and str(s.get("what")) == rid for s in p.get("series") or [])]
+
+
+def _is_bound(line: dict[str, Any], ref: dict[str, Any], *, curve: bool = False) -> bool:
+    """Whether FI's record binds ``line`` (a reference line, or a curve of a panel's series) to the plan's reference ``ref``: FI
+    recorded it as drawn from the plan (``source == "plan"``) under one of the reference's ids, and a line is horizontal (``axis``
+    "y", on the axis of the result). A value or a name that happens to be equal is no binding: FI records a line as a plan reference
+    only when the body drew it by the reference's id (``fig.ref(panel, "<id>")``), never from a typed number, so an unbound line
+    is another thing."""
+    if line.get("source") != "plan" or str(line.get("id")).split("@")[0] not in ref["ids"]:
+        return False
+    return curve or line.get("axis", "y") == "y"
+
+
+def _drawn_reference(calls: dict[str, Any], rid: str, ref: dict[str, Any]) -> bool:
+    """Whether the plan's reference ``ref`` of result ``rid`` is drawn: in a panel that draws the result, a line (on the result's
+    axis) or a curve that FI's record binds to that reference (:func:`_is_bound`). A line elsewhere, on another axis or without
+    the plan as its source is not proof."""
+    for p in _result_panels(_panels(calls), rid):
+        if any(isinstance(r, dict) and _is_bound(r, ref) for r in p.get("refs") or []):
+            return True
+        if any(isinstance(s, dict) and _is_bound(s, ref, curve=True) for s in p.get("series") or []):
+            return True
+    return False
+
+
+def missing_references(calls: dict[str, Any], protocol: Any) -> list[dict[str, Any]]:
+    """The references the plan declares for a result a figure draws and the figure does not draw: ``[{"result", "label",
+    "formula", "other_line"}]``; ``other_line`` says a panel that draws the result also has a line or curve FI could not bind to
+    the plan's reference (not taken from the plan, or on another axis), so FI cannot say the reference is missing, only that it
+    cannot confirm it. A reference counts as drawn only when FI's record binds a line or curve of the result's own panel to it
+    (:func:`_drawn_reference`); a figure whose every panel is a custom drawing says nothing FI can read, so it has none. A fault
+    of the figure (FI's record of what it draws against the plan), never a reading of any text."""
+    planned = planned_references(protocol)
+    panels = _panels(calls)
+    if not planned or not panels or all(p.get("raw") for p in panels):
+        return []
+    out: list[dict[str, Any]] = []
+    for rid, ref in planned.items():
+        mine = _result_panels(panels, rid)
+        if not mine or _drawn_reference(calls, rid, ref):
+            continue
+        # a line or curve beside the result's series in its own panel that FI could not bind to the reference: it may be the reference
+        other = any(isinstance(r, dict) and not _is_bound(r, ref) and (r.get("source") != "plan" or str(r.get("id")) in ref["ids"])
+                    for p in mine for r in p.get("refs") or []) or any(
+            isinstance(s, dict) and s.get("kind") == "curve" and (s.get("source") != "plan" or str(s.get("id")).split("@")[0] in ref["ids"])
+            for p in mine for s in p.get("series") or [])
+        out.append({"result": rid, "label": ref["label"], "formula": ref["formula"], "other_line": other})
+    return out
+
+
+def quest_missing_references(root: Path, protocol: Any) -> list[dict[str, Any]]:
+    """:func:`missing_references` for every figure that has a call record, once per figure and result: ``[{"file", "number",
+    "result", "label", "formula", "record"}]``. With a delivered paper only the figures it places are read, and ``number`` is the
+    figure's place in it; before the paper is written every figure with a record is read and ``number`` is ``None``."""
+    root = Path(root)
+    paper = root / "paper" / "paper.md"
+    if not paper.exists():
+        paper = root / "paper.md"
+    try:
+        names = {n: i for i, n in enumerate(paper_captions(paper.read_text(encoding="utf-8")), 1)}
+    except OSError:
+        folder = root / ".fi" / "figure_records"
+        stems = [p.name[:-len(".calls.json")] for p in sorted(folder.glob("*.calls.json"))] if folder.is_dir() else []
+        # a record of a figure FI later took out stays in the folder: only a figure whose file is still there is read
+        names = {f"{t}.png": None for t in stems if any((root / "figures").glob(f"{t}.*"))}
+    out: list[dict[str, Any]] = []
+    for name, number in names.items():
+        rec_path = root / ".fi" / "figure_records" / f"{Path(name).stem}.calls.json"
+        try:
+            calls = json.loads(rec_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for f in missing_references(calls, protocol):
+            out.append({"file": name, "number": number, **f, "record": rec_path.relative_to(root).as_posix()})
+    return out

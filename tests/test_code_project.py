@@ -788,3 +788,14 @@ def test_a_repair_commit_says_why_from_the_record(tmp_path):
     assert message("HEAD") == "the code as it ran (execute)"
     log = (code / "CHANGELOG.md").read_text(encoding="utf-8")
     assert "Fault: KeyError: 'k'" in log and "Functions changed: trial" in log
+
+
+def test_a_refused_result_per_value_is_raised_as_FIs_typed_refusal(tmp_path):
+    """run.py raises core.in_run.LevelsRefused for FI's refusal of a number per value (a plain TypeError before), so what
+    reads the failure sees the type, not the wording."""
+    root = _quest(tmp_path)
+    (root / "code" / "simulate.py").write_text(
+        'def run_trial(cell, trial_id, seed):\n    return {"g": {"a": 1.0, "z": 2.0}}\n', encoding="utf-8")
+    protocol = {"grid": {"n": [1]}, "runs_per_setting": 1, "thresholds": {}, "in_each_run": {"mode": ["a", "b"]}}
+    code_project.refresh(root, deps=[], protocol=protocol, title="T", question="q")
+    assert "LevelsRefused: " in _run(root).stderr

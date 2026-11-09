@@ -6762,7 +6762,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out = dict(kept)
         for name, block in done.items():
             old = kept[names[name]]
-            new, replaced, why = _code_delta.splice_functions(old, block)
+            new, replaced, why = _code_delta.splice_functions(old, block, code=self.quest_root / "code", rel=name)
             broken = why or (_trial_runner.repair_breaks_contract(old, new, name) if new is not None else "")
             if broken:
                 self._log.warning("[implement] the changed functions of %s cannot be used (%s); the scripts are written whole", name, broken)
@@ -6772,12 +6772,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         out["deps"] = sorted({*deps, *_deps_from_tail(text.rsplit("```", 1)[-1])})
         return out
 
-    def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str) -> tuple[str, str]:
+    def _code_rel(self, path: Path) -> str:
+        """``path`` relative to the quest's code folder (posix), or ``""`` when it is not inside it."""
+        try:
+            return path.resolve().relative_to((self.quest_root / "code").resolve()).as_posix()
+        except ValueError:
+            return ""
+
+    def _script_from_reply(self, node: str, old: str, code: object, parsed: Any, name: str,
+                           rel: str = "") -> tuple[str, str]:
         """``(the script a repair's reply makes, why none)``: the reply's ``functions`` are put into ``old`` and every other
         byte of it stays (:mod:`core.script_reply`); a reply that is a whole script is taken whole. The one contract
         check (``repair_breaks_contract``) still judges the result, in the caller."""
         functions = parsed.get("functions") if isinstance(parsed, dict) else ""
-        made = _script_reply.resolve(old, code, functions)
+        # the other files of the study's code folder that use a repaired function are read, so a changed signature that
+        # binds every use is accepted; a script outside the folder (``rel`` empty) keeps its parameters
+        made = _script_reply.resolve(old, code, functions, code_dir=self.quest_root / "code" if rel else None, rel=rel)
         if made.kind == "functions":
             self._log.info("[%s] %s: the reply's %d function(s) are put into the script, the rest of it is as it was (%s)",
                            node, name, len(made.replaced), ", ".join(made.replaced[:6]))
@@ -6892,7 +6902,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if path.read_text(encoding="utf-8") != expect:
             raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(kept, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, kept, by=by, note=note[:300])
+        entry = _plan.record_version(self.quest_root, kept, by=by, note=(note() if callable(note) else note)[:300])
         self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
@@ -9311,6 +9321,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         before = path.read_text(encoding="utf-8")
         basis = self._protocol_block(state) or ((_plan.parse(before).design or {}).get("protocol") or {})
         put_back: list[str] = []
+        kept_keys: list[str] = []
 
         def held(design: dict[str, Any]) -> dict[str, Any]:
             new = dict(design.get("protocol") or {})
@@ -9341,9 +9352,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
         def finish(revised: str) -> str | None:
             put_back.clear()  # the reply is judged again when it is asked for twice
+            kept_keys.clear()
             design = _plan.parse(revised).design
             if design is None:
                 return None
+            # The answer is read as the keys it changes (a redesign rewrites only the changed parts): a key of the search
+            # block that the plan has and the answer leaves out is kept from the plan. A key it sets to empty is a removal.
+            block_now = (design.get("protocol") or {}).get("optimisation")
+            old_block = basis.get("optimisation")
+            if isinstance(block_now, dict) and isinstance(old_block, dict):
+                kept_keys.extend(sorted(k for k in old_block if k not in block_now and old_block[k] not in (None, "", [], {})))
+                if kept_keys:
+                    revised = _plan.edit_design_block(
+                        revised, lambda b: {**b, "protocol": {**(b.get("protocol") or {}), "optimisation": {
+                            **{k: copy.deepcopy(old_block[k]) for k in kept_keys}, **(b.get("protocol") or {})["optimisation"]}}}
+                    ) or ""
+                    design = _plan.parse(revised).design if revised else None
+                    if design is None:
+                        raise ValueError("what the answer left out could not be kept from the plan")
+                    revised = _plan.refresh_optimisation_section(_plan.refresh_model_section(revised))
             design = held(design)
             if put_back:
                 revised = _plan.edit_design_block(revised, lambda block: held(block)) or ""
@@ -9357,7 +9384,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 raise ValueError("its search for the best design cannot be run: "
                                  + "; ".join([*missing, *([why] if why else [])] or ["it is not a search"]))
             if _frozen.sha256(design.get("protocol") or {}) == _frozen.sha256(basis):
-                raise ValueError("it changed nothing of the protocol")
+                # What of the answer could not be read is named (the field, what was written, the allowed values), not only
+                # that nothing changed: the model is asked again with it.
+                unread = " ".join(str(r) for r in getattr(self, "_answer_refused", None) or [])
+                raise ValueError("it changed nothing of the protocol" + (f"; what could not be read: {unread}" if unread else ""))
             return revised
 
         # Only how the design is described and searched is asked for (what the results are judged by is not), and a new
@@ -9365,8 +9395,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         scope = _plan_scope.PartScope(
             parts=tuple(sorted(self._FLAT_MAY_CHANGE)),
             entries={"simplifications": _plan_scope.EntryScope("id", frozenset(), True)})
-        done = await self._revise_plan_parts(request, path, scope=scope, by="engine", finish=finish,
-                                             note="a design whose objective can move, asked by FI")
+        closed = _optim.closed_choices_note(scope.names())
+        done = await self._revise_plan_parts(
+            request.rstrip() + (("\n\n" + closed) if closed else ""), path, scope=scope, by="engine", finish=finish,
+            note=lambda: "a design whose objective can move, asked by FI"
+            + (f"; kept from the plan: {', '.join(kept_keys)}" if kept_keys else ""))
+        if kept_keys:
+            self._log.warning("[evidence_gate] the answer left out %s of the search block; kept from the plan as they were",
+                              ", ".join(kept_keys))
         if put_back:
             self._log.warning("[evidence_gate] the rewrite changed what the results are judged by (%s); FI put it back as "
                               "it was", ", ".join(sorted(set(put_back))))
@@ -12155,7 +12191,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
         # seed, the simulation's entry points) is another script and is not used.
         self._keep_repair_answer("figures", text)
-        new_code, split_why = self._script_from_reply("execute", code, new_code, parsed, path.name)
+        new_code, split_why = self._script_from_reply("execute", code, new_code, parsed, path.name, self._code_rel(path))
         broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         usable = not broken and all(mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
             not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
@@ -13011,7 +13047,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not (isinstance(new_code, str) and new_code.strip()):
             new_code, new_deps = _parse_implement_response(text)
         self._keep_repair_answer("protocol", text)
-        new_code, split_why = self._script_from_reply("protocol", code, new_code, parsed, path.name)
+        new_code, split_why = self._script_from_reply("protocol", code, new_code, parsed, path.name, self._code_rel(path))
         broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name)
         if broken:
             self._log.warning("[protocol] the repair of %s is not usable (%s)", path.name, broken)
@@ -31427,7 +31463,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "labels": {"<each grid parameter and each other quantity a figure plots, named as the code names it>": "<the reader's name for it: words, its symbol in $...$ and its unit, for example Activation energy $E_a$ (kJ/mol)>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when the settings are compared trial by trial, which needs shared_draws true at the protocol level; false otherwise, including two estimates made from the same trial's data (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold, of the `constants` entry or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>, "degrees_of_freedom": <only when the interval is the estimate plus and minus one multiplier of its standard error in every setting: the whole number of the t distribution whose quantile is the multiplier (the plan's own statement, for example 3), or "normal" for the normal quantile; when the study compares values of a factor that give the interval different multipliers, a mapping {"<factor>": {"<value>": <whole number or "normal">}} with one entry per value; leave it out when the multiplier changes between settings in any other way>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "exact": <true only when the number is a count or a share of counts, so every run gives the same value; false or left out for a measurement or a value worked out with decimal arithmetic>, "paired": <true when the settings are compared trial by trial, which needs shared_draws true at the protocol level; false otherwise, including two estimates made from the same trial's data (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold, of the `constants` entry or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>, "degrees_of_freedom": <only when the interval is the estimate plus and minus one multiplier of its standard error in every setting: the whole number of the t distribution whose quantile is the multiplier (the plan's own statement, for example 3), or "normal" for the normal quantile; when the study compares values of a factor that give the interval different multipliers, a mapping {"<factor>": {"<value>": <whole number or "normal">}} with one entry per value; leave it out when the multiplier changes between settings in any other way>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
@@ -31444,7 +31480,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times; do not write how a check is read over those runs (FI asks you that afterwards, check by check). `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. A check on a quantity across trials (a coverage fraction, a spread) writes it with `mean(x)` or `sd(x)` of the per-trial result `x` the simulation returns, for example `abs(mean(covered) - 0.95)` or `abs(sd(estimate) / reference_sd - 1)`; FI works these out over the trials together, and such a check is not `per_trial`. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times; do not write how a check is read over those runs (FI asks you that afterwards, check by check). `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. A check on a quantity across trials (a coverage fraction, a spread) writes it with `mean(x)` or `sd(x)` of the per-trial result `x` the simulation returns, for example `abs(mean(covered) - 0.95)` or `abs(sd(estimate) / reference_sd - 1)`; FI works these out over the trials together, and such a check is not `per_trial`. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. r = sqrt(2) = 1.4142>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 

@@ -149,7 +149,7 @@ def test_a_legend_over_the_data_is_put_outside_and_the_record_says_so(monkeypatc
 
 
 # ---- R4: the plan's nominal level is a named reference --------------------------------------------------------------------------------
-def test_a_nominal_level_the_plan_declares_is_a_reference_and_a_typed_constant_is_not(tmp_path, frame5, monkeypatch):
+def test_a_nominal_level_the_plan_declares_is_a_reference_by_its_id_and_a_typed_constant_is_not(tmp_path, frame5, monkeypatch):
     monkeypatch.setenv(frame_figure.LAST_RUN_ENV, "1")  # no repair left: a line FI cannot name is left out and recorded
     spec = {"id": "g", "file": "g.png", "shows": ["growth"], "x": "size", "nominal": {"growth": 0.95}}
     plan = af._plan_for(spec, None, _Grid([1]))
@@ -157,7 +157,8 @@ def test_a_nominal_level_the_plan_declares_is_a_reference_and_a_typed_constant_i
 
     def body(fig, table):
         fig.line(0, "growth", [1, 2, 3], [2.0, 3.0, 4.0], "growth")
-        fig.ref(0, value=0.95)
+        fig.ref(0, "growth_nominal")
+        fig.ref(0, value=0.95)  # equal to the plan's level, but a typed number is never bound by its value
         fig.ref(0, value=0.77)  # a constant the plan does not hold
 
     out = af.run_figures([spec], {"figure_g": body}, _Grid([1]), str(tmp_path))
@@ -165,7 +166,7 @@ def test_a_nominal_level_the_plan_declares_is_a_reference_and_a_typed_constant_i
     record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
     refs = record["panels"][0]["refs"]
     assert [r["id"] for r in refs] == ["growth_nominal"]
-    assert [r["what"] for r in out[0].get("removed", [])] == ["a line at 0.77"]
+    assert [r["what"] for r in out[0].get("removed", [])] == ["a line at 0.95", "a line at 0.77"]
 
 
 def test_every_result_with_a_declared_level_gives_the_figure_a_nominal_entry():

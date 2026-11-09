@@ -388,6 +388,21 @@ def level_first(value, levels):
     return out
 
 
+class LevelsRefused(TypeError):
+    """What a trial raises when :func:`read_returned` refused its numbers per compared value (a list of the wrong length,
+    a key that is not a value the run was given, a value left out). The type, not the wording, is what FI reads: the run's
+    failure row carries the type name in its reason (``LevelsRefused: ...``)."""
+
+
+class _Refusal(str):
+    """The ``why`` :func:`read_returned` gives for a refusal of that kind (a plain string to every caller)."""
+
+
+def refusal_error(why):
+    """The exception to raise for the ``why`` of :func:`read_returned`: :class:`LevelsRefused` for that kind of refusal."""
+    return (LevelsRefused if isinstance(why, _Refusal) else TypeError)(why)
+
+
 def read_returned(value, levels, entry):
     """``(the values, "")`` or ``(None, why)`` for what the simulation function returned for one run.
 
@@ -421,12 +436,12 @@ def read_returned(value, levels, entry):
             continue
         keys = [level_key(level) for level in levels]
         if isinstance(v, (list, tuple)) and len(levels[0]) > 1:
-            return None, ("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
+            return None, _Refusal("{}() returned `{}` as a list, and a list is only read when one thing is compared inside the "
                           "run; with several, return a mapping keyed {} (one number for each value of the settings it "
                           "varies over)".format(entry, name, key_forms(levels)))
         if isinstance(v, (list, tuple)) and len(levels[0]) == 1:
             if len(v) != len(levels) or not all(_number(x) for x in v):
-                return None, ("{}() returned `{}` as a list of {} item(s): a value per level of what each run compares "
+                return None, _Refusal("{}() returned `{}` as a list of {} item(s): a value per level of what each run compares "
                               "must be one number for each of the {} value(s) the run was given ({}), in that order"
                               .format(entry, name, len(v), len(levels), ", ".join(keys[:6])))
             out[name] = {k: float(x) for k, x in zip(keys, v)}
@@ -437,23 +452,23 @@ def read_returned(value, levels, entry):
             for k, x in v.items():
                 level = _level_of(k, levels)
                 if level is None:
-                    return None, ("{}() returned `{}` with the key {!r}, which is not one of the values the run was given: key it "
+                    return None, _Refusal("{}() returned `{}` with the key {!r}, which is not one of the values the run was given: key it "
                                   "{}".format(entry, name, k, key_forms(levels)))
                 if not _number(x):
-                    return None, "{}() returned `{}` with a non-number for {!r}".format(entry, name, k)
+                    return None, _Refusal("{}() returned `{}` with a non-number for {!r}".format(entry, name, k))
                 if axes is None:
                     axes = set(level)
                 elif axes != set(level):
-                    return None, ("{}() returned `{}` keyed by {} and by {} in one result: key all of one result over the "
+                    return None, _Refusal("{}() returned `{}` keyed by {} and by {} in one result: key all of one result over the "
                                   "same settings".format(entry, name, ", ".join(sorted(axes)), ", ".join(sorted(level))))
                 lk = level_key(level)
                 if lk in got:
-                    return None, "{}() returned `{}` with {} given twice".format(entry, name, lk)
+                    return None, _Refusal("{}() returned `{}` with {} given twice".format(entry, name, lk))
                 got[lk] = float(x)
             expected = [level_key(lv) for lv in (sub_levels(levels, axes) if axes and len(axes) < len(levels[0]) else levels)]
             missing = [k for k in expected if k not in got]
             if missing:
-                return None, ("{}() returned `{}` without {}: a value per level must give every value the run was given "
+                return None, _Refusal("{}() returned `{}` without {}: a value per level must give every value the run was given "
                               "(NaN where it does not exist)".format(entry, name, ", ".join(missing[:6])))
             out[name] = {k: got[k] for k in expected}
             continue

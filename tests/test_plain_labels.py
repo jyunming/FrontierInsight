@@ -141,11 +141,11 @@ def test_pf_is_importable(name: str) -> None:
 
 
 def test_a_formula_changes_only_whole_names_not_numbers_commands_or_longer_names() -> None:
-    protocol = {"labels": {"e": "Euler", "p": "Hit share", "x": "Pos", "alpha": "Alpha", "q": "Rate"}}
+    protocol = {"labels": {"e": "Energy", "p": "Hit share", "x": "Pos", "alpha": "Alpha", "q": "Rate"}}
     text, changed = rbs.plain_formula(protocol, r"1e-3 * p + x**2 - 2x + lpha_p + pq + sqrt(q)")
     assert changed
     assert text == r"1e-3 * (Hit share) + Pos**2 - 2x + lpha_p + pq + sqrt(Rate)"
-    assert rbs.plain_formula({"labels": {"e": "Euler"}}, "1e-3") == ("1e-3", False)
+    assert rbs.plain_formula({"labels": {"e": "Energy"}}, "1e-3") == ("1e-3", False)
 
 
 def test_two_names_with_one_label_keep_their_ids() -> None:

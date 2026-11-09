@@ -22,9 +22,11 @@ import random
 
 def run_trial(cell, trial_id, seed):
     rng = random.Random(seed)
-    assert cell["procedure"] == ["bonferroni", "bh"], cell     # FI gives the whole list
+    assert cell["procedure"][-1] == "bh", cell     # FI gives the whole list (a check on a case: just the value it names)
     found = rng.random() * cell["m"]
     power = {"bonferroni": found / 10.0, "bh": found / 8.0}
+    if len(cell["procedure"]) == 1:   # a check on a case names one procedure: only that one is returned
+        return {"power": {n: v for n, v in power.items() if n in cell["procedure"]}, "power_diff": 0.0, "seed_seen": 0.0}
     return {"power": power, "power_diff": power["bh"] - power["bonferroni"], "seed_seen": float(seed % 1000)}
 '''
 

@@ -51,6 +51,7 @@ from typing import Any
 from . import execution as _execution
 from . import in_run as _in_run
 from . import mc_error as _mc
+from . import step_writes as _step_writes
 from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
@@ -325,7 +326,7 @@ def main():
                 # A number per run, or (for what each run compares inside it) one per value it was given.
                 kept, why = read_returned(value, levels_of(spec.get("levels")), spec["entry"])
                 if kept is None:
-                    raise TypeError(why)
+                    raise refusal_error(why)
                 row.update(status="ok", values=kept)
                 reasons = missing_reasons(value, kept)
                 if reasons:
@@ -1903,6 +1904,10 @@ class TrialsRunner:
             return summary
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
+        with _step_writes.watching(self.quest_root) as self._steps:  # which step wrote which result file (core/step_writes.py)
+            return await self._execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
 
         if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
@@ -2087,9 +2092,11 @@ class TrialsRunner:
         # FI_RAW_DIR names holds no column FI keeps back either.
         own = run.summary_path.relative_to(self.quest_root).as_posix()
         swap = {own: summary_path} if summary_path != run.summary_path else None
+        self._steps.mark(_step_writes.SIMULATION)
         result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
                                                 log=self.log, replace=swap).execute(
             cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        self._steps.mark(_step_writes.ANALYSIS)
         from . import analysis_frame as _analysis
 
         # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py
@@ -2577,12 +2584,13 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                    per_trial: bool = False,
                    in_each_run: dict[str, list[Any]] | None = None,
                    paired: bool = False, log: Any = None, kind: str = "check",
-                   per_value: Collection[str] = ()) -> tuple[dict[str, Any] | None, str]:
+                   per_value: Collection[str] = (), narrow: bool = True) -> tuple[dict[str, Any] | None, str]:
     """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
     with the seed FI gives that trial of that cell, or ``run_cell``; :func:`oracle_entry` says which): ``(the metrics it
     returned, "")``, or ``(None, why)``. This is how an oracle is measured without asking the script for the number.
 
-    With values compared inside each run (``in_each_run``), the run is given every one of them, as in the study, with the
+    With values compared inside each run (``in_each_run``), the run is given them as in the study, except that a factor the
+    case names is given only the value the case names (:func:`narrowed_to_case`), with the
     study's seed for the case's setting (and a number the case names that the study does not compare, :func:`case_inside`);
     a number per value is then read at the value the case names, or kept as the list of the number at every value
     the case allows when it names only some of the factors compared inside each run (or none): a factor it leaves out is
@@ -2596,9 +2604,11 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                                thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                seed_key="" if paired else None, log=log, kind=kind)
     inside = case_inside(inside, cell)
-    levels = _in_run.level_cells(inside)
     setting = {k: v for k, v in cell.items() if k not in inside}
     named = {k: v for k, v in cell.items() if k in inside}
+    whole = inside
+    inside = narrowed_to_case(inside, named) if narrow else inside   # the case's value, not a list to pick it from
+    levels = _in_run.level_cells(inside)
     if named and not _in_run.levels_named(named, levels):
         shown = ", ".join(f"{k}={_fmt(v)}" for k, v in named.items())
         return None, (f"the case sets {shown}; each run compares {', '.join(inside)} inside it, and no value each run is "
@@ -2607,6 +2617,12 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                                env=env, thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
                                levels=levels, seed_key="" if paired else cell_key(setting), log=log, kind=kind)
     if got is None:
+        if narrow and inside != whole and _levels_unreadable(why):
+            # the code names the values itself rather than reading the list it is given: ask it as the study does
+            return await run_case(executor, python, quest_root, module, cell=cell, timeout_s=timeout_s, env=env,
+                                  thresholds=thresholds, trial=trial, oracle=oracle, per_trial=per_trial,
+                                  in_each_run=in_each_run, paired=paired, log=log, kind=kind, per_value=per_value,
+                                  narrow=False)
         return None, why
     wrong = _in_run.unplaced(got, levels, named, per_value)
     if wrong:
@@ -2642,6 +2658,27 @@ async def _run_case(executor: Any, python: Path | str, quest_root: Path, module:
                           kind=kind)
 
 
+def _levels_unreadable(why: Any) -> bool:
+    """Whether a run's failure is FI's own refusal of its numbers per value (:class:`core.in_run.LevelsRefused`): the failure
+    row's reason starts with the type's name, as every failure's reason starts with its exception type. The wording after it
+    is not read."""
+    return str(why).startswith(f"{_in_run.LevelsRefused.__name__}:")
+
+
+def narrowed_to_case(inside, named):
+    """What a run on a check's case is given to compare inside it: ``inside`` (factor -> its values) with each factor the
+    case names cut down to the value the case names (the run's own spelling of it), the factors it leaves out whole. A run
+    that is given only the value the case names cannot return a number that belongs to another, so FI does not ask the
+    simulation to pick the value out of a list. A value the run is not given is left as it is (the case is refused
+    later, :func:`core.in_run.levels_named`). A case that names none of the factors changes nothing."""
+    out = {k: list(v) for k, v in (inside or {}).items()}
+    for name, wanted in (named or {}).items():
+        same = [x for x in out.get(name, []) if _in_run._same_level_value(wanted, x)]
+        if same:
+            out[name] = same[:1]
+    return out
+
+
 def case_inside(inside: dict[str, list[Any]], cell: dict[str, Any]) -> dict[str, list[Any]]:
     """The values a run on a check's case compares inside it: the study's, with each number the case names that the
     study does not compare added at the end. A factor whose values are numbers can be run at any number, so a check of a
@@ -2661,7 +2698,7 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
                           thresholds: dict[str, Any] | None = None, in_each_run: dict[str, list[Any]] | None = None,
                           budget_s: float | None = None, paired: bool = False,
                           store: dict[str, dict[str, dict[str, Any]]] | None = None,
-                          per_value: Collection[str] = (),
+                          per_value: Collection[str] = (), narrow: bool = True,
                           ) -> tuple[list[dict[str, Any]], str, list[str], int]:
     """The trials ``trials`` of ``run_trial`` on one case, all in ONE process, each with the seed FI gives that trial of
     that setting (trial 0 gets the seed :func:`run_case` gives it; ``paired``: the seed the paired study gives trial
@@ -2676,13 +2713,17 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
     the next, since no key can name everything a trial reads (a data file, an environment variable, a package)."""
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     levels: list[dict[str, Any]] | None = None
+    narrowed = False
     named: dict[str, Any] = {}
     given, key = dict(cell), cell_key(cell)
     if inside:
         inside = case_inside(inside, cell)
-        levels = _in_run.level_cells(inside)
         setting = {k: v for k, v in cell.items() if k not in inside}
         named = {k: v for k, v in cell.items() if k in inside}
+        whole = inside
+        inside = narrowed_to_case(inside, named) if narrow else inside   # the case's value, not a list to pick it from
+        levels = _in_run.level_cells(inside)
+        narrowed = inside != whole
         if named and not _in_run.levels_named(named, levels):
             return [], "the case names a value each run compares that the run is not given", [], 0
         given, key = {**setting, **inside}, cell_key(setting)
@@ -2732,7 +2773,13 @@ async def run_case_trials(executor: Any, python: Path | str, quest_root: Path, m
             continue
         if p["trial"] == plan[0]["trial"]:
             # The first trial is the one a single-trial check judges: said as before.
-            return [], str(row.get("reason") or "run_trial() failed"), [], started
+            why = str(row.get("reason") or "run_trial() failed")
+            if narrow and narrowed and _levels_unreadable(why):
+                # the code names the values itself rather than reading the list it is given: ask it as the study does
+                return await run_case_trials(executor, python, quest_root, module, cell=cell, trials=trials,
+                                             timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run,
+                                             budget_s=budget_s, paired=paired, store=store, per_value=per_value, narrow=False)
+            return [], why, [], started
         failed.append(str(row.get("reason") or "run_trial() failed"))
     if not values:
         return [], (TimeLimit("run_trial() ran out of time") if getattr(result, "timed_out", False)

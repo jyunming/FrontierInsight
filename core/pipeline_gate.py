@@ -62,9 +62,10 @@ DATA_CAP = 500 * 1024 * 1024  # ``data/`` alone
 FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_checked"
 #: The exceptions that say the code is wrong whatever the data. ``UnknownResult`` is FI's own frame refusing a read (a result
 #: the plan does not declare, or one read in a form the record does not hold): the record's shape decides it, and the small
-#: copy keeps every setting and compared value of that shape, so more trials never change it.
+#: copy keeps every setting and compared value of that shape, so more trials never change it. The figure calls of the frame raise
+#: ``UnknownResult`` for a name the plan does not declare and ``BadArgument`` for a value outside a closed list (core/frame_figure.py).
 _HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
-                          "SyntaxError", "IndentationError", "TabError", "UnknownResult"})
+                          "SyntaxError", "IndentationError", "TabError", "UnknownResult", "BadArgument"})
 #: The exceptions that say so only if they show on more data too (too little data can raise them).
 _MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
 _FAULTS = _HARD_FAULTS | _MAYBE_FAULTS

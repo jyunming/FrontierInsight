@@ -212,7 +212,7 @@ def _missing_key_reason() -> str:
     levels = in_run.level_cells({"method": ["slow", "fast"]})
     value, why = in_run.read_returned({"score": {"method=slow": 1.0}}, levels, "run_trial")
     assert value is None
-    return "TypeError: " + why
+    return f"{type(in_run.refusal_error(why)).__name__}: {why}"  # as the trial harness writes a failure row's reason
 
 
 def _failed(reason: str) -> small_run.SmallRun:
@@ -267,9 +267,11 @@ def test_with_no_frame_every_changed_message_is_what_it_was() -> None:
     assert pins == PINS_AT_6AD6C160, json.dumps(pins)
 
 
-#: sha256 (first 16 hex digits) of the same messages as the code before this change made them (commit 6ad6c160).
+#: sha256 (first 16 hex digits) of the same messages as the code before this change made them (commit 6ad6c160), except that
+#: "small_run" and "failures" carry the reason of a refused per-value result as the harness now writes it ("LevelsRefused: ..."
+#: where it wrote "TypeError: ..."), the only change in those two messages.
 PINS_AT_6AD6C160 = {
-    "small_run": "c46af295127b2217", "small_run_other": "7ad3e4770282781c", "failures": "a447049a7fe88a5e",
+    "small_run": "ba9b079aa3a3593c", "small_run_other": "7ad3e4770282781c", "failures": "03a0b2eb488c1141",
     "oracle": "c8b1dcea470a2f8e", "oracle_script": "89cff3048184af42", "extend": "8503839e96ba908c", "repair_note": "e3b0c44298fc1c14"}
 
 

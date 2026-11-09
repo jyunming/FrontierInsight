@@ -674,3 +674,120 @@ def test_a_mixed_study_does_not_offer_its_single_trial_cells_as_plain_means(tmp_
     assert "{{v:gain:mean_ci @ dose=1, steps=16}}" in sheet  # the repeated setting keeps its interval key
     assert "{{v:gain @ dose=2, steps=16}}" not in sheet and "{{v:gain:mean_ci @ dose=2, steps=16}}" not in sheet
     assert "one trial in each setting" not in pv.writer_block(rec)
+
+
+# --- a result the plan declares exact is printed as the record holds it (backlog -420) ----------------------------------
+
+
+def _ex_metric(vals):
+    return {"values": list(vals), "trials": list(range(len(vals))), "count": len(vals), "total": float(sum(vals)),
+            "non_finite": 0}
+
+
+def _ex_cells(**series):
+    n = max(len(v) for v in series.values())
+    return [{"cell": {"size": 100, "method": "direct"}, "key": "size=100,method=direct", "planned": n, "ok": n, "failed": 0,
+             "metrics": {k: _ex_metric(v) for k, v in series.items()}}]
+
+
+def _ex_plan(**exact):
+    return {"metrics": [{"id": k, "kind": "mean", "estimand": "x", "unit": "run", **({} if v is None else {"exact": v})}
+                        for k, v in exact.items()]}
+
+
+def _ex_text(cells, plan, name):
+    return pv.resolve("{{v:" + name + " @ size=100, method=direct}}", pv.from_cells(cells, plan)).text
+
+
+# the variation table: (series, what the plan says, expected text); each row is a differently shaped result
+@pytest.mark.parametrize("values, said, want", [
+    ([52817.0], True, "52817"),                                  # a count, one trial
+    ([52817.0] * 3, True, "52817"),                              # a count, three identical trials
+    ([0.52817] * 3, True, "0.52817"),                            # a share of counts
+    ([0.5281700000001] * 3, True, "0.5281700000001"),            # written as the record holds it, every digit
+    ([123456.0], True, "123456"),                                # six digits
+    ([0.12345678], False, "0.1235"),                             # a one-trial measurement the plan calls a measurement
+    ([0.12345678], None, "0.1235"),                              # no word from the plan, not whole: four figures as before
+    ([14281.0], None, "14281"),                                  # no word from the plan, whole: never another whole number
+    ([14281.0] * 2, False, "14280"),                         # the plan calls it a measurement: believed
+    ([2.16834067696] * 2, True, "2.16834067696"),                # exact as the plan says, whatever the digits look like
+    ([2.16834067696] * 2, None, "2.168"),                        # undeclared and not whole: four figures, as before
+    ([1.2345678, 1.2445678, 1.2145678], True, "1.231"),         # declared exact but the trials differ: measured, 4 figures
+])
+def test_exact_is_what_the_plan_says_and_the_record_agrees(values, said, want):
+    assert _ex_text(_ex_cells(tally=values), _ex_plan(tally=said), "tally") == want
+
+
+def test_declared_exact_with_differing_trials_is_logged(caplog):
+    with caplog.at_level("WARNING"):
+        _ex_text(_ex_cells(tally=[1.0, 2.0, 4.0]), _ex_plan(tally=True), "tally")
+    assert "declared exact, but its trials differ" in caplog.text
+
+
+def test_a_measurement_keeps_its_four_figures_and_interval():
+    cells = _ex_cells(tally=[52817.0] * 3, noisy=[1.2345678, 1.2445678, 1.2145678])
+    plan = _ex_plan(tally=True, noisy=False)
+    rec = pv.from_cells(cells, plan)
+    assert pv.resolve("{{v:noisy @ size=100, method=direct}}", rec).text == "1.231"
+    noisy = pv.resolve("{{v:noisy:mean_ci @ size=100, method=direct}}", rec)  # the known positive: unchanged
+    assert noisy.filled and "1.23" in noisy.text and "1.2312" not in noisy.text
+
+
+def _ex_two(a, b, plan):
+    cells = _ex_cells(tally=[a])
+    cells.append({**cells[0], "cell": {"size": 100, "method": "other"}, "key": "size=100,method=other",
+                  "metrics": {"tally": _ex_metric([b])}})
+    return pv.from_cells(cells, plan)
+
+
+def test_range_with_a_declared_exact_end_prints_both_ends_in_full():
+    got = pv.resolve("{{v:tally @ size=100, method=each | range}}", _ex_two(52817.0, 41.0, _ex_plan(tally=True)))
+    assert got.filled and got.text == "41 to 52817"
+    got = pv.resolve("{{v:tally @ size=100, method=each | range}}", _ex_two(0.14281, 0.33333, _ex_plan(tally=True)))
+    assert got.filled and got.text == "0.14281 to 0.33333"
+
+
+def test_range_with_no_word_from_the_plan_keeps_a_non_whole_end_at_four_figures():
+    got = pv.resolve("{{v:tally @ size=100, method=each | range}}", _ex_two(52817.0, 0.33333, _ex_plan(tally=None)))
+    assert got.filled and got.text == "0.3333 to 52817"
+
+
+def test_metric_spec_and_contract_carry_exact():
+    from core import contract, metric_spec
+
+    base = {"id": "tally", "kind": "mean", "estimand": "x", "unit": "run"}
+    ok, why = metric_spec.normalize([{**base, "exact": True}])
+    assert why is None and ok[0]["exact"] is True
+    for bad in ("yes", 1, "true"):
+        assert metric_spec.normalize([{**base, "exact": bad}])[0] is None
+    assert metric_spec.normalize([base])[1] is None  # left out is allowed
+
+
+@pytest.mark.parametrize("x, want", [
+    (0.123456789012345, "0.123456789012345"),   # past 12 digits: written as the record holds it
+    (1e15, "1000000000000000"),
+    (123456789012345678.0, "123456789012345680"),  # the float's own integer value, in full
+    (0.30000000000000004, "0.30000000000000004"),
+    (-0.0, "0"),
+    (2.0, "2"),
+])
+def test_exact_text_is_the_value_in_full(x, want):
+    assert pv.exact_text(x) == want
+
+
+def test_exact_percent_adds_no_float_noise():
+    m = pv.Measured(kind="exact", value=0.0712345)
+    assert pv.fmt(m, percent=True) == "7.12345%"
+
+
+@pytest.mark.parametrize("x, want", [
+    (0.123400000000001, "0.123400000000001"),   # past 12 digits: the real formatting entry does not cut it
+    (0.30000000000000004, "0.30000000000000004"),
+])
+def test_exact_through_fmt_is_never_rounded(x, want):
+    assert pv.fmt(pv.Measured(kind="exact", value=x)) == want
+
+
+def test_exact_metric_filled_into_the_paper_is_never_rounded():
+    cells = _ex_cells(tally=[0.30000000000000004] * 2)
+    assert _ex_text(cells, _ex_plan(tally=True), "tally") == "0.30000000000000004"

@@ -1250,7 +1250,7 @@ async def _slow_search(tmp_path: Path, replies: list[str]) -> tuple[Engine, Any,
     block["grid"] = {"axis0": [0, 1, 2]}
     block["evaluation_budget"] = {"starts": 2, "per_start": 50}
     eng, runner = await _search_engine(tmp_path, block)
-    eng.config.execution.timeout_s = 60  # one evaluation's own start-up is counted too (about 0.3 s)
+    eng.config.execution.timeout_s = 25  # about 3x below the measured study on any machine; one evaluation's own start-up is counted too (about 0.3 s)
     eng.config.engine.improve_rounds = 2
     (eng.quest_root / "code" / "simulate.py").write_text(_SLOW_SEARCH, encoding="utf-8")
     chat = AsyncMock(side_effect=list(replies))

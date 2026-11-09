@@ -4,6 +4,7 @@ called and no real study runs: the rerun's answer is given, or the study is a fe
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import math
 import subprocess
@@ -812,3 +813,173 @@ def test_a_rerun_that_compares_every_delivered_file_and_finds_no_move_is_unchang
     root, copy = _quest_with_two_files(tmp_path)
     v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=True)
     assert v.status == "unchanged" and v.unwritten == []
+
+
+# ---- a delivered result file is carried or not by FI's record of the step that wrote it (core/step_writes.py) ------------------
+def _quest_with_record(tmp_path: Path, wrote: dict[str, str]) -> tuple[Path, Path]:
+    root, copy = _quest_with_two_files(tmp_path)
+    if wrote:
+        (root / ".fi").mkdir()
+        (root / ".fi" / "step_writes.json").write_text(json.dumps(wrote), encoding="utf-8")
+    return root, copy
+
+
+def test_a_result_file_the_simulation_wrote_is_carried_by_an_analysis_only_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: table.json, unwritten by the analysis-only rerun, was carried only if no code file named it."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "simulation"})
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "unchanged" and v.carried == ["table.json"] and v.unwritten == []
+
+
+def test_a_result_file_the_analysis_wrote_stays_uncompared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Known positive: the step that was rerun wrote table.json and the rerun did not: still could_not."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "could_not" and v.unwritten == ["table.json"] and v.carried == []
+
+
+def test_a_result_file_no_step_is_recorded_for_is_not_compared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No record at all, or a record without the file: its writer is unknown, so it is never carried (the old code read the
+    file name in the code and carried it when no changed file named it)."""
+    for wrote in ({}, {"derived.json": "analysis"}):
+        root, copy = _quest_with_record(tmp_path / str(len(wrote)), wrote)
+        v = _rerun_writing(tmp_path / str(len(wrote)), monkeypatch, root, copy, table=False)
+        assert v.status == "could_not" and v.unwritten == ["table.json"] and v.carried == []
+
+
+def test_a_name_in_the_code_decides_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old code carried table.json because only report.py named it; the record says the analysis wrote it."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
+    (root / "code" / "report.py").write_text('open("table.json", "w")\n', encoding="utf-8")
+    v = _rerun_writing(tmp_path, monkeypatch, root, copy, table=False)
+    assert v.status == "could_not" and v.unwritten == ["table.json"]
+
+
+def test_a_whole_study_rerun_carries_nothing_it_reran(tmp_path: Path) -> None:
+    root, _copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "simulation"})
+    assert rerun_check.affected_files(root, {"table.json"}, "whole study") == {"table.json"}
+    assert rerun_check.affected_files(root, {"table.json"}, "analysis only") == set()
+
+
+def test_the_record_says_the_last_step_that_wrote_a_file_and_skips_overlapping_runs(tmp_path: Path) -> None:
+    from core import step_writes
+
+    root = tmp_path / "quest"
+    res = root / "data" / "results"
+    res.mkdir(parents=True)
+    with step_writes.watching(root) as w:  # simulation writes a.json and b.json; the analysis rewrites b.json and writes c.json
+        (res / "a.json").write_text("1", encoding="utf-8")
+        (res / "b.json").write_text("1", encoding="utf-8")
+        w.mark(step_writes.SIMULATION)
+        (res / "b.json").write_text("22", encoding="utf-8")
+        (res / "c.json").write_text("1", encoding="utf-8")
+        w.mark(step_writes.ANALYSIS)
+    assert step_writes.read(root) == {"a.json": "simulation", "b.json": "analysis", "c.json": "analysis"}
+    other = tmp_path / "quest2"
+    (other / "data" / "results").mkdir(parents=True)
+    with step_writes.watching(other) as first:
+        with step_writes.watching(other) as second:  # two runs at once: nobody can tell who wrote what
+            (other / "data" / "results" / "x.json").write_text("1", encoding="utf-8")
+            first.mark(step_writes.ANALYSIS)
+            second.mark(step_writes.ANALYSIS)
+    assert step_writes.read(other) == {}
+    with pytest.raises(RuntimeError):  # a run that stops before its analysis records nothing
+        with step_writes.watching(other) as w:
+            (other / "data" / "results" / "y.json").write_text("1", encoding="utf-8")
+            raise RuntimeError
+    assert step_writes.read(other) == {}
+
+
+def test_a_changed_rerun_adds_the_numbers_of_an_unwritten_affected_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: a changed rerun with an unwritten file added none of that file's numbers to what the finding reaches."""
+    root, copy = _quest_with_record(tmp_path, {"derived.json": "analysis", "table.json": "analysis"})
+    out = tmp_path / "out"
+    (out / "data" / "results").mkdir(parents=True)
+    (out / "data" / "results" / "derived.json").write_text(
+        json.dumps({"derived": {"est": {"by_setting": {"s": 9.0}}}}), encoding="utf-8")
+
+    async def fake_run_copy(*a: Any, **k: Any) -> tuple[Any, ...]:
+        return "analysis only", out, "", 1.0, False
+
+    monkeypatch.setattr(rerun_check, "run_copy", fake_run_copy)
+    v = asyncio.run(rerun_check.judge(None, "py", root, copy, {"metrics": []}, 60, None))
+    assert v.status == "changed" and v.unwritten == ["table.json"]
+    assert any(k.startswith("file:table.json") for k in v.keys) and any(k.startswith("file:table.json") for k in v.unplaced)
+
+
+# ---- nested steps are one run; an unattributable period forgets old writers ----------------------------------------------------
+
+
+def _results(root: Path) -> Path:
+    res = root / "data" / "results"
+    res.mkdir(parents=True, exist_ok=True)
+    return res
+
+
+def test_steps_started_inside_a_watched_run_are_the_same_run_and_still_record(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    with step_writes.watching(root) as w:
+        inner = outside_run.begin_run(root)  # what OutsideExecutor / execute_keeping_only_finished do for each setting
+        start = outside_run.working_states(root)
+        (res / "a.json").write_text("1", encoding="utf-8")
+        assert outside_run.run_overlapped(root, inner) is False
+        recorded = outside_run.record_finished(root, start, outside_run.run_overlapped(root, inner))
+        outside_run.end_run(root, inner)
+        w.mark(step_writes.SIMULATION)
+        w.mark(step_writes.ANALYSIS)
+    assert "data/results/a.json" in recorded  # the finished-files record works inside the watched run
+    assert step_writes.read(root) == {"a.json": "simulation"}  # and so does the step record
+
+
+def test_settings_at_the_same_time_inside_one_run_still_overlap_each_other(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    _results(root)
+    with step_writes.watching(root) as w:
+        a = outside_run.begin_run(root)
+        b = outside_run.begin_run(root)
+        assert outside_run.run_overlapped(root, a) and outside_run.run_overlapped(root, b)
+        outside_run.end_run(root, b)
+        outside_run.end_run(root, a)
+        w.mark(step_writes.ANALYSIS)
+
+
+def test_a_run_beside_a_watched_run_overlaps_it_and_its_old_writers_are_forgotten(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    (root / ".fi").mkdir()
+    (root / ".fi" / "step_writes.json").write_text(json.dumps({"table.json": "simulation", "keep.json": "simulation"}), encoding="utf-8")
+    (res / "table.json").write_text("1", encoding="utf-8")
+    (res / "keep.json").write_text("1", encoding="utf-8")
+    with step_writes.watching(root) as w:
+        beside = contextvars.Context().run(outside_run.begin_run, root)  # another run in the quest, outside the watched one's scope
+        (res / "table.json").write_text("22", encoding="utf-8")  # rewritten by the analysis, but it cannot be told
+        w.mark(step_writes.SIMULATION)
+        w.mark(step_writes.ANALYSIS)
+        outside_run.end_run(root, beside)
+    # the record keeps nothing for the file that period may have touched, so an analysis-only rerun does not carry it
+    assert step_writes.read(root) == {"keep.json": "simulation"}
+    assert rerun_check.affected_files(root, {"table.json"}, "analysis only") == {"table.json"}
+    assert rerun_check.affected_files(root, {"keep.json"}, "analysis only") == set()
+
+
+def test_a_run_that_stops_early_forgets_the_writers_of_the_files_it_changed(tmp_path: Path) -> None:
+    from core import step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    (root / ".fi").mkdir()
+    (root / ".fi" / "step_writes.json").write_text(json.dumps({"table.json": "simulation"}), encoding="utf-8")
+    (res / "table.json").write_text("1", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        with step_writes.watching(root) as w:
+            (res / "table.json").write_text("22", encoding="utf-8")
+            w.mark(step_writes.SIMULATION)
+            raise RuntimeError
+    assert step_writes.read(root) == {}

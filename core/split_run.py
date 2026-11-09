@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import step_writes as _step_writes
 from .execution import ExecutionResult, scrub_secrets
 
 RAW_DIRNAME = "raw"
@@ -274,6 +275,12 @@ class SplitRunner:
     async def execute(
         self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None,
     ) -> ExecutionResult:
+        with _step_writes.watching(self.quest_root) as self._steps:  # which step wrote which result file (core/step_writes.py)
+            return await self._execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    async def _execute(
+        self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None,
+    ) -> ExecutionResult:
         if len(cmd) < 2 or Path(cmd[1]) != self.analysis:
             return await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
 
@@ -323,7 +330,9 @@ class SplitRunner:
             write_manifest(raw_dir, manifest)
             self.simulated += 1
 
+        self._steps.mark(_step_writes.SIMULATION)
         analysis = await self.inner.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+        self._steps.mark(_step_writes.ANALYSIS)
         self.failed_script = ANALYSIS_NAME if analysis.returncode != 0 else None
         return ExecutionResult(
             analysis.returncode, analysis.stdout, analysis.stderr,

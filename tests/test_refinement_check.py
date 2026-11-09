@@ -278,3 +278,19 @@ def test_a_setting_with_no_headline_number_at_any_level_is_not_judged_and_not_co
     assert [(r["setting"], r["status"]) for r in v["results"] if r["setting"] == "gap=1"] == [("gap=1", "lost")]
     other = rc.judge(SETTING, {"gap=4": runs["gap=4"]}, {"width": 30.0}, {"width"})
     assert other["verdict"] == "converged"  # known positive: the finite setting alone still converges
+
+
+def test_a_setting_whose_headline_key_is_absent_at_every_level_is_not_converged_and_named() -> None:
+    """Before: the setting returned {} at each level, added nothing, and the others made the verdict converged."""
+    runs = {"gap=1": [{}, {}, {}],
+            "gap=4": [{"width": 10.0}, {"width": 10.001}, {"width": 10.0005}]}
+    v = rc.judge(SETTING, runs, {"width": 30.0}, {"width"})
+    assert v["verdict"] == "not_converged"
+    lost = [r for r in v["results"] if r["setting"] == "gap=1"]
+    assert [(r["result"], r["status"]) for r in lost] == [("width", "lost")] and "width" in lost[0]["how"]
+    # a setting that returns only other results has no headline number either
+    other = {"gap=1": [{"iterations": 4.0}, {"iterations": 5.0}, {"iterations": 6.0}], "gap=4": runs["gap=4"]}
+    assert rc.judge(SETTING, other, {"width": 30.0}, {"width"})["verdict"] == "not_converged"
+    # known positive: every setting returning the headline still converges
+    fine = {"gap=1": [{"width": 5.0}, {"width": 5.001}, {"width": 5.0005}], "gap=4": runs["gap=4"]}
+    assert rc.judge(SETTING, fine, {"width": 30.0}, {"width"})["verdict"] == "converged"

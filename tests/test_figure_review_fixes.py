@@ -216,7 +216,7 @@ def test_a_constant_equal_to_a_threshold_and_to_a_reference_is_not_named_by_the_
     h.references = {"error_limit": {"value": 0.05, "label": "error_limit = 0.05", "fixed": True},
                     "theory": {"value": 0.05, "label": "Theory"}}
     h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
-    with pytest.raises(ValueError, match="several references"):
+    with pytest.raises(ValueError, match="never matched"):
         h.ref(0, value=0.05)
 
 

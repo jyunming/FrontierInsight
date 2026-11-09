@@ -892,3 +892,10 @@ def test_a_fallback_for_one_plan_multiplier_excuses_only_a_t_or_normal_quantile(
     for m in (_Z, 2.5705818):
         v = tc.judge(_levelled_record({**_METHODS, "plain_z": m}), _levelled_proto(3), repairs_left=False)
         assert v.action == tc.OK and any("method=plain_z" in n for n in v.calibration.not_checked)
+
+
+def test_a_level_fault_is_told_by_the_type_of_the_failure_not_its_wording() -> None:
+    from core import trial_checks
+    assert trial_checks.is_level_fault("LevelsRefused: run_trial() says it differently now: a reworded message")
+    assert not trial_checks.is_level_fault("TypeError: run_trial() returned `g` with the key 'z', not a value")
+    assert not trial_checks.is_level_fault("ValueError: boom")

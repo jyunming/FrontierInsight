@@ -184,9 +184,17 @@ def judge(setting: dict[str, Any], runs: dict[str, list[dict[str, float]]], spre
     results: list[dict[str, Any]] = []
     changed = False
     returned = {n for levels in runs.values() for level in levels for n in level}
-    if names and not any(_judged(n, names) for n in returned):
-        names = set()  # the headline is named as no result the run returns: every result is judged, never none
+    if names and not any(_judged(n, names) for n in returned | set(spread)):
+        names = set()  # the headline is named as no result the run or the study has: every result is judged, never none
+    # The headline results the study measured or another setting returned: each setting run again must return one.
+    expected = sorted(n for n in returned | set(spread) if _judged(n, names or set()))
     for cell_key, levels in runs.items():
+        if expected and not any(_judged(n, names or set()) for level in levels for n in level):
+            # No headline number at any level (the levels returned nothing, or only other results): adding nothing
+            # would let the others carry the verdict, so each expected headline result is lost for this setting.
+            for name in expected:
+                results.append({"setting": cell_key, "result": name, "values": [None] * len(levels), "status": "lost",
+                                "how": f"the setting returned no `{name}` at any level"})
         for name in sorted({n for level in levels for n in level}):
             values = [level.get(name) for level in levels]
             finite = [v is not None and math.isfinite(v) for v in values]
@@ -220,7 +228,7 @@ def judge(setting: dict[str, Any], runs: dict[str, list[dict[str, float]]], spre
                             "how": finest.get("how"), "status": "converged" if ok else "not_converged"})
     if not results:
         return {"verdict": "not_run", "results": [], "why": "no setting could be run again at the finer levels"}
-    if not changed:
+    if not changed and not any(r["status"] == "lost" for r in results):
         return {"verdict": "no_effect", "results": results,
                 "why": "every result was the very same number at every level: the refinement checked nothing (the code "
                        "may not read this setting)"}
