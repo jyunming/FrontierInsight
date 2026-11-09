@@ -746,6 +746,14 @@ def _exact(value: Any) -> Any:
     return "json", json.dumps(value, default=str, sort_keys=True)
 
 
+def _level_key(value: Any) -> Any:
+    """``value`` as a dict key that groups the cells of one level of a setting: a scalar is its own key (as it always was); a
+    list or a dict (a setting whose value is a grid or a table) cannot be hashed, so its key is its JSON text."""
+    if value is None or isinstance(value, (str, int, float)):
+        return value
+    return "json", json.dumps(value, default=str, sort_keys=True)
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -1273,7 +1281,7 @@ def _refuse_mean_over_changing_axis(rec: Records, key: Key) -> None:
     for axis in pooled:
         groups: dict[Any, list[dict[str, Any]]] = {}
         for c in cells:
-            groups.setdefault(c["cell"].get(axis), []).append(c)
+            groups.setdefault(_level_key(c["cell"].get(axis)), []).append(c)
         if len(groups) < 2:
             continue
         found: list[tuple[float, float | None, float | None]] = []
