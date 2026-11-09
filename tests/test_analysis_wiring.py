@@ -461,8 +461,9 @@ PINS_AT_811719AF = {
     # run.py carries the text of core/in_run.py (what a run returned, read as FI reads it): it changed when a trial with no
     # number for a compared value became a missing number (it was "dab51e372647d8db", then "87e0998489e5371b") and again
     # when a run's numbers given level first are read and a case is not read from one plain number of a run given every value
-    "run_none": "a170adc907d3a756",
-    "run_plain": "a170adc907d3a756",
+    # and again when a refused per-value result raises FI's typed LevelsRefused (core/in_run.py); it was "a170adc907d3a756"
+    "run_none": "31f40a3da41e1bf3",
+    "run_plain": "31f40a3da41e1bf3",
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
@@ -476,7 +477,8 @@ PINS_AT_811719AF = {
     # and again with core/in_run.py as above; it was "22b5c692db24cc0c", then "9c02b84106d93943", then "334d654a28f5a5e0"
     # and again when the frame's Figure docstring stopped naming fig.curve (05361164, an intended text change: a curve the
     # figure computes itself is no longer taught)
-    "run_framed": "968739116e2bd633",
+    # and again with core/in_run.py's typed LevelsRefused (run.py carries the runtime); it was "968739116e2bd633"
+    "run_framed": "7c0c2a465be6c47e",
 }
 
 
