@@ -6,8 +6,10 @@ before the simulation, between the two steps and after the analysis, and keeps i
 wrote or rewrote each file: ``{file name: step}``. A rerun of the study (``core/rerun_check.py``) reads it to tell which
 delivered result files a changed step can affect. A file this record has no writer for is not known to be safe.
 
-When two runs overlap in one quest FI cannot tell which of them wrote a changed file, so nothing is recorded (as for
-``core/outside_run.py::record_finished``)."""
+When two runs overlap in one quest FI cannot tell which of them wrote a changed file, so nothing new is recorded (as for
+``core/outside_run.py::record_finished``) and the old writer of every file that period may have touched is forgotten: a file
+with no trusted writer stays "not known", never "written by the simulation". The steps a study starts inside itself belong to
+the same run (``begin_run(scope=True)``); only another run at the same time overlaps it."""
 from __future__ import annotations
 
 import json
@@ -52,9 +54,16 @@ class Watch:
 
     def __init__(self, quest_root: Path | str) -> None:
         self.root = Path(quest_root)
-        self._last = snapshot(self.root)
+        self._start = snapshot(self.root)
+        self._last = dict(self._start)
         self.wrote: dict[str, str] = {}
         self.done = False
+
+    def touched(self) -> set[str]:
+        """The result files this run may have changed: new, changed or gone since it began (or at any boundary it saw)."""
+        end = snapshot(self.root)
+        names = {n for n in set(self._start) | set(end) if self._start.get(n) != end.get(n)}
+        return names | set(self.wrote)
 
     def mark(self, step: str) -> None:
         """The files new or changed since the last mark were written by ``step``. After the analysis the run is complete."""
@@ -70,19 +79,34 @@ class Watch:
 @contextmanager
 def watching(quest_root: Path | str) -> Iterator[Watch]:
     """Watch one run of the steps; when it ran to the analysis and no other run overlapped it, keep what it wrote."""
-    token = _outside.begin_run(quest_root)
+    token = _outside.begin_run(quest_root, scope=True)
     watch = Watch(quest_root)
     try:
         yield watch
     finally:
         overlapped = _outside.end_run(quest_root, token)
-        if watch.done and not overlapped and watch.wrote:
-            _save(watch.root, watch.wrote)
+        if watch.done and not overlapped:
+            if watch.wrote:
+                _save(watch.root, watch.wrote)
+        else:
+            _forget(watch.root, watch.touched())
+
+
+def _forget(root: Path, names: set[str]) -> None:
+    """FI could not tell who wrote these files (the run overlapped another or did not finish): drop their recorded writers."""
+    record = read(root)
+    if not names & set(record):
+        return
+    _write(root, {k: v for k, v in record.items() if k not in names})
 
 
 def _save(root: Path, wrote: dict[str, str]) -> None:
     record = read(root)
     record.update(wrote)
+    _write(root, record)
+
+
+def _write(root: Path, record: dict[str, str]) -> None:
     path = root / RECORD
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

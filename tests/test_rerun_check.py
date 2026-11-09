@@ -4,6 +4,7 @@ called and no real study runs: the rerun's answer is given, or the study is a fe
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import math
 import subprocess
@@ -904,3 +905,81 @@ def test_a_changed_rerun_adds_the_numbers_of_an_unwritten_affected_file(tmp_path
     v = asyncio.run(rerun_check.judge(None, "py", root, copy, {"metrics": []}, 60, None))
     assert v.status == "changed" and v.unwritten == ["table.json"]
     assert any(k.startswith("file:table.json") for k in v.keys) and any(k.startswith("file:table.json") for k in v.unplaced)
+
+
+# ---- nested steps are one run; an unattributable period forgets old writers ----------------------------------------------------
+
+
+def _results(root: Path) -> Path:
+    res = root / "data" / "results"
+    res.mkdir(parents=True, exist_ok=True)
+    return res
+
+
+def test_steps_started_inside_a_watched_run_are_the_same_run_and_still_record(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    with step_writes.watching(root) as w:
+        inner = outside_run.begin_run(root)  # what OutsideExecutor / execute_keeping_only_finished do for each setting
+        start = outside_run.working_states(root)
+        (res / "a.json").write_text("1", encoding="utf-8")
+        assert outside_run.run_overlapped(root, inner) is False
+        recorded = outside_run.record_finished(root, start, outside_run.run_overlapped(root, inner))
+        outside_run.end_run(root, inner)
+        w.mark(step_writes.SIMULATION)
+        w.mark(step_writes.ANALYSIS)
+    assert "data/results/a.json" in recorded  # the finished-files record works inside the watched run
+    assert step_writes.read(root) == {"a.json": "simulation"}  # and so does the step record
+
+
+def test_settings_at_the_same_time_inside_one_run_still_overlap_each_other(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    _results(root)
+    with step_writes.watching(root) as w:
+        a = outside_run.begin_run(root)
+        b = outside_run.begin_run(root)
+        assert outside_run.run_overlapped(root, a) and outside_run.run_overlapped(root, b)
+        outside_run.end_run(root, b)
+        outside_run.end_run(root, a)
+        w.mark(step_writes.ANALYSIS)
+
+
+def test_a_run_beside_a_watched_run_overlaps_it_and_its_old_writers_are_forgotten(tmp_path: Path) -> None:
+    from core import outside_run, step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    (root / ".fi").mkdir()
+    (root / ".fi" / "step_writes.json").write_text(json.dumps({"table.json": "simulation", "keep.json": "simulation"}), encoding="utf-8")
+    (res / "table.json").write_text("1", encoding="utf-8")
+    (res / "keep.json").write_text("1", encoding="utf-8")
+    with step_writes.watching(root) as w:
+        beside = contextvars.Context().run(outside_run.begin_run, root)  # another run in the quest, outside the watched one's scope
+        (res / "table.json").write_text("22", encoding="utf-8")  # rewritten by the analysis, but it cannot be told
+        w.mark(step_writes.SIMULATION)
+        w.mark(step_writes.ANALYSIS)
+        outside_run.end_run(root, beside)
+    # the record keeps nothing for the file that period may have touched, so an analysis-only rerun does not carry it
+    assert step_writes.read(root) == {"keep.json": "simulation"}
+    assert rerun_check.affected_files(root, {"table.json"}, "analysis only") == {"table.json"}
+    assert rerun_check.affected_files(root, {"keep.json"}, "analysis only") == set()
+
+
+def test_a_run_that_stops_early_forgets_the_writers_of_the_files_it_changed(tmp_path: Path) -> None:
+    from core import step_writes
+
+    root = tmp_path / "quest"
+    res = _results(root)
+    (root / ".fi").mkdir()
+    (root / ".fi" / "step_writes.json").write_text(json.dumps({"table.json": "simulation"}), encoding="utf-8")
+    (res / "table.json").write_text("1", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        with step_writes.watching(root) as w:
+            (res / "table.json").write_text("22", encoding="utf-8")
+            w.mark(step_writes.SIMULATION)
+            raise RuntimeError
+    assert step_writes.read(root) == {}
