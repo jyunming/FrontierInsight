@@ -59,6 +59,18 @@ def _output(result, name):
         raise LookupError(name)
 
 
+def _parts(value):
+    """(real part, imaginary part) of one number; the imaginary part is None unless the value is a complex number (a Python
+    complex, a numpy complex scalar or a one-element complex array). Raises when it is not one number. Read before float(),
+    which drops the imaginary part of a numpy complex scalar without a word."""
+    if (not isinstance(value, (int, float, complex, str)) and hasattr(value, "dtype") and hasattr(value, "item")
+            and getattr(value, "size", None) == 1):
+        value = value.item()
+    if isinstance(value, complex):
+        return value.real, value.imag
+    return float(value), None
+
+
 def _draws(fn, inputs, params):
     import random
 
@@ -70,7 +82,7 @@ def _draws(fn, inputs, params):
     except Exception:  # noqa: BLE001
         rng = random.Random(12345)
     rng_name = next((n for n in RNG_PARAMS if n in params), None)
-    values = []
+    values, imags = [], []
     started = time.monotonic()
     for i in range(DRAWS):
         kwargs = dict(inputs)
@@ -83,18 +95,22 @@ def _draws(fn, inputs, params):
         except BaseException as e:  # noqa: BLE001
             return {"status": "error", "detail": _err(e)}
         try:
-            draw = float(result)
+            draw, imag = _parts(result)
         except BaseException:  # noqa: BLE001
             return {"status": "not_number", "detail": "it returned something that is not one number"}
-        if not math.isfinite(draw):
+        if not math.isfinite(draw) or (imag is not None and not math.isfinite(imag)):
             return {"status": "nonfinite", "detail": "a draw was not a finite number"}
         values.append(draw)
+        if imag is not None:
+            imags.append(abs(imag))
         if len(values) >= MIN_DRAWS and time.monotonic() - started > TIME_LIMIT_S:
             break
     if len(values) < MIN_DRAWS:
         return {"status": "error",
                 "detail": "the function is too slow to be drawn from " + str(MIN_DRAWS) + " times in the time allowed"}
-    return {"status": "measured", "draws": values}
+    # Complex draws: the draws compared are the real parts; the largest imaginary part is kept for judge(), which holds each
+    # to the same tolerance as a single value (a draw cannot be "close" to a real distribution with a real imaginary part).
+    return {"status": "measured", "draws": values, **({"imag": max(imags)} if imags else {})}
 
 
 def measure(case):
@@ -124,7 +140,7 @@ def measure(case):
             result = fn(**inputs)
         except BaseException as e:  # noqa: BLE001
             return {"status": "error", "detail": _err(e)}
-        values, absent = {}, []
+        values, absent, imags = {}, [], {}
         for n in names:
             try:
                 got = _output(result, n)
@@ -132,10 +148,12 @@ def measure(case):
                 absent.append(n)
                 continue
             try:
-                values[n] = float(got)
+                values[n], imag = _parts(got)
+                if imag is not None:
+                    imags[n] = imag
             except BaseException:  # noqa: BLE001 -- an array of several numbers, a method, a tensor: not one number
                 values[n] = None
-        return {"status": "measured", "values": values, "absent": absent}
+        return {"status": "measured", "values": values, "absent": absent, **({"imags": imags} if imags else {})}
     if case.get("random"):
         return _draws(fn, inputs, params)
     try:
@@ -143,7 +161,8 @@ def measure(case):
     except BaseException as e:  # noqa: BLE001
         return {"status": "error", "detail": _err(e)}
     try:
-        return {"status": "measured", "value": float(value)}
+        re_part, imag = _parts(value)
+        return {"status": "measured", "value": re_part, **({"imag": imag} if imag is not None else {})}
     except BaseException:  # noqa: BLE001
         if len(case.get("outputs") or []) >= 2 and _by_name(value):
             return {"status": "outputs", "detail": "the function returns its outputs by name and the worked example gives one value"}
@@ -153,6 +172,10 @@ def measure(case):
 
 def _number(v):
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _imag_note(imag):
+    return "it returned a complex number with imaginary part " + format(imag, ".10g") + "; the worked example is a real number"
 
 
 def _judge_draws(case, draws, want):
@@ -190,15 +213,20 @@ def _judge_multi(case, measured, want):
     if absent:
         return ("mismatch", "return the outputs by name: " + ", ".join(names) + " (a dict with these keys); no output called "
                 + ", ".join(absent), None, None, want)
-    got, tols, bad = {}, {}, []
+    got, tols, bad, notes = {}, {}, [], []
+    imags = measured.get("imags") if isinstance(measured.get("imags"), dict) else {}
     for n in names:
         absolute = case["abs"][n] if isinstance(case["abs"], dict) else case["abs"]
         tols[n] = max(case["rel"] * abs(want[n]), absolute)
         got[n] = _number(values.get(n))
         if got[n] is None or not math.isfinite(got[n]) or abs(got[n] - want[n]) > tols[n]:
             bad.append(n)
+        elif n in imags and not abs(imags[n]) <= tols[n]:
+            bad.append(n)
+            notes.append(n + ": " + _imag_note(imags[n]))
     if bad:
-        return "mismatch", "the output " + ", ".join(bad) + (" does" if len(bad) == 1 else " do") + " not agree", got, tols, want
+        return ("mismatch", "the output " + ", ".join(bad) + (" does" if len(bad) == 1 else " do") + " not agree"
+                + ("; " + "; ".join(notes) if notes else ""), got, tols, want)
     return "ok", "", got, tols, want
 
 
@@ -217,14 +245,21 @@ def judge(case, measured):
         return "error", "the run that calls the function gave a result FI cannot read", None, None, want
     if isinstance(want, dict):
         return _judge_multi(case, measured, want)
+    imag = _number(measured.get("imag"))
     if case.get("random"):
-        return _judge_draws(case, measured.get("draws"), want)
+        result = _judge_draws(case, measured.get("draws"), want)
+        if result[0] == "ok" and imag is not None and not imag <= max(case["rel"] * abs(want), case["abs"]):
+            return "mismatch", _imag_note(imag), result[2], result[3], want
+        return result
     value = _number(measured.get("value"))
     if value is None:
         return "mismatch", "it returned something that is not one number", None, None, want
     tol = max(case["rel"] * abs(want), case["abs"])
     if not math.isfinite(value) or abs(value - want) > tol:
         return "mismatch", "", value, tol, want
+    if imag is not None and not abs(imag) <= tol:
+        # A real example against a complex value: it agrees only when the imaginary part is within the same tolerance of zero.
+        return "mismatch", _imag_note(imag), value, tol, want
     return "ok", "", value, tol, want
 
 
