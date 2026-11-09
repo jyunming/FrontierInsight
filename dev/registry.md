@@ -24,7 +24,7 @@ same PR that adds, splits or renames one.
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol? Also the plan's
   notes on the protocol (`*_notes`; `rng_notes`: what `rng_reuse` reads from free code about a stream that may restart for every setting, a note for the quality report and never a difference; `run_count_notes`: repeated runs of a design that names nothing random). Under the trial contract a `for` loop in the analysis script is not read as the grid; `analysis_suspects` returns
   the loops it skipped, which `run_manifest.confirmed` settles from FI's own count of the run (`Engine._grid_values_left_out`).
-- `core/run_manifest.py` — runtime check (`differences` / `plain_difference` / `difference_request`: where the analysis lists
+- `core/run_manifest.py` — `freeze` / `distinct`: the one form a setting's value takes wherever FI groups or lists a setting's values (a list a tuple, a dict a tagged frozenset; `[1]`, `[1.0]`, `[True]` are one value), used by `paper_values` and copied in the standalone `analysis_figures`; runtime check (`differences` / `plain_difference` / `difference_request`: where the analysis lists
   more values than FI's record holds, computed from the counts, the plain first sentence of the stop, and the request that
   names metric, settings and counts for the repair of the analysis alone; `engine._manifest_repair_budget`: up to three tries): does what the simulation says it ran (`run_manifest.json`) match the
   protocol's exact Cartesian product? Also the two-script split-analysis lint, the strata of a `given` mean
