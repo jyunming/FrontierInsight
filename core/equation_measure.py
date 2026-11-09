@@ -63,7 +63,8 @@ def _parts(value):
     """(real part, imaginary part) of one number; the imaginary part is None unless the value is a complex number (a Python
     complex, a numpy complex scalar or a one-element complex array). Raises when it is not one number. Read before float(),
     which drops the imaginary part of a numpy complex scalar without a word."""
-    if not isinstance(value, (int, float, complex, str)) and hasattr(value, "dtype") and hasattr(value, "item")             and getattr(value, "size", None) == 1:
+    if (not isinstance(value, (int, float, complex, str)) and hasattr(value, "dtype") and hasattr(value, "item")
+            and getattr(value, "size", None) == 1):
         value = value.item()
     if isinstance(value, complex):
         return value.real, value.imag

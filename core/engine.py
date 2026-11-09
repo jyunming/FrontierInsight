@@ -5531,7 +5531,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         and not dropped else " ".join(reason.split())[:300]}
                 if fresh and not gone and not dropped:
                     item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
-                if len(unit) == 1 and fresh and not gone and not dropped and key in (trial_fixed or {})                         and (trial_fixed or {})[key] != (base_fixed or {}).get(key):
+                if (len(unit) == 1 and fresh and not gone and not dropped and key in (trial_fixed or {})
+                        and (trial_fixed or {})[key] != (base_fixed or {}).get(key)):
                     # Only a part of it cannot be read: the rest of the change is made, that part alone is left out, and
                     # a key of the block the plan had readable stays as the plan had it (the audit's version of it could
                     # not be read; its loss would cost the block what it had, e.g. a search its evaluation budget).
