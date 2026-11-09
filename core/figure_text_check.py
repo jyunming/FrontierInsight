@@ -238,8 +238,9 @@ def _result_panels(panels: list[dict[str, Any]], rid: str) -> list[dict[str, Any
 def _is_bound(line: dict[str, Any], ref: dict[str, Any], *, curve: bool = False) -> bool:
     """Whether FI's record binds ``line`` (a reference line, or a curve of a panel's series) to the plan's reference ``ref``: FI
     recorded it as drawn from the plan (``source == "plan"``) under one of the reference's ids, and a line is horizontal (``axis``
-    "y", on the axis of the result). A value or a name that happens to be equal is no binding: FI itself records a typed number
-    that matches exactly one reference of the plan as that reference, so an unbound line is another thing."""
+    "y", on the axis of the result). A value or a name that happens to be equal is no binding: FI records a line as a plan reference
+    only when the body drew it by the reference's id (``fig.ref(panel, "<id>")``), never from a typed number, so an unbound line
+    is another thing."""
     if line.get("source") != "plan" or str(line.get("id")).split("@")[0] not in ref["ids"]:
         return False
     return curve or line.get("axis", "y") == "y"

@@ -224,7 +224,8 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False, bare: bool = Fal
         return f"{int(m.value)}"
     if m.kind in ("exact", "whole"):  # every trial gave this one value: it is printed as the record holds it (a percent shifts the point)
         v = _shift(m.value, 100.0) if percent else m.value
-        return (exact_text(v) if _rounding_changes(v) else sig(v, 4)) + ("%" if percent else "")
+        # an exact result (the plan says so and every trial holds it) is written as the record holds it, nothing rounds it
+        return (exact_text(v) if m.kind == "exact" or _rounding_changes(v) else sig(v, 4)) + ("%" if percent else "")
     if m.kind == "count":
         return f"{m.successes} of {m.n}"
     scale = 100.0 if percent else 1.0
@@ -1739,7 +1740,7 @@ def resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: boo
                 scale = 100.0 if key.percent else 1.0
                 digits = 3 if measured.kind == "ratio" else 4
                 # a range with an exact end is written at the places that end needs, both ends alike (41 to 52817)
-                exactly = measured.kind in ("exact", "whole") and any(_rounding_changes(x * scale) for x in measured.parts)
+                exactly = measured.kind == "exact" or (measured.kind == "whole" and any(_rounding_changes(x * scale) for x in measured.parts))
                 out = " to ".join((exact_text(_shift(x, scale)) if exactly and (measured.kind == "exact" or float(_shift(x, scale)).is_integer())
                                    else sig(x * scale, digits)) + tail
                                   for x in measured.parts)

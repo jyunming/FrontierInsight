@@ -22,7 +22,7 @@ def test_identical_reference_lines_are_one_entry():
     h = _Host()
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     h.ref(0, "limit")
-    h.ref(0, value=3.0)  # the same plan reference typed as a number: the same line
+    h.ref(0, "limit")  # the same plan reference drawn again by its id: the same line
     refs = h.record()["panels"][0]["refs"]
     assert [r["id"] for r in refs] == ["limit"]
     h.finish(h.labels, {})

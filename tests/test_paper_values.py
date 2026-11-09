@@ -778,3 +778,16 @@ def test_exact_text_is_the_value_in_full(x, want):
 def test_exact_percent_adds_no_float_noise():
     m = pv.Measured(kind="exact", value=0.0712345)
     assert pv.fmt(m, percent=True) == "7.12345%"
+
+
+@pytest.mark.parametrize("x, want", [
+    (0.123400000000001, "0.123400000000001"),   # past 12 digits: the real formatting entry does not cut it
+    (0.30000000000000004, "0.30000000000000004"),
+])
+def test_exact_through_fmt_is_never_rounded(x, want):
+    assert pv.fmt(pv.Measured(kind="exact", value=x)) == want
+
+
+def test_exact_metric_filled_into_the_paper_is_never_rounded():
+    cells = _ex_cells(tally=[0.30000000000000004] * 2)
+    assert _ex_text(cells, _ex_plan(tally=True), "tally") == "0.30000000000000004"

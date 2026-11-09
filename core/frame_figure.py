@@ -1167,8 +1167,8 @@ class FigureCalls:
     def ref(self, panel, ref_id=None, axis="y", *, at=None, value=None, key=None, form="mean"):
         """A reference line, one of three: a plan reference ``ref_id`` (labelled with the plan's words); ``at=<result id>`` (FI
         reads the line's value from the table: ``form`` mean, n, low or high at setting ``key``); or ``value=<number>``, a
-        constant drawn as stated (recorded as "stated in the figure", labelled "Reference line" by FI, and claimed only as a
-        line at that coordinate)."""
+        typed constant, which FI cannot name and so refuses (it is never matched to a plan reference by its number; draw a
+        plan reference by its id)."""
         ax, rec = self._panel(panel)
         if axis not in ("x", "y"):
             raise BadArgument("`axis=%r` must be \"x\" or \"y\"" % (axis,))
@@ -1204,21 +1204,22 @@ class FigureCalls:
                 raise ValueError("`value=%r` must be a finite number" % (value,))
             if axis == "x" and any(isinstance(v, str) for e in rec["series"] for v in e["x"]):
                 raise ValueError("panel %d has categories on its x axis, which have no coordinate to draw a line at; use axis=\"y\"" % panel)
+            # A typed number is never bound to a reference of the plan by its value: an unrelated line that happens to sit at a
+            # reference's number is not that reference. Only ``ref_id`` (FI looks the id up) draws a plan reference.
             hits = self._plan_match(value, rec)
-            if len(hits) != 1:
-                return self._no_identity(
-                    panel, "a line at %s" % _typed(value),
-                    "its value matches several references of the plan" if hits
-                    else "FI has no record of where its value comes from",
-                    "the constant %r %s, so FI cannot say what the line is. If it is a theory value, add it to the plan as "
-                    "a named reference; if it is a result's value, draw it with `at=<result id>`"
-                    % (value, "matches several references of the plan (%s)" % ", ".join(sorted(hits)) if hits
-                       else "matches no reference of the plan at this panel's setting"))
-            ident = hits[0]
-            number, source = self._plan_value(ident, rec), "plan"
-            label = self._reference_label(ident)
+            ids = ", ".join(sorted(map(str, self._plan_values(rec)))) or "(none)"
+            return self._no_identity(
+                panel, "a line at %s" % _typed(value),
+                "its value equals a reference of the plan, but a typed number is not bound to one by its value" if hits
+                else "FI has no record of where its value comes from",
+                "the constant %r is typed, so FI cannot say what the line is%s. If it is a reference of the plan, draw it by its "
+                "id with `fig.ref(panel, \"<reference id>\")` (the plan's reference ids at this panel: %s); if it is a theory "
+                "value the plan lacks, add it to the plan as a named reference; if it is a result's value, draw it with "
+                "`at=<result id>`"
+                % (value, " (it equals the plan's reference %s, but a typed number is never matched to a reference by its "
+                   "value)" % ", ".join(sorted(hits)) if hits else "", ids))
         if source == "plan" and any(r["id"] == ident and r["axis"] == axis for r in rec["refs"]):
-            # the same reference of the plan drawn again (by its id and as a typed number): one line, one legend entry
+            # the same reference of the plan drawn again by its id: one line, one legend entry
             return None
         draw = ax.axhline if axis == "y" else ax.axvline
         art = draw(float(number), linestyle=":", color="0.2", label=label)

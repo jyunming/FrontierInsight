@@ -5,6 +5,7 @@ is called."""
 from __future__ import annotations
 
 import matplotlib
+import pytest
 
 matplotlib.use("Agg")
 
@@ -108,7 +109,8 @@ def test_no_false_flag_on_merged_entries_and_registered_curves() -> None:
     h = _Host()
     h.line(0, "fast", [1, 2], [1.0, 2.0], "growth")
     h.ref(0, "limit")
-    h.ref(0, value=3.0)  # the same plan reference typed as a number: one entry
+    with pytest.raises(ValueError):
+        h.ref(0, value=3.0)  # the same number typed is no reference: refused, one entry
     h.finish(h.labels, {})
     rec = h.record()
     texts = list(rec["legend"]["entries"]) if rec.get("legend") else None

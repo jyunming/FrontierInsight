@@ -650,12 +650,14 @@ def test_uneven_error_bars_are_recorded_and_their_meaning_is_checked_against_the
     assert h.axes[0].get_ylim()[1] > 6.0
 
 
-def test_ref_has_two_sources_and_a_typed_constant_takes_the_plan_reference_it_equals():
+def test_ref_has_two_sources_and_a_typed_constant_is_never_bound_to_a_plan_reference():
     h = _host_by_x()
     h.ref(0, "limit")
     h.ref(0, at="growth", key="size=2")
-    h.ref(0, value=3.0)  # the plan's `limit` typed as a number: that reference, already drawn, so one line
-    h.ref(1, value=3.0)  # on a panel without it: the plan's `limit`, named by the plan
+    h.ref(0, "limit")  # the same reference by its id again: one line
+    with pytest.raises(ValueError, match="never matched"):
+        h.ref(1, value=3.0)  # equal to the plan's `limit`, but a typed number is not bound to it by its value
+    h.ref(1, "limit")  # on a panel without it: the plan's `limit`, named by the plan
     with pytest.raises(ValueError):
         h.ref(0, value=1.5)  # no reference of the plan: FI cannot name it, so it is not drawn
     with pytest.raises(ValueError):
