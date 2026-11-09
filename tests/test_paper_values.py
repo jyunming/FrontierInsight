@@ -704,7 +704,7 @@ def _ex_text(cells, plan, name):
     ([52817.0], True, "52817"),                                  # a count, one trial
     ([52817.0] * 3, True, "52817"),                              # a count, three identical trials
     ([0.52817] * 3, True, "0.52817"),                            # a share of counts
-    ([0.5281700000001] * 3, True, "0.52817"),                    # float noise is dropped, nothing else
+    ([0.5281700000001] * 3, True, "0.5281700000001"),            # written as the record holds it, every digit
     ([123456.0], True, "123456"),                                # six digits
     ([0.12345678], False, "0.1235"),                             # a one-trial measurement the plan calls a measurement
     ([0.12345678], None, "0.1235"),                              # no word from the plan, not whole: four figures as before
@@ -761,3 +761,20 @@ def test_metric_spec_and_contract_carry_exact():
     for bad in ("yes", 1, "true"):
         assert metric_spec.normalize([{**base, "exact": bad}])[0] is None
     assert metric_spec.normalize([base])[1] is None  # left out is allowed
+
+
+@pytest.mark.parametrize("x, want", [
+    (0.123456789012345, "0.123456789012345"),   # past 12 digits: written as the record holds it
+    (1e15, "1000000000000000"),
+    (123456789012345678.0, "123456789012345680"),  # the float's own integer value, in full
+    (0.30000000000000004, "0.30000000000000004"),
+    (-0.0, "0"),
+    (2.0, "2"),
+])
+def test_exact_text_is_the_value_in_full(x, want):
+    assert pv.exact_text(x) == want
+
+
+def test_exact_percent_adds_no_float_noise():
+    m = pv.Measured(kind="exact", value=0.0712345)
+    assert pv.fmt(m, percent=True) == "7.12345%"

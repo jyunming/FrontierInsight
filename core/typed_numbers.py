@@ -286,28 +286,34 @@ def _decimal(x: Any) -> Decimal | None:
         return None
 
 
-def declared_numbers(protocol: dict[str, Any] | None) -> frozenset[Decimal]:
-    """The numbers the plan itself names and fixes: every numeric value under ``protocol.constants`` and
-    ``protocol.thresholds`` (a named, single value the plan declared, however small). Other numeric fields (settings, runs,
-    seeds) are not among them: a small whole number there is incidental."""
-    found: set[Decimal] = set()
+def declared_names(protocol: dict[str, Any] | None) -> dict[str, float]:
+    """The numbers the plan names: each numeric leaf under ``protocol.constants`` and ``protocol.thresholds``, by its key
+    (``{"alpha": 0.05}`` is ``alpha``; a nested key is read by its own name). A ``{{calc:}}`` may write such a name and FI
+    puts the plan's value in, so that a number is the plan's because the plan named it, never because a typed digit happens
+    to equal a declared value. A key that is not a plain name, or that two different values share, is left out. Other
+    numeric fields (settings, runs, seeds) are not named."""
+    found: dict[str, float] = {}
+    clash: set[str] = set()
 
     def walk(o: Any) -> None:
         if isinstance(o, dict):
-            for v in o.values():
-                walk(v)
+            for k, v in o.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    d = _decimal(v)
+                    if isinstance(k, str) and k.isidentifier() and d is not None and d.is_finite():
+                        if k in found and found[k] != float(v):
+                            clash.add(k)
+                        found[k] = float(v)
+                else:
+                    walk(v)
         elif isinstance(o, list):
             for v in o:
                 walk(v)
-        elif isinstance(o, (int, float)) and not isinstance(o, bool):
-            d = _decimal(o)
-            if d is not None and d.is_finite():
-                found.add(d)
 
     if isinstance(protocol, dict):
         for part in ("constants", "thresholds"):
             walk(protocol.get(part))
-    return frozenset(found)
+    return {k: v for k, v in found.items() if k not in clash}
 
 
 def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[Decimal]:

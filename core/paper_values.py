@@ -132,14 +132,20 @@ def sig(x: float, digits: int = 4) -> str:
     return _clean(f"{round(x, -place):.{max(0, -place)}f}")
 
 
+def _shift(x: float, scale: float) -> float:
+    """``x * scale`` in decimal, so a percent (x 100) adds no float noise to a value the record holds."""
+    from decimal import Decimal
+    return float(Decimal(repr(float(x))) * Decimal(repr(float(scale)))) if scale != 1.0 else x
+
+
 def exact_text(x: float) -> str:
-    """``x`` as the record holds it: an integer-valued number in full, any other with the float noise trimmed (12 significant
-    figures: 0.30000000000000004 is 0.3), so a result with no spread is never changed by the rounding a measured one gets."""
+    """``x`` as the record holds it: an integer-valued number in full, any other as its shortest round-trip digits
+    (``repr``), so a result with no spread is never changed by rounding, not even past 12 digits."""
     if not math.isfinite(x):
         raise _Unfilled("the value is not a finite number")
-    if x == int(x) and abs(x) < 1e15:
+    if x == int(x):
         return str(int(x))
-    return _clean(f"{x:.12g}")
+    return _clean(repr(float(x)))
 
 
 def _rounding_changes(x: float) -> bool:
@@ -217,7 +223,7 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False, bare: bool = Fal
     if m.kind == "int":
         return f"{int(m.value)}"
     if m.kind in ("exact", "whole"):  # every trial gave this one value: it is printed as the record holds it (a percent shifts the point)
-        v = m.value * 100.0 if percent else m.value
+        v = _shift(m.value, 100.0) if percent else m.value
         return (exact_text(v) if _rounding_changes(v) else sig(v, 4)) + ("%" if percent else "")
     if m.kind == "count":
         return f"{m.successes} of {m.n}"
@@ -1616,7 +1622,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
         plan = _typed.plan_numbers(protocol, topic)
-        declared = _typed.declared_numbers(protocol)
+        named = _typed.declared_names(protocol)
         levels, counts = _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
         # its own however it is spelled.
@@ -1643,10 +1649,14 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 pass  # the trials FI ran, as degrees of freedom: a count, never a number the plan fixes
             elif d is not None and d.is_finite() and (d in plan or -d in plan):
                 # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
-                # A value the plan itself names (a constant or a threshold) is the plan's number, however small.
-                of_the_plan += 0 if small and d not in declared and -d not in declared else 1
+                of_the_plan += 0 if small else 1
             elif not small:
                 own.append(repr(node.value))
+        # A name the plan declares (a constant or a threshold) is the plan's number however small: FI puts its value in.
+        called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        used = {n.id: named[n.id] for n in ast.walk(tree)
+                if isinstance(n, ast.Name) and id(n) not in called and n.id in named}
+        of_the_plan += len(used)
         if own:
             raise _Unfilled(f"it uses {', '.join(dict.fromkeys(own))}, which the plan and the topic do not state; write it "
                             "from the plan's own numbers as the plan writes them (a two-sided level is 1 - alpha / 2 with "
@@ -1656,7 +1666,7 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
         if not of_the_plan:
             raise _Unfilled("it uses none of the plan's or the topic's numbers, so it is not a number the plan fixes; type "
                             "a whole number as it is, or say the number in words")
-        ev = _forms.evaluate(expression, {}, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
+        ev = _forms.evaluate(expression, used, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
                                                       "t_quantile": _stats.t_quantile})
         if ev.value is None:
             why = (f"it names {', '.join(ev.missing)}, which is no number" if ev.missing
@@ -1730,7 +1740,7 @@ def resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: boo
                 digits = 3 if measured.kind == "ratio" else 4
                 # a range with an exact end is written at the places that end needs, both ends alike (41 to 52817)
                 exactly = measured.kind in ("exact", "whole") and any(_rounding_changes(x * scale) for x in measured.parts)
-                out = " to ".join((exact_text(x * scale) if exactly and (measured.kind == "exact" or float(x * scale).is_integer())
+                out = " to ".join((exact_text(_shift(x, scale)) if exactly and (measured.kind == "exact" or float(_shift(x, scale)).is_integer())
                                    else sig(x * scale, digits)) + tail
                                   for x in measured.parts)
             else:
