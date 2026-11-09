@@ -561,15 +561,19 @@ def _text_pair(item: "str | tuple[str, str]") -> tuple[str, str]:
     return ("", item) if isinstance(item, str) else (item[0], item[1])
 
 
-def _unproven_use(name: str, tree: ast.AST, sig: inspect.Signature, module: str) -> tuple[int, int | None, str]:
+def _unproven_use(name: str, tree: ast.AST, sig: inspect.Signature, module: str,
+                  any_star: bool = False) -> tuple[int, int | None, str]:
     """``(calls found, line, what)`` for one file: ``line`` is the first use of ``name`` that FI cannot show binds to ``sig``
     (``what`` says how it is used), ``None`` when every use is a call that binds or an import that is followed to its calls.
-    A name imported under another name (``from m import f as g``) is followed under that name."""
+    A name imported under another name (``from m import f as g``) is followed under that name. ``any_star``: a star import
+    of any module counts (a file of the study other than the one that defines ``name``: the module it star-imports may
+    re-export ``name``, which the code does not show)."""
     names = {name}
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom) and any(x.name == "*" for x in n.names):
-            if not module or (n.module or "").rsplit(".", 1)[-1] == module:
-                return 0, n.lineno, f"a star import of the module that defines `{name}`"
+            if any_star or not module or (n.module or "").rsplit(".", 1)[-1] == module:
+                return 0, n.lineno, (f"a star import of a module that may bring in `{name}`" if any_star
+                                     else f"a star import of the module that defines `{name}`")
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             for x in n.names:
                 if x.name.rsplit(".", 1)[-1] == name and x.asname and isinstance(n, ast.ImportFrom):
@@ -606,7 +610,7 @@ def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunction
     """Why a repair's new parameters of ``name`` are not allowed (``""`` when they are). The rule of :func:`params_kept` is
     that every call that worked still works; its own test (same parameters, defaults added after them) is enough but
     not needed: parameters it refuses are allowed when FI can account for every use of ``name`` in ``texts`` (the code as
-    the repair leaves it: the repaired file and every other file of the study that mentions ``name`` or star-imports; each
+    the repair leaves it: the repaired file first, then every other file of the study that mentions ``name`` or star-imports; each
     a text or ``(file, text)``) and every use is a call that binds to them (an import under another name is followed to
     its calls), since then no call that worked is broken. Refused, with :func:`params_kept`'s reason and the file and line
     of the use, when a call does not bind to the new parameters, and when that cannot be told: ``name`` is never called, a
@@ -618,13 +622,13 @@ def signature_change_problem(name: str, old: ast.FunctionDef | ast.AsyncFunction
         return why
     sig = _signature(new)
     calls = 0
-    for item in texts:
+    for i, item in enumerate(texts):
         label, text = _text_pair(item)
         try:
             tree = ast.parse(text)
         except (SyntaxError, ValueError):
             return why
-        n, line, what = _unproven_use(name, tree, sig, module)
+        n, line, what = _unproven_use(name, tree, sig, module, any_star=i > 0)
         calls += n
         if line is not None:
             return f"{why}; {label or 'the repaired file'} line {line} has {what}"
@@ -666,9 +670,28 @@ def project_files_using(code: Path, rel: str, names: Iterable[str]) -> list[str]
         if other == rel or "tests" in parts[:-1] or "__pycache__" in parts[:-1] or parts[0] == "skills":
             continue
         text = _read(path)
-        if "import *" in text or any(n in text for n in names):
+        if any(n in text for n in names) or _star_imports_project(code, path, text):
             out.append(other)
     return out
+
+
+def _star_imports_project(code: Path, path: Path, text: str) -> bool:
+    """Whether ``text`` (the file ``path``) star-imports a module of the study (``code/``) or a relative one, found by
+    parsing, so any spelling of the import counts. A star import of a library cannot bring in a study's function. A file that
+    does not parse counts (it cannot be shown not to)."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return True
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and any(x.name == "*" for x in n.names):
+            if n.level or not n.module:
+                return True
+            for root in (code, path.parent):  # a module is found from the study's folder or from the importing file's own
+                base = root.joinpath(*n.module.split("."))
+                if base.with_suffix(".py").is_file() or base.is_dir():
+                    return True
+    return False
 
 
 def unpassed_params(old_fn: str, new_fn: str, name: str, callers: dict[str, str], caller_names: dict[str, set[str]]) -> str:
@@ -789,13 +812,16 @@ def file_blocks(reply: str) -> tuple[str, dict[str, str]]:
 
 def splice(source: str, reply: str, scope: set[str] | None = None,
            ignored: list[str] | None = None, *, limit: int | None = MAX_FUNCTIONS,
-           elsewhere: Iterable[str | tuple[str, str]] = (), module: str = "") -> tuple[str | None, list[str], str]:
+           elsewhere: Iterable[str | tuple[str, str]] | None = None, module: str = "") -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
     reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
     function(s) the finding is about) replaces it (the parameter names must be the same, in the same order, or every call
     of it in the spliced file and in ``elsewhere`` (the texts of the other files that call it) must bind to the new
     ones, :func:`signature_change_problem`; at most
-    :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
+    :data:`MAX_FUNCTIONS`). ``elsewhere`` is what FI knows of the rest of the study: ``None`` (the default) means the other
+    files are not known, so a function keeps its parameters (:func:`params_kept`: new ones only after them, with a default);
+    a list means "these are ALL the other files that can use the function" (empty: no other file does) and only then may
+    the parameters change; a definition of any other function the file already has is not spliced (its name is appended to
     ``ignored``); a function the file has not is added as a helper (above the script's ``if __name__`` block, else at the end); imports it brings are added; anything else
     in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
     may be replaced. ``limit`` is the most functions one reply may replace (``None``: no limit, for a repair of a script
@@ -853,9 +879,10 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
         ast.parse(out)
     except SyntaxError as e:
         return None, [], f"the file would not be valid Python ({e.msg}, line {e.lineno})"
-    texts = [out, *elsewhere]
+    texts = [out, *elsewhere] if elsewhere is not None else None
     for name in replaced:
-        why = signature_change_problem(name, old_funcs[name], new_funcs[name], texts, module)
+        why = (signature_change_problem(name, old_funcs[name], new_funcs[name], texts, module) if texts is not None
+               else params_kept(old_funcs[name], new_funcs[name]))
         if why:
             return None, [], f"`{name}` {why}"
     return out, [*replaced, *added], ""
@@ -1807,8 +1834,9 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
                 env.log.warning("[code_review] %s: the reply also changed %s, which does not call `%s`; not used",
                                 issue.get("id"), other, scope)
                 continue
+            # no `elsewhere`: FI does not hold the uses of this caller, so it keeps its parameters
             before = _read(env.code / target)
-            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [], elsewhere=[new])
+            changed, done, why_not = splice(before, f"```python\n{text}\n```", set(callers[target]), [])
             if changed is None:
                 new, why = None, f"its change to {target}: {why_not}"
             elif changed != before:

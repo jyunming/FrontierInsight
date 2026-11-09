@@ -1174,7 +1174,7 @@ class FigureCalls:
             raise BadArgument("`axis=%r` must be \"x\" or \"y\"" % (axis,))
         if sum(v is not None for v in (ref_id, at, value)) != 1:
             raise ValueError("a reference line is one of: a reference id of the plan, `at=<result id>` (FI reads the value from "
-                             "the table), or `value=<number>` for a constant")
+                             "the table); a typed `value=<number>` is not one, since FI cannot name it")
         if ref_id is not None and ref_id not in (getattr(self, "references", None) or {}) and ref_id in self._plan_values(rec):
             numbers = self._plan_values(rec)[ref_id]
             if max(numbers) - min(numbers) > 0:

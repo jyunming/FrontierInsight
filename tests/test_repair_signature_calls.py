@@ -52,17 +52,18 @@ REFUSED = "must keep its parameters (fig, panel, xid, yid)"
 
 
 def test_new_parameters_that_every_call_fits_are_accepted():
-    out, replaced, why = fr.splice(BROKEN_CALLS, REPLY_FITS, None, None, limit=None)
+    # elsewhere=[]: the caller holds the whole project and no other file uses the helper
+    out, replaced, why = fr.splice(BROKEN_CALLS, REPLY_FITS, None, None, limit=None, elsewhere=[])
     assert why == ""
     assert replaced == ["_plot_pair"]
     assert "def _plot_pair(fig, table, xid, yid, panel):" in out
 
 
-def test_the_script_repair_path_accepts_it_too():
+def test_the_script_repair_path_does_not_know_the_other_files_so_it_keeps_the_strict_rule():
+    # was: accepted the new signature seeing only the script, though another file may call it the old way
     made = script_reply.resolve(BROKEN_CALLS, "", REPLY_FITS)
-    assert made.why == ""
-    assert made.kind == "functions"
-    assert "_draw(fig, table, panel, xid, yid)" in made.code
+    assert made.code == ""
+    assert REFUSED in made.why
 
 
 def test_a_call_that_worked_and_no_longer_binds_is_still_refused():
@@ -158,7 +159,8 @@ def test_the_function_passed_as_a_value_is_refused():
 
 
 def test_a_lookup_by_name_or_a_star_import_is_refused():
-    for text in ("import sim\n\nsim.f(1)\ng = getattr(sim, 'f')\n", "from sim import *\n\nf(1)\n"):
+    for text in ("import sim\n\nsim.f(1)\ng = getattr(sim, 'f')\n", "from sim import *\n\nf(1)\n",
+                 "from sim import\t*\n\nf(1)\n"):
         out, _r, why = _change(text)
         assert out is None, text
         assert "use.py" in why
@@ -169,3 +171,80 @@ def test_a_file_that_only_imports_the_function_under_another_name_is_looked_at(t
     (tmp_path / "use.py").write_text("from sim import f as g\n\n\ndef run():\n    return g(1, 2)\n", encoding="utf-8")
     (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
     assert fr.project_files_using(tmp_path, "sim.py", {"f"}) == ["use.py"]
+
+
+# --- the loosened rule needs FI to hold every use: an unknown project keeps the strict rule --------------------------
+
+LOCAL_SIM = "def f(x, y):\n    return x + y\n\n\ndef local():\n    return f(1, 2)\n"
+LOCAL_REPLY = "```python\ndef f(x):\n    return x\n\n\ndef local():\n    return f(1)\n```"
+OTHER_CALLS_OLD = "from sim import f\n\nf(1, 2)\n"
+STRICT = "must keep its parameters (x, y)"
+
+
+def test_without_the_other_files_a_signature_change_keeps_the_strict_rule():
+    out, _r, why = fr.splice(LOCAL_SIM, LOCAL_REPLY, None, None, limit=None)
+    assert out is None
+    assert STRICT in why
+
+
+def test_with_the_other_files_given_an_old_style_call_refuses_and_none_accepts():
+    out, _r, why = fr.splice(LOCAL_SIM, LOCAL_REPLY, None, None, limit=None, elsewhere=[("other.py", OTHER_CALLS_OLD)], module="sim")
+    assert out is None and "other.py" in why
+    out, _r, why = fr.splice(LOCAL_SIM, LOCAL_REPLY, None, None, limit=None, elsewhere=[], module="sim")
+    assert why == "" and "def f(x):" in out
+
+
+def test_code_delta_entry_keeps_the_strict_rule():
+    from core import code_delta
+
+    out, _names, why = code_delta.splice_functions(LOCAL_SIM, LOCAL_REPLY)
+    assert out is None
+    assert STRICT in why
+
+
+def test_script_reply_entry_keeps_the_strict_rule():
+    made = script_reply.resolve(LOCAL_SIM, "", LOCAL_REPLY)
+    assert made.code == ""
+    assert STRICT in made.why
+
+
+def _project(tmp_path, files):
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+
+def test_a_star_import_with_a_tab_is_found_by_parsing(tmp_path):
+    _project(tmp_path, {"sim.py": SIM, "bridge.py": "from sim import\t*\n", "z.py": "x = 1\n"})
+    assert fr.project_files_using(tmp_path, "sim.py", {"area"}) == ["bridge.py"]
+
+
+def test_a_star_import_of_a_library_is_not_a_use(tmp_path):
+    _project(tmp_path, {"sim.py": SIM, "z.py": "from math import *\nx = sqrt(4)\n"})
+    assert fr.project_files_using(tmp_path, "sim.py", {"area"}) == []
+
+
+def test_a_reexport_through_a_star_import_is_refused(tmp_path):
+    _project(tmp_path, {"sim.py": SIM, "bridge.py": "from sim import f as g\n",
+                        "down.py": "from bridge import *\n\nprint(g(1, 2))\n"})
+    others = fr.project_files_using(tmp_path, "sim.py", {"f"})
+    assert "down.py" in others
+    out, _r, why = fr.splice(SIM, REPLY_ONE, None, None, limit=None,
+                             elsewhere=[(o, (tmp_path / o).read_text(encoding="utf-8")) for o in others], module="sim")
+    assert out is None
+    assert "down.py" in why
+
+
+def test_a_star_import_of_a_library_in_a_file_that_calls_it_is_refused_not_assumed():
+    # FI cannot show from the code that the library does not bring `f` in; the loosened rule is not used (the strict one stays)
+    lib = ("lib.py", "from math import *\n\nf(1, 2)\n")
+    out, _r, why = fr.splice(SIM, REPLY_ONE, None, None, limit=None, elsewhere=[lib], module="sim")
+    assert out is None
+    assert "lib.py line 1" in why
+
+
+def test_a_star_import_of_a_sibling_module_in_a_subfolder_is_a_use(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    _project(tmp_path, {"sim.py": SIM})
+    (tmp_path / "pkg" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "use.py").write_text("from helper import *\n", encoding="utf-8")
+    assert fr.project_files_using(tmp_path, "sim.py", {"area"}) == ["pkg/use.py"]
