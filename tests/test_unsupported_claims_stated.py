@@ -165,3 +165,15 @@ def test_an_unchanged_claim_with_a_passage_is_listed_as_before(tmp_path: Path) -
         {"paper_md": str(path), "claim_grounding": _grounding_with_passage(FIRST, FIRST)})
     text = path.read_text(encoding="utf-8")
     assert n == 1 and f'"{FIRST}"' in text and text.count("not found supported") == 1
+
+
+def test_an_earlier_unsupported_claim_is_carried_by_its_stored_passage_when_its_wording_is_not_in_the_paper() -> None:
+    """A claim the check wrote as a paraphrase, with the paper's own sentence stored as its passage, is carried over to the
+    next check by that passage: a later check that leaves it out cannot clear it while the passage is still there."""
+    from core.engine import _unsupported_still_in
+
+    earlier = [{"claim": "The method applies to every design", "basis": "unsupported", "evidence": "no result shows it",
+                "where": [{"passage": FIRST}]}]
+    kept = _unsupported_still_in(PAPER, earlier, [])
+    assert [c["claim"] for c in kept] == ["The method applies to every design"]
+    assert _unsupported_still_in(PAPER.replace(FIRST, "The fan was run at three speeds"), earlier, []) == []
