@@ -239,14 +239,20 @@ same PR that adds, splits or renames one.
   record, on disk in `.fi/improve/raw/`) / `_improve_fresh_run` (`_FRESH_SCRIPT` and no cached trials for a rerun) /
   `_improve_after_rerun` (the headline "changed" note via `code_project.record_note`), prompt `agents/improve.md`,
   config `engine.improve_rounds`; each round's row is `criteria.record(..., improve=...)`.
-- `core/improve_speed.py` — the improve loop with the goal of speed, run before the study when the timing says it would
-  not fit the time allowed. `sample_cells` (the timed settings plus each known-answer case of the plan), `run_sample`
-  (fixed-seed trials through the harness in an outside copy, the least time of two repeats), `disagreements` (a number
-  not the same to 9 digits, or only in one run), `fast_enough`, `profile_text` (the costliest sampled setting run once
-  with the harness's `profile` spec key: Python's profiler during the calls only; the top functions go into the prompt). `RunChecksMixin._speed_up` (`core/run_checks.py`) asks
-  for one change per round (prompt `agents/improve_speed.md`), applies `improve.check_edit` with `improve.guards` over
-  every check of the plan, keeps a change on the sample alone, and times the study twice (the slower timing stands);
-  `_size_the_run` calls it once, before the runs are lowered or the quest stops, and `_size_the_scan` once for a search (its evaluations counted from `optimise_search.rehearse`, the search run on a stand-in objective, via `run_checks._search_rounds`: designs asked for together run `at_once` at a time)
+- `core/improve_speed.py` — the improve loop with the goal of speed, run before the study is sized whenever the padded
+  whole-study estimate is at least 10 minutes (`worth_speeding_up`, `WORTH_SPEEDING_UP_S`), and always, before the cut,
+  when the study does not fit.
+  `sample_cells` (the timed settings plus each known-answer case of the plan), `untimed_cells` (those the study's timing
+  never ran, timed first so `bounded_sample` limits each by its own cost), `run_sample` (fixed-seed trials through the
+  harness in an outside copy, the least time of two repeats; `why_not_run` says why a run gave too few trials),
+  `disagreements` (a number not the same to 9 digits, or only in one run), `fast_enough` (at least `MIN_SAVING` and more
+  than the two unchanged samples differ), `profile_text` (the costliest sampled setting run once
+  with the harness's `profile` spec key: Python's profiler during the calls only; the top functions go into the prompt). `RunChecksMixin._speed_up_if_long` (`core/run_checks.py`) is the
+  one gate both paths call; `_speed_up` / `_speed_up_rounds` ask for one change per round (prompt
+  `agents/improve_speed.md`), apply `improve.check_edit` with `improve.guards` over every check of the plan, keep a change
+  on the sample alone, ask again after a round not kept (up to `engine.improve_rounds`), stop when a kept round cost more
+  time than it saves on the study or the last round took more than a tenth of it, and time the study twice (the slower timing stands); `_size_the_run` calls it once, before the fit decision,
+  and `_size_the_scan` once for a search (its evaluations counted from `optimise_search.rehearse`, the search run on a stand-in objective, via `run_checks._search_rounds`: designs asked for together run `at_once` at a time)
   (sample: the scan's timed settings plus `run_checks._search_sample`, the baseline and fixed designs of the search's
   space), timing the scan and the search again after a kept change. `improve.only_noise` is the
   start condition of the correctness loop (nothing to change when every unmet check is flagged or inside its tolerance).

@@ -299,6 +299,8 @@ async def test_the_confirmation_is_made_once_per_version_of_the_code_and_counts_
 ) -> None:
     record = _honest(_record())
     eng, runner, ex = _engine_and_runner(tmp_path, record)
+    # this study is long enough to be sped up before it is sized; the runs counted here are the timing's only
+    eng.config.engine.improve_rounds = 0
     seen: list[float] = []
     real = est.pilot
 

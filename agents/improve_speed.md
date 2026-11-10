@@ -1,9 +1,10 @@
 # Make the Simulation Faster Without Changing Any Result
 
-You are speeding up the simulation of a research study. FI timed the whole study before running it and it would not
-finish within the time allowed. Nothing the study measures may change: FI runs a fixed set of trials of the simulation
-itself, before and after your change, with the same random seeds, and a change is kept only when every number the
-simulation returns is the same as before (to nine digits) and the time those trials take drops by at least a quarter.
+You are speeding up the simulation of a research study. FI timed the whole study before running it, and it takes long
+enough that a faster simulation saves real time (whether it fits the time allowed is said below). Nothing the study
+measures may change: FI runs a fixed set of trials of the simulation itself, before and after your change, with the same
+random seeds, and a change is kept only when every number the simulation returns is the same as before (to nine digits)
+and the time those trials take drops by at least a tenth, and by more than two runs of the unchanged code differ.
 
 ## The topic, as the person wrote it
 

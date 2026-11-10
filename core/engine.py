@@ -30010,7 +30010,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "code_finding_test",                # a small test that fails on the current code because of one finding
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
-        "improve_speed",        # one change that makes a study that would not fit the time allowed faster
+        "improve_speed",        # one change that makes a long study's simulation faster, same numbers
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence

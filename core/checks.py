@@ -985,8 +985,9 @@ CHECKS: tuple[Check, ...] = (
           'are spent is not run; quest stops'),
     Check('speed_up_study', 'core.run_checks', 'RunChecksMixin._speed_up_rounds',
           'execute', 'measured', 'repair',
-          'Edits that make the simulation faster are kept only when every number in a fixed trial sample is '
-          'unchanged and it is clearly faster'),
+          'A study over its time, or one that fits but takes 10 minutes or more, is sped up before it is '
+          'sized: edits are kept only when every number in a fixed trial sample is unchanged and it is faster '
+          'by a tenth and by more than timing noise'),
     Check('pilot_reads_trials', 'core.run_checks', 'RunChecksMixin._pilot_gate',
           'execute', 'measured', 'stop',
           'Timed pilot trials read before the freeze: a protocol metric not a number, never moving, or an '

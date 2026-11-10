@@ -1746,6 +1746,25 @@ class RunChecksMixin:
                                                                  slowdown=slowdown), once_seen)
             # The timings are kept term by term (core/cost_model.py), not only their total; nothing reads them back yet.
             _cost_model.keep_measured(self.quest_root, probes=probes, est=est, slowdown=slowdown, limit_s=limit_s, key=key)  # type: ignore[attr-defined]
+            if not speed_done and not cut_done and isinstance(runner, _trial_runner.TrialsRunner):
+                # After the correctness checks and before the study is sized: a study that does not fit is sped up before it
+                # is cut, and one that fits only when it is long (core/improve_speed.py); a kept speed-up is timed again.
+                speed_done = True
+                # a grid larger than FI lists does not fit either way: it is cut too
+                too_large = _optimise_search.grid_size(grid) > _optimise_search.MAX_LISTED_SETTINGS
+                if (sped := await self._speed_up_if_long(
+                        state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
+                        fits=None if not too_large else False, budget_s=max(0.0, budget_s - self._pilot_spent), probes=probes)) is not None \
+                        and sped.get("kept"):
+                    # The simulation is a different one now: what was measured on the slow one (the slowdown at once, whether
+                    # settings may share processes, with the time that check was given) is measured again on the faster one.
+                    cached.clear()
+                    slowdown = None
+                    grouping_done = False
+                    # the slower of two timings of the faster simulation is the one the next decision is made on
+                    for p in sped.get("probes") or []:
+                        cached[_estimate.probe_key(p.cell, runs)] = p
+                    continue
             line = _estimate.says(est, limit_s, topic=by_topic)
             base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
@@ -1796,22 +1815,6 @@ class RunChecksMixin:
                         **base, "fits": True, "per_process": runner.per_process, "shared_groups": runner.shared_groups,
                         "group_allowance_s": runner.group_allowance_s})
                     return None
-            if (not speed_done and not cut_done and int(self.config.engine.improve_rounds or 0) > 0  # type: ignore[attr-defined]
-                    and isinstance(runner, _trial_runner.TrialsRunner)):
-                # Before the runs are cut or the quest stops: try to make the simulation itself faster, same numbers.
-                speed_done = True
-                sped = await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s,
-                                            budget_s=max(0.0, budget_s - self._pilot_spent), probes=probes)
-                if sped.get("kept"):
-                    # The simulation is a different one now: what was measured on the slow one (the slowdown at once, whether
-                    # settings may share processes, with the time that check was given) is measured again on the faster one.
-                    cached.clear()
-                    slowdown = None
-                    grouping_done = False
-                    # the slower of two timings of the faster simulation is the one the next decision is made on
-                    for p in sped.get("probes") or []:
-                        cached[_estimate.probe_key(p.cell, runs)] = p
-                    continue
             protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
             if cut_done:
                 # The shorter run, timed again, is still over: over the topic's limit but within FI's own, it runs and the
@@ -1986,9 +1989,10 @@ class RunChecksMixin:
         and FI's timing of the scan's settings as a measurement's are timed (a plan's claim alone is not trusted), and the
         search's evaluations, which share the scan's time, are added at what one new design (the search's baseline) costs;
         over ``execution.timeout_s``: the same stop, as for a measurement (FI does not run a smaller scan than the plan's),
-        with what fits for the plan. ``None`` to go on. Before that stop, the simulation is made faster with the same
-        numbers as a measurement's is (:meth:`_speed_up`, once; ``speed_done``), on the scan's settings and a few designs of
-        the search's own space, and timed again.
+        with what fits for the plan. ``None`` to go on. Before the study is sized, one that does not fit, or fits and is
+        long (:meth:`_speed_up_if_long`), has its simulation made faster with the same numbers as a measurement's is
+        (:meth:`_speed_up`, once; ``speed_done``), on the scan's settings and a few designs of the search's own space, and
+        is timed again.
 
         Not skipped for a frozen protocol or a background job: the search runs here either way and sizing never changes the
         protocol; the timing is bounded by ``engine.pilot_timeout_frac`` of the time allowed, and a resume repeats it."""
@@ -2232,15 +2236,25 @@ class RunChecksMixin:
                                    _estimate.plain_duration(est.seconds * _estimate.SAFETY))
                 else:
                     self._log.info("[execute] the search's coarse scan: %s", _estimate.says(est, limit_s))  # type: ignore[attr-defined]
+                # It fits, and a long study is still sped up before it runs (core/improve_speed.py), on the whole study's
+                # estimate (the scan, the search and FI's check at finer settings); a kept speed-up times it all again.
+                if not speed_done and grid is not None:
+                    sped = await self._speed_up_if_long(
+                        state, runner, python, env, grid, runs, thresholds or {}, inside or {},
+                        whole if whole is not None else est, limit_s,
+                        budget_s=max(0.0, budget_s - (time.monotonic() - timing_started)), probes=probes,
+                        deterministic=deterministic, extra_cells=_search_sample(block, grid))
+                    if sped is not None and sped.get("kept"):
+                        return await self._size_the_scan(state, runner, python, env, speed_done=True)
                 return None
-        if not speed_done and grid is not None and int(self.config.engine.improve_rounds or 0) > 0:  # type: ignore[attr-defined]
+        if not speed_done and grid is not None:
             # What FI runs is the same simulation, whatever the study is called: the speed-up a measurement gets is tried
-            # here too, on the scan's settings and a few designs the search itself would try.
-            sped = await self._speed_up(
+            # here too, on the scan's settings and a few designs the search itself would try, before the study is sized.
+            sped = await self._speed_up_if_long(
                 state, runner, python, env, grid, runs, thresholds or {}, inside or {}, est, limit_s,
                 budget_s=max(0.0, budget_s - (time.monotonic() - timing_started)), probes=probes,
                 deterministic=deterministic, extra_cells=_search_sample(block, grid))
-            if sped.get("kept"):
+            if sped is not None and sped.get("kept"):
                 return await self._size_the_scan(state, runner, python, env, speed_done=True)
         text = self._too_long_text(est, limit_s, cut=False)
         if searched or checked:
@@ -3135,6 +3149,26 @@ class RunChecksMixin:
                 f"order. Timed that way, it expects about {_estimate.plain_duration(padded)}, within the limit.")
         return said, seconds, dataclasses.replace(est, seconds=seconds)
 
+    async def _speed_up_if_long(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]], runs: int,
+                                thresholds: dict[str, Any], inside: dict[str, list[Any]], est: Any, limit_s: float,
+                                fits: bool | None = None, **kwargs: Any) -> dict[str, Any] | None:
+        """The speed-up step for a study FI estimates at ``est`` (the whole study: a search's evaluations and FI's check at
+        finer settings included; padded by ``run_estimate.SAFETY``): always when it does not fit the time allowed
+        (``fits``; default: ``run_estimate.known_too_long`` on ``est``), and when it fits only when it is long
+        (``improve_speed.worth_speeding_up``). ``None`` when it is not tried: the study fits and is short (one line says
+        so) or ``engine.improve_rounds`` is 0."""
+        from . import improve_speed as _speed
+
+        padded_s = float(est.seconds) * _estimate.SAFETY
+        if fits is None:
+            fits = not _estimate.known_too_long(est, limit_s)
+        if not _speed.worth_speeding_up(padded_s, fits):
+            self._log.info("[improve] %s", _speed.not_worth_it_line(padded_s))  # type: ignore[attr-defined]
+            return None
+        if int(self.config.engine.improve_rounds or 0) <= 0:  # type: ignore[attr-defined]
+            return None
+        return await self._speed_up(state, runner, python, env, grid, runs, thresholds, inside, est, limit_s, **kwargs)
+
     async def _speed_up(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """:meth:`_speed_up_rounds`, which commits each version it keeps with its own words (code_project.CodeRuns)."""
         with self._hold_code_runs():  # type: ignore[attr-defined]
@@ -3145,14 +3179,21 @@ class RunChecksMixin:
                                budget_s: float = 600.0, probes: list[Any] | None = None,
                                deterministic: bool | None = None,
                                extra_cells: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """The study would not fit the time allowed: up to ``engine.improve_rounds`` edits that make the simulation itself
-        faster without changing a number (core/improve_speed.py). FI runs a fixed sample of trials, the checks' own cases
-        included, before and after each edit; an edit is kept only when every number is the same and the sample takes
-        clearly less time, and it passes every guard the correctness loop has. The study is then timed twice and the
-        slower timing stands (``probes``), so the noise of one timing cannot make it fit. ``{"kept": bool, "rounds": [...],
-        "calls": n, "speedup": x, "probes": [...] | None}``. ``deterministic``: whether a setting is one call with no
-        randomness (default: the runner's own); ``extra_cells``: settings the sample holds the change to as well (a
-        search's designs outside its coarse scan)."""
+        """The study does not fit, or it fits and is long (core/improve_speed.py ``worth_speeding_up``): rounds
+        of one edit each that make the simulation itself faster without changing a number. FI runs a fixed sample of
+        trials, the checks' own cases included, twice on the unchanged code and once after each edit; an edit is kept only
+        when every number is the same, it passes every guard the correctness loop has, and the sample is faster by at least
+        ``improve_speed.MIN_SAVING`` of its time and by more than the two samples of the unchanged code differ
+        (``improve_speed.fast_enough``), measured against the faster of those two samples (then against the last kept
+        version). A round that is not kept (the edit refused, the reply unreadable, a number changed, or the saving under
+        a tenth or within the noise) does not end the step: the model is asked again with the reason. The rounds stop
+        after ``engine.improve_rounds`` rounds, at a kept round whose wall time (the model's answer and the sample) is more
+        than it saves on the study (its share saved times FI's estimate of the study before it), or before a round when
+        the last one took longer than the least saving FI keeps would give back on the study. A setting of the sample the study's timing never ran is timed on its own first, so its time limit comes from
+        its own cost. After a kept edit the study is timed twice and the slower timing stands (``probes``), so the noise of
+        one timing cannot make it fit. ``{"kept": bool, "rounds": [...], "calls": n, "speedup": x, "probes": [...] | None,
+        "stopped": why}``. ``deterministic``: whether a setting is one call with no randomness (default: the runner's own);
+        ``extra_cells``: settings the sample holds the change to as well (a search's designs outside its coarse scan)."""
         import asyncio
 
         from . import changelog as _changelog
@@ -3184,8 +3225,28 @@ class RunChecksMixin:
         timeout_s = max(60, int(self.config.execution.timeout_s))  # type: ignore[attr-defined]
         timeouts: dict[str, int] | None = None
         if probes is not None:
+            # A setting of the sample the study's timing never ran (a check's case, a search's design) is timed first, given
+            # at most what one sample may take: a setting slower than that could not be sampled anyway. Its time limit in
+            # the sample then comes from its own cost (one such setting, finer than the base, was given the base's).
+            probes = list(probes)
+            timing_started = time.monotonic()
+            share = _speed.sample_share_s(budget_s, 2 + limit)
+            for cell in _speed.untimed_cells(cells, probes):
+                left = budget_s - (time.monotonic() - timing_started)
+                if left < 5:
+                    break
+                probe, why_timed = await _estimate._time_one(
+                    self.executor, python, root, module, cell, runs=runs, deterministic=det,  # type: ignore[attr-defined]
+                    timeout_s=int(max(5, min(share, left, timeout_s))), env=env, thresholds=thresholds,
+                    in_each_run=inside, name="speed_timing")
+                if probe is not None:
+                    probes.append(probe)  # one that ran out of its time is a lower bound, left out of the sample below
+                else:
+                    log.info("[improve] A setting of the sample could not be timed (%s); it is left out of the sample.",
+                             why_timed)
+            budget_s = max(0.0, budget_s - (time.monotonic() - timing_started))
             # The sample is held to what the timing measured: a setting it did not see finish is left out, each gets a
-            # few times its measured cost, and every sample of the step fits in the time left for timing.
+            # few times its own measured cost, and every sample of the step fits in the time left for timing.
             cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=det,
                                                          budget_s=budget_s, samples=2 + limit)
             if not cells:
@@ -3237,9 +3298,14 @@ class RunChecksMixin:
                 return stop("every number of the sample differs from one run of the unchanged code to the next, so an "
                             "edit cannot be judged")
         needed = padded / max(limit_s, 1e-9)
-        target = needed * _speed.MARGIN
+        # What two samples of the same, unchanged code differ by: an edit must save more than this to count as faster.
+        noise_s = abs(first.seconds - again.seconds)
+        record["noise_s"] = noise_s
+        # The unchanged code's time is the faster of its two samples (noise is slower, never faster): an edit is judged
+        # against that, so a slow first sample cannot make an edit that changes nothing look faster.
+        unchanged_s = min(first.seconds, again.seconds) if again.seconds > 0 else first.seconds
         original = _improve.snapshot(root)
-        best = {"files": original, "sample": first}
+        best = {"files": original, "sample": _replace(first, seconds=unchanged_s)}
         tried = {_improve.fingerprint(original)}
         # Where the time goes, measured on the costliest setting the timing saw (the base when none was timed).
         timed = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in probes or [] if getattr(p, "cell", None)}
@@ -3249,14 +3315,24 @@ class RunChecksMixin:
                                             timeout_s=max(60, int(min(timeout_s, budget_s or timeout_s))), log=log)
         record["profiled"] = bool(profile)
         block = _speed.speed_block(padded, limit_s, first, cells, runs, profile=profile)
-        log.info("[improve] The study would take about %s, more than the %s allowed. Trying to make the simulation itself "
-                 "faster without changing any result (up to %d change(s)).", _estimate.plain_duration(padded),
-                 _estimate.plain_duration(limit_s), limit)
-        self._progress("[improve] The study is too slow for the time allowed; trying to make the simulation faster "  # type: ignore[attr-defined]
-                       "without changing any result.")
+        over = padded > limit_s
+        log.info("[improve] The study would take about %s, %s the %s allowed. Trying to make the simulation itself faster "
+                 "without changing any result, one change at a time while each saves at least a tenth (up to %d).",
+                 _estimate.plain_duration(padded), "more than" if over else "within", _estimate.plain_duration(limit_s),
+                 limit)
+        self._progress("[improve] " + ("The study is too slow for the time allowed" if over else "The study takes a while")  # type: ignore[attr-defined]
+                       + "; trying to make the simulation faster without changing any result.")
         used = 0
+        last_wall_s = 0.0
         while used < limit:
+            study_now = padded * best["sample"].seconds / max(unchanged_s, 1e-9)
+            if last_wall_s and last_wall_s > _speed.MIN_SAVING * study_now:
+                record["stopped"] = (f"the last round took {_estimate.plain_duration(last_wall_s)}, more than the least "
+                                     "saving FI keeps would give back on the study")
+                break
             used += 1
+            round_started = time.monotonic()
+            before_s = best["sample"].seconds
             files = _improve.snapshot(root)
             allowed = _improve.editable(root)
             prompt = self._prompts["improve_speed"].substitute(  # type: ignore[attr-defined]
@@ -3273,6 +3349,7 @@ class RunChecksMixin:
                 record["calls"] += 1
             except Exception as e:  # noqa: BLE001 -- no answer is no change
                 entry.update(outcome="not asked", reason=repr(e)[:200])
+                record["stopped"] = "the model could not be asked"
                 break
             from .engine import _parse_json_lenient
 
@@ -3287,6 +3364,9 @@ class RunChecksMixin:
                              **({"file": edit.file, "diff": _improve.diff_text(edit)} if edit is not None
                                 else {"reply": str(reply or "")[:8000]}))
                 log.info("[improve] Speed-up %d refused before it ran: %s", used, why)
+                # Not kept is not the end: the model is asked again with the reason (the history block), up to the cap.
+                last_wall_s = time.monotonic() - round_started
+                entry["wall_s"] = round(last_wall_s, 3)
                 continue
             name = _improve.edited_path(edit)
             candidate = {**files, name: new_text}
@@ -3303,14 +3383,16 @@ class RunChecksMixin:
                 entry.update(outcome="aborted", reason="its run changed " + ", ".join(touched[:4]))
                 log.warning("[improve] Speed-up %d stopped: its test run changed %s, which FI judges the code by; the "
                             "earlier version is back.", used, ", ".join(touched[:4]))
+                record["stopped"] = f"round {used}'s test run changed files FI judges the code by"
                 break
             if after.failed:
                 entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
             elif (bad := _speed.disagreements(first, after, ignore=noisy)):
                 entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
-            elif not _speed.fast_enough(best["sample"].seconds, after.seconds):
+            elif not _speed.fast_enough(best["sample"].seconds, after.seconds, noise_s):
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
-                                                         f"{best['sample'].seconds:.3f} s: not clearly faster")
+                                                         f"{best['sample'].seconds:.3f} s: not faster by a tenth and by "
+                                                         f"more than the {noise_s:.3f} s two runs of the same code differ")
             else:
                 entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                     f"{best['sample'].seconds:.3f} s, with the same numbers")
@@ -3320,18 +3402,30 @@ class RunChecksMixin:
                     _code_project.record_change, root, f"speed-up {used}: {edit.why}", category="changed",
                     results=_changelog.results(
                         "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
-                        f"and the sample runs {first.seconds / max(best['sample'].seconds, 1e-9):.1f} times faster."),
+                        f"and the sample runs {unchanged_s / max(best['sample'].seconds, 1e-9):.1f} times faster."),
                     log=log)
             if entry["outcome"] != "kept":
                 _improve.restore(root, best["files"])
             log.info("[improve] Speed-up %d %s: %s", used, "kept" if entry["outcome"] == "kept" else "not kept",
                      entry.get("reason"))
-            if record["kept"] and first.seconds / max(best["sample"].seconds, 1e-9) >= target:
+            last_wall_s = time.monotonic() - round_started
+            entry["wall_s"] = round(last_wall_s, 3)
+            if entry["outcome"] != "kept":
+                continue  # asked again with the reason, up to the cap
+            saved_s = (before_s - best["sample"].seconds) / max(before_s, 1e-9) * study_now
+            entry["saves_on_study_s"] = round(saved_s, 1)
+            if last_wall_s > saved_s:
+                record["stopped"] = (f"round {used} took {_estimate.plain_duration(last_wall_s)}, more than the "
+                                     f"{_estimate.plain_duration(saved_s)} it saves on the study")
                 break
+        else:
+            record["stopped"] = f"all {limit} round(s) of engine.improve_rounds were used"
+        if record.get("stopped"):
+            log.info("[improve] The rounds of speed-up end: %s.", record["stopped"])
         _improve.restore(root, best["files"])
-        record["sample_s_before"] = first.seconds
+        record["sample_s_before"] = unchanged_s
         record["sample_s_after"] = best["sample"].seconds
-        record["speedup"] = first.seconds / max(best["sample"].seconds, 1e-9)
+        record["speedup"] = unchanged_s / max(best["sample"].seconds, 1e-9)
         record["needed"] = needed
         if record["kept"]:
             # Timed twice; the slower timing stands (one timing of the same study differs by a quarter or more).
