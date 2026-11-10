@@ -14037,8 +14037,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     had = got is not None
                     got = _code_review.keep_seen(got, call["shown"], outside, call["cut"]) if got else got
                     if again:
-                        kept = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
-                        p_verdicts = [*kept, *(got or [])] or None
+                        before = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
+                        p_verdicts = [*before, *(got or [])] or None
                     else:
                         p_verdicts = [*(p_verdicts or []), *(got or [])] or ([] if had else None)
                     if not call_reqs:
@@ -14057,7 +14057,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
                     raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
-                if p_verdicts is not None:  # an answer that was had in full is kept for the next reading of this same part
+                # Only an answer that judged every requirement this part was asked is kept for the next reading of this same
+                # part: a part answered in part is asked again, so what it left unjudged is not left so for good.
+                if p_verdicts is not None and not {r["id"] for r in call_reqs} - {v["id"] for v in p_verdicts}:
                     kept[key] = {"verdicts": p_verdicts, "logic": part_found, "outside": outside[outside_from:],
                                  "listed": part_listed, "version": version}
                     _code_review.save_reading_cache(self.quest_root, kept)

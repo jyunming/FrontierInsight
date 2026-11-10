@@ -98,3 +98,22 @@ def test_a_measurements_run_record_is_what_it_was(tmp_path: Path) -> None:
     trials.keep_runs_time(other, "k", [run, run], 15.0)
     two = run_facts.read(other)["trials_run"]
     assert (two["trials"], two["cells"], two["trial_sum_s"], two["settings_s"], two["wall_s"]) == (6, 4, 9.0, 14.0, 15.0)
+
+
+def test_a_continued_search_that_took_its_scan_from_the_earlier_one_counts_its_own_time(tmp_path: Path) -> None:
+    """A search that continues an earlier one takes the coarse scan from it (the scan ran before this call's time began).
+    Old code: the earlier scan's seconds were taken off this call's time, so a 100 s scan and a 20 s continuation gave a
+    study of 100 s; the scan is counted once, by the run record, and the continuation's own 20 s stand."""
+    from core import optimise
+
+    run_facts.record_trials(tmp_path, key="k", wall_s=100.0, trials=3, cells=3, trial_sum_s=90.0)
+    run_facts.record_evaluations(tmp_path, evaluations=4, evaluations_s=30.0)
+    scan_s = optimise.keep_search_time(tmp_path, [], scan_ran=False, scan_s=0.0, scan_replayed=True)
+    assert scan_s == 0.0
+    assert run_facts.read(tmp_path)["trials_run"]["wall_s"] == 100.0, "the earlier scan's record is kept"
+    best = tmp_path / "results" / "best_design.json"
+    best.parent.mkdir(parents=True)
+    best.write_text(json.dumps({"time": {"seconds": 20.0}}), encoding="utf-8")
+    assert run_facts.run_seconds(tmp_path) == pytest.approx(120.0)
+    # known positive: a scan this call ran is inside its time and is said apart
+    assert optimise.keep_search_time(tmp_path, [], scan_ran=True, scan_s=7.0, scan_replayed=False) == 7.0

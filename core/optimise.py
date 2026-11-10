@@ -849,13 +849,11 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
 def keep_search_time(quest_root: Path, rows: list[Any], *, scan_ran: bool, scan_s: float, scan_replayed: bool) -> float:
     """Keep what the evaluations of a search cost in FI's run record (``.fi/run_facts.json``, beside the coarse scan's, which
     the scan wrote as it finished): how many designs were evaluated and their process times added up, from the search's own
-    rows (the scan's rows are the scan's). Returns the seconds of the coarse scan inside the search's wall time, so its record
-    says them apart: this call's scan, or, for a search that continues an earlier one and took its scan from it, the
-    earlier record's."""
-    if not scan_ran and scan_replayed:
-        kept_run = _run_facts.read(quest_root).get("trials_run")
-        kept_wall = kept_run.get("wall_s") if isinstance(kept_run, dict) and "evaluations" in kept_run else None
-        scan_s = float(kept_wall) if isinstance(kept_wall, (int, float)) and not isinstance(kept_wall, bool) else 0.0
+    rows (the scan's rows are the scan's). Returns the seconds of the coarse scan inside this call's wall time, so its record
+    says them apart: this call's scan, or 0 for a search that continues an earlier one and took its scan from it (that scan
+    ran before this call's time began; the run record keeps its wall time, which counts it once)."""
+    if not scan_ran:
+        scan_s = 0.0
     done = [r for r in rows if isinstance(r, dict) and r.get("event", "evaluation") == "evaluation" and r.get("stage") != "scan"]
     spent = [r["elapsed_s"] for r in done if isinstance(r.get("elapsed_s"), (int, float))
              and not isinstance(r["elapsed_s"], bool) and math.isfinite(r["elapsed_s"])]
