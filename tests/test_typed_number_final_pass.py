@@ -14,7 +14,7 @@ from core import paper_facts, paper_values
 from tests.test_paper_keys_wiring import KEY_SD, PROTOCOL, TYPED, _engine, _quest
 
 LEVEL = "0.975"  # the two-sided level of the plan's 95% interval: not a number of the plan, but computed from one
-CALC = "{{calc:1 - (1 - 0.95) / 2}}"
+CALC = "{{calc:1 - (1 - nominal_coverage) / 2}}"
 
 
 def _paper() -> str:
@@ -62,7 +62,7 @@ def test_a_whole_draft_in_the_last_round_is_edited_once_before_anything_is_taken
     assert "FI'S RECORD OF THIS RUN" in prompt and "{{calc:EXPR}}" in prompt and TYPED in prompt
     assert state["draft_edited"] is True
     shown = paper_facts.without_marks(Path(state["paper_md"]).read_text(encoding="utf-8"))
-    assert f"at level {LEVEL}" in shown  # FI computed it from the plan's 0.95
+    assert f"at level {LEVEL}" in shown  # FI computed it from the plan's nominal_coverage
     review = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
     final = paper_facts.without_marks(Path(state["paper_md"]).read_text(encoding="utf-8"))
     # The typed result the edit left in stays as written; the level FI computed is traced, so only the result is listed.
@@ -187,49 +187,51 @@ def test_a_draft_the_extension_reask_wrote_whole_is_not_an_edited_draft(tmp_path
 # --- {{calc:EXPR}} ------------------------------------------------------------------------------------------------------
 
 
-def test_calc_computes_from_the_plans_numbers_and_refuses_a_number_of_its_own() -> None:
-    plan = {"thresholds": {"alpha": 0.05}, "grid": {"m": [20, 200], "pi1": [0.05, 0.2]}}
+def test_calc_computes_from_the_plans_names_and_refuses_a_number_of_its_own() -> None:
+    plan = {"thresholds": {"alpha": 0.05, "m": 200}, "constants": {"pi1": 0.2}}
     got = {e: paper_values.calc(e, plan, "a 95% interval").text for e in (
-        "1 - 0.05 / 2", "ndtri(1 - 0.05 / 2)", "t_quantile(1 - 0.05 / 2, 3)", "(1 - 0.05) * 0.05",
-        "floor(0.2 * 200 + 1/2)", "ndtri(1 - 0.05)")}
-    assert got == {"1 - 0.05 / 2": "0.975", "ndtri(1 - 0.05 / 2)": "1.96", "t_quantile(1 - 0.05 / 2, 3)": "3.182",
-                   "(1 - 0.05) * 0.05": "0.0475", "floor(0.2 * 200 + 1/2)": "40", "ndtri(1 - 0.05)": "1.645"}
-    # A number the plan does not state, a level FI's intervals do not use, a name, a value out of range.
-    for expr, why in (("0.05 * 0.97", "0.97"), ("t_quantile(0.9, 3)", "0.9"), ("1.37 * 0.42", "1.37"),
-                      ("floor(0.05 * 200 + 1/2) * 1.1", "1.1"), ("bias + 0.05", "bias"), ("ndtri(2 + 0.05)", "cannot"),
+        "1 - alpha / 2", "ndtri(1 - alpha / 2)", "t_quantile(1 - alpha / 2, 3)", "(1 - alpha) * alpha",
+        "floor(pi1 * m + 1/2)", "ndtri(1 - alpha)")}
+    assert got == {"1 - alpha / 2": "0.975", "ndtri(1 - alpha / 2)": "1.96", "t_quantile(1 - alpha / 2, 3)": "3.182",
+                   "(1 - alpha) * alpha": "0.0475", "floor(pi1 * m + 1/2)": "40", "ndtri(1 - alpha)": "1.645"}
+    # A digit (even one the plan states), a level FI's intervals do not use, an unnamed word, a value out of range.
+    for expr, why in (("alpha * 0.97", "0.97"), ("t_quantile(0.9, 3)", "0.9"), ("1.37 * 0.42", "1.37"),
+                      ("floor(alpha * 200 + 1/2) * 1.1", "1.1"), ("bias + alpha", "bias"), ("ndtri(2 + alpha)", "cannot"),
+                      # a digit equal to a number of the plan is not the plan's: only its name is
+                      ("1 - 0.05 / 2", "0.05"), ("floor(0.2 * 200 + 1/2)", "0.2"),
                       # spelled so a text search misses its number, or made of whole numbers alone, or too large
-                      (".8473", "0.8473"), ("0.05 * .97", "0.97"), ("1_234 * 0.05", "1234"), ("0x1F * 0.05", "31"),
+                      (".8473", "0.8473"), ("alpha * .97", "0.97"), ("1_234 * alpha", "1234"), ("0x1F * alpha", "31"),
                       ("6 / 7", "none of the plan"), ("2", "none of the plan"),
-                      ("1e99999999999999999999999 * 0.05", "inf"), ("1 - 0.05 /", "cannot read")):
+                      ("1e99999999999999999999999 * alpha", "inf"), ("1 - alpha /", "cannot read")):
         value = paper_values.calc(expr, plan)
         assert value.text == paper_values.NOT_RECORDED and value.hit and why in value.hit.reason, (expr, value)
-    # A negative plan number written with its sign counts; a whole number 0-10 that a setting alone holds does not, one the
-    # plan declares as a constant does (tests/test_calc_declared_numbers.py).
-    assert paper_values.calc("-0.5 * 2", {"constants": {"shift": -0.5}}).text == "-1"
+    # A negative constant is used by its name; a whole number 0-10 that a setting alone holds is no plan number, one the
+    # plan declares as a constant is (tests/test_calc_declared_numbers.py).
+    assert paper_values.calc("-shift * 2", {"constants": {"shift": -0.5}}).text == "1"
     assert paper_values.calc("3 * 7 / 9", {"grid": {"k": [3, 4]}}).hit is not None
-    # The topic's numbers may be used, as they may be typed; without a plan nothing is computed.
-    assert paper_values.calc("1 - 0.1 / 2", plan, "intervals at level 0.1").text == "0.95"
-    assert paper_values.calc("1 - 0.05 / 2", None).text == paper_values.NOT_RECORDED
+    # The topic's numbers are no names either; without a plan nothing is computed.
+    assert paper_values.calc("1 - 0.1 / 2", plan, "intervals at level 0.1").hit is not None
+    assert paper_values.calc("1 - alpha / 2", None).text == paper_values.NOT_RECORDED
 
 
 def test_calc_goes_through_the_paper_as_a_key_and_a_refused_one_is_a_hit_and_taken_out(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     rec = paper_values.records_of(root, PROTOCOL)
-    paper = ("## Methods\nIntervals used the level {{calc:1 - (1 - 0.95) / 2}}.\n\n"
-             "## Results\nThe reference was {{calc:0.95 * 0.97}}.\n")
+    paper = ("## Methods\nIntervals used the level {{calc:1 - (1 - nominal_coverage) / 2}}.\n\n"
+             "## Results\nThe reference was {{calc:nominal_coverage * 0.97}}.\n")
     out = paper_facts.render(paper, root, records=rec)
     assert "fi:fact-calc" not in out.text and not out.unfilled  # a key, not a fact of the run
     assert paper_facts.without_marks(out.text).startswith("## Methods\nIntervals used the level 0.975.")
     assert paper_facts.to_placeholders(out.text) == paper  # the writer gets back what it typed
-    assert paper_values.unfilled_in(out.text) == ["calc:0.95 * 0.97"]
+    assert paper_values.unfilled_in(out.text) == ["calc:nominal_coverage * 0.97"]
     paper_values.write_record(root, list(out.values))
     hits = paper_facts.value_hits(out.text, root)
-    assert len(hits) == 1 and "{{calc:0.95 * 0.97}}" in hits[0] and "0.97" in hits[0] and "{{v:calc" not in hits[0]
+    assert len(hits) == 1 and "{{calc:nominal_coverage * 0.97}}" in hits[0] and "0.97" in hits[0] and "{{v:calc" not in hits[0]
     assert "The reference was" in hits[0]  # the sentence, so the passage editor finds it
     taken, dropped = paper_facts.take_out_unfilled(out.text)
-    assert [d["key"] for d in dropped] == ["calc:0.95 * 0.97"]
+    assert [d["key"] for d in dropped] == ["calc:nominal_coverage * 0.97"]
     assert "0.975" in paper_facts.without_marks(taken) and "not recorded" not in paper_facts.without_marks(taken)
     # Inside math the value is written bare, and the typed-number check never reads an expression's numbers.
-    assert paper_facts.without_marks(paper_facts.render("In $t_{ {{calc:1 - (1 - 0.95) / 2}} }$ ok.", root,
+    assert paper_facts.without_marks(paper_facts.render("In $t_{ {{calc:1 - (1 - nominal_coverage) / 2}} }$ ok.", root,
                                                         records=rec).text) == "In $t_{ 0.975 }$ ok."
     assert not paper_facts.typed_hits(paper, PROTOCOL, "")

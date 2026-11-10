@@ -91,8 +91,8 @@ SPAN_OPEN = "<!-- fi:v-span {original} -->"
 SPAN_CLOSE = "<!-- /fi:v-span -->"
 _SPAN = re.compile(r"<!-- fi:v-span (.*?) -->(.*?)<!-- /fi:v-span -->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{v:([^{}]{1,300})\}\}")
-#: A number of the method FI computes from the plan's own numbers: the writer types ``{{calc:1 - 0.05 / 2}}``, FI keeps it
-#: as the key ``calc:1 - 0.05 / 2`` (filled, marked and taken out like every other key) and shows it to the writer as typed.
+#: A number of the method FI computes from the plan's own numbers: the writer types ``{{calc:1 - alpha / 2}}``, FI keeps it
+#: as the key ``calc:1 - alpha / 2`` (filled, marked and taken out like every other key) and shows it to the writer as typed.
 CALC = "calc:"
 #: ``{{trend:<result> over <axis> @ ...}}`` and ``{{comparison:<result> <form> vs <result> <form> @ ...}}`` are keys of the same
 #: kind (:mod:`core.trend`): the direction and size of a change along a setting, and one result against another inside each
@@ -1607,11 +1607,11 @@ def _quantile_arguments(tree: ast.AST) -> tuple[set[int], set[int]]:
 
 
 def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec: Records | None = None) -> Value:
-    """``{{calc:expression}}`` computed by FI. Every number in it must be one the writer may type (a number the plan or the
-    topic states, a whole number from 0 to 10, or, only as a quantile's probability or degrees of freedom, a number FI fixes
-    for its own intervals, :func:`_fi_own_numbers`;
-    :mod:`core.typed_numbers`), so an expression can only work out what the
-    plan already fixes (a quantile, a level, a reference value, a count from the grid), never carry a number of its own.
+    """``{{calc:expression}}`` computed by FI. The plan's numbers in it are written by the name the plan gives them (a key
+    under ``protocol.constants`` or ``protocol.thresholds``, :func:`core.typed_numbers.declared_names`), never as digits, so
+    a result that happens to equal a plan number is not the plan's. A digit is allowed only as a whole number from 0 to 10, or,
+    as a quantile's probability or degrees of freedom, a number FI fixes for its own intervals (:func:`_fi_own_numbers`), so an
+    expression can only work out what the plan already fixes (a quantile, a level, a reference value, a count from the grid).
     It may call FI's calculator functions, ``ndtr``/``ndtri`` (the standard normal distribution and its quantile) and
     ``t_quantile(p, df)`` (the Student-t quantile). An expression FI does not compute reads ``not recorded`` with why."""
     from decimal import Decimal
@@ -1623,7 +1623,6 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
     try:
         if not isinstance(protocol, dict) or not protocol:
             raise _Unfilled("FI has no plan to compute it from")
-        plan = _typed.plan_numbers(protocol, topic)
         named = _typed.declared_names(protocol)
         levels, counts = _fi_own_numbers(rec)
         # The numbers are read from the parsed expression, not from its text: ``.97``, ``1_234`` or ``0x1F`` is a number of
@@ -1649,10 +1648,9 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 of_the_plan += 1  # FI's own interval level, as the probability a quantile is asked for
             elif d is not None and d.is_finite() and id(node) in freedom and d in counts:
                 pass  # the trials FI ran, as degrees of freedom: a count, never a number the plan fixes
-            elif d is not None and d.is_finite() and (d in plan or -d in plan):
-                # A whole number from 0 to 10 is allowed anyway: only another plan number shows the plan fixes the value.
-                of_the_plan += 0 if small else 1
             elif not small:
+                # A bare number is never the plan's, even when it equals one: the plan's number is written by the name the
+                # plan gives it (a declared constant or threshold), so that FI puts the plan's value in.
                 own.append(repr(node.value))
         # A name the plan declares (a constant or a threshold) is the plan's number however small: FI puts its value in.
         called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
@@ -1660,13 +1658,13 @@ def calc(expression: str, protocol: dict[str, Any] | None, topic: str = "", rec:
                 if isinstance(n, ast.Name) and id(n) not in called and n.id in named}
         of_the_plan += len(used)
         if own:
-            raise _Unfilled(f"it uses {', '.join(dict.fromkeys(own))}, which the plan and the topic do not state; write it "
-                            "from the plan's own numbers as the plan writes them (a two-sided level is 1 - alpha / 2 with "
-                            "the plan's alpha), or say the number in words")
+            raise _Unfilled(f"it uses {', '.join(dict.fromkeys(own))}, as digits; write the plan's numbers "
+                            "by the name the plan gives them, as a constant or a threshold (a two-sided level is 1 - alpha / 2 "
+                            "with the plan's alpha), or say the number in words")
         # Whole numbers alone make any number (6 / 7): an expression works out something from at least one of the plan's
-        # or the topic's numbers. A bound, not a proof: 0.05 * 9 * 9 still passes.
+        # or the topic's numbers, written by name (a digit equal to a plan number is no longer one).
         if not of_the_plan:
-            raise _Unfilled("it uses none of the plan's or the topic's numbers, so it is not a number the plan fixes; type "
+            raise _Unfilled("it uses none of the plan's named constants or thresholds, so it is not a number the plan fixes; type "
                             "a whole number as it is, or say the number in words")
         ev = _forms.evaluate(expression, used, special={"ndtr": _forms._ndtr, "ndtri": _forms._ndtri,
                                                       "t_quantile": _stats.t_quantile})
@@ -2283,11 +2281,14 @@ into the paper as a key in double braces, never as digits. FI replaces each key 
 paper is saved, so the reader sees the number.
 You may type only: a number the plan or the topic states, written exactly as the plan writes it (a setting, a true value, a
 nominal level, a constant of the method); the number of a figure, table, section or citation (Figure 2, Section 3, [4]); and a
-whole number from 0 to 10 inside a formula. A typed result, or any other typed number, is sent back to you.
+whole number from 0 to 10 inside a formula. A typed result, or any other typed number, is sent back to you. The confidence
+level of FI's own intervals is not typed: write {{interval_level}}% ("a {{interval_level}}% interval") and FI fills the number.
 A number the method works out from the plan's numbers (a quantile, a cutoff or bound from a formula of the plan's constants, a
 reference value, a count from the grid) is not typed either: write {{calc:EXPR}} and FI computes it, also inside a formula.
-Build EXPR from the plan's numbers as the plan writes them, e.g. {{calc:1 - 0.05 / 2}} or, for a bound a / (b * c) - 1 of
-the plan's own a, b and c, {{calc:a / (b * c) - 1}} with their digits for a, b and c. EXPR may use + - * / ** and
+Build EXPR from the names of the plan's constants and thresholds (the keys under its constants and thresholds), never from
+digits: {{calc:1 - alpha / 2}} for the two-sided level of a plan with an alpha, or, for a bound a / (b * c) - 1 of the plan's
+own a, b and c, {{calc:a / (b * c) - 1}}. A digit typed in EXPR is refused even when it equals a number of the plan, except a
+whole number from 0 to 10 and the level of FI's own intervals as a quantile's probability. EXPR may use + - * / ** and
 parentheses and the functions <CALC_FUNCTIONS>.
 How to write a key: {{v:<value> @ <where>}}. The value is a quantity from the list below. <where> names every setting the
 study varied, each as name=<value it took> (one setting), name=all (the trials of all its settings together) or name=each (kept

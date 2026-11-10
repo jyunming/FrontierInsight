@@ -230,10 +230,13 @@ def test_a_listed_number_is_the_number_not_its_operator_or_neighbour():
     assert [t for t, _s in taken] == ["2.5", "7", "13", "12 %"]
 
 
-def test_a_quantile_level_named_in_the_method_is_not_a_typed_result():
-    """Old code removed the 97.5 of "the 97.5th percentile". (A critical value the plan does not state stays flagged.)"""
-    assert _typed("We take the 97.5th percentile of the errors.") == []
-    assert _typed("The gain was 97.5 here.") == ["97.5"]
+def test_a_percentile_level_is_a_number_to_trace_not_a_label():
+    """-425: "the 90th percentile" counted as a label, so a wrong level was never checked. Now its number is traced like any
+    other: a level the plan does not state is found; one the plan states (97.5 here) passes by exact equality, as always."""
+    assert _typed("We take the 90th percentile of the errors.") == ["90"]
+    assert _typed("The 99.9 quantile of the errors was used.") == ["99.9"]
+    plan = tn.plan_numbers({"constants": {"level": 97.5}}, "")
+    assert [n.token for n in tn.typed_outside_the_plan("We take the 97.5th percentile.", plan)] == []
 
 
 # --- numbers of FI's own records, the level of its intervals, rounded plan constants, powers of ten ---------------------------
@@ -276,15 +279,22 @@ def test_a_number_that_is_only_a_run_fact_in_name_is_still_flagged(tmp_path):
     assert [n.token for n in tn.typed_outside_the_plan("The bias was 41 percent of the truth.", _plan(), facts)] == ["41 percent"]
 
 
-def test_the_level_of_fis_intervals_may_be_named_but_another_level_may_not():
+def test_a_typed_95_percent_is_traced_like_any_number():
+    """-423: any "95%" passed, so "success rate of 95%" passed too. Now a 95 passes only as a number of the plan; the
+    level of FI's own intervals is written {{interval_level}}% (FI fills it)."""
     empty = tn.plan_numbers({}, "")
-    assert tn.typed_outside_the_plan("They are normal-approximation 95% intervals.", empty) == []
-    assert [n.token for n in tn.typed_outside_the_plan("They are 97% intervals.", empty)] == ["97%"]
+    assert [n.token for n in tn.typed_outside_the_plan("They are normal-approximation 95% intervals.", empty)] == ["95%"]
+    assert [n.token for n in tn.typed_outside_the_plan("The success rate was 95% overall.", empty)] == ["95%"]
+    assert tn.typed_outside_the_plan("They are {{interval_level}}% intervals.", empty) == []
+    # kept exception: a number equal to a number of the plan, here the plan's own 0.95 as a percent, passes
+    assert tn.typed_outside_the_plan("The nominal level is 95%.", tn.plan_numbers({"constants": {"p": 0.95}}, "")) == []
 
 
-def test_a_plan_constant_written_to_fewer_places_is_the_plans_number_but_a_close_result_is_not():
+def test_a_number_that_only_rounds_to_a_plan_constant_is_traced_but_the_exact_one_passes():
+    """-424: a mean typed as 16.118 passed because the plan holds 16.11809565. Now only the plan's digits pass."""
     plan = tn.plan_numbers({"constants": {"lnA": 16.11809565, "R": 0.008314462618}}, "")
-    for text, flagged in (("ln A = 16.118", []), ("R = 0.008314", []), ("ln A = 16.119", ["16.119"]), ("ln A = 16.1", ["16.1"])):
+    for text, flagged in (("ln A = 16.118", ["16.118"]), ("R = 0.008314", ["0.008314"]), ("ln A = 16.119", ["16.119"]),
+                          ("ln A = 16.11809565", []), ("R = 0.008314462618", [])):
         assert [n.token for n in tn.typed_outside_the_plan(text, plan)] == flagged
 
 
