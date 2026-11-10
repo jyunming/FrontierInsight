@@ -917,6 +917,11 @@ class AgentCoder:
         tampered = [f"code/{rel} ({'removed' if not (work / rel).is_file() else 'added' if not (self.code_dir / rel).is_file() else 'changed'})"
                     for rel in changed if self._owned_rel(rel)]
         take = [rel for rel in changed if not self._owned_rel(rel) and not is_scratch(rel)]
+        products = [rel for rel in changed if not self._owned_rel(rel) and is_scratch(rel) and (work / rel).is_file()]
+        if products:
+            shown = ", ".join(f"code/{r}" for r in products[:5]) + (f" and {len(products) - 5} more" if len(products) > 5 else "")
+            self._log.info("[implement] not carried back from the coding agent's copy (products of its own runs, the "
+                           "study writes them again when it runs): %s", shown)
         cheats: list[str] = []
         for rel in take:
             path = work / rel
@@ -1089,7 +1094,10 @@ class TreeSnapshot:
 
 
 def is_scratch(rel: str) -> bool:
-    return rel.split("/", 1)[0] in SCRATCH_DIRS
+    """Whether this path of ``code/`` is something the agent's own runs wrote (a product), by its folder. A ``.py`` file
+    is never one, whatever its folder: it is code (a helper module the study imports), so it is checked and carried back
+    like any other code; the folder says nothing about whether a file is code."""
+    return rel.split("/", 1)[0] in SCRATCH_DIRS and not rel.endswith(".py")
 
 
 def parse_failures(code_dir: Path, changed: Iterable[str]) -> list[str]:

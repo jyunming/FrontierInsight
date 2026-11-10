@@ -289,9 +289,11 @@ def remove_created_since(quest_root: Path | str, before: set[str], left: list[st
     finished setting recorded (:func:`record_finished`) is kept: a finished setting wrote it whole."""
     root = Path(quest_root)
     created = working_files(root) - before
-    # A finished value in the shared folder stays (unfinished_shared): only its locks and temporary files go.
+    # In the shared folder a file stays only when FI's record says a setting that finished wrote it whole (a lock, a
+    # half-written ``result.partial`` or a ``result.npy`` cut off under its final name has no such record); no file name
+    # decides it.
     shared = {r for r in created if r == SHARED_CACHE or r.startswith(SHARED_CACHE + "/")}
-    doomed = (created - shared) | set(unfinished_shared(shared))
+    doomed = (created - shared) | _not_a_finished_state(root, shared)
     rewritten: set[str] = set()
     if states is not None:
         # FI's own folders (code/) are not written by a setting; a rewrite there is not a result.
@@ -312,7 +314,11 @@ def unfinished_shared(rels: list[str] | set[str]) -> list[str]:
     tell a lock from a value otherwise, and a value it removes is worked out again by every later setting. The exception
     covers files the stopped run CREATED; a file that was already there and was written over is judged by the record of
     finished settings instead (:func:`remove_created_since`, ``states``), because a rewrite under the final name is
-    exactly what a cut-off save looks like."""
+    exactly what a cut-off save looks like.
+
+    This name test is used only by the sweeps where nothing was stopped (a lock a finished or an ended session left).
+    What a setting stopped for its time created in the shared folder is judged by FI's record of finished settings, not
+    by name (:func:`remove_created_since`, :meth:`OutsideExecutor._clean_shared`)."""
     out = []
     for rel in sorted(rels):
         if not (rel == SHARED_CACHE or rel.startswith(SHARED_CACHE + "/")):
@@ -388,8 +394,8 @@ def code_version(quest_root: Path | str) -> str:
     setting runs and the code that decides a set of trials (``core.trial_runner._run_key``). Also every other file the
     simulation may read (:func:`core.code_layout.simulation_inputs`): a helper module beside ``simulate.py``, a parameter
     file in ``code/``, a file the person put in the quest's ``inputs/``. Changing any of them changes what the simulation
-    computes, so the cached values of the old version are not reused. The analysis script, the tests and the notes in
-    ``code/`` work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was repaired after every
+    computes, so the cached values of the old version are not reused; so does a note or a hidden file in ``code/``, which
+    the run can read. The analysis script and the tests work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was repaired after every
     setting had run, the values its unchanged simulation had kept were moved aside and worked out again."""
     from . import code_layout
 
@@ -879,12 +885,11 @@ class OutsideExecutor:
 
     async def _clean_shared(self, before: set[str], *, beside: bool, states: dict[str, list[int]] | None = None) -> None:
         """After a run FI stopped for its time: the files that appeared in the shared folder while it ran. Alone, they are
-        its own: the locks and temporary files among them (:func:`unfinished_shared`) are removed, so the next setting does
-        not wait on them, and a value it finished is kept. With another run beside it, FI cannot tell which run wrote
-        which, so they are kept and said."""
-        # Only what it left unfinished (a lock, a temporary file): a value it finished is kept (unfinished_shared).
+        its own: those no finished setting recorded (a lock, a half-written file, whatever its name) are removed, so the
+        next setting neither waits on them nor reads them, and a value a finished setting wrote is kept. With another run
+        beside it, FI cannot tell which run wrote which, so they are kept and said."""
         now = await asyncio.to_thread(_shared_names, self.quest_root)
-        created = unfinished_shared(now - before)
+        created = sorted(await asyncio.to_thread(_not_a_finished_state, self.quest_root, now - before))
         if states is not None and not beside:
             # A value that was there before and was written over while this run ran, and is not what a finished setting
             # wrote (code that saves under the final name was cut off part way): moved aside, not read as a result.

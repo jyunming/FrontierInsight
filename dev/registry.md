@@ -759,9 +759,9 @@ same PR that adds, splits or renames one.
   trial wait. `SHARED_CACHE` (`data/results/cache/`) is linked into a cell's copy (a junction on Windows), not copied, so the
   settings share it; `prepare_shared_cache` moves aside what another version of the simulation's code kept there (`code_version`:
   `simulate.py` and its model package, not the analysis script; record `.fi/shared_cache.json`);
-  `OutsideExecutor._clean_shared` removes the locks and temporary files a stopped setting left there
-  (`unfinished_shared`) when no other ran beside it, and keeps the values it finished; `OutsideExecutor.settle` (after
-  `run_trials`' batch) removes those of settings stopped side by side. `prepare_shared_cache` runs one at a time per
+  `OutsideExecutor._clean_shared` and `remove_created_since` remove what a stopped setting created there that no
+  finished setting recorded (`.fi/finished_files.json`, by state, not by name) when no other ran beside it; `OutsideExecutor.settle` (after
+  `run_trials`' batch) removes the locks and temporary files (`unfinished_shared`, by name) of settings stopped side by side. `prepare_shared_cache` runs one at a time per
   quest (a lock file in `.fi/`) and returns None when the old folder cannot be moved aside; no link under docker. Tests: `tests/test_outside_run.py`, `tests/test_trial_runner.py`, `tests/test_killed_trial_leftovers.py`,
   `tests/test_shared_cache.py`.
 - `core/function_steps.py` — the model's package written one function at a time (the plan's own numbers, the outline's `constants` and the protocol's, are written by FI as a marked block, made again from the plan every time, into every module of the package for each name it reads and nothing outside the block binds: `plan_constants` / `with_constants` / `write_constants` / `write_package_constants`, before each function is checked, at the end of the step, for a package kept from before and for files an extension wrote, with the frame on or off, so no script has to set them): `model_functions` (the outline's
@@ -869,6 +869,7 @@ same PR that adds, splits or renames one.
   `_apply_package_repair` (`repair_note` / `repair_files`: the reflect and oracle repairs of simulate.py may return
   `package_files`), `_package_snapshot` / `_restore_package` (the oracle gate's undo of a repair bent to a disputed
   check), `_label_target` (labels asked for in `model.py`); `code_project.requirements_for` scans the package's imports.
+  `simulation_inputs` is the one list of files behind every cached result, search record and stored timing (`outside_run.code_version`, `trial_runner._run_key`, `optimise._run_key` via `_below_code`, `cost_model.design_key`): every file under `code/` and `inputs/` except FI's analysis, tests, skills, FI's three own notes (`FI_NOTES`) and tool caches by exact name (`TOOL_CACHES`); notes and hidden files the coding agent writes count, and a `.py` file counts in any folder.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
   Whether a quest gets it is `Engine._split_on`: under `split_analysis: auto` every quest that runs a simulation
   (`_runs_code`), deterministic (`run_cell`) or stochastic (`run_trial`); `design_is_stochastic` only decides whether

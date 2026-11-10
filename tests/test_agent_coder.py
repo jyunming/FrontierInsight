@@ -240,6 +240,35 @@ async def test_a_round_works_on_a_copy_and_only_the_agents_files_come_back(quest
     assert record["rounds"][0]["copied"] == ["pkg/model.py", "simulate.py"]
 
 
+async def test_a_helper_module_in_a_product_folder_comes_back_and_a_data_file_there_is_named_and_left(
+        quest: Path, tmp_path: Path, standin, caplog) -> None:
+    """Old code: any file whose first folder was data/, results/ ... was left in the copy, so a helper module the study
+    imports was lost (and the study failed on import). A .py file is code wherever it sits; a data file there is a product
+    the study writes again, and each one left behind is named in the log."""
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM},
+                  {"write": "data/helpers.py", "text": "def g(x): return x"},
+                  {"write": "results/more/util.py", "text": "K = 3"},
+                  {"write": "data/out.csv", "text": "a,b"},
+                  {"write": "figures/f.png", "text": "png"}])
+    coder = ac.AgentCoder(quest, _host(tmp_path, standin), max_fixes=2, timeout_s=60)
+    with caplog.at_level(logging.INFO):
+        res = await coder.write("write the code")
+    assert res.ok and not res.cheats
+    code = quest / "code"
+    assert (code / "data" / "helpers.py").read_text(encoding="utf-8") == "def g(x): return x"
+    assert (code / "results" / "more" / "util.py").exists()
+    assert not (code / "data" / "out.csv").exists() and not (code / "figures").exists()
+    assert sorted(res.copied) == ["data/helpers.py", "results/more/util.py", "simulate.py"]
+    named = [r.getMessage() for r in caplog.records if "not carried back" in r.getMessage()]
+    assert len(named) == 1 and "code/data/out.csv" in named[0] and "code/figures/f.png" in named[0]
+    assert "helpers.py" not in named[0]
+
+
+def test_a_py_file_is_never_scratch_whatever_its_folder() -> None:
+    assert not ac.is_scratch("data/helpers.py") and not ac.is_scratch("results/a/b.py")
+    assert ac.is_scratch("data/out.csv") and ac.is_scratch("figures/f.png") and not ac.is_scratch("pkg/model.py")
+
+
 async def test_an_edit_of_fis_tests_is_kept_out_and_recorded(quest: Path, tmp_path: Path, standin) -> None:
     standin.plan([{"write": "tests/test_oracles.py", "text": "def test_x():\n    pass\n"},
                   {"write": "tests/test_extra.py", "text": "x = 1\n"}, {"write": "simulate.py", "text": GOOD_SIM}])
