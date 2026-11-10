@@ -1121,7 +1121,7 @@ def test_a_failure_one_version_reports_where_the_other_returns_a_number_is_a_dis
     v = si.judge_rows(_script_rows(tmp_path, MAIN_FOUR, REF_TWO, inputs), inputs, si.REL)
     assert v["status"] == si.DISAGREE and [d["inputs"] for d in v["disagreements"]] == [{"x": -1.0}]
 
-# --- the tolerance of the comparison: relative 1e-3 -------------------------------------------------------------------------
+# --- the tolerance of the comparison: the plan example's own -----------------------------------------------------------------
 
 
 def _spec_with(example: dict | None = None) -> fs.Spec:
@@ -1129,26 +1129,62 @@ def _spec_with(example: dict | None = None) -> fs.Spec:
     return fs.Spec(name="fit_rate", signature="def fit_rate(t, c):", purpose="fit", equation="S1", kind="step", card=card)
 
 
-def test_tolerance_is_relative_1e3_for_every_function_and_a_method_example_may_loosen_it():
-    assert si.tolerance_for(_spec_with({"untestable": "arrays"}), {}) == 1e-3
-    assert si.tolerance_for(_spec_with(), None) == 1e-3
-    method = {"method": "bisection", "tolerance": 1e-2, "tolerance_mode": "relative"}
-    assert si.tolerance_for(_spec_with(method), {}) == 1e-2
-    assert si.tolerance_for(_spec_with({**method, "tolerance": 1e-9}), {}) == 1e-3  # never tighter than the tolerance
+def test_the_tolerance_is_the_one_the_plan_example_states_in_the_mode_it_states():
+    rel = si.tolerance_for(_spec_with({"method": "bisection", "tolerance": 1e-2, "tolerance_mode": "relative"}), {})
+    assert (rel.rel, rel.abs) == (1e-2, 0.0)
+    absolute = si.tolerance_for(_spec_with({"method": "bisection", "tolerance": 0.01, "tolerance_mode": "absolute"}), {})
+    assert (absolute.rel, absolute.abs) == (0.0, 0.01)
+    # a stated tolerance counts without a method too, and tighter than any floor of FI's own
+    tight = si.tolerance_for(_spec_with({"tolerance": 1e-9, "tolerance_mode": "relative"}), {})
+    assert (tight.rel, tight.abs) == (1e-9, 0.0)
+    assert "states" in tight.basis
 
 
-def test_a_solver_level_gap_agrees_and_a_one_percent_difference_does_not():
-    tol = si.tolerance_for(_spec_with(), {})
+def test_an_example_that_states_no_tolerance_is_held_to_round_off_whatever_constants_it_writes():
+    none = si.tolerance_for(_spec_with({"untestable": "arrays"}), {})
+    assert none.rel == 1e-6 and none.abs == 0.0 and "no tolerance" in none.basis
+    assert si.tolerance_for(_spec_with(), None).rel == 1e-6
+    # a rounded-looking constant (1.5) and a named method with no tolerance do not loosen it
+    for example in ({"expected_formula": "1.5 * x"}, {"method": "bisection", "expected_formula": "0.61 * x"}):
+        tol = si.tolerance_for(_spec_with(example), {})
+        assert tol.rel == 1e-6
+        gap = [{"main": 100.0, "ref": 100.0 * (1 + 2e-3)}]
+        assert si.judge_rows(gap, [{"x": 1.0}], tol.rel, abs_tol=tol.abs)["status"] == si.DISAGREE
+
+
+def test_two_versions_that_differ_by_a_gap_the_old_floor_allowed_now_disagree():
     inputs = [{"t": [1.0]}]
+    gap = [{"main": 100.0, "ref": 100.0 * (1 + 5e-4)}]  # 5e-4 relative: inside the old fixed 1e-3
+    tol = si.tolerance_for(_spec_with({"untestable": "arrays"}), {})
+    assert si.judge_rows(gap, inputs, 1e-3)["status"] == si.AGREE  # the failing input, on the old floor
+    assert si.judge_rows(gap, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.DISAGREE
+    same = [{"main": 100.0, "ref": 100.0 * (1 + 1e-9)}]  # round-off level still agrees
+    assert si.judge_rows(same, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.AGREE
+
+
+def test_an_absolute_tolerance_of_the_example_is_applied_as_absolute():
+    inputs = [{"t": [1.0]}]
+    tol = si.tolerance_for(_spec_with({"method": "scan", "tolerance": 0.01, "tolerance_mode": "absolute"}), {})
+    inside = [{"main": 100.0, "ref": 100.009}]  # a relative gap of 9e-5, an absolute 0.009
+    outside = [{"main": 100.0, "ref": 100.09}]  # the old code held both to 1e-3 relative and passed this one
+    assert si.judge_rows(inside, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.AGREE
+    assert si.judge_rows(outside, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.DISAGREE
+    assert si.judge_rows(outside, inputs, 1e-3)["status"] == si.AGREE  # old behaviour, shown
+    zero = [{"main": 0.0, "ref": 0.004}]
+    assert si.judge_rows(zero, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.AGREE
+
+
+def test_a_solver_level_gap_is_no_disagreement_when_the_example_states_the_solvers_tolerance():
+    inputs = [{"t": [1.0]}]
+    tol = si.tolerance_for(_spec_with({"method": "least squares", "tolerance": 1e-3, "tolerance_mode": "relative"}), {})
     benign = [{"main": [0.00246142, 0.000955612], "ref": [0.00246148, 0.000955512]}]  # gaps of 2e-5 and 1e-4
-    assert si.judge_rows(benign, inputs, si.REL)["status"] == si.DISAGREE  # the failing input, on the old floor
-    assert si.judge_rows(benign, inputs, tol)["status"] == si.AGREE
+    assert si.judge_rows(benign, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.AGREE
     planted = [{"main": [1.0, 2.0], "ref": [1.0, 2.0 * 1.01]}]
-    assert si.judge_rows(planted, inputs, tol)["status"] == si.DISAGREE
+    assert si.judge_rows(planted, inputs, tol.rel, abs_tol=tol.abs)["status"] == si.DISAGREE
 
 
 def test_nan_or_infinity_against_a_number_is_a_disagreement_at_any_tolerance():
-    tol = si.tolerance_for(_spec_with(), {})
+    tol = si.tolerance_for(_spec_with(), {}).rel
     inputs = [{"t": [1.0]}]
     assert si.judge_rows([{"main": float("nan"), "ref": 0.5}], inputs, tol)["status"] == si.DISAGREE
     assert si.judge_rows([{"main": {"f": "nan"}, "ref": 0.5}], inputs, tol)["status"] == si.DISAGREE

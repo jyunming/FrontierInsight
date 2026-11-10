@@ -15,8 +15,9 @@ only the analysis changed), and the numbers it reports are compared with the del
 * A number the frozen protocol declares as a reference (a known answer, an analytic value) is not computed by the code: a
   repair that changes it repairs the plan, not the code, and it does not count.
 * A result the frozen protocol holds to a precision (``precision.target_half_width`` on ``precision.metric``) is not changed by
-  a small move of its estimate or interval ends (:func:`plan_allowance`: a quarter of the target, no more than the delivered
-  run's own standard error, no more than 1% of the value), with or without redrawn numbers. One number of a setting that
+  a move of its estimate or interval ends within the delivered run's own standard error of it (:func:`plan_allowance`; no
+  fixed share of the target or of the value), with or without redrawn numbers. A result with no standard error in the record
+  has no allowance: any move counts, and the verdict says so. One number of a setting that
   counts, or an interval whose width moves by more than that, takes the allowance from the whole setting. A result with no
   declared precision keeps the rules above.
 * A change that only reshapes the same value (a number against ``{"value": ..., "lo": ..., "hi": ...}``) is not a change.
@@ -322,17 +323,12 @@ def declared_precision(protocol: Any) -> tuple[str, float] | None:
     return metric, float(width)
 
 
-#: The share of the plan's precision target a rerun's move may use, and the share of the delivered value it may be at most.
-PLAN_SHARE = 0.25
-PLAN_REL = 0.01
-
-
-def plan_allowance(width: float, old: float, se: float | None) -> float:
-    """How far a number may move and still be inside the plan's precision: a quarter of the target half-width (the target is
-    what the plan needs the noise to reach, not a bias it accepts), no more than the delivered run's own standard error of the
-    number when FI's record has one, and no more than 1% of the delivered value (of the half-width when that is 0)."""
-    limit = min(PLAN_SHARE * width, PLAN_REL * (abs(old) if old else width))
-    return min(limit, se) if se is not None else limit
+def plan_allowance(se: float | None) -> float | None:
+    """How far a number the plan holds to a precision may move and still be unchanged: the delivered run's own measured
+    standard error of that number, nothing else. ``None`` when FI's record has no standard error for it: nothing is excused,
+    because no measured noise says the move is noise (the plan's target half-width is what the plan needs the noise to
+    reach, not a bias it accepts, and no fixed share of it or of the value is measured)."""
+    return se
 
 
 def _end_side(key: str) -> str:
@@ -357,6 +353,7 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
     notes: list[str] = []
     keep: list[dict[str, Any]] = []
     refs = 0
+    unmeasured: set[str] = set()  # results held to a precision whose record has no standard error
     plan_precision = declared_precision(protocol)
     pending: list[tuple[dict[str, Any], tuple[str | None, str | None], float]] = []  # inside the plan's precision, not yet excused
     for c in changes:
@@ -373,8 +370,10 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
                                    or (se > 0 and move / (math.sqrt(2) * se) <= Z)):
                 continue  # inside the Monte Carlo noise
         if plan_precision and metric == plan_precision[0] and c["new"] is not None and counts and number_kind(c["key"]) in ("estimate", "end"):
-            allowed = plan_allowance(plan_precision[1], c["old"], uncertainty(c["key"], c["old"], stats, ok, kinds))
-            if abs(c["new"] - c["old"]) <= allowed:
+            allowed = plan_allowance(uncertainty(c["key"], c["old"], stats, ok, kinds))
+            if allowed is None:
+                unmeasured.add(metric)
+            elif abs(c["new"] - c["old"]) <= allowed:
                 pending.append((c, (metric, setting), allowed))
                 continue
         keep.append(c)
@@ -397,7 +396,9 @@ def counted(changes: list[dict[str, Any]], protocol: Any, base_trials: Any, redr
     if refs:
         notes.append(f"{refs} changed value(s) are references the plan declares: that repairs the plan, not the code")
     for m, move in sorted(inside.items()):
-        notes.append(f"{m} moves by {move:.3g}, inside the plan's precision {plan_precision[1]:.3g}")  # type: ignore[index]
+        notes.append(f"{m} moves by {move:.3g}, within its own standard error")
+    for m in sorted(unmeasured):
+        notes.append(f"{m} has no standard error in FI's record, so a move of it is not excused as noise")
     if redrawn:
         notes.append("the repair changes how random numbers are drawn: a number counts only beyond its Monte Carlo uncertainty")
     return keep, notes

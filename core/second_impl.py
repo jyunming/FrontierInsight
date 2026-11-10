@@ -48,7 +48,7 @@ import re
 import string
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, NamedTuple
 
 from . import equation_tests as _eqt
 from . import function_steps as _fs
@@ -67,8 +67,6 @@ MAX_ROUNDS = 2
 MAX_INPUTS = 8
 MIN_INPUTS = 4
 REL = 1e-6
-#: The relative tolerance of the comparison of the two versions of a function (see :func:`tolerance_for`).
-TOLERANCE = 1e-3
 #: Below this, a result that is exactly 0 on one side agrees with a round-off result on the other.
 ZERO_FLOOR = 1e-12
 MAX_REFERENCE_LINES = 120
@@ -787,24 +785,33 @@ def ranges_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> dict[str, Any]
     return {}
 
 
-def tolerance_for(spec: _fs.Spec, protocol: dict[str, Any] | None) -> float:
-    """Relative tolerance of the comparison, for every function: :data:`TOLERANCE`, or the example's own tolerance when it
-    names a numerical method and that is larger (an iterative method cannot be held tighter than its own tolerance). Two
-    independently written fits differ at their solvers' own precision (1e-5 to 1e-4), which is no disagreement; a gap above
-    the tolerance is still one, and a NaN or an infinity against a number is one at any tolerance."""
+class Tolerance(NamedTuple):
+    """How close two versions must be: ``rel`` relative to the smaller result, ``abs`` absolute (the larger of the two
+    allows the pair); ``basis`` says in plain words where it comes from, for the record."""
+    rel: float
+    abs: float
+    basis: str
+
+
+def tolerance_for(spec: _fs.Spec, protocol: dict[str, Any] | None) -> Tolerance:
+    """How close two versions of a function must be, read from the plan: the tolerance its worked example states, in the mode
+    it states (relative or absolute), whether or not a numerical method is named. When the example states none (with or without a
+    method), the two are held to round-off only (``equation_tests.RELATIVE``): no looseness is guessed and there is no floor
+    of FI's own. A NaN or an infinity against a number is a disagreement at any tolerance."""
     example: Any = None
     if spec.card:
         example = spec.card.get("example")
     else:
         eq = next((e for e in _eqt.eligible(protocol) if _eqt._text(e["id"]) == spec.equation), None)
         example = (eq or {}).get("example")
-    tol = TOLERANCE
-    if isinstance(example, dict) and _text(example.get("method")):
-        t = _eqt._number(example.get("tolerance"))
+    if isinstance(example, dict):
+        stated = _eqt._number(example.get("tolerance"))
         mode = _text(example.get("tolerance_mode")).lower() or "relative"
-        if t is not None and t > 0 and mode == "relative":
-            tol = max(tol, float(t))
-    return tol
+        if stated is not None and stated > 0 and mode in ("relative", "absolute"):
+            if mode == "absolute":
+                return Tolerance(0.0, float(stated), f"within {float(stated):g} (absolute), the tolerance the plan's example states")
+            return Tolerance(float(stated), 0.0, f"within {float(stated):g} (relative), the tolerance the plan's example states")
+    return Tolerance(_eqt.RELATIVE, 0.0, f"within {_eqt.RELATIVE:g} (relative), floating-point round-off: the plan's example states no tolerance")
 
 
 # --- comparing two results -------------------------------------------------------------------------------------------------
@@ -837,7 +844,7 @@ class _Other(str):
     """A result of a type the script could not carry; two of the same type name are taken as equal."""
 
 
-def _close(a: float, b: float, rel: float) -> bool:
+def _close(a: float, b: float, rel: float, abs_tol: float = 0.0) -> bool:
     if math.isnan(a) or math.isnan(b):
         return math.isnan(a) and math.isnan(b)
     if math.isinf(a) or math.isinf(b):
@@ -846,12 +853,12 @@ def _close(a: float, b: float, rel: float) -> bool:
         return True
     lo = min(abs(a), abs(b))
     if lo == 0.0:
-        return max(abs(a), abs(b)) <= ZERO_FLOOR
-    return abs(a - b) <= rel * lo
+        return max(abs(a), abs(b)) <= max(ZERO_FLOOR, abs_tol)
+    return abs(a - b) <= max(rel * lo, abs_tol)
 
 
-def same(a: Any, b: Any, rel: float = REL) -> bool:
-    """Whether two decoded results agree: numbers within ``rel`` (relative; NaN with NaN; infinities by sign), integers,
+def same(a: Any, b: Any, rel: float = REL, abs_tol: float = 0.0) -> bool:
+    """Whether two decoded results agree: numbers within ``rel`` (relative) or ``abs_tol`` (absolute; NaN with NaN; infinities by sign), integers,
     strings and booleans exactly, lists and dicts element by element with the same shape."""
     if isinstance(a, bool) or isinstance(b, bool):
         return isinstance(a, bool) and isinstance(b, bool) and a == b
@@ -860,25 +867,25 @@ def same(a: Any, b: Any, rel: float = REL) -> bool:
     if isinstance(a, int) and isinstance(b, int):
         return a == b
     if _is_num(a) and _is_num(b):
-        return _close(float(a), float(b), rel)
+        return _close(float(a), float(b), rel, abs_tol)
     if isinstance(a, complex) or isinstance(b, complex):
         try:
             ca, cb = complex(a), complex(b)
         except (TypeError, ValueError):
             return False
-        return _close(ca.real, cb.real, rel) and _close(ca.imag, cb.imag, rel)
+        return _close(ca.real, cb.real, rel, abs_tol) and _close(ca.imag, cb.imag, rel, abs_tol)
     if isinstance(a, str) and isinstance(b, str):
         return a == b
     if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(same(x, y, rel) for x, y in zip(a, b))
+        return len(a) == len(b) and all(same(x, y, rel, abs_tol) for x, y in zip(a, b))
     if isinstance(a, dict) and isinstance(b, dict):
-        return set(a) == set(b) and all(same(a[k], b[k], rel) for k in a)
+        return set(a) == set(b) and all(same(a[k], b[k], rel, abs_tol) for k in a)
     if a is None and b is None:
         return True
     return False
 
 
-def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[int, bool, list[str], list[str]]:
+def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "", abs_tol: float = 0.0) -> tuple[int, bool, list[str], list[str]]:
     """Compare what both versions return, matched by name (dict keys present in both, at every depth) or position (lists
     of the same length). ``(values compared, whether one of them differs, notes, missing)``. ``missing`` holds the path of
     every key the first version (``a``) returns that the second lacks: it was not compared, so the step cannot be agree.
@@ -893,7 +900,7 @@ def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[in
         n, differs = 0, False
         for k in a:
             if k in b:
-                cn, cd, cnotes, cmiss = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k))
+                cn, cd, cnotes, cmiss = compare_shared(a[k], b[k], rel, f"{path}.{k}" if path else str(k), abs_tol)
                 n, differs = n + cn, differs or cd
                 notes += cnotes
                 missing += cmiss
@@ -903,7 +910,7 @@ def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[in
         # are named, not compared, and are no disagreement.
         n, differs, notes, missing = 0, False, [], []
         for i, (x, y) in enumerate(zip(a, b)):
-            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]")
+            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]", abs_tol)
             n, differs = n + cn, differs or cd
             notes += cnotes
             missing += cmiss
@@ -915,12 +922,12 @@ def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "") -> tuple[in
     if isinstance(a, list) and isinstance(b, list) and len(a) == len(b) and any(isinstance(x, (dict, list)) for x in a + b):
         n, differs, notes, missing = 0, False, [], []
         for i, (x, y) in enumerate(zip(a, b)):
-            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]")
+            cn, cd, cnotes, cmiss = compare_shared(x, y, rel, f"{path}[{i}]", abs_tol)
             n, differs = n + cn, differs or cd
             notes += cnotes
             missing += cmiss
         return n, differs, notes, missing
-    return 1, not same(a, b, rel), [], []
+    return 1, not same(a, b, rel, abs_tol), [], []
 
 
 def short(value: Any, limit: int = 120) -> str:
@@ -942,7 +949,8 @@ _SETUP_SAID = {"ran": "the study's setup trial ran to the end", "failed": "the s
                "none": "the study's setup trial was not run"}
 
 
-def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none") -> dict[str, Any]:
+def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: float, setup: str = "none",
+               abs_tol: float = 0.0) -> dict[str, Any]:
     """The verdict on the rows the script returned (one per input: ``main`` / ``ref`` results, or ``main_err`` /
     ``ref_err``). Both raising excludes the input; one raising is a ``domain`` disagreement; otherwise the values are
     compared. ``{"status": agree|disagree|unconfirmed, "compared", "excluded", "disagreements": [{inputs, main, other, kind}]}``."""
@@ -971,7 +979,7 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
                         "main": f"raised {m_err}" if m_err else short(decode(row.get("main"))),
                         "other": f"raised {r_err}" if r_err else short(decode(row.get("ref")))})
         else:
-            shared, differs, case_notes, case_missing = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel)
+            shared, differs, case_notes, case_missing = compare_shared(decode(row.get("main")), decode(row.get("ref")), rel, "", abs_tol)
             missing += [m for m in case_missing if m not in missing]
             notes += [n for n in case_notes if n not in notes]
             if differs:
@@ -1600,8 +1608,10 @@ class SecondImpl:
         if len(rows) != len(inputs):
             return {"status": UNCONFIRMED, "why": "the comparison returned fewer results than inputs", "disagreements": [], "retry": True}
         state = str(out.get("setup") or "none") if setup else "none"
-        verdict = judge_rows(rows, inputs, tolerance_for(spec, self.protocol), setup=state)
+        tol = tolerance_for(spec, self.protocol)
+        verdict = judge_rows(rows, inputs, tol.rel, setup=state, abs_tol=tol.abs)
         verdict["setup"] = state
+        verdict["tolerance"] = tol.basis
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
         return verdict

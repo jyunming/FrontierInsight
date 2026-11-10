@@ -597,17 +597,43 @@ def _moved(rel: float) -> list[dict[str, Any]]:
     return [{"key": "derived/derived/est/by_setting/s", "old": 22.8138685, "new": 22.8138685 * (1 + rel)}]
 
 
-def test_a_move_inside_the_precision_the_plan_declares_is_not_counted_and_is_noted() -> None:
+def _se_trials(se: float, centre: float = 22.8) -> dict[str, Any]:
+    """The trials of setting ``s`` whose result ``est`` has exactly this standard error (ten values, centre +/- 3 se)."""
+    return _trials([centre + (3 * se if i % 2 else -3 * se) for i in range(10)], metric="est")
+
+
+def test_the_helper_trials_have_the_standard_error_asked_for() -> None:
+    trials = _se_trials(0.04)
+    got = rerun_check.uncertainty("derived/derived/est/by_setting/s", 22.8, *rerun_check.trial_stats(trials), {})
+    assert got == pytest.approx(0.04)
+
+
+def test_a_move_inside_the_results_own_standard_error_is_not_counted_and_is_noted() -> None:
     changes = [{"key": "derived/derived/est/by_setting/s", "old": 22.8138685, "new": 22.8138493}]
-    kept, notes = rerun_check.counted(changes, PRECISE, None, redrawn=False)
-    assert kept == [] and any("est moves by" in n and "inside the plan's precision 0.1" in n for n in notes)
-    # the same move with random draws changed: the larger of the two allowances applies
-    assert rerun_check.counted(changes, PRECISE, None, redrawn=True)[0] == []
+    kept, notes = rerun_check.counted(changes, PRECISE, _se_trials(0.04), redrawn=False)
+    assert kept == [] and any("est moves by" in n and "within its own standard error" in n for n in notes)
+    # the same move with random draws changed
+    assert rerun_check.counted(changes, PRECISE, _se_trials(0.04), redrawn=True)[0] == []
 
 
-def test_a_move_larger_than_the_declared_precision_is_counted() -> None:
-    big = [{"key": "derived/derived/est/by_setting/s", "old": 22.8, "new": 22.95}]
-    assert rerun_check.counted(big, PRECISE, None, redrawn=False)[0] == big
+def test_a_move_beyond_the_results_own_standard_error_is_counted() -> None:
+    big = [{"key": "derived/derived/est/by_setting/s", "old": 22.8, "new": 22.95}]  # 0.15 against a standard error of 0.04
+    assert rerun_check.counted(big, PRECISE, _se_trials(0.04), redrawn=False)[0] == big
+
+
+def test_a_shift_is_judged_against_the_measured_error_only_not_against_a_share_of_the_target() -> None:
+    # a guard, not a fail-first test: target half-width 0.1, value near 1 (a quarter of the target and 1% of the value are 0.025
+    # and 0.01); the same 0.005 shift counts against a small measured error and is excused by a larger one
+    near_one = [{"key": "derived/derived/est/by_setting/s", "old": 1.0, "new": 1.005}]
+    assert rerun_check.counted(near_one, PRECISE, _se_trials(0.0004, 1.0), redrawn=False)[0] == near_one
+    assert rerun_check.counted(near_one, PRECISE, _se_trials(0.02, 1.0), redrawn=False)[0] == []  # inside a measured error
+
+
+def test_a_result_with_no_standard_error_in_the_record_is_excused_nothing_and_the_verdict_says_so() -> None:
+    small = [{"key": "derived/derived/est/by_setting/s", "old": 1.0, "new": 1.005}]  # 5% of the half-width, 0.5% of the value
+    kept, notes = rerun_check.counted(small, PRECISE, None, redrawn=False)
+    assert kept == small and any("est has no standard error" in n for n in notes)
+    assert rerun_check.counted(small, PRECISE, None, redrawn=True)[0] == small
 
 
 def test_a_result_with_no_declared_precision_still_counts_a_millionth_move() -> None:
@@ -632,29 +658,30 @@ def test_a_repair_inside_the_declared_precision_is_unchanged_end_to_end(tmp_path
     copy = rerun_check.copy_code(root, tmp_path / "w")
     (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8").replace("scale = 1.0", "scale = 1.001"), encoding="utf-8")
     run = lambda proto: asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, proto, 60, None))  # noqa: E731
-    got = run(PRECISE)  # the study's est moves by 0.0045 and the trials' mean by the same: inside a quarter of 0.1 and 1% of the value
-    assert got.status == "unchanged" and any("inside the plan's precision" in n for n in got.notes)
+    got = run(PRECISE)  # the study's est moves by 0.0045 and the trials' mean by the same: inside the delivered run's own error (0.96)
+    assert got.status == "unchanged" and any("within its own standard error" in n for n in got.notes)
     assert run(PROTOCOL).status == "changed"
 
 
 K = "derived/derived/est/by_setting/s"
 
 
-def _kept(changes: list[dict[str, Any]], protocol: Any = PRECISE, redrawn: bool = False) -> list[dict[str, Any]]:
-    return rerun_check.counted(changes, protocol, None, redrawn)[0]
+def _kept(changes: list[dict[str, Any]], protocol: Any = PRECISE, redrawn: bool = False, trials: Any = None) -> list[dict[str, Any]]:
+    return rerun_check.counted(changes, protocol, trials, redrawn)[0]
 
 
-def test_the_allowance_is_a_quarter_of_the_target_and_stops_at_it() -> None:
-    old = 100.0  # 1% of the value is 1.0: the quarter of 0.1 (0.025) is the limit
-    assert _kept([{"key": K, "old": old, "new": old + 0.02}]) == []
-    over = [{"key": K, "old": old, "new": old + 0.03}]
-    assert _kept(over) == over
+def test_the_allowance_is_the_own_standard_error_and_stops_at_it() -> None:
+    old = 100.0
+    trials = _se_trials(0.03, old)
+    assert _kept([{"key": K, "old": old, "new": old + 0.029}], trials=trials) == []
+    over = [{"key": K, "old": old, "new": old + 0.031}]
+    assert _kept(over, trials=trials) == over
 
 
 def test_a_mean_shifted_by_most_of_the_target_is_counted() -> None:
     shifted = [{"key": K, "old": 22.8, "new": 22.8 + 0.09}]  # 0.9 x the half-width
     assert _kept(shifted) == shifted
-    assert _kept(shifted, redrawn=False) == shifted
+    assert _kept(shifted, trials=_se_trials(0.01)) == shifted
 
 
 def test_a_large_target_on_a_small_scale_value_does_not_excuse_a_large_share_of_it() -> None:
@@ -664,22 +691,23 @@ def test_a_large_target_on_a_small_scale_value_does_not_excuse_a_large_share_of_
 
 
 def test_an_interval_that_widens_is_counted_with_the_mean_it_belongs_to() -> None:
-    mean = {"key": K, "old": 100.0, "new": 100.0}
+    trials = _se_trials(0.03, 100.0)
     lo = {"key": K + "/lo", "old": 90.0, "new": 90.0 - 0.02}
     hi = {"key": K + "/hi", "old": 110.0, "new": 110.0 + 0.02}
-    assert _kept([lo]) == [] and _kept([hi]) == []  # one end alone moves the width by 0.02: inside
-    both = _kept([lo, hi])  # the width moves by 0.04: beyond the allowance, so both ends count
+    assert _kept([lo], trials=trials) == [] and _kept([hi], trials=trials) == []  # one end alone moves the width by 0.02: inside
+    both = _kept([lo, hi], trials=trials)  # the width moves by 0.04: beyond the allowance, so both ends count
     assert both == [lo, hi]
     # a number of the setting that counts takes the allowance from the others
     big = {"key": K + "/sd", "old": 5.0, "new": 6.0}
-    assert _kept([lo, big]) == [lo, big]
+    assert _kept([lo, big], trials=trials) == [lo, big]
 
 
 def test_an_interval_stored_as_a_pair_widens_and_is_counted() -> None:
+    trials = _se_trials(0.03, 100.0)
     lo = {"key": K + "/ci[0]", "old": 90.0, "new": 90.0 - 0.02}
     hi = {"key": K + "/ci[1]", "old": 110.0, "new": 110.0 + 0.02}
-    assert _kept([lo]) == [] and _kept([hi]) == []
-    assert _kept([lo, hi]) == [lo, hi]  # the width moves by 0.04: beyond the allowance
+    assert _kept([lo], trials=trials) == [] and _kept([hi], trials=trials) == []
+    assert _kept([lo, hi], trials=trials) == [lo, hi]  # the width moves by 0.04: beyond the allowance
     assert rerun_check._end_side(K + "/ci[0]") == "lo" and rerun_check._end_side(K + "/interval[1]") == "hi"
     assert rerun_check._end_side(K + "/values[0]") == ""
 
@@ -690,18 +718,18 @@ def test_a_precision_that_names_no_declared_result_excuses_nothing() -> None:
         assert _kept(changes, {**PROTOCOL, "precision": precision}) == changes  # PROTOCOL has three metrics: none is "the only one"
 
 
-def test_the_original_input_is_still_excused_and_the_own_error_bounds_it() -> None:
-    real = [{"key": "derived/derived/est", "old": 22.8138685, "new": 22.8138493}]
-    assert _kept(real) == []
+def test_the_original_input_is_still_excused_when_the_own_error_covers_it() -> None:
+    real = [{"key": K, "old": 22.8138685, "new": 22.8138493}]
+    assert _kept(real, trials=_se_trials(0.04)) == []
     trials = _trials([float(i) for i in range(10)], metric="est")  # the delivered run's own error of "s": about 0.96
-    tight = {"key": "trials/s/est/mean", "old": 4.5, "new": 4.5 + 0.02}  # beyond a quarter of 0.05, though inside its own error
+    tight = {"key": "trials/s/est/mean", "old": 4.5, "new": 4.5 + 0.02}  # beyond a quarter of 0.05, but inside its own error
     narrow = {**PROTOCOL, "precision": {"target_half_width": 0.05, "metric": "est"}}
-    assert rerun_check.counted([tight], narrow, trials, redrawn=False)[0] == [tight]
+    assert rerun_check.counted([tight], narrow, trials, redrawn=False)[0] == []
 
 
 def test_a_run_whose_own_error_is_smaller_than_the_plan_allowance_is_bound_by_its_own_error() -> None:
     trials = _trials([4.5 + 0.001 * i for i in range(10)], metric="est")  # its own error: about 0.001
-    move = {"key": "trials/s/est/mean", "old": 4.5045, "new": 4.5045 + 0.01}  # inside a quarter of 0.1 and 1% of the value
+    move = {"key": "trials/s/est/mean", "old": 4.5045, "new": 4.5045 + 0.01}  # beyond its own error
     wide = {**PROTOCOL, "precision": {"target_half_width": 0.1, "metric": "est"}}
     assert rerun_check.counted([move], wide, trials, redrawn=False)[0] == [move]
     small = {**move, "new": 4.5045 + 0.0002}  # inside its own error too
