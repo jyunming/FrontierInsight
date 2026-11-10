@@ -374,6 +374,16 @@ def repair_parts(metrics: Any) -> tuple[list[dict[str, Any]], list[tuple[str, st
     return kept, partial, dropped
 
 
+def proportion_ids(protocol: dict[str, Any] | None) -> frozenset[str]:
+    """The ids the protocol declares as metrics of kind ``proportion`` over every run (a 0/1 outcome of each trial): the one
+    list that says which results get a binomial (Wilson) interval. Nothing is read from the values a trial gave."""
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    if not metrics:
+        return frozenset()
+    kept, _dropped = repair(metrics)
+    return frozenset(str(m["id"]) for m in kept if m.get("kind") == "proportion" and not m.get("given"))
+
+
 def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:
     """``(the specs that pass, a sentence per problem)``: :func:`repair_parts` with the notes of the metrics kept without a
     part and of the metrics left out in one list. Say them apart with :func:`repair_parts`."""

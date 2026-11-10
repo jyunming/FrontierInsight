@@ -59,7 +59,7 @@ def test_the_table_serves_the_settings_values_and_numbers_of_the_record() -> Non
 
 
 def test_a_proportion_has_a_wilson_interval_and_a_mean_a_t_interval() -> None:
-    t = _table()
+    t = _table(kinds={"alive": "proportion", "growth": "mean"})
     key = "rate=0.2,dose=1"
     assert t.mean("alive", key) == pytest.approx(0.6)
     lo, hi = t.interval("alive", key)
@@ -67,6 +67,33 @@ def test_a_proportion_has_a_wilson_interval_and_a_mean_a_t_interval() -> None:
     lo, hi = t.interval("growth", key)
     half = stats._t95(4) * stats.mean_std(t.values("growth", key))[1] / math.sqrt(5)
     assert lo == pytest.approx(2.25 - half, abs=0, rel=1e-12) and hi == pytest.approx(2.25 + half, abs=0, rel=1e-12)
+
+
+def test_the_kind_of_interval_is_the_plans_not_read_from_the_values() -> None:
+    # the original failure: a result of a setting where every trial happened to give 0 or 1 switched to a Wilson interval
+    # whatever the plan declared; the plan's `mean` result (or one it does not declare a kind for) gets a t interval
+    for values in ([0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0, 1.0]):
+        s = frame_table.summary(values)
+        lo, hi, how = frame_table.interval(s)
+        assert not s["binary"] and s["zero_one"] and how.startswith("t interval") and "does not declare" in how
+        assert lo < sum(values) / len(values) < hi and (lo, hi) != stats.wilson_interval(int(sum(values)), len(values))
+        assert frame_table.interval(frame_table.summary(values, True))[:2] == stats.wilson_interval(int(sum(values)), len(values))
+    # a result that gave 0, 1 and 2 is no proportion in either reading: a t interval, nothing said about the plan
+    s = frame_table.summary([0.0, 1.0, 2.0])
+    assert not s["binary"] and not s["zero_one"] and frame_table.interval(s)[2] == "t interval of the mean"
+    assert not frame_table.summary([0.0, 1.0, 2.0], True)["binary"], "a declared proportion that gave a 2 is not Wilson-judged"
+
+
+def test_the_tables_interval_follows_the_kinds_the_plan_gives_it() -> None:
+    key = "rate=0.2,dose=1"
+    undeclared = _table()  # no kinds: the plan does not say
+    lo, hi = undeclared.interval("alive", key)
+    half = stats._t95(4) * stats.mean_std(undeclared.values("alive", key))[1] / math.sqrt(5)
+    assert (lo, hi) == pytest.approx((0.6 - half, 0.6 + half), abs=0, rel=1e-12) and (lo, hi) != stats.wilson_interval(3, 5)
+    assert _table(kinds={"alive": "mean"}).interval("alive", key) == (lo, hi)
+    assert _table(kinds={"alive": "proportion"}).interval("alive", key) == stats.wilson_interval(3, 5)
+    # in a setting where a declared mean gave only 0 and 1 (a clipped value), it stays a t interval
+    assert _table(kinds={"growth": "mean"}).interval("growth", "rate=0.1,dose=1") == _table().interval("growth", "rate=0.1,dose=1")
 
 
 def test_an_id_the_plan_does_not_declare_raises_with_the_declared_list() -> None:
@@ -116,10 +143,11 @@ def _same(a: float | None, b: float | None) -> bool:
     return math.isclose(a, b, rel_tol=10.0 ** -DIGITS, abs_tol=0.0) or a == b
 
 
-def _check_against_trial_table(cells: list[dict[str, Any]]) -> int:
-    t = _table(cells, declared=tuple(sorted({m for c in cells for m in c["metrics"]})))
+def _check_against_trial_table(cells: list[dict[str, Any]], proportions: tuple[str, ...] = ("alive",)) -> int:
+    t = _table(cells, declared=tuple(sorted({m for c in cells for m in c["metrics"]})),
+               kinds={p: "proportion" for p in proportions})
     plain = [c for c in cells if not c.get("level")]
-    summarised = {c["key"]: c for c in trial_table.summaries(plain)}
+    summarised = {c["key"]: c for c in trial_table.summaries(plain, proportions)}
     checked = 0
     for key in t.keys():
         for name, s in summarised[key]["metrics"].items():
@@ -268,7 +296,7 @@ def test_edge_cases_give_what_trial_table_gives() -> None:
     nan = float("nan")
     cells = [_cell(0.1, 1, [nan, nan]), _cell(0.1, 2, [1.0, True, 0.0]), _cell(0.2, 1, [0.0, 1.0, 0.5, 1.0]), _cell(0.2, 2, [1.0]),
              _cell(0.3, 1, [0.0, 0.0, 0.0])]
-    t = _table(cells)
+    t = _table(cells, kinds={"growth": "proportion"})
     assert t.n("growth", "rate=0.1,dose=1") == 0 and t.mean("growth", "rate=0.1,dose=1") is None
     assert t.interval("growth", "rate=0.1,dose=1") == (None, None) and t.values("growth", "rate=0.1,dose=1") == []
     assert t.values("growth", "rate=0.1,dose=2") == [1.0, 0.0], "a bool is not a value"
@@ -277,7 +305,7 @@ def test_edge_cases_give_what_trial_table_gives() -> None:
     assert mixed != stats.wilson_interval(3, 4) and mixed[0] < 0.625 < mixed[1], "a 0.5 among them: a t interval"
     assert t.interval("growth", "rate=0.2,dose=2") == stats.wilson_interval(1, 1), "one trial of a proportion, as trial_table"
     assert t.interval("growth", "rate=0.3,dose=1") == stats.wilson_interval(0, 3)
-    assert _check_against_trial_table(cells) == 10
+    assert _check_against_trial_table(cells, ("growth",)) == 10
 
 
 # ---- speed ------------------------------------------------------------------------------------------------------------------

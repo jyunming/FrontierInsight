@@ -478,7 +478,9 @@ PINS_AT_811719AF = {
     # and again when the frame's Figure docstring stopped naming fig.curve (05361164, an intended text change: a curve the
     # figure computes itself is no longer taught)
     # and again with core/in_run.py's typed LevelsRefused (run.py carries the runtime); it was "968739116e2bd633"
-    "run_framed": "7c0c2a465be6c47e",
+    # and again when the table took the plan's kinds (Table(..., kinds=): a result gets a binomial interval only when the plan
+    # declares it a proportion, an intended text change); it was "7c0c2a465be6c47e"
+    "run_framed": "11ff3296ced4b58f",
 }
 
 

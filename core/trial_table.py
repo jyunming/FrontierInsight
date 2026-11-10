@@ -73,14 +73,21 @@ def _is_index(values: list[float]) -> bool:
     return len(values) > 1 and sorted(values) == [float(i) for i in range(len(values))]
 
 
-def summary(values: list[float]) -> dict[str, Any]:
+#: The method a mean gets; a result that gave only 0 and 1 though the plan does not declare it a proportion gets this said too.
+T_INTERVAL = "t interval of the mean"
+UNDECLARED = " (the plan does not declare it a proportion)"
+
+
+def summary(values: list[float], proportion: bool = False) -> dict[str, Any]:
     """What the table needs of one value's trials in one setting, without the trials themselves: ``n``, ``mean``,
-    ``sd``, whether every trial gave 0 or 1 (``binary``, with their ``successes``), whether the values are a trial index
+    ``sd``, whether the plan declares the value a proportion and every trial gave 0 or 1 (``binary``: the only case with a
+    binomial interval; ``zero_one`` says only that every trial gave 0 or 1, and ``successes`` counts those), whether the values are a trial index
     (``index``), whether they are all one number (``constant``), and a ``digest`` of the values (two settings with the
     same digest gave the very same trials: copies, not independent runs)."""
     mean, sd, n = _stats.mean_std(values)
-    binary = bool(values) and all(v in (0.0, 1.0) for v in values)
-    return {"n": n, "mean": mean, "sd": sd, "binary": binary, "successes": sum(values) if binary else None,
+    zero_one = bool(values) and all(v in (0.0, 1.0) for v in values)
+    return {"n": n, "mean": mean, "sd": sd, "binary": bool(proportion) and zero_one, "zero_one": zero_one,
+            "successes": sum(values) if zero_one else None,
             "index": _is_index(values), "constant": len(set(values)) <= 1,
             "digest": hashlib.sha256(array("d", values).tobytes()).hexdigest()[:16]}
 
@@ -118,12 +125,13 @@ def not_run_summary() -> dict[str, Any]:
     return {**summary([]), "status": NOT_RUN}
 
 
-def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def summaries(cells: list[dict[str, Any]], proportions: Any = ()) -> list[dict[str, Any]]:
     """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
-    :func:`summary`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
+    :func:`summary`; ``proportions``: the ids the plan declares proportions, :func:`core.metric_spec.proportion_ids`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
     has them. A record with no metrics (the per-value records a study that compares values inside each run writes with
     nothing in them) is kept, with an empty ``metrics``."""
     out: list[dict[str, Any]] = []
+    declared = {str(p) for p in proportions or ()}
     for c in cells:
         cell, level = c.get("cell"), c.get("level")
         setting: dict[str, Any] = dict(cell) if isinstance(cell, dict) else {}
@@ -134,7 +142,7 @@ def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entry.update({k: c[k] for k in ("planned", "ok", "failed")
                       if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
         for name, metric in c["metrics"].items():
-            one = {**summary(_values(metric)), **missing(metric)}
+            one = {**summary(_values(metric), str(name) in declared), **missing(metric)}
             one["status"] = status_of(one, entry)
             entry["metrics"][str(name)] = one
         # The record says in numbers that no trial of this setting succeeded or failed: it never ran, whatever values
@@ -145,8 +153,9 @@ def summaries(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def interval(s: dict[str, Any]) -> tuple[float | None, float | None, str]:
-    """``(lower, upper, method)`` of the 95% interval of the mean from a :func:`summary`: Wilson when every trial gave
-    0 or 1, otherwise a t interval (the same numbers :func:`core.stats.wilson_interval` and
+    """``(lower, upper, method)`` of the 95% interval of the mean from a :func:`summary`: Wilson for a value the plan declares
+    a proportion (every trial gave 0 or 1), otherwise a t interval, which says so when every trial gave 0 or 1 though the plan
+    does not declare a proportion (the same numbers :func:`core.stats.wilson_interval` and
     :func:`core.stats.confidence_interval` give from the values)."""
     n = int(s.get("n") or 0)
     if n <= 0:
@@ -157,10 +166,10 @@ def interval(s: dict[str, Any]) -> tuple[float | None, float | None, str]:
     if n < 2:
         return None, None, ""
     half = _stats._t95(n - 1) * (s["sd"] / math.sqrt(n))
-    return s["mean"] - half, s["mean"] + half, "t interval of the mean"
+    return s["mean"] - half, s["mean"] + half, T_INTERVAL + (UNDECLARED if s.get("zero_one") else "")
 
 
-def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[str, Any] | None:
+def per_setting_precision(quest_root: Path, metric: str, target: float, proportions: Any = ()) -> dict[str, Any] | None:
     """How the plan's precision target (a 95% interval of the mean no wider than ``target`` either side) holds for
     ``metric`` in each setting of FI's trial record, the interval worked out from that setting's own trials: ``{"target",
     "metric", "settings"`` (every setting of the record, so a setting that never gave a value is in the count),
@@ -173,7 +182,7 @@ def per_setting_precision(quest_root: Path, metric: str, target: float) -> dict[
     no_value: list[str] = []
     widest, widest_at = -1.0, ""
     judged = 0
-    for c in summaries(_record(quest_root)):
+    for c in summaries(_record(quest_root), proportions):
         s = c["metrics"].get(metric)
         if not c["metrics"] and not c.get("planned"):
             continue  # a per-value record with nothing in it is not a setting
@@ -248,10 +257,10 @@ def rows_of(summarised: list[dict[str, Any]], hide: Any = ()) -> list[dict[str, 
     return out
 
 
-def rows(quest_root: Path, hide: Any = ()) -> list[dict[str, Any]]:
+def rows(quest_root: Path, hide: Any = (), proportions: Any = ()) -> list[dict[str, Any]]:
     """One row per setting and per value the trials returned: ``{"setting", "metric", "n", "mean", "sd",
-    "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record."""
-    return rows_of(summaries(_record(quest_root)), hide)
+    "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record (``proportions``: see :func:`summaries`)."""
+    return rows_of(summaries(_record(quest_root), proportions), hide)
 
 
 def _num(x: Any) -> str:
@@ -276,8 +285,8 @@ def markdown(table: list[dict[str, Any]]) -> str:
         return ""
     lines = [
         "Computed by FI from the value every trial returned (raw/trials.json), with no model in between: per setting, "
-        "the trials that gave the value (n), their mean and SD, and a 95% interval of the mean (Wilson when every trial "
-        "gave 0 or 1, otherwise a t interval). Quantities the analysis derives from several values are not here.",
+        "the trials that gave the value (n), their mean and SD, and a 95% interval of the mean (Wilson for a result the "
+        "plan declares a proportion, otherwise a t interval). Quantities the analysis derives from several values are not here.",
         "",
         "| setting | value | n | mean | SD | 95% interval of the mean | interval |",
         "|---|---|---|---|---|---|---|",
@@ -290,10 +299,10 @@ def markdown(table: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(quest_root: Path, hide: Any = ()) -> list[dict[str, Any]]:
+def write(quest_root: Path, hide: Any = (), proportions: Any = ()) -> list[dict[str, Any]]:
     """Write ``paper/results_table.md`` from the trial record and return its rows; nothing is written without one (``hide``:
-    see :func:`kept_values`)."""
-    table = rows(quest_root, hide)
+    see :func:`kept_values`; ``proportions``: see :func:`summaries`)."""
+    table = rows(quest_root, hide, proportions)
     if table:
         paper = Path(quest_root) / "paper"
         paper.mkdir(parents=True, exist_ok=True)

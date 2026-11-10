@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from . import in_run as _in_run
+from . import metric_spec as _metric_spec
 from . import reference_values as _refs
 from . import results_by_setting as _rbs
 from . import stats as _stats
@@ -429,6 +430,12 @@ class Records:
     #: Whether the trials drew random numbers, from the harness row of each trial (``drew``): ``False`` when none did (the
     #: results are deterministic), ``True`` when all did, ``None`` when the record does not say or the trials differ.
     drew: bool | None = None
+
+    def is_proportion(self, metric: str) -> bool:
+        """Whether the plan declares ``metric`` a proportion: the only thing that gives a result a binomial interval."""
+        if "proportions" not in self._derived:
+            self._derived["proportions"] = _metric_spec.proportion_ids(self.protocol)
+        return str(metric) in self._derived["proportions"]
 
     def seeds_of(self, cell: dict[str, Any]) -> dict[int, int]:
         """The seeds of the trials behind ``cell``. The record of a value compared inside each run is the run's own
@@ -968,7 +975,7 @@ def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[f
     if ran := _one_run_each(cells, metric):
         raise _Unfilled(f"each of the {ran} settings ran once, so their values are not repeated draws and there is no interval")
     obs, shared = _observations(rec, cells, metric)
-    summary = _tt.summary(obs)
+    summary = _tt.summary(obs, rec.is_proportion(metric))
     if shared:
         if len(obs) < 2:
             raise _Unfilled("the settings share their random draws and fewer than two different draws gave a value, "
@@ -1181,7 +1188,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     # when the usual four figures would change it (14281 is not 14280), and as before when they would not (0.1160).
     exact = _exact_kind(rec, metric, cells, values)
     if form == "count":
-        if not summary["binary"]:
+        if not summary["zero_one"]:
             raise _Unfilled(f"{metric} is not a 0/1 value, so there is no count of successes")
         return Measured(summary["mean"], "count", n=summary["n"], successes=int(summary["successes"]))
     if form in ("mean", "mean_ci") and (ran := _one_run_each(cells, metric)):
@@ -1409,7 +1416,7 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
             cells = _matching(rec, fixed, key.metric)
             ref, ref_kind = _reference(rec, key.metric, cells)
             obs, shared = _observations(rec, cells, key.metric)
-            s = _tt.summary(obs)
+            s = _tt.summary(obs, rec.is_proportion(key.metric))
             if shared:
                 if len(obs) < 2:
                     raise _Unfilled("the settings share their random draws and fewer than two different draws gave a "

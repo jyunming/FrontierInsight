@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from . import grid_keys as _grid_keys
+from . import metric_spec as _metric_spec
 from . import oracle_forms as _forms
 from . import reference_values as _refs
 from . import result_checks as _result_checks
@@ -956,7 +957,7 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     cells = _trial_table._record(Path(quest_root))
     if not cells:
         return [], None
-    summarised = _trial_table.summaries(cells)
+    summarised = _trial_table.summaries(cells, _metric_spec.proportion_ids(protocol))
     protocol = _without_left_out(protocol, Path(quest_root))
     built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged, labels)
     return _trial_table.rows_of(summarised, _diagnostics(protocol)), built

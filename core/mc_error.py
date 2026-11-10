@@ -98,11 +98,7 @@ def mean_names(protocol: dict[str, Any] | None) -> frozenset[str]:
 def proportion_names(protocol: dict[str, Any] | None) -> frozenset[str]:
     """The names the protocol declares as metrics of kind ``proportion`` over every run: a 0/1 outcome, by the record,
     judged on its binomial interval even when every trial gave its expected 0 or 1 (:func:`statistic`)."""
-    metrics = (protocol or {}).get("metrics") if isinstance(protocol, dict) else None
-    if not metrics:
-        return frozenset()
-    kept, _dropped = _metric_spec.repair(metrics)
-    return frozenset(str(m["id"]) for m in kept if m.get("kind") == "proportion" and not m.get("given"))
+    return _metric_spec.proportion_ids(protocol)
 
 
 def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:

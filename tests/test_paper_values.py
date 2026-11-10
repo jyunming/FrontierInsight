@@ -27,6 +27,14 @@ def s2(tmp_path):
     return _records("s2_kinetics_trials.json", tmp_path)
 
 
+def _declaring_proportions(rec: pv.Records, *ids: str) -> pv.Records:
+    """The same records under a plan that declares ``ids`` proportions: only the plan gives a result a binomial interval."""
+    from dataclasses import replace
+
+    metrics = [{"id": i, "estimand": f"how often {i} holds", "kind": "proportion", "unit": "one trial"} for i in ids]
+    return replace(rec, protocol={**(rec.protocol or {}), "metrics": metrics}, _derived={})
+
+
 @pytest.fixture()
 def s3(tmp_path):
     return _records("s3_kinetics_trials.json", tmp_path)
@@ -95,6 +103,7 @@ def test_an_sd_setting_by_setting_is_filled_where_the_pooled_one_is_not(s2):
 
 
 def test_s2_coverage_wilson_interval_is_two_ends_and_count_is_exact(s2):
+    s2 = _declaring_proportions(s2, "coverage_Ea")
     cells = _cells("s2_kinetics_trials.json")
     allv = np.concatenate([c["metrics"]["coverage_Ea"]["values"] for c in cells])
     k, n = int(allv.sum()), len(allv)
@@ -109,6 +118,7 @@ def test_s2_coverage_wilson_interval_is_two_ends_and_count_is_exact(s2):
 
 
 def test_a_wilson_interval_never_renders_with_plus_minus(s2):
+    s2 = _declaring_proportions(s2, "coverage_Ea")
     # sigma 0.02, n 40: the Wilson interval is not symmetric about the mean
     for form in ("pm", "ci", "mean_ci"):
         got = pv.resolve(f"coverage_Ea:{form} @ noise_sigma=0.02, n_points=40", s2)

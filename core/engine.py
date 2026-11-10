@@ -15653,7 +15653,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                           and 0 < target < 1e300 else None)
             # FI's own trial record has the trials of each setting: the target is held to each setting's own interval
             # (never one pooled over settings whose true values differ). Said in the record, never a route back to design.
-            per_setting = _trial_table.per_setting_precision(self.quest_root, on, float(target)) if not_judged and on else None
+            per_setting = (_trial_table.per_setting_precision(self.quest_root, on, float(target),
+                                                              _metric_spec.proportion_ids(self._protocol_block(state)))
+                           if not_judged and on else None)
             if per_setting:
                 not_judged = None
             replicates_for_specs = state.get("result_json_replicates") or []
@@ -15797,7 +15799,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # No pooled interval for the quantity the target is on: FI's trial record gives each setting's own.
             judged = any(isinstance(e, dict) and "target_half_width" in e for e in aggregate.values())
             if on_declared and not judged and isinstance(target, (int, float)) and not isinstance(target, bool) and 0 < target < 1e300:
-                per_setting = _trial_table.per_setting_precision(self.quest_root, on_declared, float(target))
+                per_setting = _trial_table.per_setting_precision(self.quest_root, on_declared, float(target),
+                                                                 _metric_spec.proportion_ids(protocol))
                 words = _evidence.precision_per_setting_words(per_setting) if per_setting else ""
                 if words:
                     return (f"{words[0].upper()}{words[1:]}. Say so in the limitations and do not claim a precision the "
@@ -24059,7 +24062,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         try:
-            trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)))
+            trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)),
+                                            _metric_spec.proportion_ids(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
                 by_setting = _results_by_setting.write(
                     self.quest_root, self._protocol_block(state), self._judged_checks(),

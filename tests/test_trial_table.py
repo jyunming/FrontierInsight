@@ -40,13 +40,16 @@ def test_index_and_constant_values_are_left_out(tmp_path: Path) -> None:
     assert "noise_level" not in metrics  # the same in every trial of every setting
 
 
-def test_a_value_every_trial_gives_as_0_or_1_gets_a_wilson_interval(tmp_path: Path) -> None:
+def test_a_value_the_plan_declares_a_proportion_gets_a_wilson_interval(tmp_path: Path) -> None:
     cells = [{"cell": {"m": m}, "key": f"m={m}", "metrics": {"any_false_discovery": {"values": vals}}}
              for m, vals in ((20, [0, 1, 1, 0, 1]), (200, [1, 1, 1, 0, 1]))]
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
-    row = _row(trial_table.rows(tmp_path), "m=20", "any_false_discovery")
+    row = _row(trial_table.rows(tmp_path, (), {"any_false_discovery"}), "m=20", "any_false_discovery")
     assert row["method"] == "Wilson" and (row["ci_lower"], row["ci_upper"]) == stats.wilson_interval(3, 5)
+    # a plan that does not declare it a proportion gets a t interval, and the method column says so
+    row = _row(trial_table.rows(tmp_path), "m=20", "any_false_discovery")
+    assert row["method"].startswith("t interval of the mean") and "does not declare" in row["method"]
 
 
 def test_the_file_and_the_writer_s_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
