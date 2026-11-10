@@ -1255,6 +1255,7 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
             "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
             "repairs_stopped": str(cr.get("repairs_stopped") or ""),
+            "parts_not_read": [str(x) for x in _list(cr.get("parts_not_read"))],
             "issues": _issue_rows(cr, getattr(q, "root", None)), "issue_summary": _issue_summary(cr),
             "open_changing_per_reading": [_int(r.get("changing", r.get("high"))) for r in readings]}
 
@@ -1633,6 +1634,8 @@ def render(report: dict[str, Any]) -> str:
     if code.get("final_version_read") is not None:
         lines += ["", "The final version of the code was " + ("" if code["final_version_read"] else "not ")
                   + "read by a second model."
+                  + (" The reading stopped before these parts of the code were read: "
+                     + "; ".join(code["parts_not_read"]) + "." if code.get("parts_not_read") else "")
                   + (" Open findings per reading: " + ", ".join(
                       f"{n} ({h} high-severity)" for n, h in zip(code["open_per_reading"], code["open_high_per_reading"]))
                      + "." if code.get("open_per_reading") else "")

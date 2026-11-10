@@ -13950,6 +13950,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if any(c["cut"] for c in calls):
             record["lines_cut"] = [x for c in calls for x in c["cut"]]
         earlier = _code_review.earlier_block(previous)
+        small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
+                     or "(FI did not run the simulation before this reading)")
+        # A part of the code that was read before, with the same text, the same things it uses, the same plan and the same
+        # question, is not read again: its earlier reading is used (:func:`core.code_review.request_key`).
+        kept = _code_review.load_reading_cache(self.quest_root)
+        depends = _code_review.part_dependencies(code, calls)
+        asked_of = [[r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]] for c in calls]
+        keys = [_code_review.request_key(c, depends[i], asked=asked_of[i], reader=str(reader or ""),
+                                         template=self._prompts["code_review"].template, small_run=small_run,
+                                         shown_values=shown_values) for i, c in enumerate(calls)]
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
@@ -13973,17 +13983,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # A request is made for each part, and made once more if it fails: those 2 per part are reserved before the
             # reading starts, so a reading is never admitted and then dropped for want of requests. The follow-up ask of a
             # part (up to 2 more) is made only while the requests the later parts need stay reserved.
-            if int(record.get("reader_calls") or 0) + 2 * len(calls) > _code_review.MAX_READER_CALLS:
+            # Only the parts that must be asked are reserved for, one request each: a part read before and not changed is
+            # not asked again. A request that fails is made once more only while the parts still to come keep theirs; when
+            # none is left for them the reading stops partway and the parts not read are recorded (``parts_not_read``).
+            fresh = len({k for k in keys if k not in kept})
+            if int(record.get("reader_calls") or 0) + fresh > _code_review.MAX_READER_CALLS:
                 raise _code_review.BudgetSpent(f"the {_code_review.MAX_READER_CALLS} reader requests of a quest are "
-                                               f"used; this reading needs {2 * len(calls)} more")
+                                               f"used; this reading needs {fresh} more")
             for p_index, call in enumerate(calls, start=1):
+                key = keys[p_index - 1]
+                if key in kept:
+                    hit = kept[key]
+                    p_verdicts = copy.deepcopy(hit.get("verdicts") or [])
+                    logic = _code_review.merge_logic(logic, copy.deepcopy(hit.get("logic") or []))
+                    outside.extend(copy.deepcopy(hit.get("outside") or []))
+                    listed = [*listed, *(c for c in hit.get("listed") or [] if c not in listed)]
+                    part_verdicts.append(p_verdicts)
+                    record["requests"][p_index - 1]["reused"] = True
+                    record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
+                    continue
+                part_found: list[dict[str, Any]] = []
+                part_listed: list[str] = []
+                outside_from = len(outside)
                 sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
                 # only the requirements this request was given the plan's definition of (:func:`core.code_review.asked_ids`)
                 call_reqs = [r for r in reqs if call.get("asked") is None or r["id"] in call["asked"]]
                 for _ask in range(2):
-                    if _ask and int(record.get("reader_calls") or 0) + 2 + 2 * (len(calls) - p_index) > _code_review.MAX_READER_CALLS:
+                    later = len({k for k in keys[p_index:] if k not in kept and k != key})
+                    if _ask and int(record.get("reader_calls") or 0) + 1 + later > _code_review.MAX_READER_CALLS:
                         break  # the follow-up ask would use what the parts still to come need
                     left = [r for r in call_reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
                     again = ""
@@ -13999,8 +14028,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
                                                              indent=2),
                         plan=call["plan"], open_items=call["open_items"] or "(none)", code=sources, previous=earlier,
-                        small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
-                        or "(FI did not run the simulation before this reading)"
+                        small_run=small_run
                     ) + again
                     reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
@@ -14021,12 +14049,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                    for f in found if f not in seen)
                     found = seen
                     logic = _code_review.merge_logic(logic, found)
-                    listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
-                                         if c not in listed)]
+                    part_found.extend(found)
+                    said = _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
+                    part_listed.extend(said)
+                    listed = [*listed, *(c for c in said if c not in listed)]
                 if p_verdicts is None and many:
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
                     raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
+                if p_verdicts is not None:  # an answer that was had in full is kept for the next reading of this same part
+                    kept[key] = {"verdicts": p_verdicts, "logic": part_found, "outside": outside[outside_from:],
+                                 "listed": part_listed, "version": version}
+                    _code_review.save_reading_cache(self.quest_root, kept)
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = ("its answers cited no place in the code it was shown" if outside
@@ -14042,6 +14076,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed, twice ({str(e)[:120] or type(e).__name__})"
             verdicts = p_verdicts if not many else None
+        if verdicts is None:
+            unread = [_code_review.part_label(c, record["code_parts"]) for i, c in enumerate(calls) if keys[i] not in kept]
+            if unread:
+                record["parts_not_read"] = list(dict.fromkeys(unread))
         if outside:
             record["cited_outside_what_was_shown"] = outside[:50]
         same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")

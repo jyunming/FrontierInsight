@@ -344,12 +344,12 @@ async def test_a_line_that_was_cut_is_not_fully_shown_so_a_citation_of_it_is_not
 
 
 @pytest.mark.asyncio
-async def test_a_reading_is_not_admitted_unless_each_part_can_be_asked_and_asked_again_if_it_fails(
+async def test_a_reading_is_not_admitted_unless_each_part_can_be_asked(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _engine(tmp_path)
     _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": EXP})
     monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 700)
-    monkeypatch.setattr(cr, "MAX_READER_CALLS", 3)  # two parts need 2 requests and 2 more for a failed one
+    monkeypatch.setattr(cr, "MAX_READER_CALLS", 1)  # two parts need one request each
     reader = _PartReader()
     engine._client = reader
     await engine._code_review_gate(WITH_PLAN)
