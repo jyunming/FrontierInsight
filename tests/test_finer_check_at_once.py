@@ -2,7 +2,7 @@
 request (so the harness runs them at the same time), and its time estimate counts the check at what a finest-setting run
 costs. A fake evaluator stands in for the simulation: no model, no real run.
 
-Known positive: the record the check writes is the one the one-after-another version wrote (the hashes below were taken
+Known positive: the record the check writes is the same as the record of the version that ran one design after another (the hashes below were taken
 from that version on the same fake answers)."""
 from __future__ import annotations
 
