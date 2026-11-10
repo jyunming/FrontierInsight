@@ -209,22 +209,35 @@ def test_a_comparison_of_a_worked_out_quantity_does_not_split_its_setting_into_a
     assert "nutrient = " not in text.split("water clarity")[0]
 
 
-def test_a_quantity_worked_out_from_the_mapped_result_replaces_the_map_and_is_answered_once(tmp_path, monkeypatch) -> None:
+def test_a_quantity_worked_out_from_the_mapped_result_is_disclosed_and_never_replaces_the_map(tmp_path, monkeypatch) -> None:
     protocol = {**PROTOCOL, "derived": DERIVED, "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]}
     design = {**DESIGN, "protocol": protocol}
     asked = tr.quantities_to_place(REQ, protocol)
     kept = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:peak_ratio"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
-    assert {"item": "Q1", "by": "metric:peak_ratio", "at": {}} in kept["topic_map"]
-    # an answer that is not worked out from the mapped result leaves the plan's own map
+    assert {"item": "Q1", "by": "metric:algae_peak", "at": {}, "other_candidate": "metric:peak_ratio"} in kept["topic_map"]
+    # an answer that is not worked out from the mapped result leaves the plan's own map, with nothing to disclose
     other = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
     assert {"item": "Q1", "by": "metric:algae_peak", "at": {}} in other["topic_map"]
-    # the paper's line for it is one value, not a range
+    # the paper still answers by the plan's result; the model's proposal is only told to the reader of the quality report
     root = _quest(tmp_path, monkeypatch, kept["topic_map"])
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: kept)
-    pv.write_answers(root, {"peak_ratio": 1.5}, kept, ids=["peak_ratio"])
     text = pf.answers_text(root)
-    assert "- peak algae (measured as: `peak_ratio`): {{v:peak_ratio}} (one value worked out by the analysis" in text
+    assert "- peak algae (measured as: `algae_peak`)" in text and "{{v:algae_peak" in text and "peak_ratio" not in text
     assert "peak_ratio" in cp._answers_prompt(TEMPLATES, design, asked, [], "")  # the model is shown what it is worked out from
+    assert pf.other_candidates(root) == [{"name": "peak algae", "planned": "metric:algae_peak", "candidate": "metric:peak_ratio"}]
+
+
+def test_a_variance_worked_out_from_a_mean_is_not_printed_as_the_mean() -> None:
+    """Planted: the question asks for a mean; the plan maps the mean; the second model call names a variance computed from it.
+    The old code replaced the plan's map, so the paper printed the variance as the mean."""
+    derived = [{"id": "peak_variance", "inputs": ["algae_peak"], "role": "result", "label": "variance of the peak", "asked": True}]
+    protocol = {**PROTOCOL, "derived": derived, "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]}
+    design = {**DESIGN, "protocol": protocol}
+    asked = {"Q1": {"name": "mean peak", "stated": "report the mean peak", "by": "metric:algae_peak"}}
+    row = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:peak_variance"}}, asked)["topic_map"][0]
+    assert row["by"] == "metric:algae_peak" and row["other_candidate"] == "metric:peak_variance"
+    again = cp._apply_answers({**protocol, "topic_map": [row]}, design, {"Q1": {"by": "metric:algae_peak"}}, asked)["topic_map"][0]
+    assert "other_candidate" not in again  # the entry is rewritten by each answer: an earlier candidate does not stay
 
 
 def test_a_condition_the_question_already_states_is_not_added_again(tmp_path, monkeypatch) -> None:

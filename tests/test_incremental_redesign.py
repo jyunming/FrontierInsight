@@ -65,12 +65,36 @@ def test_the_plan_parts_the_scripts_read_are_compared_from_the_record(tmp_path: 
     design = {"protocol": {"optimisation": {"objective": "a"}, "metrics": [1], "definitions": [1], "model": {"x": 1}}, "note": "n"}
     assert cd.compare(tmp_path, cd.parts(design)).known is False
     cd.save(tmp_path, cd.parts(design, {"f": "def f(x):"}), package="p")
-    same = {**design, "protocol": {**design["protocol"], "definitions": [2], "model": {"x": 2}}}
-    assert cd.compare(tmp_path, cd.parts(same, {"f": "def f(x):"})).changed == [], "definitions and the model are not read by the scripts"
+    assert cd.compare(tmp_path, cd.parts(design, {"f": "def f(x):"})).changed == [], "an unchanged design changes no part"
     moved = {**design, "protocol": {**design["protocol"], "optimisation": {"objective": "b"}}}
     delta = cd.compare(tmp_path, cd.parts(moved, {"f": "def f(x):"}))
     assert delta.known and delta.changed == ["protocol.optimisation"]
     assert '"objective": "b"' in cd.describe(delta) and '"objective": "a"' in cd.describe(delta)
+
+
+def test_every_part_of_the_design_the_writer_is_shown_is_a_part_the_scripts_are_built_from(tmp_path: Path) -> None:
+    """The writer is sent the whole design (definitions, criteria, the model and the rest included); a hand-written list of keys the
+    scripts "do not read" hid a redesigned definition, and the old code kept scripts written for the old one."""
+    design = {"protocol": {"metrics": [{"id": "m1"}], "definitions": [{"metric": "m1", "defined_as": "the mean of x over the first half"}],
+                           "criteria": ["a"], "model": {"x": 1}, "simplifications": ["s"], "topic_map": [{"item": "Q1"}]}}
+    cd.save(tmp_path, cd.parts(design, {"f": "h"}, "p"), package="p")
+    for key, value in (("definitions", [{"metric": "m1", "defined_as": "the mean of x over the second half"}]), ("criteria", ["b"]),
+                       ("model", {"x": 2}), ("simplifications", ["t"]), ("topic_map", [{"item": "Q2"}])):
+        revised = {"protocol": {**design["protocol"], key: value}}
+        assert cd.compare(tmp_path, cd.parts(revised, {"f": "h"}, "p")).changed == [f"protocol.{key}"], key
+    assert not hasattr(cd, "NOT_READ_BY_SCRIPTS")
+
+
+def test_a_record_written_before_every_part_was_covered_is_another_version(tmp_path: Path) -> None:
+    import json
+
+    cd.save(tmp_path, cd.parts({"protocol": {"definitions": [1]}}), package="p")
+    record = json.loads((tmp_path / cd.RECORD).read_text(encoding="utf-8"))
+    assert record["schema"] == cd.SCHEMA == 3
+    record["schema"] = 2
+    (tmp_path / cd.RECORD).write_text(json.dumps(record), encoding="utf-8")
+    delta = cd.compare(tmp_path, cd.parts({"protocol": {"definitions": [1]}}))
+    assert not delta.known and "another version" in delta.reason
 
 
 def test_the_shared_splice_keeps_every_other_byte_and_says_why_not() -> None:
@@ -101,9 +125,15 @@ async def test_the_scripts_of_a_revised_plan_change_only_the_functions_the_revis
     assert await engine._incremental_scripts(state, outline) is None and not asked
     cd.save(engine.quest_root, engine._scripts_built_from(state, outline), package=PKG)
     sim = (code / "simulate.py").read_text(encoding="utf-8")
-    # the revision changes nothing the scripts read: kept, no request
-    kept = await engine._incremental_scripts({**state, "design": {"protocol": {**state["design"]["protocol"], "definitions": ["words only"]}}}, outline)
+    # the revision changes nothing: kept, no request
+    kept = await engine._incremental_scripts(state, outline)
     assert kept is not None and kept["simulate"] == sim and not asked
+    # a redesigned definition is a change the writer sees: it is asked once, and its NO CHANGE keeps the scripts
+    reply[0] = "NO CHANGE"
+    defined = {**state, "design": {"protocol": {**state["design"]["protocol"], "definitions": ["words only"]}}}
+    kept = await engine._incremental_scripts(defined, outline)
+    assert kept is not None and kept["simulate"] == sim and len(asked) == 1 and '"words only"' in asked[0]
+    asked.clear()
     # the revision changes a part the scripts read: only the returned function is replaced
     import ast
     name = next(n.name for n in ast.parse(sim).body if isinstance(n, ast.FunctionDef))

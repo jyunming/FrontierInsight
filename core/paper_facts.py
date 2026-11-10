@@ -1720,6 +1720,28 @@ def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
     return out
 
 
+def other_candidates(quest_root: Path | str) -> list[dict[str, str]]:
+    """The questions for which the answers part named a better result than the plan's map (``other_candidate`` on the plan's
+    ``topic_map`` entry, a derived result FI's record shows is worked out from the mapped one): ``{"name", "planned", "candidate"}``.
+    The plan's map is what the paper answers by; this is read by the quality report alone."""
+    from . import topic_requirements as _topic_req
+
+    root = Path(quest_root)
+    req = _read(root, f".fi/{_topic_req.FILE}")
+    protocol = plan_protocol(root)
+    asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
+    if not asked or not isinstance(protocol, dict):
+        return []
+    plan = _topic_req.view({}, protocol)
+    out: list[dict[str, str]] = []
+    for item in asked:
+        name = " ".join(str(item.get("name") or "").split())
+        entry = next((m for m in _topic_req.map_entries(req, plan, "quantities", item) if m.get("other_candidate")), None)
+        if name and entry:
+            out.append({"name": name, "planned": str(entry.get("by") or ""), "candidate": str(entry["other_candidate"])})
+    return out
+
+
 def unit_notes(quest_root: Path | str) -> list[str]:
     """One sentence for each answer given in another unit than the question asks in, for a writer of the paper, the slides or
     the poster: the result's own unit and that FI did not convert it (from :func:`unit_conflicts`, the record the Answers block reads)."""

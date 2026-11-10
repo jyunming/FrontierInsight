@@ -126,6 +126,7 @@ class Derived(_Strict):
     kind: Literal["mean", "proportion"] = "mean"
     label: str = ""
     asked: bool = False  # the model's answer to FI's question after the plan (core/contract_parts.py): read by no check
+    for_question: str | None = None  # the question of the topic the names step made this result for (core/contract_parts.py): read by no check
     # the plan's own row, when FI asked about its formula (core/contract_parts.py): read by no check; what the audit judged
     as_planned: dict[str, Any] | None = None
 
