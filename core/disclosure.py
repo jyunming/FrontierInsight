@@ -852,9 +852,13 @@ def _failed_checks_sentence(quest_root: Path) -> str:
 
 
 def _widened_sentence(record: Any) -> str:
-    """The known-answer checks whose tolerance FI widened to the digits their expected value is written to, after the plan,
-    asked once, left it tighter (``Engine._widen_to_precision`` keeps the sentences in ``.fi/oracle_review.json``)."""
-    told = [t.strip() for t in record.get("tolerance_widened") or [] if isinstance(t, str) and t.strip()]         if isinstance(record, dict) else []
+    """The known-answer checks whose tolerance is tighter than the digits their expected value is written to, after the
+    plan, asked once, left it (``Engine._note_tight_tolerances`` keeps the sentences in ``.fi/oracle_review.json`` as
+    ``tolerance_kept``; a record of an earlier version holds ``tolerance_widened``, whose sentences say what FI did then)."""
+    if not isinstance(record, dict):
+        return ""
+    told = [t.strip() for key in ("tolerance_widened", "tolerance_kept") for t in record.get(key) or []
+            if isinstance(t, str) and t.strip()]
     return " ".join(t if t.endswith(".") else t + "." for t in told)
 
 

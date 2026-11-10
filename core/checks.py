@@ -458,7 +458,8 @@ CHECKS: tuple[Check, ...] = (
     Check('oracle_expected_precision', 'core.oracle_forms', 'precision_gaps',
           'plan', 'own_record', 'repair',
           'A check whose tolerance is smaller than half a unit of the last digit of its expected value as typed '
-          'is asked back once, then the tolerance is widened to that precision.'),
+          'is asked back once, then disclosed with its tolerance unchanged; a check whose expected value FI '
+          "computes itself from the plan's formula and finds the same is exact and not asked."),
     Check('oracle_expected_formula', 'core.oracle_forms', 'formula_findings',
           'plan', 'own_record', 'repair',
           "FI computes each check's expected value from the plan's expected_formula itself; "

@@ -339,7 +339,7 @@ async def test_the_plan_step_sends_a_bare_name_conservation_check_back_once_with
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_plan_does_not_fix_has_its_tolerance_widened_to_its_digits_and_the_plan_says_so(tmp_path: Path) -> None:
+async def test_a_check_the_plan_does_not_fix_keeps_its_tolerance_and_the_plan_says_so(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     kimi = {"name": "decay at t=1", "kind": "special_case", "expected": 0.367879, "tolerance": 1e-12,
             "case": {"n": 4}, "measure": "P_out", "reference": "derivation: y(1) = exp(-1) = 0.367879"}
@@ -349,11 +349,12 @@ async def test_a_check_the_plan_does_not_fix_has_its_tolerance_widened_to_its_di
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 1, "asked once, never in a loop"
     section = _plan_text(engine).split(f"## {of.HEADING}", 1)[1].split("\n## ", 1)[0]
-    assert "The plan did not change the checks." in section and "FI widened the tolerance to 5e-07" in section
+    assert "The plan did not change the checks." in section and "FI kept the tolerance as the plan wrote it" in section
+    assert "widened" not in section
     assert "Still not in its kind's form" not in section
     assert _oracle_in_plan(engine)["expected"] == 0.367879, "no expected value is changed by FI itself"
-    assert _oracle_in_plan(engine)["tolerance"] == 5e-07, "half a unit of the last digit of 0.367879"
-    assert "FI widened the tolerance" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert _oracle_in_plan(engine)["tolerance"] == 1e-12, "the tolerance is never widened to the digits the plan typed"
+    assert "FI kept the tolerance as the plan wrote it" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
 TOY_VIOLATION = '''
@@ -632,31 +633,26 @@ def test_the_typed_numbers_of_a_plan_are_read_with_their_trailing_zeros() -> Non
     assert of.typed_numbers(DIGITS_PLAN)["level"] == {"expected": "0.0174090", "tolerance": "1.0e-07"}
 
 
-def test_a_tolerance_still_too_tight_is_widened_to_half_a_unit_on_its_own_scale_and_the_expected_value_is_kept() -> None:
+def test_a_tolerance_still_too_tight_is_told_of_and_kept_as_written_never_widened() -> None:
     names = of.precision_gaps(DIGITS_PLAN)
     assert names == ["share"], "level is typed to seven digits, so 1e-07 is within its precision"
-    text, told = of.widen_to_precision(DIGITS_PLAN, names)
-    assert len(told) == 1 and "FI widened the tolerance" in told[0] and "of the value" in told[0]
-    from core import plan as _plan
-    oracles = {o["name"]: o for o in _plan.raw_design_block(text)["protocol"]["oracles"]}
-    assert oracles["share"]["expected"] == 0.5123 and oracles["share"]["tolerance_mode"] == "relative"
-    assert oracles["share"]["tolerance"] * 0.5123 >= 5e-5 and oracles["share"]["tolerance"] * 0.5123 < 5.0001e-5
-    assert oracles["level"]["tolerance"] == 1e-7, "a check not named is not touched"
-    assert "share" not in of.precision_gaps(text), "widened once, no longer tighter than its digits"
-    assert of.widen_to_precision(text, names) == (text, [])
+    told = of.tight_tolerance_notes(DIGITS_PLAN, names)
+    assert len(told) == 1 and "FI kept the tolerance as the plan wrote it" in told[0] and "of the value" in told[0]
+    assert of.tight_tolerance_notes(DIGITS_PLAN, ["level"]) == [], "a check not named is not told of"
+    assert not hasattr(of, "widen_to_precision"), "no function widens a tolerance any more"
+    assert of.precision_gaps(DIGITS_PLAN) == ["share"], "the plan text is not changed, so the gap is still there"
 
 
-def test_a_genuinely_wrong_value_still_fails_after_the_tolerance_is_widened_and_a_rounded_one_passes() -> None:
+def test_a_value_just_outside_a_tight_tolerance_fails_and_is_not_made_to_pass_by_widening() -> None:
     from core import oracle_check as oc
     check = {"name": "level", "kind": "special_case", "expected": 0.017409, "tolerance": 1e-7, "case": {"dt": 0.1},
              "measure": "y_end"}
     text = DIGITS_PLAN.replace("0.0174090", "0.017409")
-    text, _told = of.widen_to_precision(text, of.precision_gaps(text))
     from core import plan as _plan
-    widened = _plan.raw_design_block(text)["protocol"]["oracles"][0]
-    assert widened["tolerance"] == pytest.approx(5e-7)
-    for value, passes in ((0.0174088, True), (0.017409 + 10 * widened["tolerance"], False), (0.017409 - 1e-4, False)):
-        judged = oc.judged([{**check, "tolerance": widened["tolerance"]}], {"checks": [{"name": "level", "value": value}]})
+    kept = _plan.raw_design_block(text)["protocol"]["oracles"][0]
+    assert kept["tolerance"] == pytest.approx(1e-7)
+    for value, passes in ((0.0174090005, True), (0.0174088, False), (0.017409 - 1e-4, False)):
+        judged = oc.judged([{**check, "tolerance": kept["tolerance"]}], {"checks": [{"name": "level", "value": value}]})
         assert judged[0]["passed_by_engine"] is passes, value
 
 
@@ -668,16 +664,18 @@ def test_the_one_time_ask_tells_the_plan_to_write_an_exact_value_with_enough_dig
            "(for example 0.300000" in ask
 
 
-def test_the_widening_is_in_the_run_record_the_paper_s_limitations_carry(tmp_path: Path) -> None:
+def test_the_kept_tolerance_is_in_the_run_record_the_paper_s_limitations_carry(tmp_path: Path) -> None:
     import json
     from core import disclosure
     (tmp_path / ".fi").mkdir()
     (tmp_path / ".fi" / "oracle_review.json").write_text(
-        json.dumps({"tolerance_widened": ["The check 'level' expects 0.04978 ... FI widened the tolerance to 5e-06"]}),
+        json.dumps({"tolerance_kept": ["The check 'level' expects 0.04978 ... FI kept the tolerance as the plan wrote it"],
+                    "tolerance_widened": ["An earlier version: FI widened the tolerance to 5e-06"]}),
         encoding="utf-8")
-    assert "FI widened the tolerance to 5e-06." in disclosure.run_record(tmp_path)
+    record = disclosure.run_record(tmp_path)
+    assert "FI kept the tolerance as the plan wrote it." in record and "FI widened the tolerance to 5e-06." in record
     (tmp_path / ".fi" / "oracle_review.json").write_text("{}", encoding="utf-8")
-    assert "widened" not in disclosure.run_record(tmp_path)
+    assert "kept the tolerance" not in disclosure.run_record(tmp_path)
 
 
 def test_an_expected_value_typed_as_a_string_is_not_a_number_to_the_oracle_so_it_is_asked_for_a_number() -> None:
@@ -687,3 +685,48 @@ def test_an_expected_value_typed_as_a_string_is_not_a_number_to_the_oracle_so_it
     assert oc.limit_of(check)[1] is None, "the oracle does not read a string as a number"
     assert oc.unjudgeable([check]) and "numeric `expected`" in oc.unjudgeable([check])[0]
     assert of.enforce({"oracles": [check]}).precision == [], "the precision rule has nothing to count; the numeric ask does"
+
+
+FORMULA_PLAN = '''# Plan
+
+## The design
+
+```yaml
+hypothesis: h
+protocol:
+  oracles:
+    - name: rate_exact
+      kind: special_case
+      expected: 0.04
+      tolerance: 0.003
+      case: {p: 0.2}
+      measure: mean(y_end)
+      expected_formula: (1 - p) * 0.05
+    - name: rate_no_formula
+      kind: special_case
+      expected: 0.04
+      tolerance: 0.003
+      case: {p: 0.2}
+      measure: y_end
+```
+'''
+
+
+def test_a_check_whose_formula_fi_computes_and_finds_the_same_is_exact_and_not_asked_about_its_digits() -> None:
+    """0.04 is typed to one digit, but FI's own computation of `(1 - p) * 0.05` is 0.04: the typed digits are not its
+    uncertainty, so nothing is asked and nothing is said about its tolerance 0.003. The same value with no formula is."""
+    assert of.precision_gaps(FORMULA_PLAN) == ["rate_no_formula"]
+    assert of.tight_tolerance_notes(FORMULA_PLAN) and all("rate_exact" not in n for n in of.tight_tolerance_notes(FORMULA_PLAN))
+    assert of.precision_requests(FORMULA_PLAN, ["rate_exact"]) == []
+    _text, _rewrites, requests = of.apply_to_plan(FORMULA_PLAN)
+    assert any("rate_no_formula" in r for r in requests) and not any("rate_exact" in r for r in requests)
+
+
+def test_the_digits_rule_is_left_out_after_the_plan_was_asked_once_so_nothing_is_asked_twice() -> None:
+    _text, _rewrites, requests = of.apply_to_plan(FORMULA_PLAN, precision_asks=False)
+    assert requests == []
+
+
+def test_a_formula_that_gives_another_number_does_not_make_a_check_exact() -> None:
+    wrong = FORMULA_PLAN.replace("(1 - p) * 0.05", "(1 - p) * 0.07")
+    assert "rate_exact" in of.precision_gaps(wrong)

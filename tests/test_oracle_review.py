@@ -589,25 +589,25 @@ def _tolerance_of(engine: Engine) -> float:
 
 
 @pytest.mark.asyncio
-async def test_a_tolerance_the_plan_leaves_tighter_than_its_expected_value_s_digits_is_widened_and_said(tmp_path: Path) -> None:
+async def test_a_tolerance_the_plan_leaves_tighter_than_its_expected_value_s_digits_is_kept_and_said(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW)  # asked once, it changes nothing
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 1 and "written to 4 significant digits" in model.revisions[0]
-    assert _tolerance_of(engine) == 5e-06, "half a unit of the last digit of 0.04978"
+    assert _tolerance_of(engine) == 1e-06, "never widened to half a unit of the last digit of 0.04978"
     assert plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["expected"] == 0.04978
     section = _section(engine)
-    assert "FI widened the tolerance to 5e-06" in section and "Still not in its kind's form" not in section
+    assert "FI kept the tolerance as the plan wrote it" in section and "Still not in its kind's form" not in section
     record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
-    assert len(record["tolerance_widened"]) == 1
-    # Once: another pass through the plan step asks and widens nothing more.
+    assert len(record["tolerance_kept"]) == 1 and not record.get("tolerance_widened")
+    # Once: another pass through the plan step asks and says nothing more.
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
-    assert len(model.revisions) == 1 and _tolerance_of(engine) == 5e-06
+    assert len(model.revisions) == 1 and _tolerance_of(engine) == 1e-06
 
 
 @pytest.mark.asyncio
-async def test_a_plan_that_fixes_the_tolerance_when_asked_is_not_widened(tmp_path: Path) -> None:
+async def test_a_plan_that_fixes_the_tolerance_when_asked_is_not_told_of(tmp_path: Path) -> None:
     def looser(block: dict[str, Any]) -> dict[str, Any]:
         oracles = [{**o, "tolerance": 2e-5} for o in block["protocol"]["oracles"]]
         return {**block, "protocol": {**block["protocol"], "oracles": oracles}}
@@ -618,7 +618,7 @@ async def test_a_plan_that_fixes_the_tolerance_when_asked_is_not_widened(tmp_pat
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert _tolerance_of(engine) == 2e-5
     record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
-    assert not record.get("tolerance_widened")
+    assert not record.get("tolerance_kept") and not record.get("tolerance_widened")
 
 
 def _adds_a_tight_check(fix_on_second_ask: bool):
@@ -636,7 +636,7 @@ def _adds_a_tight_check(fix_on_second_ask: bool):
 
 
 @pytest.mark.asyncio
-async def test_a_too_tight_check_the_reply_added_is_asked_about_once_and_then_widened_with_its_own_sentence(
+async def test_a_too_tight_check_the_reply_added_is_asked_about_once_and_then_kept_with_its_own_sentence(
         tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=_adds_a_tight_check(False))
@@ -645,41 +645,71 @@ async def test_a_too_tight_check_the_reply_added_is_asked_about_once_and_then_wi
     assert len(model.revisions) == 2, "the first ask, and one more for the check the reply added"
     assert "'second level'" in model.revisions[1] and "decay at t=1" not in model.revisions[1].split("These checks do not fit")[-1]
     got = {o["name"]: o["tolerance"] for o in plan.load_design(engine.quest_root)[0]["protocol"]["oracles"]}
-    assert got == {"decay at t=1": 5e-06, "second level": 5e-05}
-    told = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_widened"]
+    assert got == {"decay at t=1": 1e-06, "second level": 1e-05}, "no tolerance is widened"
+    told = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_kept"]
     assert len(told) == 2
-    assert "asked once, did not fix it" in told[0] and "'decay at t=1'" in told[0]
+    assert "asked once, did not change it" in told[0] and "'decay at t=1'" in told[0]
     assert "added this check in its reply and was asked about it once more" in told[1] and "'second level'" in told[1]
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 2, "never asked again"
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_reply_added_is_not_widened_when_the_second_ask_fixes_it(tmp_path: Path) -> None:
+async def test_a_check_the_reply_added_is_not_told_of_when_the_second_ask_fixes_it(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW, revise=_adds_a_tight_check(True))
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     got = {o["name"]: o["tolerance"] for o in plan.load_design(engine.quest_root)[0]["protocol"]["oracles"]}
-    assert got == {"decay at t=1": 5e-06, "second level": 1e-3}
-    assert len(json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_widened"]) == 1
+    assert got == {"decay at t=1": 1e-06, "second level": 1e-3}
+    assert len(json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))["tolerance_kept"]) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_resume_after_an_unanswered_ask_widens_only_the_checks_it_asked_about_and_says_so(tmp_path: Path) -> None:
+async def test_a_resume_after_an_unanswered_ask_tells_only_of_the_checks_it_asked_about(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     model = _Model(DIGITS_PROTOCOL, DIGITS_REVIEW)
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
-    # As if the run had stopped while the request was out, with the plan as the reply left it (not widened yet).
-    path = plan.plan_path(engine.quest_root)
-    path.write_text(path.read_text(encoding="utf-8").replace("5e-06", "1e-06").replace("5.0e-06", "1.0e-06"), encoding="utf-8")
+    # As if the run had stopped while the request was out, with the plan as the reply left it.
     record_path = engine.fi_dir / "oracle_review.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    record_path.write_text(json.dumps({**record, "answered": False, "tolerance_widened": []}), encoding="utf-8")
+    record_path.write_text(json.dumps({**record, "answered": False, "tolerance_kept": []}), encoding="utf-8")
     (engine.fi_dir / "oracle_guidance.json").unlink()
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.revisions) == 1, "not asked again"
-    assert _tolerance_of(engine) == 5e-06
-    assert "FI widened the tolerance" in _section(engine)
-    assert "is widened" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert _tolerance_of(engine) == 1e-06
+    assert "FI kept the tolerance as the plan wrote it" in _section(engine)
+    assert "is said so in the plan" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_check_whose_formula_fi_computes_keeps_its_own_tolerance_and_is_not_asked_or_told(tmp_path: Path) -> None:
+    """The expected value 0.04 is typed to one digit but FI computes its formula as 0.04: it is exact, so its tolerance
+    0.003 (tighter than the typed digits) is neither asked about, widened, nor listed as kept."""
+    exact = {**DIGITS_CHECK, "name": "rate", "expected": 0.04, "tolerance": 0.003, "case": {"n": 4, "p": 0.2},
+             "expected_formula": "(1 - p) * 0.05"}
+    engine = Engine(_config(tmp_path))
+    model = _Model({**DIGITS_PROTOCOL, "oracles": [exact]}, DIGITS_REVIEW)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert not any("significant digits" in r for r in model.revisions)
+    assert _tolerance_of(engine) == 0.003
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert not record.get("tolerance_kept") and not record.get("tolerance_widened")
+    assert "kept the tolerance" not in _section(engine) and "widened" not in _section(engine)
+    assert "widen" not in (engine.fi_dir / "run.log").read_text(encoding="utf-8").lower().replace("never widen", "")
+
+
+@pytest.mark.asyncio
+async def test_a_check_with_no_formula_is_asked_once_and_the_outcome_is_said_without_any_change(tmp_path: Path) -> None:
+    plain = {**DIGITS_CHECK, "name": "rate", "expected": 0.04, "tolerance": 0.003}
+    engine = Engine(_config(tmp_path))
+    model = _Model({**DIGITS_PROTOCOL, "oracles": [plain]}, DIGITS_REVIEW)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert sum("significant digits" in r for r in model.revisions) == 1
+    assert _tolerance_of(engine) == 0.003
+    assert "FI kept the tolerance as the plan wrote it" in _section(engine)
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "kept the tolerance as the plan wrote it" in log

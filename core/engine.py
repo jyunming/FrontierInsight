@@ -18573,11 +18573,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if progress.get("asked") and not progress.get("answered"):
             # The request went out in a run that stopped before its answer was read: it is not made again, and the plan
             # says so.
-            # Only the checks the recorded ask was about are widened, and only those the plan left tighter than their digits.
-            widened = self._widen_to_precision(path, list(progress.get("precision_asked") or []),
-                                               added=progress.get("precision_added_asked") or [])
-            if widened:
-                requests = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)[2]
+            # Only the checks the recorded ask was about are told of, and only those the plan left tighter than their
+            # digits (their tolerance is not changed).
+            widened = self._note_tight_tolerances(path, list(progress.get("precision_asked") or []),
+                                                  added=progress.get("precision_added_asked") or [])
+            requests = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs, precision_asks=False)[2]
             self._write_plan_section(path, [
                 "", "- FI asked the plan once to change its checks, and the quest stopped before an answer to it could "
                 "be used; it was not asked again. Read the checks in the block below before the run.",
@@ -18587,7 +18587,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again, and a tolerance it was asked about that is still tighter "
-                              "than its expected value's digits is widened")
+                              "than its expected value's digits is said so in the plan (it is not changed)")
         elif (requests or findings or formula_asks or example_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
@@ -18640,16 +18640,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if len(after) < len(before):
                 self._log.warning("[oracle] the plan has fewer checks against known answers after it was asked (%d, was %d)",
                                   len(after), len(before))
-            text, again, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
+            text, again, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs, precision_asks=False)
             if again:
                 path.write_text(text, encoding="utf-8")
-            # A tolerance the plan, asked once, left tighter than its expected value's own digits is widened by FI. A
-            # check the reply ADDED that is too tight was not asked about: it is asked about once, then widened.
-            widened = self._widen_to_precision(path, too_tight)
+            # A tolerance the plan, asked once, left tighter than its expected value's own digits stays as written and
+            # is said so (never widened). A check the reply ADDED that is too tight was not asked about: it is asked
+            # about once, then said so the same way.
+            widened = self._note_tight_tolerances(path, too_tight)
             widened += await self._precision_of_added_checks(path, too_tight)
             if widened:
                 again = [*again, *widened]
-                text, _more, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
             for r in left:
                 self._log.warning("[oracle] still not in its kind's form after the plan was asked once: %s", r)
             self._write_plan_section(path, [
@@ -18679,7 +18679,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     async def _precision_of_added_checks(self, path: Path, asked: list[str]) -> list[str]:
         """A check the reply to the ask added that is tighter than its expected value's digits was never asked about: it is
-        asked about once, for that check only, and widened (and said so) when that does not fix it. The sentences."""
+        asked about once, for that check only, and said so (its tolerance is not changed) when that does not fix it. The sentences."""
         known = {str(n).strip().lower() for n in asked}
         added = [n for n in _forms.precision_gaps(path.read_text(encoding="utf-8")) if n.strip().lower() not in known]
         record = self._oracle_review_read()
@@ -18692,27 +18692,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _forms.precision_requests(path.read_text(encoding="utf-8"), added)))
         if failed:
             self._log.warning("[oracle] %s", failed)
-        return self._widen_to_precision(path, added, added=added)
+        return self._note_tight_tolerances(path, added, added=added)
 
-    def _widen_to_precision(self, path: Path, names: list[str] | None = None, added: list[str] | None = None) -> list[str]:
-        """Widen, in plan.md, the tolerance of each named check (the ones the plan was asked about) that is still smaller
-        than half a unit of the last digit
-        of its expected value (:func:`core.oracle_forms.widen_to_precision`) and say so: in the log, as a version of the
-        plan by the engine, among the checks the engine changed (shown before the freeze) and in ``oracle_review.json``.
-        The sentences, or ``[]`` when nothing was widened."""
-        text, told = _forms.widen_to_precision(path.read_text(encoding="utf-8"), names, added)
+    def _note_tight_tolerances(self, path: Path, names: list[str] | None = None, added: list[str] | None = None) -> list[str]:
+        """Say, for each named check (the ones the plan was asked about) whose tolerance is still smaller than half a unit
+        of the last digit of its expected value (:func:`core.oracle_forms.tight_tolerance_notes`), that FI kept it as the
+        plan wrote it: in the log and in ``oracle_review.json`` (``tolerance_kept``, which the paper's limitations carry).
+        A tolerance is never widened to the digits the plan typed. The sentences, or ``[]`` when there are none."""
+        told = _forms.tight_tolerance_notes(path.read_text(encoding="utf-8"), names, added)
         if not told:
             return []
-        before = self._planned_oracles()
-        path.write_text(text, encoding="utf-8")
-        _plan.record_version(self.quest_root, text, by="engine",
-                             note="a tolerance widened to the precision of its expected value")
-        changed = [n for n, o in self._planned_oracles().items() if before.get(n) != o]
-        self._note_engine_change(changed, reason="; ".join(told) + ".")
         for sentence in told:
             self._log.warning("[oracle] %s", sentence)
         record = self._oracle_review_read()
-        self._oracle_review_write({**record, "tolerance_widened": [*record.get("tolerance_widened", []), *told]})
+        self._oracle_review_write({**record, "tolerance_kept": [*record.get("tolerance_kept", []), *told]})
         return told
 
     def _simulation_ran(self) -> bool:
