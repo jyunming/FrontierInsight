@@ -300,3 +300,15 @@ async def test_a_render_that_fails_leaves_the_earlier_drafts_removed_list(tmp_pa
     with pytest.raises(RuntimeError):
         await eng._node_write({"paper_md": str(path)})  # type: ignore[arg-type]
     assert record.read_bytes() == kept
+
+
+def test_a_claim_kept_only_by_its_stored_passage_is_listed_but_its_sentence_is_not_cut(tmp_path: Path) -> None:
+    """The passage match widens the Limitations listing only: a reworded claim whose passage holds a number is stated as
+    unconfirmed, and its sentence stays in the paper (the take-out gets the claims it got before)."""
+    eng, path = _paper(tmp_path)
+    g = _grounding()
+    g["claims"] = [_claim("A fit quality of at least 0.9991 holds throughout", "unsupported", "x", TYPED)]
+    n = eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
+    text = path.read_text(encoding="utf-8")
+    assert n == 1 and TYPED in text.split("## Limitations")[0]
+    assert "A fit quality of at least 0.9991 holds throughout" in text.split("## Limitations")[1]

@@ -26866,10 +26866,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # FI's own blocks quote claims too (the Limitations block does): only the writer's text says what the paper holds
             flat = " ".join(_paper_facts.without_blocks(before).split())
             sentences = re.split(r"(?<=[.!?])\s+", flat)
+            # The passage the check stored for a claim (``where``) is the exact way to find it again; the claim's own
+            # wording is only the fallback for a claim with no stored passage in the paper.
+            keyed = " ".join(_paper_facts.to_placeholders(_paper_facts.without_blocks(before)).split())
+            by_wording = [c for c in grounding.get("claims") or []
+                          if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
+                          and (" ".join(str(c["claim"]).split()) in flat
+                               or any(_same_statement(str(c["claim"]), s) for s in sentences))]
+            # The passage match widens the Limitations listing only; the take-out of sentences with a number below is given
+            # exactly the claims that matched by wording, as before.
             standing = [c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
-                        and (" ".join(str(c["claim"]).split()) in flat
-                             or any(_same_statement(str(c["claim"]), s) for s in sentences))]
+                        and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
             # A sentence the check found unsupported that states a number is not delivered (core/record_claims.py): it is
             # taken out of the paper and the Limitations say so. One with no number stays and is stated as unconfirmed.
             # The paper, the claim list, the receipt, the record and the Limitations change together: if any write fails,
@@ -26877,7 +26885,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             snapshot = self._snapshot_files(paper_path)
             removed: list[dict[str, Any]] = []
             try:
-                text, removed = self._plan_take_out_unsupported_numbers(state, paper_path, standing)
+                text, removed = self._plan_take_out_unsupported_numbers(state, paper_path, by_wording)
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
                     _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
@@ -30922,6 +30930,16 @@ def _unsupported_still_in(paper_text: str, earlier: list[Any], claims: list[dict
                     "evidence": f"{str(c.get('evidence') or '').strip()} (an earlier check found it unsupported; the "
                                 "sentence is unchanged and this check did not judge it again)".strip()})
     return out
+
+
+def _passage_stands(claim: dict[str, Any], *texts: str) -> bool:
+    """Whether a passage the claim check stored for ``claim`` (``where``) is still in one of ``texts`` (the writer's text,
+    spaces made single): the claim is found by that exact passage, never by its wording."""
+    for w in claim.get("where") or []:
+        passage = " ".join(str(w.get("passage") or "").split()) if isinstance(w, dict) else ""
+        if passage and any(passage in t for t in texts):
+            return True
+    return False
 
 
 def _same_statement(a: str, b: str) -> bool:
