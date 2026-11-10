@@ -99,7 +99,11 @@ class Verdict:
 def time_allowed(quest_root: Path | str, limit_s: float | None = None) -> float | None:
     """The seconds a rerun may take, from the run record, ``None`` when the record says nothing. The study's entry runs the
     settings one after another, so what it needs is what the run's settings took in all (``settings_s``, times
-    :data:`SERIAL_FACTOR`), or the wall time when that is longer; the answer is :data:`SLACK` times that, and never above ``limit_s`` (the quest's own limit for one run)."""
+    :data:`SERIAL_FACTOR`), or the wall time when that is longer; the answer is :data:`SLACK` times that, and never above ``limit_s`` (the quest's own limit for one run).
+    For a search for the best design the entry runs the coarse scan and then every evaluation one after another, so the
+    evaluations' own times (``evaluations_s``) are settings' times too, and the wall time is the scan's, the search's and
+    FI's check of its best design (:func:`core.run_facts.run_seconds`; the entry does not run the check, so it is a
+    generous floor)."""
     from . import run_facts as _run_facts
 
     run = _run_facts.read(quest_root).get("trials_run")
@@ -108,8 +112,9 @@ def time_allowed(quest_root: Path | str, limit_s: float | None = None) -> float 
         v = run.get(name) if isinstance(run, dict) else None
         return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else None
 
-    wall, settings = seconds("wall_s"), seconds("settings_s")
-    seen = [x for x in (wall, None if settings is None else SERIAL_FACTOR * settings) if x is not None]
+    wall = _run_facts.run_seconds(quest_root)
+    own = [x for x in (seconds("settings_s"), seconds("evaluations_s")) if x is not None]  # each setting's and evaluation's process
+    seen = [x for x in (wall, SERIAL_FACTOR * sum(own) if own else None) if x is not None]
     if not seen:
         return None
     allowed = max(FLOOR_S, SLACK * max(seen))
