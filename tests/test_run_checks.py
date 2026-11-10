@@ -1016,10 +1016,12 @@ async def test_settings_run_at_once_make_a_run_fit_that_one_after_another_would_
 
 
 @pytest.mark.asyncio
-async def test_a_kept_speed_up_makes_fi_measure_again_before_it_chooses_how_settings_share_processes(tmp_path: Path) -> None:
+async def test_a_kept_speed_up_makes_fi_measure_again_before_it_chooses_how_settings_share_processes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A study over the time allowed was checked for sharing processes on the slow simulation, then a speed-up was kept, and
     the faster simulation was never checked again: it ran one process per setting on timings of the slow one (the slowdown
     at once, the verdict on sharing). After a kept speed-up both are measured again, once."""
+    _every_study_is_long(monkeypatch)
     eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8, grid={"n": [1, 2, 4], "m": [1, 2, 3, 4]})
     runner.at_once = 4
     eng._pilot_spent = 0.0
@@ -1245,7 +1247,15 @@ def _speed_reply(find: str, replace: str) -> str:
     return json.dumps({"file": "simulate.py", "find": find, "replace": replace, "why": "the same sum, worked out once"})
 
 
-async def _slow_search(tmp_path: Path, replies: list[str]) -> tuple[Engine, Any, AsyncMock]:
+def _every_study_is_long(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.0) -> None:
+    """The tests' studies take seconds; the speed-up's gate (ten minutes on a real study) is set to ``seconds`` here."""
+    from core import improve_speed
+
+    monkeypatch.setattr(improve_speed, "WORTH_SPEEDING_UP_S", seconds)
+
+
+async def _slow_search(tmp_path: Path, replies: list[str], monkeypatch: pytest.MonkeyPatch) -> tuple[Engine, Any, AsyncMock]:
+    _every_study_is_long(monkeypatch)
     block = copy.deepcopy(_SCAN_BLOCK)
     block["grid"] = {"axis0": [0, 1, 2]}
     block["evaluation_budget"] = {"starts": 2, "per_start": 50}
@@ -1260,25 +1270,27 @@ async def _slow_search(tmp_path: Path, replies: list[str]) -> tuple[Engine, Any,
 
 @pytest.mark.asyncio
 async def test_a_search_too_slow_to_fit_gets_a_faster_simulation_with_the_same_numbers_before_the_plan_is_asked(
-        tmp_path: Path) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A real search was timed at 12 days for 8 h allowed and went straight to asking the plan for a smaller study: the step
     that makes the simulation faster with the same numbers ran for measurements only. The same simulation is sped up for a
     search, and timed again: here the whole study then fits."""
-    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONCE)])
+    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONCE), "{}"], monkeypatch)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
-    assert chat.await_count == 1
+    # the first round is kept; a second is asked only when it can still pay for itself, and saves nothing here
+    assert chat.await_count in (1, 2)
     assert _ONCE in (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
-    assert record["kept"] is True and record["speedup"] > 5
+    assert record["kept"] is True and record["speedup"] > 5 and record["rounds"][0]["outcome"] == "kept"
     # The timing right after the change is of the scan only; the line says so (the whole study is timed again after).
     assert "the search's coarse scan would now take" in _log(eng) and "the study would now take" not in _log(eng)
 
 
 @pytest.mark.asyncio
-async def test_a_search_speed_up_that_changes_a_number_only_away_from_the_scan_is_not_kept(tmp_path: Path) -> None:
+async def test_a_search_speed_up_that_changes_a_number_only_away_from_the_scan_is_not_kept(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The scan here computes one design only; a change that keeps its number but alters the ones the search would compute
     elsewhere is caught on the search's own designs, and the plan is then asked to fit, as before."""
-    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONLY_AT_THE_BASE)])
+    eng, runner, chat = await _slow_search(tmp_path, [_speed_reply(_WASTE, _ONLY_AT_THE_BASE)], monkeypatch)
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert "fit" in _cut(eng)
     record = json.loads((eng.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
@@ -1461,3 +1473,76 @@ async def test_a_check_given_another_environment_than_the_runs_is_still_refused(
     await runner.execute([sys.executable, str(eng.quest_root / "code" / "experiment.py")], cwd=eng.quest_root, timeout_s=60,
                          env=eng._first_run_env(None))
     assert "not used as the run (its env is not the real run's)" in _log(eng)
+
+
+# ---- every long study is sped up before it is sized, fitting or not; a short one is not ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_measurement_that_fits_but_is_long_is_sped_up_before_it_is_sized_and_a_short_one_is_not(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A study that fit its time but would take hours was never sped up: the step ran only when it did not fit. Now the
+    padded whole-study estimate decides (ten minutes on a real study; the gate is set to this test's scale)."""
+    calls: list[Any] = []
+
+    async def speed_up(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(a[8])  # the estimate it was given
+        return {"kept": False}
+
+    _every_study_is_long(monkeypatch)
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(calls) == 1 and run_estimate.read_record(eng.quest_root)["fits"] is True
+    # under the gate: no speed-up, one line saying why
+    _every_study_is_long(monkeypatch, 1e9)
+    eng, model, runner, ex = await _sizing(tmp_path / "short", timeout_s=3600)
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(calls) == 1
+    assert _log(eng).count("so FI does not try to make the simulation faster") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_fits_but_is_long_is_sped_up_on_its_whole_estimate_and_a_short_one_is_not(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The search path had the same gap: its fitting branch returned before the speed-up. The estimate it is given is the
+    whole study's (the scan with the search's evaluations), not the coarse scan alone."""
+    calls: list[Any] = []
+
+    async def speed_up(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append((a[8], k.get("extra_cells")))
+        return {"kept": False}
+
+    block = copy.deepcopy(_SCAN_BLOCK)
+    block["grid"] = {"axis0": [0, 1, 2]}
+    _every_study_is_long(monkeypatch)
+    eng, runner = await _search_engine(tmp_path, block)
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(calls) == 1 and calls[0][1], "the search's own designs are in the sample"
+    whole = calls[0][0]
+    assert whole.cells > 3, "the estimate given is the scan with the search's evaluations"
+    _every_study_is_long(monkeypatch, 1e9)
+    eng, runner = await _search_engine(tmp_path / "short", block)
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(calls) == 1 and "so FI does not try to make the simulation faster" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_short_measurement_that_does_not_fit_is_sped_up_before_it_is_cut(tmp_path: Path) -> None:
+    """The ten-minute skip is for a study that fits: one that does not fit its time allowed is sped up first, however
+    short, and only then cut (the runs lowered). The real ten-minute gate stands here; the study takes seconds."""
+    calls: list[str] = []
+
+    async def speed_up(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append("speed_up")
+        return {"kept": False}
+
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8)
+    eng._speed_up = speed_up  # type: ignore[method-assign]
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert calls == ["speed_up"], "a study over its time is sped up before it is cut"
+    assert run_estimate.read_record(eng.quest_root).get("reduced"), "and then cut"
+    assert "so FI does not try to make the simulation faster" not in _log(eng)

@@ -52,6 +52,7 @@ from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import outside_run as _outside
+from . import run_facts as _run_facts
 from . import step_writes as _step_writes
 from . import trial_runner as _trials
 
@@ -845,6 +846,22 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
     return kept[0] if kept is not None else None
 
 
+def keep_search_time(quest_root: Path, rows: list[Any], *, scan_ran: bool, scan_s: float, scan_replayed: bool) -> float:
+    """Keep what the evaluations of a search cost in FI's run record (``.fi/run_facts.json``, beside the coarse scan's, which
+    the scan wrote as it finished): how many designs were evaluated and their process times added up, from the search's own
+    rows (the scan's rows are the scan's). Returns the seconds of the coarse scan inside this call's wall time, so its record
+    says them apart: this call's scan, or 0 for a search that continues an earlier one and took its scan from it (that scan
+    ran before this call's time began; the run record keeps its wall time, which counts it once)."""
+    if not scan_ran:
+        scan_s = 0.0
+    done = [r for r in rows if isinstance(r, dict) and r.get("event", "evaluation") == "evaluation" and r.get("stage") != "scan"]
+    spent = [r["elapsed_s"] for r in done if isinstance(r.get("elapsed_s"), (int, float))
+             and not isinstance(r["elapsed_s"], bool) and math.isfinite(r["elapsed_s"])]
+    _run_facts.record_evaluations(quest_root, evaluations=len(done), evaluations_s=sum(spent) if spent else None,
+                                  keep_scan=scan_ran or scan_replayed)
+    return scan_s
+
+
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
                      base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
                      frozen: bool = False, at_once: int = 1, stop_flat: bool = True,
@@ -1030,6 +1047,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             (quest_root / rel).unlink(missing_ok=True)
 
     scanned: dict[str, dict[str, Any]] = {}
+    scan_runs: list[tuple[Any, float]] = []  # the coarse scans this call ran, with the wall seconds of each
 
     async def scan(grid: dict[str, list[Any]], scan_block: dict[str, Any] | None = None,
                    level: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -1044,6 +1062,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         left = deadline - time.monotonic()
         if left <= 0:
             return []
+        scan_began = time.monotonic()
         trial_run = await _trials.run_trials(
             executor, python, quest_root, module, grid, runs_per_setting=runs, base_seed=int(base_seed),
             deterministic=entry == "run_cell", timeout_s=max(1, math.ceil(left)), env=env,
@@ -1051,6 +1070,9 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             run_id=run_id,
         )
         stderr_parts.append(trial_run.stderr())
+        # How long the scan took is kept in FI's run record, as for a measurement (core/run_facts.py).
+        scan_runs.append((trial_run, trial_run.wall_s if trial_run.wall_s is not None else time.monotonic() - scan_began))
+        _trials.keep_runs_time(quest_root, key, [r for r, _w in scan_runs], sum(w for _r, w in scan_runs))
         summary = json.loads(trial_run.summary_path.read_text(encoding="utf-8"))
         scanned[grid_key] = summary
         reasons = {c.key: next((r.get("reason") for r in c.rows if r.get("reason")), "") for c in trial_run.cells}
@@ -1245,8 +1267,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     outcome = done_outcome or {}
     elapsed = time.monotonic() - started + before_s
     planned = _plan.budget(block)
+    scan_s = keep_search_time(quest_root, outcome.get("rows") or [], scan_ran=bool(scan_runs), scan_s=sum(w for _r, w in scan_runs),
+                              scan_replayed=replay_scan is not None)
     extra = {
         "time": {"seconds": round(elapsed, 3),
+                 **({"scan_seconds": round(min(scan_s, elapsed), 3)} if scan_s > 0 else {}),
                  "seconds_per_evaluation": (round(elapsed / outcome["evaluations"], 4)
                                             if outcome.get("evaluations") else None),
                  "estimated_seconds": planned.get("seconds"),

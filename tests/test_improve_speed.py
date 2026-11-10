@@ -78,12 +78,14 @@ def _engine(tmp_path: Path, rounds: int = 3, source: str = SLOW) -> Engine:
     return engine
 
 
-async def _speed(engine: Engine, model: _Model) -> dict[str, Any]:
+async def _speed(engine: Engine, model: _Model, seconds: float = 10.0) -> dict[str, Any]:
+    """The speed-up on a study FI estimates at ``seconds`` (unpadded) for 10 s allowed: too slow to fit. A long one
+    (``seconds`` in hours) lets the rounds go on, since a round then costs far less than a tenth of the study."""
     engine._client = model
     root = engine.quest_root
     runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
     grid = {"s": [1, 2, 3]}
-    big = SimpleNamespace(seconds=10.0)
+    big = SimpleNamespace(seconds=seconds)
     return await engine._speed_up({}, runner, engine.executor.python_path(root), None, grid, 50, {}, {}, big, 10.0)
 
 
@@ -95,17 +97,39 @@ def test_the_sample_must_return_the_same_numbers_and_take_clearly_less_time() ->
     assert sp.disagreements(a, same) == []
     assert len(sp.disagreements(a, off)) == 1 and "x" in sp.disagreements(a, off)[0]
     assert sp.disagreements(a, gone) and "only in one" in sp.disagreements(a, gone)[0]
-    assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(1.0, 0.8) and not sp.fast_enough(0.0, 0.0)
+    assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(0.0, 0.0)
+
+
+def test_a_change_is_kept_when_it_saves_a_tenth_and_more_than_two_runs_of_the_same_code_differ() -> None:
+    """The step kept a change only at a quarter less time, so a study that a change made 15% faster ran at its old speed.
+    The rule is now a tenth, and more than the noise FI measured: the two samples of the unchanged code."""
+    assert sp.fast_enough(1.0, 0.85) and sp.fast_enough(1.0, 0.89)
+    assert not sp.fast_enough(1.0, 0.95)
+    # a saving of 0.15 s is not a saving when two runs of the same code already differ by 0.2 s
+    assert not sp.fast_enough(1.0, 0.85, 0.2) and sp.fast_enough(1.0, 0.85, 0.1)
+
+
+def test_a_study_is_sped_up_when_fi_expects_it_to_take_ten_minutes_or_more_whether_it_fits_or_not() -> None:
+    """A study that fit its time but took hours was never sped up: the step ran only when FI's estimate said it would not
+    fit. The gate is now the padded whole-study estimate alone."""
+    assert sp.worth_speeding_up(600.0) and sp.worth_speeding_up(5 * 3600.0)
+    assert not sp.worth_speeding_up(599.0) and not sp.worth_speeding_up(None)
+    # a study that does not fit is sped up before it is cut, however short
+    assert sp.worth_speeding_up(30.0, fits=False) and not sp.worth_speeding_up(30.0, fits=True)
+    assert sp.not_worth_it_line(300.0) == ("The study fits and is expected to take about 5 minutes, under 10 minutes, so FI "
+                                           "does not try to make the simulation faster.")
 
 
 @pytest.mark.asyncio
 async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them_and_is_faster_is_kept(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     model = _Model([_edit(LOOP, CHEAT), _edit(LOOP, FAST)])
-    out = await _speed(engine, model)
+    out = await _speed(engine, model, seconds=10_000.0)
     text = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert out["rounds"][0]["outcome"] == "not kept" and "number(s) of the sample changed" in out["rounds"][0]["reason"]
-    assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] == 2
+    # a change not kept does not end the step: the model is asked again, with the reason
+    assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] >= 2
+    assert "number(s) of the sample changed" in model.prompts[1]
     assert "np.sum(x * x)" in text and "x[:200]" not in text
     assert out["speedup"] > 1.5
 
@@ -233,10 +257,11 @@ def test_the_sample_takes_only_settings_the_timing_saw_finish_and_fits_the_time_
     assert why == ("2 of the sample's 3 settings are left out (FI's timing did not see 1 finish; 1 would not fit in "
                    "the time left for timing)")
     assert timeouts == {tr.cell_key({"s": 1}): 60}  # three times its 0.48 s, at least a minute
-    # a setting the timing never ran is costed as the base; a known-answer case's setting is one of these
+    # a setting the timing never ran is not costed as another one (the step times it first, untimed_cells)
     more, more_t, more_why = sp.bounded_sample([{"s": 1}, {"s": 9}], [_probe({"s": 1}, 50.0, axis=None)], runs=50,
                                         deterministic=False, budget_s=10_000.0, samples=1)
-    assert more == [{"s": 1}, {"s": 9}] and more_t[tr.cell_key({"s": 9})] == 60 and more_why == ""
+    assert more == [{"s": 1}] and tr.cell_key({"s": 9}) not in more_t and "did not see 1 finish" in more_why
+    assert sp.untimed_cells([{"s": 1}, {"s": 9}], [_probe({"s": 1}, 50.0, axis=None)]) == [{"s": 9}]
     # nothing fits, or nothing finished: the step is skipped and says why
     none, _, why = sp.bounded_sample(cells, probes, runs=50, deterministic=False, budget_s=1.0, samples=4)
     assert none == [] and "more than the" in why
@@ -309,3 +334,107 @@ async def test_an_answer_with_a_first_try_and_a_correction_is_read_as_the_correc
     entry = out["rounds"][0]
     assert "not the JSON object" not in entry["reason"], entry["reason"]
     assert "this text is not in the file" in entry["diff"] and entry["why"] != "placeholder"
+
+
+@pytest.mark.asyncio
+async def test_a_setting_the_timing_never_ran_is_timed_first_and_its_limit_is_its_own(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live quest's only speed-up try never ran: a known-answer case's setting, finer than the base, was costed as the
+    base (about 5 s) and given a minute; it did not finish, and the step stopped. Such a setting is timed on its own first,
+    and its limit in the sample comes from that timing."""
+    engine = _engine(tmp_path, rounds=1)
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True)
+    timed: list[dict[str, Any]] = []
+
+    async def time_one(executor, python, quest_root, module, cell, **kw):  # noqa: ANN001, ANN003
+        timed.append(dict(cell))
+        return est.Probe(None, None, dict(cell), 100.0, fixed_s=100.0, per_trial_s=0.0, timed_trials=1), ""
+
+    seen: dict[str, Any] = {}
+
+    async def run_sample(*a: Any, **k: Any) -> sp.Sample:
+        seen.update(cells=a[4], timeouts=k.get("timeouts"))
+        return sp.Sample(failed="stop here")
+
+    monkeypatch.setattr(est, "_time_one", time_one)
+    monkeypatch.setattr(sp, "run_sample", run_sample)
+    probes = [_probe({"s": 1}, 2.0, axis=None), _probe({"s": 2}, 2.0), _probe({"s": 3}, 2.0)]
+    record = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 1, {}, {},
+                                    SimpleNamespace(seconds=10_000.0), 100_000.0, budget_s=100_000.0, probes=probes,
+                                    deterministic=True, extra_cells=[{"s": 9}])
+    assert timed == [{"s": 9}], "only the setting the timing never ran is timed first"
+    assert {"s": 9} in seen["cells"]
+    assert seen["timeouts"][tr.cell_key({"s": 9})] == 300  # three times its own 100 s, not a minute from the base
+    assert "stop here" in record["stopped"]
+
+
+SOMETIMES_FAILS = SLOW.replace("    rng = np.random.default_rng(seed)\n",
+                               "    rng = np.random.default_rng(seed)\n    if cell['s'] == 2:\n"
+                               "        raise ValueError('no stable answer at this setting')\n")
+
+
+@pytest.mark.asyncio
+async def test_a_sample_that_does_not_run_says_why(tmp_path: Path) -> None:
+    """A live quest's sample stopped at '0 of 1 trials ran at <setting>' and kept no reason: the trial's error and the
+    time limit it reached were both dropped. The reason now reaches the record (and run.log, which says the same)."""
+    engine = _engine(tmp_path, source=SOMETIMES_FAILS)
+    out = await _speed(engine, _Model([]))
+    assert "trials ran at s=2" in out["stopped"]
+    assert "a trial failed" in out["stopped"] and "no stable answer at this setting" in out["stopped"]
+    saved = json.loads((engine.quest_root / ".fi" / "improve_speed.json").read_text(encoding="utf-8"))
+    assert saved["stopped"] == out["stopped"]
+    slow = SLOW.replace("    rng = np.random.default_rng(seed)\n",
+                        "    rng = np.random.default_rng(seed)\n    if cell['s'] == 2:\n        import time; time.sleep(30)\n")
+    root = engine.quest_root
+    (root / "code" / "simulate.py").write_bytes(slow.encode("utf-8"))
+    sample = await sp.run_sample(engine.executor, engine.executor.python_path(root), root,
+                                 "code/simulate.py", [{"s": 2}], deterministic=False, thresholds={}, in_each_run={},
+                                 env=None, timeout_s=60, timeouts={tr.cell_key({"s": 2}): 3})
+    assert "reached its time limit of 3 seconds" in sample.failed
+
+
+@pytest.mark.asyncio
+async def test_the_rounds_go_on_while_each_saves_a_tenth_even_when_the_study_already_fits(tmp_path: Path) -> None:
+    """The rounds stopped as soon as the study would fit the time allowed; a study that already fits was never made
+    faster. They now go on to the cap of engine.improve_rounds, a round not kept included."""
+    engine = _engine(tmp_path, rounds=3)
+    model = _Model([_edit(LOOP, FAST), _edit("this text is not in the file", "x")])
+    engine._client = model
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
+    # FI expects about 4 h for a limit of 28 h: it fits, and it is long
+    out = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 50, {}, {},
+                                 SimpleNamespace(seconds=10_000.0), 100_000.0)
+    assert out["rounds"][0]["outcome"] == "kept" and out["calls"] == 3
+    assert out["rounds"][1]["outcome"] == "refused" and out["rounds"][2]["outcome"] == "refused"
+    assert out["stopped"] == "all 3 round(s) of engine.improve_rounds were used"
+    assert out["noise_s"] >= 0 and out["rounds"][0]["saves_on_study_s"] > 0
+    assert "It fits, but it is long" in model.prompts[0] and "times faster to fit" not in model.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_the_rounds_stop_when_a_round_costs_more_time_than_it_saves_on_the_study(tmp_path: Path) -> None:
+    """A round's wall time (the model's answer and the sample) is set against what it saves on the study: on a study of a
+    second and a half, a kept change saves less than the round took, and the rounds stop there."""
+    engine = _engine(tmp_path, rounds=3)
+    engine._client = _Model([_edit(LOOP, FAST), _edit(LOOP, FAST)])
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
+    out = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 50, {}, {},
+                                 SimpleNamespace(seconds=1.0), 100.0)
+    assert out["rounds"][0]["outcome"] == "kept" and len(out["rounds"]) == 1
+    assert "more than the" in out["stopped"] and "it saves on the study" in out["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_first_change_is_followed_by_a_second_ask_and_a_kept_second_change_is_kept(tmp_path: Path) -> None:
+    """A round that is not kept (here a change whose text is not in the file) does not end the step: FI asks again with the
+    reason, and a second change that keeps every number and is faster is kept."""
+    engine = _engine(tmp_path, rounds=3)
+    model = _Model([_edit("this text is not in the file", "x"), _edit(LOOP, FAST)])
+    out = await _speed(engine, model, seconds=10_000.0)
+    assert out["rounds"][0]["outcome"] == "refused"
+    assert len(model.prompts) >= 2 and "this text is not in the file" in model.prompts[1]
+    assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True
+    assert "np.sum(x * x)" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")

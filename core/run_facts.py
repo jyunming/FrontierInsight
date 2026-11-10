@@ -145,6 +145,26 @@ def record_trials(quest_root: Path | str, *, key: str, wall_s: float | None, tri
     _write(quest_root, **changes)
 
 
+def record_evaluations(quest_root: Path | str, *, evaluations: int, evaluations_s: float | None,
+                       keep_scan: bool = True) -> None:
+    """Keep, in the run record of a search for the best design, how many designs the search evaluated (the coarse scan's
+    settings are the record's ``cells`` and ``trials``) and their process times added up (``evaluations_s``; ``None`` when
+    none is known). Each evaluation ran in a process of its own, as a setting of the scan does, so a run of the delivered
+    ``code/run.py`` (which runs them one after another) needs this much as well (:func:`core.rerun_check.time_allowed`). A
+    record that holds only this part (the scan was taken from an earlier search) is kept as it is, with this added.
+    ``keep_scan=False``: the search had no coarse scan, so an earlier run's record (of trials that are not this search's) is
+    not kept."""
+    run = read(quest_root).get("trials_run")
+    run = dict(run) if isinstance(run, dict) and keep_scan else {}
+    run["evaluations"] = int(evaluations)
+    seconds = _seconds(evaluations_s)
+    if seconds is not None:
+        run["evaluations_s"] = round(seconds, 2)
+    else:
+        run.pop("evaluations_s", None)
+    _write(quest_root, trials_run=run)
+
+
 def settings_shared(quest_root: Path | str) -> int | None:
     """How many settings shared a process in the run whose trials are stored (only after FI's check showed the same numbers
     both ways), or ``None`` when each had a process of its own."""
@@ -172,7 +192,11 @@ def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
     run = read(quest_root).get("trials_run")
     wall = run.get("wall_s") if isinstance(run, dict) else None
     if isinstance(wall, (int, float)) and not isinstance(wall, bool) and 0 <= wall < float("inf"):
-        return float(wall)
+        # The record of a search for the best design holds the coarse scan's wall time; the study is the scan, the search
+        # and FI's check of its best design (:func:`search_seconds` leaves the scan out, so it counts once).
+        return float(wall) + (search_seconds(quest_root) if "evaluations" in run else 0.0)
+    if isinstance(run, dict) and "evaluations" in run and "wall_s" not in run:
+        return search_seconds(quest_root) or None  # a search without a coarse scan: the search and its check are the study
     if isinstance(run, dict):
         return None  # FI ran trials and does not know how long they took (a cluster job): the last execution is not it
     if isinstance(fallback, (int, float)) and not isinstance(fallback, bool) and 0 <= fallback < float("inf"):
@@ -181,13 +205,17 @@ def run_seconds(quest_root: Path | str, fallback: Any = None) -> float | None:
 
 
 def _recorded_seconds(path: Path) -> float:
-    """``time.seconds`` of one of FI's own records of the search (0 when it holds none)."""
+    """``time.seconds`` of one of FI's own records of the search, less its ``time.scan_seconds`` (0 when it holds none)."""
     try:
         t = (json.loads(path.read_text(encoding="utf-8")) or {}).get("time")
         v = t.get("seconds") if isinstance(t, dict) else None
+        scan = t.get("scan_seconds") if isinstance(t, dict) else None
     except (OSError, ValueError, AttributeError):
         return 0.0
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else 0.0
+    if not (isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf")):
+        return 0.0
+    # The search's time includes its coarse scan; when the run record holds the scan (``scan_seconds``), it is not counted twice.
+    return max(0.0, float(v) - float(scan)) if isinstance(scan, (int, float)) and not isinstance(scan, bool) and 0 <= scan < float("inf") else float(v)
 
 
 def search_seconds(quest_root: Path | str) -> float:

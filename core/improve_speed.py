@@ -1,9 +1,12 @@
-"""Make a study that does not fit the time allowed fit, without changing a result.
+"""Make the simulation of a study faster before the study runs, without changing a result.
 
-FI runs a fixed sample of the study itself, before and after one edit of the simulation: the same settings, the same
-trials, the same seeds. The edit is kept only when every number the sample returns is the same (to nine digits; a
-speed-up must not change what the study measures) and the time the sample takes drops by a stated margin. Nothing the
-code prints and no time the code reports is read: the harness times the calls.
+Every study that does not fit the time allowed, and every study that fits but that FI expects to take
+:data:`WORTH_SPEEDING_UP_S` or more (its padded whole-study estimate), gets this step after the correctness checks and
+before the study is sized (a study that does not fit is sped up before it is cut). FI runs a fixed sample of
+the study itself, before and after each edit of the simulation: the same settings, the same trials, the same seeds. An
+edit is kept only when every number the sample returns is the same (to nine digits; a speed-up must not change what the
+study measures) and the sample is faster by at least :data:`MIN_SAVING` and by more than the timing's own noise
+(:func:`fast_enough`). Nothing the code prints and no time the code reports is read: the harness times the calls.
 """
 
 from __future__ import annotations
@@ -25,11 +28,27 @@ from . import trial_runner as _tr
 SAMPLE_TRIALS = 12
 #: The sample is run this many times; the faster of the runs is the time (noise is slower, never faster).
 REPEATS = 2
-#: An edit is kept only when the sample takes at most this share of the time it took before.
-KEEP_BELOW = 0.75
+#: An edit is kept only when it saves at least this share of the sample's time (and more than the timing's noise).
+MIN_SAVING = 0.10
 RTOL, ATOL = 1e-9, 1e-12
-#: The speed-up is sought until the sample is this much faster than the study needs (a margin for the noise of a timing).
-MARGIN = 1.25
+#: A study that fits the time allowed and that FI expects to take less than this (padded, the whole study) is not sped
+#: up: the step would cost about as much time as it could save. A study that does not fit is always sped up first.
+WORTH_SPEEDING_UP_S = 600.0
+
+
+def worth_speeding_up(padded_s: float | None, fits: bool = True) -> bool:
+    """Whether a study is sped up before it runs: always when it does not fit the time allowed (before it is cut,
+    whatever its length); when it fits, only when its padded whole-study estimate (the search and FI's check at finer
+    settings included) is at least :data:`WORTH_SPEEDING_UP_S`."""
+    if not fits:
+        return True
+    return padded_s is not None and float(padded_s) >= WORTH_SPEEDING_UP_S
+
+
+def not_worth_it_line(padded_s: float) -> str:
+    """The one line said when a study that fits is too short to be sped up."""
+    return (f"The study fits and is expected to take about {_estimate.plain_duration(padded_s)}, under "
+            f"{_estimate.plain_duration(WORTH_SPEEDING_UP_S)}, so FI does not try to make the simulation faster.")
 
 
 @dataclass
@@ -37,6 +56,8 @@ class Sample:
     seconds: float = 0.0
     values: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     failed: str = ""
+    #: The wall time the sample took in all (its processes included), for what a round of the step costs.
+    wall_s: float = 0.0
 
 
 def sample_cells(grid: dict[str, list[Any]], oracles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -62,14 +83,14 @@ SAMPLE_ALLOWANCE = 3.0
 
 def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, runs: int, deterministic: bool,
                    budget_s: float, samples: int) -> tuple[list[dict[str, Any]], dict[str, int], str]:
-    """The settings of the sample FI can afford, and the time each may take, from what the timing measured: a setting
-    the timing did not see finish (``at_least``) is left out (its cost is not known, only that it is large), a setting
-    the timing never ran is costed as the base, and each is given :data:`SAMPLE_ALLOWANCE` times its measured cost. The
+    """The settings of the sample FI can afford, and the time each may take, from what the timing measured of that very
+    setting: a setting the timing did not see finish (``at_least``) or never ran is left out (its cost is not known; the
+    step times each setting of the sample the study's timing never ran before it calls this, :func:`untimed_cells`), and
+    each is given :data:`SAMPLE_ALLOWANCE` times its own measured cost. The
     ``samples`` samples the step runs (before, and after each edit) together fit in ``budget_s``: the costliest settings
     are left out first. ``([], {}, why)`` when none can be sampled in that time; otherwise ``why`` says how many settings
     were left out, or is empty."""
     by_key = {_tr.cell_key(p.cell): p for p in probes or [] if getattr(p, "cell", None) is not None}
-    base = next((p for p in probes or [] if getattr(p, "axis", 0) is None), None)
     n = 1 if deterministic else SAMPLE_TRIALS
 
     def cost(p: Any) -> float:
@@ -79,7 +100,7 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
 
     costed: list[tuple[float, dict[str, Any]]] = []
     for cell in cells:
-        p = by_key.get(_tr.cell_key(cell)) or base
+        p = by_key.get(_tr.cell_key(cell))
         if p is None or getattr(p, "at_least", False):
             continue
         costed.append((cost(p), cell))
@@ -105,12 +126,40 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
             {_tr.cell_key(cell): max(60, math.ceil(SAMPLE_ALLOWANCE * c)) for c, cell in kept}, note)
 
 
+def untimed_cells(cells: list[dict[str, Any]], probes: list[Any] | None) -> list[dict[str, Any]]:
+    """The settings of the sample the study's timing never ran (a known-answer case's setting, a search's design): each is
+    timed on its own before the sample is chosen, so its time limit comes from its own cost, not from another setting's."""
+    seen = {_tr.cell_key(p.cell) for p in probes or [] if getattr(p, "cell", None) is not None}
+    return [cell for cell in cells if _tr.cell_key(cell) not in seen]
+
+
+def sample_share_s(budget_s: float, samples: int) -> float:
+    """The most one run of the sample may take so that every sample of the step fits in ``budget_s``."""
+    return budget_s / max(1, samples) / REPEATS
+
+
+def why_not_run(rows: list[dict[str, Any]], result: Any, timeout_s: float, quest_root: Path | str | None = None) -> str:
+    """Why a run of the sample did not give every trial: the simulation could not be loaded, a trial failed (its reason
+    and where), the run reached its time limit (with the limit), or it ended without reporting (its exit code)."""
+    loaded = next((r for r in rows if r.get("load_error")), None)
+    if loaded is not None:
+        return f"the simulation could not be loaded: {str(loaded['load_error'])[:300]}"
+    failed = next((r for r in rows if r.get("status") == "failed"), None)
+    if failed is not None:
+        where = _tr.last_frame(str(failed.get("traceback") or ""), quest_root)
+        return f"a trial failed: {str(failed.get('reason') or 'no reason given')[:300]}" + (f" (at {where})" if where else "")
+    if getattr(result, "timed_out", False):
+        return f"the run reached its time limit of {_estimate.plain_duration(float(timeout_s))}"
+    return f"the run ended without reporting (exit code {getattr(result, 'returncode', '?')})"
+
+
 async def run_sample(executor: Any, python: Path | str, quest_root: Path, module: str, cells: list[dict[str, Any]], *,
                      deterministic: bool, thresholds: dict[str, Any] | None, in_each_run: dict[str, list[Any]] | None,
                      env: dict[str, str] | None, timeout_s: int, log: Any = None,
                      timeouts: dict[str, int] | None = None) -> Sample:
     """Run ``SAMPLE_TRIALS`` fixed-seed trials of each cell (``REPEATS`` times) and return the values of the first run and
-    the least time any run took (the calls only, the first trial of each cell left out)."""
+    the least time any run took (the calls only, the first trial of each cell left out). A run that does not give every
+    trial ends the sample, and ``failed`` says at which setting and why (:func:`why_not_run`)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -118,6 +167,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
     ex = _outside.OutsideExecutor(executor, quest_root, log=log)
     inside = {str(k): list(v) for k, v in (in_each_run or {}).items()}
     out_sample = Sample()
+    started = time.monotonic()
     best: float | None = None
     for rep in range(REPEATS):
         total = 0.0
@@ -133,9 +183,9 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
                 "cell": {**cell, **inside}, "kind": "scan", "levels": _in_run.levels_json(_in_run.level_cells(inside)),
                 "trials": [{"trial": t, "seed": None if deterministic else _tr.trial_seed(0, key, t)} for t in range(n)],
                 "nonce": nonce, "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
-            await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
-                              out.relative_to(quest_root).as_posix()], cwd=quest_root,
-                             timeout_s=(timeouts or {}).get(key, timeout_s), env=env)
+            limit = (timeouts or {}).get(key, timeout_s)
+            result = await ex.execute([str(python), _tr.HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+                                       out.relative_to(quest_root).as_posix()], cwd=quest_root, timeout_s=limit, env=env)
             try:
                 rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
             except (OSError, ValueError):
@@ -145,7 +195,10 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
             done = sorted((r for r in rows if isinstance(r, dict) and r.get("nonce") == nonce and r.get("status") == "ok"),
                           key=lambda r: int(r.get("trial") or 0))
             if len(done) < n:
-                out_sample.failed = f"{len(done)} of {n} trials ran at {key or 'its only setting'}"
+                ours = [r for r in rows if isinstance(r, dict) and r.get("nonce") in (nonce, None)]
+                out_sample.failed = (f"{len(done)} of {n} trials ran at {key or 'its only setting'}: "
+                                     f"{why_not_run(ours, result, limit, quest_root)}")
+                out_sample.wall_s = time.monotonic() - started
                 return out_sample
             values[key] = [dict(r.get("values") or {}) for r in done]
             total += sum(float(r.get("duration_s") or 0.0) for r in done[1:] or done)
@@ -153,6 +206,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
             out_sample.values = values
         best = total if best is None else min(best, total)
     out_sample.seconds = float(best or 0.0)
+    out_sample.wall_s = time.monotonic() - started
     return out_sample
 
 
@@ -209,8 +263,12 @@ def count_numbers(sample: Sample) -> int:
     return sum(len(_numbers(r)) for rows in sample.values.values() for r in rows)
 
 
-def fast_enough(before_s: float, after_s: float) -> bool:
-    return before_s > 0 and after_s <= KEEP_BELOW * before_s
+def fast_enough(before_s: float, after_s: float, noise_s: float = 0.0) -> bool:
+    """Whether an edit made the sample clearly faster: it saves at least :data:`MIN_SAVING` of the time before
+    (``before_s - after_s >= MIN_SAVING * before_s``) AND more than the timing's own noise, the difference between two
+    samples of the unchanged code (``before_s - after_s > noise_s``)."""
+    saved = before_s - after_s
+    return before_s > 0 and saved >= MIN_SAVING * before_s and saved > max(0.0, noise_s)
 
 
 #: How many functions of the measured breakdown the model is shown.
@@ -275,8 +333,12 @@ async def profile_text(executor: Any, python: Path | str, quest_root: Path, modu
 def speed_block(est_seconds: float, limit_s: float, before: Sample, cells: list[dict[str, Any]], runs: int,
                 profile: str = "") -> str:
     per_cell = before.seconds / max(1, len(cells))
+    if est_seconds > limit_s:
+        need = f"It has to be about {est_seconds / max(limit_s, 1e-9):.1f} times faster to fit."
+    else:
+        need = "It fits, but it is long: every change that makes it faster shortens the run."
     return (f"FI estimates the whole study at about {_estimate.plain_duration(est_seconds)}; the time allowed is "
-            f"{_estimate.plain_duration(limit_s)}. It has to be about {est_seconds / max(limit_s, 1e-9):.1f} times faster.\n"
+            f"{_estimate.plain_duration(limit_s)}. {need}\n"
             f"FI timed {len(cells)} settings ({SAMPLE_TRIALS} trials each, fixed seeds): about "
             f"{per_cell * 1000:.0f} ms of computing per setting on average for the trials after the first, in the "
             f"code below. The study runs {runs} trials of each setting."

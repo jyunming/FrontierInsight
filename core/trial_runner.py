@@ -2232,22 +2232,32 @@ class TrialsRunner:
 def _keep_run_time(quest_root: Path, key: str, run: TrialRun, wall_s: float | None) -> None:
     """Keep the wall time of a run of the trials, how many it ran, the sum of the per-trial times and, in a quest run in
     two stages, which stage the run belongs to (exploring or confirming) in ``.fi/run_facts.json``."""
+    keep_runs_time(quest_root, key, [run], wall_s)
+
+
+def keep_runs_time(quest_root: Path, key: str, runs: list[TrialRun], wall_s: float | None) -> None:
+    """:func:`_keep_run_time` for the runs of one study that ran in turn (the coarse scans of a search for the best design):
+    ``wall_s`` is their wall times added up, the counts and times are the runs' together. For one run it is exactly
+    :func:`_keep_run_time`."""
     from . import phased, run_facts
 
-    rows = [r for c in run.cells for r in c.rows]
+    rows = [r for run in runs for c in run.cells for r in c.rows]
     times = [r["duration_s"] for r in rows if isinstance(r.get("duration_s"), (int, float)) and not isinstance(r["duration_s"], bool)]
     try:
         stage = phased.stage(quest_root)
     except Exception:  # noqa: BLE001 -- a record that cannot be read leaves the stage unsaid
         stage = None
-    walls = [c.wall_s for c in run.cells]
+    cells = [c for run in runs for c in run.cells]
+    walls = [c.wall_s for c in cells]
     settings_s = (sum(walls) if walls and all(isinstance(w, (int, float)) and not isinstance(w, bool) for w in walls)
                   else None)  # every setting's own wall time added up; None when a setting has none
-    run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(run.cells),
+    shared = {run.per_process for run in runs}
+    run_facts.record_trials(quest_root, key=key, wall_s=wall_s, trials=len(rows), cells=len(cells),
                             settings_s=settings_s,
                             trial_sum_s=sum(times) if times else None,
                             stage=stage if stage in (phased.EXPLORE, phased.CONFIRM) else None,
-                            at_once=run.most_at_once or None, per_process=run.per_process)
+                            at_once=max(run.most_at_once for run in runs) or None,
+                            per_process=shared.pop() if len(shared) == 1 else None)
 
 
 def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:

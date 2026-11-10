@@ -419,6 +419,13 @@ def _inside(variable: dict[str, Any], value: Any) -> bool:
     return variable["low"] <= value <= variable["high"]
 
 
+#: Keys a bound is written under instead of `limit`, and those of them that bound from below.
+_LIMIT_OTHER_KEYS = ("max", "maximum", "min", "minimum", "<=", "<", ">=", ">", "upper", "lower")
+_LIMIT_LOW_KEYS = {"min", "minimum", ">=", ">", "lower"}
+#: A limit that puts another quantity (a name) where the number should be, such as "<= other_quantity".
+_NAMES_A_QUANTITY = re.compile(r"^\s*(?:<=|>=|<|>|≤|≥|=<|=>)\s*[A-Za-z_]")
+
+
 def _limit(value: Any) -> tuple[str, float] | None:
     match = _LIMIT.match(str(value)) if isinstance(value, str) else None
     if match is None:
@@ -444,99 +451,156 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _constraint(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]:
+#: What a refused limit says about expressing a limit between two quantities. The format reads a limit as a bound and a
+#: number on ONE quantity the simulation returns (:func:`core.optimise_search.judge` checks that returned number), so a
+#: comparison of two quantities is written as a limit on one returned quantity that holds their difference.
+LIMIT_BETWEEN_NOTE = ("A limit that compares one quantity with another is written as a limit on one quantity the "
+                      "simulation returns: have the simulation return their difference as a quantity, and limit that, for "
+                      "example `quantity` that difference and `limit` \">= 0\"")
+
+#: What a refused numerical setting says about a value that is worked out from the design. The search runs the simulation
+#: with the plain number given as ``search`` (and the finer values of ``check``).
+SETTING_FROM_DESIGN_NOTE = ("a setting the simulation works out from the design (it depends on the design variables) is "
+                            "computed inside the simulation, not listed here: this entry gives the plain number the "
+                            "simulation uses or scales it by, or leave the entry out")
+
+
+def _constraint_problems(item: Any, index: int) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(the constraint, [])`` or ``(None, every problem found in it)``."""
     where = f"{_P}.constraints` entry {index}"
     if not isinstance(item, dict):
-        return None, f"{where} is not a mapping (`quantity`, `limit`)"
+        return None, [f"{where} is not a mapping (`quantity`, `limit`)"]
     out = dict(item)
+    problems: list[str] = []
     quantity = _text(out.get("quantity"))
     if not quantity:
-        return None, f"{where} has no `quantity` (the name the simulation returns it under)"
+        problems.append(f"{where} has no `quantity` (the name the simulation returns it under)")
     out["quantity"] = quantity
     parsed = _limit(out.get("limit"))
     if parsed is None:
-        return None, (f"{where} (`{quantity}`): `limit` must read like \"<= 120\" or \">= 3\" (a bound and a number); "
-                      f"{out.get('limit')!r} cannot be read")
-    out["limit"] = f"{parsed[0]} {_fmt(parsed[1])}"  # a bound is inclusive: "< 120" is read as "<= 120"
+        here = f"{where}{f' (`{quantity}`)' if quantity else ''}"
+        written = [(k, item[k]) for k in _LIMIT_OTHER_KEYS if k in item and item[k] is not None]
+        if out.get("limit") is None and written:
+            # The bound is written under another key (`max`, `min`, `<`): say how it is written, not that a limit is unreadable.
+            key, value = written[0]
+            number = _fmt(value) if _number(value) else "n"
+            problems.append(f"{here} has no `limit`; you wrote `{key}`. Write it as `limit`: "
+                            f"\"{'>=' if key in _LIMIT_LOW_KEYS else '<='} {number}\" (a bound and a number)")
+        elif out.get("limit") is None:
+            problems.append(f"{here} has no `limit`: write it like \"<= 120\" or \">= 3\" (a bound and a number)")
+        else:
+            problems.append(f"{here}: `limit` must read like \"<= 120\" or \">= 3\" (a bound and a number); "
+                            f"{out.get('limit')!r} cannot be read."
+                            + (f" {LIMIT_BETWEEN_NOTE}" if _NAMES_A_QUANTITY.match(str(out.get("limit"))) else ""))
+    else:
+        out["limit"] = f"{parsed[0]} {_fmt(parsed[1])}"  # a bound is inclusive: "< 120" is read as "<= 120"
     if out.get("unit") is not None and not isinstance(out["unit"], (str, int, float)):
-        return None, f"{where}: `unit` must be text"
-    return out, None
+        problems.append(f"{where}: `unit` must be text")
+    return (None, problems) if problems else (out, [])
 
 
-def _setting(name: str, item: Any) -> tuple[dict[str, Any] | None, str | None]:
+def _constraint(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]:
+    out, problems = _constraint_problems(item, index)
+    return out, (problems[0] if problems else None)
+
+
+def _setting_problems(name: str, item: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(the setting, [])`` or ``(None, every problem found in it)``. The check against ``search`` is made only when both
+    ``search`` and ``finer`` can be read."""
     where = f"{_P}.numerical_settings` `{name}`"
     if _number(item):
         item = {"search": item}
     if not isinstance(item, dict):
-        return None, f"{where} must be a mapping with `search` (and `check`, the finer values)"
+        return None, [f"{where} must be a mapping with `search` (and `check`, the finer values)"]
     out = dict(item)
+    problems: list[str] = []
     search = out.get("search")
-    if not _number(search) or search <= 0:
-        return None, f"{where}: `search` must be a positive number (the value the search uses)"
+    search_ok = _number(search) and search > 0
+    if not search_ok:
+        problems.append(f"{where}: `search` must be a positive number (the value the search uses); "
+                        f"{SETTING_FROM_DESIGN_NOTE}")
     finer = str(out.get("finer") or "smaller").strip().lower()
-    if finer not in ("smaller", "larger"):
-        return None, f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)"
-    if out.get("finer") is not None:
+    finer_ok = finer in ("smaller", "larger")
+    if not finer_ok:
+        problems.append(f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)")
+    elif out.get("finer") is not None:
         out["finer"] = finer
     if out.get("unit") is not None and not isinstance(out["unit"], str):
-        return None, f"{where}: `unit` must be text (the setting's unit, such as nm), or leave it out"
+        problems.append(f"{where}: `unit` must be text (the setting's unit, such as nm), or leave it out")
     tolerance = out.get("tolerance")
     if tolerance is not None and not (_number(tolerance) and 0 < tolerance < 1):
-        return None, (f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "
-                      "result's spread counts as converged), or leave it out")
+        problems.append(f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "
+                        "result's spread counts as converged), or leave it out")
     check = out.get("check")
-    if check is None:
-        return out, None
-    levels = check if isinstance(check, list) else [check]
-    if not levels or not all(_number(v) and v > 0 for v in levels):
-        return None, f"{where}: `check` must be one or more positive numbers (the finer values)"
-    before = search
-    for level in levels:
-        ratio = before / level if finer == "smaller" else level / before
-        if ratio < MIN_REFINEMENT:
-            return None, (f"{where}: the check value {_fmt(level)} is not finer than {_fmt(before)} (each level must be "
-                          f"at least {MIN_REFINEMENT} times {'smaller' if finer == 'smaller' else 'larger'} than the one "
-                          "before it)")
-        before = level
-    out["check"] = list(levels)
-    return out, None
+    if check is not None:
+        levels = check if isinstance(check, list) else [check]
+        if not levels or not all(_number(v) and v > 0 for v in levels):
+            problems.append(f"{where}: `check` must be one or more positive numbers (the finer values)")
+        elif search_ok and finer_ok:
+            before = search
+            for level in levels:
+                ratio = before / level if finer == "smaller" else level / before
+                if ratio < MIN_REFINEMENT:
+                    problems.append(f"{where}: the check value {_fmt(level)} is not finer than {_fmt(before)} (each level "
+                                    f"must be at least {MIN_REFINEMENT} times {'smaller' if finer == 'smaller' else 'larger'} "
+                                    "than the one before it)")
+                    break
+                before = level
+            else:
+                out["check"] = list(levels)
+        else:
+            out["check"] = list(levels)
+    return (None, problems) if problems else (out, [])
+
+
+def _setting(name: str, item: Any) -> tuple[dict[str, Any] | None, str | None]:
+    out, problems = _setting_problems(name, item)
+    return out, (problems[0] if problems else None)
 
 
 def _whole_at_least_one(value: Any) -> bool:
     return _whole(value) and value >= 1
 
 
-def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any] | None = None) -> str | None:
-    """The scan run before the search: each axis is a design variable (its values inside its range) or a condition the
-    plan holds fixed for the search (``fixed``; any values: the scan compares the study across them, and only the
-    cells at the held value can start the search)."""
+def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any] | None = None,
+          unread: set[str] | None = None) -> list[str]:
+    """The problems of the scan run before the search, one for each axis that has one (empty when it can be read): each
+    axis is a design variable (its values inside its range) or a condition the plan holds fixed for the search
+    (``fixed``; any values: the scan compares the study across them, and only the cells at the held value can start the
+    search). ``unread``: names of design variables that could not be read; an axis with such a name is not judged here."""
     if not isinstance(grid, dict) or not grid:
-        return (f"{_P}.grid` (the scan run first) must map each design variable, or each condition held fixed that is "
-                "compared across settings, to the values it takes")
+        return [f"{_P}.grid` (the scan run first) must map each design variable, or each condition held fixed that is "
+                "compared across settings, to the values it takes"]
     fixed = fixed or {}
+    unread = unread or set()
+    problems: list[str] = []
     for axis, values in grid.items():
         values = values if isinstance(values, list) else [values]
         if str(axis) in variables:
             if is_array(variables[str(axis)]):
-                return (f"{_P}.grid` `{axis}`: `{axis}` is an array variable; a scan axis takes single numbers, so scan "
-                        "another setting (the search changes the array from its baseline)")
-            if not values or not all(_inside(variables[str(axis)], v) for v in values):
-                return f"{_P}.grid` `{axis}`: every value must lie inside that variable's range"
+                problems.append(f"{_P}.grid` `{axis}`: `{axis}` is an array variable; a scan axis takes single numbers, so "
+                                "scan another setting (the search changes the array from its baseline)")
+            elif not values or not all(_inside(variables[str(axis)], v) for v in values):
+                problems.append(f"{_P}.grid` `{axis}`: every value must lie inside that variable's range")
+        elif str(axis) in unread:
+            continue
         elif str(axis) in fixed:
             if not values or not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) and
                                      (not isinstance(v, float) or math.isfinite(v)) for v in values):
-                return f"{_P}.grid` `{axis}`: give the settings to compare as a list of numbers or a list of names"
-            if len({isinstance(v, str) for v in values}) > 1:
-                return f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix"
+                problems.append(f"{_P}.grid` `{axis}`: give the settings to compare as a list of numbers or a list of names")
+            elif len({isinstance(v, str) for v in values}) > 1:
+                problems.append(f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix")
         else:
             near = _near_a_variable(str(axis), variables)
             if near and values and all(isinstance(v, str) for v in values):
-                return (f"{_P}.grid` scans `{axis}`, which looks like a misspelling of the design variable `{near}`: "
-                        f"write `{near}`, or rename the comparison so it is not mistaken for it")
-            return (f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held fixed: to "
-                    f"compare the study across `{axis}`, also list it under `protocol.optimisation.fixed` with the value "
-                    "the search holds it at (a setting whose values are names needs no such entry)")
-    return None
+                problems.append(f"{_P}.grid` scans `{axis}`, which looks like a misspelling of the design variable "
+                                f"`{near}`: write `{near}`, or rename the comparison so it is not mistaken for it")
+            else:
+                problems.append(f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held "
+                                f"fixed: to compare the study across `{axis}`, also list it under "
+                                "`protocol.optimisation.fixed` with the value the search holds it at (a setting whose "
+                                "values are names needs no such entry)")
+    return problems
 
 
 def _near_a_variable(axis: str, variables: dict[str, dict[str, Any]]) -> str | None:
@@ -552,151 +616,211 @@ def _near_a_variable(axis: str, variables: dict[str, dict[str, Any]]) -> str | N
     return next((n for n in names if len(n) >= 3 and len(a) >= 3 and (n.lower() in a or a in n.lower())), None)
 
 
+#: Between two problems in the one reason :func:`normalize` gives. The first problem comes first, as it always did, so a
+#: reader that looks at the start of the reason (a regular expression on its first words) still sees that one.
+ALSO = "\nAnd also: "
+
+
+def split_problems(why: str | None) -> list[str]:
+    """The problems in a reason :func:`normalize` gave, one each (empty for no reason)."""
+    return [p for p in (why or "").split(ALSO) if p]
+
+
+def first_problem(why: str | None) -> str:
+    """The first problem of a reason (``""`` for none): what a reader that acts on one problem at a time looks at."""
+    found = split_problems(why)
+    return found[0] if found else ""
+
+
+def problems_of(block: Any) -> list[str]:
+    """Every problem the optimisation block has, in the order the block is read (empty when it can be read)."""
+    return _read(block)[1]
+
+
 def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
-    """``(block, None)`` when the optimisation block can be read and checked, else ``(None, why)``."""
+    """``(block, None)`` when the optimisation block can be read and checked, else ``(None, why)``. ``why`` holds every
+    problem found in one pass, the first as it has always been, the others after it (joined by :data:`ALSO`;
+    :func:`split_problems` splits them). A part that cannot be read skips only the checks that need it."""
+    out, problems = _read(block)
+    return (out, None) if out is not None else (None, ALSO.join(problems))
+
+
+def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """``(the block read, [])`` or ``(None, every problem found)``, in the order the block is read."""
+    problems: list[str] = []
     if not isinstance(block, dict):
-        return None, f"{_P}` must be a mapping (`objective`, `design_variables`, `baseline`, ...)"
+        return None, [f"{_P}` must be a mapping (`objective`, `design_variables`, `baseline`, ...)"]
     out: dict[str, Any] = dict(block)
     objective = out.get("objective")
     if not isinstance(objective, dict):
-        return None, f"{_P}.objective` must say the `quantity` to minimise or maximise and its `direction`"
-    objective = dict(objective)
-    if not _text(objective.get("quantity")):
-        return None, f"{_P}.objective` has no `quantity` (the name the simulation returns it under)"
-    objective["quantity"] = _text(objective["quantity"])
-    word = str(objective.get("direction") or "").strip().lower()
-    direction = DIRECTIONS.get(word, word)
-    if direction not in closed_values("objective.direction"):
-        return None, choice_refusal("objective.direction", objective.get("direction"))
-    objective["direction"] = direction
-    for key in ("unit", "meaning"):
-        if objective.get(key) is not None and not isinstance(objective[key], (str, int, float)):
-            return None, f"{_P}.objective.{key}` must be text"
-    out["objective"] = objective
+        problems.append(f"{_P}.objective` must say the `quantity` to minimise or maximise and its `direction`")
+    else:
+        objective = dict(objective)
+        if not _text(objective.get("quantity")):
+            problems.append(f"{_P}.objective` has no `quantity` (the name the simulation returns it under)")
+        else:
+            objective["quantity"] = _text(objective["quantity"])
+        word = str(objective.get("direction") or "").strip().lower()
+        direction = DIRECTIONS.get(word, word)
+        if direction not in closed_values("objective.direction"):
+            problems.append(choice_refusal("objective.direction", objective.get("direction")))
+        else:
+            objective["direction"] = direction
+        for key in ("unit", "meaning"):
+            if objective.get(key) is not None and not isinstance(objective[key], (str, int, float)):
+                problems.append(f"{_P}.objective.{key}` must be text")
+        out["objective"] = objective
 
     items = out.get("design_variables")
     if isinstance(items, dict):
         items = [items]
-    if not isinstance(items, list) or not items:
-        return None, f"{_P}.design_variables` must list what the search may change (each with a `name` and a range)"
-    variables: dict[str, dict[str, Any]] = {}
+    variables: dict[str, dict[str, Any]] = {}  # the design variables that were read
+    named: dict[str, None] = {}  # the names of all design variables, read or not, in order
+    names_known = True  # whether every design variable's name is known, so what is checked by name can be
     fixed_items: list[dict[str, Any]] = []
-    for index, item in enumerate(items, start=1):
-        variable, why = _variable(item, index)
-        if variable is None:
-            return None, why
-        if variable["name"] in variables:
-            return None, f"{_P}.design_variables` names `{variable['name']}` twice"
-        variables[variable["name"]] = variable
-        fixed_items.append(variable)
-    out["design_variables"] = fixed_items
+    if not isinstance(items, list) or not items:
+        problems.append(f"{_P}.design_variables` must list what the search may change (each with a `name` and a range)")
+        names_known = False
+    else:
+        for index, item in enumerate(items, start=1):
+            variable, why = _variable(item, index)
+            if variable is None:
+                problems.append(why or f"{_P}.design_variables` entry {index} cannot be read")
+                label = _text(item.get("name")) if isinstance(item, dict) else ""
+                if label:
+                    named.setdefault(label)
+                else:
+                    names_known = False
+                continue
+            if variable["name"] in named:
+                problems.append(f"{_P}.design_variables` names `{variable['name']}` twice")
+                continue
+            variables[variable["name"]] = variable
+            named.setdefault(variable["name"])
+            fixed_items.append(variable)
+        out["design_variables"] = fixed_items
+    unread = set(named) - set(variables)  # the names of those that could not be read
 
     fixed = out.get("fixed")
     if fixed is not None:
         if not isinstance(fixed, dict):
-            return None, f"{_P}.fixed` must map each condition held fixed to its value"
-        clash = sorted(set(map(str, fixed)) & set(variables))
-        if clash:
-            return None, f"{_P}.fixed` holds `{clash[0]}` fixed, but it is also a design variable the search may change"
+            problems.append(f"{_P}.fixed` must map each condition held fixed to its value")
+        else:
+            clash = sorted(set(map(str, fixed)) & set(named))
+            if clash:
+                problems.append(f"{_P}.fixed` holds `{clash[0]}` fixed, but it is also a design variable the search may change")
 
     baseline = out.get("baseline")
     if not isinstance(baseline, dict) or not isinstance(baseline.get("values"), dict):
-        return None, (f"{_P}.baseline` must give the design to beat: `values` ({BASELINE_VALUES_RULE}) and `source` "
-                      "(where it comes from)")
-    values = {_text(k): v for k, v in baseline["values"].items()}  # a name is read with its spaces collapsed
-    out["baseline"] = {**baseline, "values": values}
-    missing = [name for name in variables if name not in values]
-    if missing:
-        return None, f"{_P}.baseline.values` has no value for `{missing[0]}` (the baseline gives every design variable)"
-    extra = [str(name) for name in values if str(name) not in variables]
-    if extra:
-        return None, f"{_P}.baseline.values` names `{extra[0]}`, which is not a design variable"
-    for name, variable in variables.items():
-        if is_array(variable):
-            why = array_problem(variable, values[name])
-            if why:
-                return None, f"{_P}.baseline.values` `{name}`: {why}"
-        elif not _inside(variable, values[name]):
-            return None, (f"{_P}.baseline.values` `{name}` = {values[name]!r} is outside the range the search may use "
-                          "(or not a value that variable takes)")
-    if baseline.get("source") is not None and not isinstance(baseline["source"], (str, int, float)):
-        return None, f"{_P}.baseline.source` must be text"
+        problems.append(f"{_P}.baseline` must give the design to beat: `values` ({BASELINE_VALUES_RULE}) and `source` "
+                        "(where it comes from)")
+    else:
+        values = {_text(k): v for k, v in baseline["values"].items()}  # a name is read with its spaces collapsed
+        out["baseline"] = {**baseline, "values": values}
+        if names_known:
+            missing = [name for name in named if name not in values]
+            if missing:
+                problems.append(f"{_P}.baseline.values` has no value for `{missing[0]}` (the baseline gives every design "
+                                "variable)")
+            extra = [str(name) for name in values if str(name) not in named]
+            if extra:
+                problems.append(f"{_P}.baseline.values` names `{extra[0]}`, which is not a design variable")
+        for name, variable in variables.items():
+            if name not in values:
+                continue
+            if is_array(variable):
+                why = array_problem(variable, values[name])
+                if why:
+                    problems.append(f"{_P}.baseline.values` `{name}`: {why}")
+            elif not _inside(variable, values[name]):
+                problems.append(f"{_P}.baseline.values` `{name}` = {values[name]!r} is outside the range the search may use "
+                                "(or not a value that variable takes)")
+        if baseline.get("source") is not None and not isinstance(baseline["source"], (str, int, float)):
+            problems.append(f"{_P}.baseline.source` must be text")
 
     constraints = out.get("constraints")
     if constraints is not None:
         if isinstance(constraints, dict):
             constraints = [constraints]
         if not isinstance(constraints, list):
-            return None, f"{_P}.constraints` must be a list (each a `quantity` and a `limit` such as \"<= 120\")"
-        fixed_constraints = []
-        for index, item in enumerate(constraints, start=1):
-            constraint, why = _constraint(item, index)
-            if constraint is None:
-                return None, why
-            fixed_constraints.append(constraint)
-        out["constraints"] = fixed_constraints
+            problems.append(f"{_P}.constraints` must be a list (each a `quantity` and a `limit` such as \"<= 120\")")
+        else:
+            fixed_constraints = []
+            for index, item in enumerate(constraints, start=1):
+                constraint, found = _constraint_problems(item, index)
+                if constraint is None:
+                    problems.extend(found)
+                else:
+                    fixed_constraints.append(constraint)
+            out["constraints"] = fixed_constraints
 
     settings = out.get("numerical_settings")
     if settings is not None:
         if not isinstance(settings, dict):
-            return None, f"{_P}.numerical_settings` must map each setting (a mesh size, a time step) to its values"
-        fixed_settings: dict[str, Any] = {}
-        for name, item in settings.items():
-            setting, why = _setting(str(name), item)
-            if setting is None:
-                return None, why
-            fixed_settings[str(name)] = setting
-        out["numerical_settings"] = fixed_settings
+            problems.append(f"{_P}.numerical_settings` must map each setting (a mesh size, a time step) to its values")
+        else:
+            fixed_settings: dict[str, Any] = {}
+            for name, item in settings.items():
+                setting, found = _setting_problems(str(name), item)
+                if setting is None:
+                    problems.extend(found)
+                else:
+                    fixed_settings[str(name)] = setting
+            out["numerical_settings"] = fixed_settings
 
     budget = out.get("evaluation_budget")
     if budget is not None:
         if not isinstance(budget, dict):
-            return None, f"{_P}.evaluation_budget` must give `starts` and `per_start` (whole numbers)"
-        for key in ("starts", "per_start"):
-            if not _whole_at_least_one(budget.get(key)):
-                return None, f"{_P}.evaluation_budget.{key}` must be a whole number of at least 1"
-        seconds = budget.get("seconds_per_evaluation")
-        if seconds is not None and (not _number(seconds) or seconds <= 0):
-            return None, f"{_P}.evaluation_budget.seconds_per_evaluation` must be a positive number (an estimate)"
+            problems.append(f"{_P}.evaluation_budget` must give `starts` and `per_start` (whole numbers)")
+        else:
+            for key in ("starts", "per_start"):
+                if not _whole_at_least_one(budget.get(key)):
+                    problems.append(f"{_P}.evaluation_budget.{key}` must be a whole number of at least 1")
+            seconds = budget.get("seconds_per_evaluation")
+            if seconds is not None and (not _number(seconds) or seconds <= 0):
+                problems.append(f"{_P}.evaluation_budget.seconds_per_evaluation` must be a positive number (an estimate)")
     for key in ("runs_per_evaluation", "check_runs"):
         if out.get(key) is not None and not _whole_at_least_one(out[key]):
-            return None, f"{_P}.{key}` must be a whole number of at least 1"
+            problems.append(f"{_P}.{key}` must be a whole number of at least 1")
 
     method = out.get("search_method")
     if method is not None:
-        name = str(method).strip() if isinstance(method, str) else ""
-        if not in_closed_choices("search_method", name):
-            return None, choice_refusal("search_method", method)
-        out["search_method"] = name
+        word = str(method).strip() if isinstance(method, str) else ""
+        if not in_closed_choices("search_method", word):
+            problems.append(choice_refusal("search_method", method))
+        else:
+            out["search_method"] = word
 
     tolerance = out.get("improvement_tolerance")
     if tolerance is not None:
         if isinstance(tolerance, dict):
             value, mode = tolerance.get("value"), str(tolerance.get("mode") or "absolute").strip().lower()
             if not _number(value) or value < 0:
-                return None, f"{_P}.improvement_tolerance.value` must be a number of at least 0"
+                problems.append(f"{_P}.improvement_tolerance.value` must be a number of at least 0")
             if mode not in closed_values("improvement_tolerance.mode"):
-                return None, choice_refusal("improvement_tolerance.mode", tolerance.get("mode"))
-            if mode == "relative" and value > 1:
-                return None, (f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means 5%); "
-                              f"{_fmt(value)} would mean more than 100%")
-            if tolerance.get("mode") is not None:
-                out["improvement_tolerance"] = {**tolerance, "mode": mode}
+                problems.append(choice_refusal("improvement_tolerance.mode", tolerance.get("mode")))
+            elif _number(value) and value >= 0:
+                if mode == "relative" and value > 1:
+                    problems.append(f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means "
+                                    f"5%); {_fmt(value)} would mean more than 100%")
+                elif tolerance.get("mode") is not None:
+                    out["improvement_tolerance"] = {**tolerance, "mode": mode}
         elif not _number(tolerance) or tolerance < 0:
-            return None, f"{_P}.improvement_tolerance` must be a number (how much better counts), or leave it out"
+            problems.append(f"{_P}.improvement_tolerance` must be a number (how much better counts), or leave it out")
 
     target = out.get("target")
     if target is not None:
         value = target.get("value") if isinstance(target, dict) else target
         if not _number(value):
-            return None, f"{_P}.target` must be a number (the value of the objective you hope to reach), or leave it out"
+            problems.append(f"{_P}.target` must be a number (the value of the objective you hope to reach), or leave it out")
 
     margin = out.get("constraint_margin")
     if margin is not None and (not _number(margin) or margin < 0):
-        return None, f"{_P}.constraint_margin` must be a number of at least 0"
+        problems.append(f"{_P}.constraint_margin` must be a number of at least 0")
 
     grid = out.get("grid")
-    if isinstance(grid, dict):
+    grid_ok = True
+    if isinstance(grid, dict) and names_known and (fixed is None or isinstance(fixed, dict)):
         # A study compared across named alternatives (a family, a mode) is an outer comparison, not a search variable. The
         # plan need not also list it as held fixed: FI does, at the first alternative named. FI then searches every
         # alternative on its own (core/optimise_search.py ``compare``) and compares their best designs; the first one is
@@ -704,59 +828,128 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
         held = dict(fixed) if isinstance(fixed, dict) else {}
         for axis, values in grid.items():
             values = values if isinstance(values, list) else [values]
-            if (str(axis) not in variables and str(axis) not in {str(k) for k in held}
+            if (str(axis) not in named and str(axis) not in {str(k) for k in held}
                     and values and all(isinstance(v, str) and v.strip() for v in values)
                     and not _near_a_variable(str(axis), variables)):
                 held[str(axis)] = values[0].strip()
         if held and held != (fixed if isinstance(fixed, dict) else {}):
             out["fixed"] = fixed = held
     if grid is not None:
-        why = _grid(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None)
-        if why:
-            return None, why
-        out["grid"] = {str(axis): (v if isinstance(v, list) else [v]) for axis, v in grid.items()}
+        if names_known or not (isinstance(grid, dict) and grid):
+            # (a scan can be judged only against the design variables' names; without them only its form is)
+            found = _grid(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None, unread)
+            problems.extend(found)
+            grid_ok = not found
+        else:
+            grid_ok = False
+        if grid_ok:
+            out["grid"] = {str(axis): (v if isinstance(v, list) else [v]) for axis, v in grid.items()}
 
     # What every evaluation goes through together (all the values in one run, as a measurement's `in_each_run`): the
     # objective of one design can be a result over all of them.
     inside = out.get("in_each_run")
+    inside_ok = True
+    inside_read: dict[str, list[Any]] = {}  # the axes of `in_each_run` that could be read, whether or not all of them could
     if inside is not None:
         if not isinstance(inside, dict) or not inside:
-            return None, f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values"
-        from . import plan as _plan
+            problems.append(f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values")
+            inside_ok = False
+        else:
+            from . import plan as _plan
 
-        read: dict[str, list[Any]] = {}
-        for name, values in inside.items():
-            # Read as a measurement's `in_each_run` is: numbers, names or tuples, each value once.
-            kept, why = _plan._grid_values(name, values, part="optimisation.in_each_run")
-            if why:
-                return None, why
-            if len({json.dumps(float(v) if _number(v) else v) for v in kept or []}) < len(kept or []):
-                return None, f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one time"
-            if len(kept or []) < 2:
-                return None, (f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
-                              f"put it under `{_P[1:]}.fixed`)")
-            if str(name) in variables or str(name) in {str(k) for k in (fixed or {})} \
-                    or str(name) in (out.get("grid") or {}) or str(name) in (out.get("numerical_settings") or {}):
-                return None, (f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, a "
-                              "numerical setting or a setting of the scan: it is one of them")
-            read[str(name)] = list(kept or [])
-        out["in_each_run"] = read
+            read: dict[str, list[Any]] = {}
+            grid_names = {str(k) for k in grid} if isinstance(grid, dict) else set()
+            setting_names = {str(k) for k in settings} if isinstance(settings, dict) else set()
+            held_names = {str(k) for k in fixed} if isinstance(fixed, dict) else set()
+            for name, values in inside.items():
+                # Read as a measurement's `in_each_run` is: numbers, names or tuples, each value once.
+                kept, why = _plan._grid_values(name, values, part="optimisation.in_each_run")
+                if why:
+                    problems.append(why)
+                    inside_ok = False
+                    continue
+                if len({json.dumps(float(v) if _number(v) else v) for v in kept or []}) < len(kept or []):
+                    problems.append(f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one time")
+                    inside_ok = False
+                    continue
+                if len(kept or []) < 2:
+                    problems.append(f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
+                                    f"put it under `{_P[1:]}.fixed`)")
+                    inside_ok = False
+                    continue
+                if str(name) in named or str(name) in held_names or str(name) in grid_names or str(name) in setting_names:
+                    problems.append(f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, a "
+                                    "numerical setting or a setting of the scan: it is one of them")
+                    inside_ok = False
+                    continue
+                read[str(name)] = list(kept or [])
+            inside_read = read
+            if inside_ok:
+                out["in_each_run"] = read
 
     # The scan divided into parts, each varying only some of its settings, as a measurement's `sub_studies` divide its grid.
+    # They are read against the scan and what every evaluation goes through, so they wait for both to be readable.
     subs = out.get("sub_studies")
-    if subs is not None:
+    if subs is not None and (grid_ok and inside_ok or problems):
         from . import plan as _plan
 
-        fixed_subs, why = _plan._sub_studies(subs, out.get("grid"), out.get("in_each_run"))
-        if why:
-            for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
-                             ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
-                why = why.replace(old, new)
-            if not why.startswith(_P):  # the block's repair reads the part a message is about from its first words
-                why = f"{_P}.sub_studies`: {why}"
-            return None, why
-        out["sub_studies"] = fixed_subs
-    return out, None
+        if grid_ok and inside_ok:
+            sub_grid, sub_inside = out.get("grid"), out.get("in_each_run")
+        else:
+            # The scan or what every evaluation goes through has a problem, but the parts are read all the same, against
+            # what could be read of them, so that one answer names the parts' problems beside theirs: only an axis that
+            # cannot be read is left out (of the scan and of the parts that name it), the rest is judged as written.
+            sub_grid, sub_inside = _readable_scan(grid), inside_read
+            if isinstance(subs, list) and sub_grid:
+                unreadable_axes = ({str(a) for a in grid} - set(sub_grid)) | (
+                    {str(a) for a in inside} - set(inside_read) - set(sub_grid) if isinstance(inside, dict) else set())
+                subs = _without_axes(subs, unreadable_axes)
+        if grid_ok and inside_ok or sub_grid:  # (else nothing of the scan could be read: its own problems say so)
+            fixed_subs, why = _plan._sub_studies(subs, sub_grid, sub_inside)
+            if why:
+                for one in why.split(_plan.ALSO):
+                    for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
+                                     ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
+                        one = one.replace(old, new)
+                    if not one.startswith(_P):  # the block's repair reads the part a message is about from its first words
+                        one = f"{_P}.sub_studies`: {one}"
+                    problems.append(one)
+            elif grid_ok and inside_ok:
+                out["sub_studies"] = fixed_subs
+    return (None, problems) if problems else (out, [])
+
+
+def _readable_scan(grid: Any) -> dict[str, list[Any]]:
+    """The axes of a scan that can be read, each as a list of values (an axis that cannot be read is not in it)."""
+    from . import plan as _plan
+
+    if not isinstance(grid, dict):
+        return {}
+    read: dict[str, list[Any]] = {}
+    for axis, values in grid.items():
+        kept, why = _plan._grid_values(axis, values if isinstance(values, list) else [values], part="optimisation.grid")
+        if kept is not None and not why:
+            read[str(axis)] = list(kept)
+    return read
+
+
+def _without_axes(subs: list[Any], axes: set[str]) -> list[Any]:
+    """``subs`` with the settings in ``axes`` taken out of each part's ``vary`` and ``hold``; a part left varying nothing
+    is dropped (what it varied could not be read)."""
+    if not axes:
+        return subs
+    out: list[Any] = []
+    for sub in subs:
+        if not (isinstance(sub, dict) and isinstance(sub.get("vary"), list) and sub["vary"]):
+            out.append(sub)
+            continue
+        vary = [a for a in sub["vary"] if not (isinstance(a, str) and a.strip() in axes)]
+        if not vary:
+            continue
+        hold = sub.get("hold")
+        out.append({**sub, "vary": vary, **({"hold": {k: v for k, v in hold.items() if str(k) not in axes}}
+                                           if isinstance(hold, dict) else {})})
+    return out
 
 
 def scan_size(block: dict[str, Any]) -> int:
@@ -800,10 +993,12 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     out: dict[str, Any] = dict(block)
     notes: list[str] = []
     for _ in range(64):
-        fixed, why = normalize(out)
+        fixed, found = _read(out)
         if fixed is not None:
             return fixed, notes
-        why = why or ""
+        # One problem at a time, the first in reading order: the block is read again after each part is left out, so a
+        # later problem (the scan's, say) is found the next time round.
+        why = found[0] if found else ""
         part = re.match(r"`protocol\.optimisation\.?(\w*)", why)
         key = part.group(1) if part else ""
         from . import plan as _plan_module
@@ -1130,6 +1325,10 @@ SCAN_PARTS_RULE = ("a search for the best design keeps its coarse scan and the p
                    "`protocol.optimisation`: `protocol.optimisation.grid`, `.sub_studies`, `.in_each_run` and "
                    "`.numerical_settings`; the same names at the top level of `protocol` cannot stand beside it")
 
+#: What a part of a divided scan holds (the same sentence the request about a scan that cannot run gives in its own words).
+HOLD_RULE = ("Each `sub_studies` entry lists in `vary` the settings of the scan it crosses, and in `hold` a value (one it has "
+             "in `protocol.optimisation.grid`) for every other setting of the scan that has more than one value.")
+
 
 def scan_request(topic: str, problems: list[str], *, left_out: bool = False) -> str:
     """The request FI makes of the plan's model when the coarse scan of its search cannot run: the plan's own arithmetic
@@ -1194,10 +1393,11 @@ def plain_gaps(design: Any, why: str | None = None, limit_s: float | None = None
         gaps.append(_PLAIN_PARTS["baseline"])
     if not isinstance(block.get("evaluation_budget"), dict):
         gaps.append(_PLAIN_PARTS["evaluation_budget"])
-    named = re.match(r"`protocol\.optimisation\.?(\w*)", why or "")
-    plain = _PLAIN_PARTS.get(named.group(1) if named else "")
-    if plain and plain not in gaps:
-        gaps.append(plain)
+    for problem in split_problems(why):  # every part the reason names, not only the first
+        named = re.match(r"`protocol\.optimisation\.?(\w*)", problem)
+        plain = _PLAIN_PARTS.get(named.group(1) if named else "")
+        if plain and plain not in gaps:
+            gaps.append(plain)
     if scan_problem(design, limit_s):
         gaps.append("a first scan of the settings small enough to run")
     if why and not gaps:
@@ -1240,7 +1440,7 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
                  "The rule FI applies: " + SCAN_PARTS_RULE + ". So the plan's own top-level `grid`, `sub_studies`, "
                  "`in_each_run` and `numerical_settings` are not kept beside the block (FI removes them): what they "
                  "compared is written again inside the block, where `sub_studies` entries vary settings of "
-                 "`protocol.optimisation.grid`. The baseline's `values` is " + BASELINE_VALUES_RULE + ". "
+                 "`protocol.optimisation.grid`. " + HOLD_RULE + " The baseline's `values` is " + BASELINE_VALUES_RULE + ". "
                  "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion.")
     return "\n\n".join(parts)
 

@@ -652,3 +652,49 @@ def test_a_declared_reference_value_is_the_same_everywhere_by_design_and_a_decla
     cells = _cells(gain=lambda r: 3 * r, ratio_ref=10.0, bound_ref=7.0, level=2.5)
     assert _flags(cells, reported, names) == [("level", "constant")], "only the declared result is flagged"
     assert ("ratio_ref", "constant") in _flags(cells, reported), "without the declared role it is flagged (the old behaviour)"
+
+
+# ---- a constant the plan's own record accounts for -------------------------------------------------------------------------
+
+def _search_cells(**metrics: Any) -> list[dict[str, Any]]:
+    """Eight settings with no grid declared: two settings vary in the data, one stays fixed."""
+    return [{"cell": {"rate": r, "mode": "ab"[i % 2], "fixed": 5}, "metrics": {n: [fn(r) if callable(fn) else fn] for n, fn in metrics.items()}}
+            for i, r in enumerate(RATES)]
+
+
+SEARCH_PLAN = {"metrics": [{"id": "gain", "depends_on": ["rate"]}, {"id": "at_origin", "depends_on": ["rate", "mode"]},
+                           {"id": "from_fixed", "depends_on": ["fixed"]}, {"id": "undeclared"}],
+               "oracles": [{"name": "origin_is_one", "kind": "special_case", "measure": "at_origin", "expected": 1,
+                            "tolerance": 1e-9, "case": {"rate": 1.0, "mode": "a"}}]}
+
+
+def _after_record(cells: list[dict[str, Any]], plan: dict[str, Any], reported: set[str]) -> list[tuple[str, str]]:
+    found = dr.quantity_problems(cells, reported, dr.expected_constants(plan), plan)
+    return [(q.name, q.kind) for q in dr.split_flat(found, plan)[0]]
+
+
+def test_a_constant_equal_to_the_known_answer_of_its_check_is_that_answer() -> None:
+    cells = _search_cells(gain=lambda r: 3 * r, at_origin=1.0)
+    names = REPORTED | {"at_origin"}
+    assert _flags(cells, names) == [("at_origin", "constant")], "judged without the plan: the old behaviour"
+    assert _after_record(cells, SEARCH_PLAN, names) == []
+
+
+def test_a_known_answer_measure_constant_at_another_value_is_still_flagged() -> None:
+    cells = _search_cells(gain=lambda r: 3 * r, at_origin=1.0001)
+    assert _after_record(cells, SEARCH_PLAN, REPORTED | {"at_origin"}) == [("at_origin", "constant")]
+    off_in_one = _search_cells(gain=lambda r: 3 * r, at_origin=lambda r: 1.0 if r < 8 else 1.5)
+    assert "at_origin" not in dr.expected_by_record(off_in_one, SEARCH_PLAN)
+
+
+def test_in_a_search_with_no_grid_a_constant_that_depends_on_a_setting_that_varies_is_still_flagged() -> None:
+    plan = {**SEARCH_PLAN, "oracles": []}
+    cells = _search_cells(gain=lambda r: 3 * r, at_origin=2.0)
+    assert _after_record(cells, plan, REPORTED | {"at_origin"}) == [("at_origin", "constant")]
+
+
+def test_a_constant_that_depends_only_on_settings_that_never_vary_is_not_flagged() -> None:
+    plan = {**SEARCH_PLAN, "oracles": []}
+    cells = _search_cells(gain=lambda r: 3 * r, from_fixed=2.0, undeclared=2.0)
+    names = REPORTED | {"from_fixed", "undeclared"}
+    assert _after_record(cells, plan, names) == [("undeclared", "constant")], "no depends_on: judged as before"

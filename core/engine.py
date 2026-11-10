@@ -6245,9 +6245,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         missing = _optim.missing_parts(design, self._scan_limit_s()) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
         if block_why:
-            entry = _plan.offending_entry(design.get("protocol"), block_why)
+            entry = _entries_as_written(design.get("protocol"), block_why)
             missing.append(f"its optimisation block cannot be used ({block_why})"
-                           + (f"; the entry as written: {entry}" if entry else ""))
+                           + (f"; {entry}" if entry else ""))
         return True, missing, block_why
 
     def _scan_limit_s(self) -> float:
@@ -6283,6 +6283,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return ""
         if isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name():
             return str(record.get("problem") or "")
+        return ""
+
+    def _search_refused_block(self, sha: str, file: str | None = None) -> str:
+        """The block the plan's model wrote that the reader refused last time, as written (cut at ``_REFUSED_BLOCK_CHARS``),
+        kept in the same record as the reason; empty for another plan or model, and when the last answer was used."""
+        try:
+            record = json.loads((self.fi_dir / (file or _SEARCH_ASKED)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if (isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()
+                and record.get("problem")):
+            return str(record.get("refused_block") or "")
         return ""
 
     def _search_schema_refused(self, sha: str, file: str | None = None) -> bool:
@@ -6566,6 +6578,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
         last_problem = self._search_problem(plan_sha, file)  # why the last answer was not used (kept on disk)
+        last_block = self._search_refused_block(plan_sha, file) if last_problem else ""  # ... and the block it refused
         schema = self._search_schema_refused(plan_sha, file)  # ... and whether it was refused for its form
         while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
                + (_SCHEMA_RETRY_ASKS if schema else 0)
@@ -6585,9 +6598,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             ask = request(design, text)
             if last_problem:
                 # The reader's exact reason for refusing the last answer goes back to the model, not only what is missing.
+                if last_block:
+                    # The refused block is the base of this request: the model changes what the reason names and keeps the
+                    # rest, so a part the last answer got right stays right.
+                    ask += ("\n\nThe block you wrote last time, exactly as you wrote it (shown up to "
+                            f"{_REFUSED_BLOCK_CHARS} characters):\n" + last_block)
                 ask += ("\n\nYour last answer was not used. The reason, exactly:\n" + last_problem
-                        + "\nFix that, and keep everything the plan already has.")
-            extra_now = {**(extra or {}), **({"problem": last_problem, "schema": schema} if last_problem else {})}
+                        + "\nFix that, and keep everything the plan already has."
+                        + (" Start from the block you wrote last time (shown above): change only what the reason names, "
+                           "and keep every other part of it exactly as you wrote it." if last_block else ""))
+            extra_now = {**(extra or {}), **({"problem": last_problem, "schema": schema,
+                                             **({"refused_block": last_block} if last_block else {})}
+                                            if last_problem else {})}
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
             if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra_now):
@@ -6598,6 +6620,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             outcome = "kept"
             earlier_problem = last_problem
             last_problem = ""
+            last_block = ""
+            self._answer_block = None  # the block of the answer, set by a keep that reads one (:meth:`_keep_only_the_search`)
             schema = False
             repeated = False
             try:
@@ -6608,7 +6632,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     outcome = "kept in part"
                     schema = True
                     last_problem = ("Part of your last answer was used. This part was not: "
-                                    + " ".join(" ".join(refused).split()))[:1500]
+                                    + " ".join(_optim.ALSO.join(" ".join(one.split()) for one in r.split(_optim.ALSO))
+                                               for r in refused))[:_REFUSAL_CHARS]
                     self._log.warning("[plan] the plan step's answer to complete %s was used in part; not used: %s",
                                       short, "; ".join(refused)[:600])
                     repeated = bool(earlier_problem) and last_problem == earlier_problem
@@ -6623,7 +6648,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             except ValueError as e:
                 outcome = "not usable"
                 schema = True
-                last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "", " ".join(str(e).split()))[:1500]
+                last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "",
+                                      _optim.ALSO.join(" ".join(one.split()) for one in str(e).split(_optim.ALSO)))[:_REFUSAL_CHARS]
+                if isinstance(getattr(self, "_answer_block", None), dict):
+                    last_block = json.dumps(self._answer_block, default=str, ensure_ascii=False)[:_REFUSED_BLOCK_CHARS]
                 self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
                 if earlier_problem and last_problem == earlier_problem:
                     outcome = "same refusal again"
@@ -6639,7 +6667,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             count += 1
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
             self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
-                                      {**(extra or {}), **({"problem": last_problem, "schema": schema} if last_problem else {})})
+                                      {**(extra or {}), **({"problem": last_problem, "schema": schema,
+                                                            **({"refused_block": last_block} if last_block else {})}
+                                                           if last_problem else {})})
             if outcome == "same refusal again":
                 # The same reason twice: the model repeats an answer the plan's rules cannot take, so another call would
                 # cost a few minutes and return the same refusal. The stop that follows says what is missing.
@@ -6665,7 +6695,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 # The same part refused twice for the same reason, and nothing else came with it: asking again would return
                 # it once more. Recorded so, so a resume does not ask once more either.
                 self._record_search_asked(count, calls, plan_sha, "same refusal again", file,
-                                          {**(extra or {}), "problem": last_problem, "schema": False})
+                                          {**(extra or {}), "problem": last_problem, "schema": False,
+                                           **({"refused_block": last_block} if last_block else {})})
                 self._log.warning("[plan] the plan's model gave the same part that could not be used for %s twice, so FI "
                                   "stopped asking (%d request(s) made)", short, count)
                 return design, plan_sha
@@ -8328,12 +8359,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not isinstance(block, dict):
             raise ValueError("your answer has no `protocol.optimisation` block: write it as a mapping (`objective`, "
                              "`design_variables`, `baseline`, `evaluation_budget`) under `protocol` in the design block")
+        self._answer_block = block  # kept as written, so a refusal sends it back as the base of the next request
         old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
         old_block = old_protocol.get("optimisation")
         if isinstance(old_block, dict):
             _fixed, why = _optim.normalize(old_block)
-            named = re.match(r"`protocol\.optimisation\.?(\w*)", why or "")
-            unreadable = {named.group(1)} if named else set()
+            # Every part the reader names, not only the first: the model was asked for all of them at once.
+            unreadable = {m.group(1) for m in (re.match(r"`protocol\.optimisation\.?(\w*)", one)
+                                              for one in _optim.split_problems(why)) if m}
             if not isinstance(old_block.get("evaluation_budget"), dict):
                 unreadable.add("evaluation_budget")
             if _optim.scan_problem(old, self._scan_limit_s()):
@@ -8378,9 +8411,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             block = merged
         fixed_block, why_block = _optim.normalize(block)
         if fixed_block is None:
-            entry = _plan.offending_entry({"optimisation": block}, why_block)
+            entry = _entries_as_written({"optimisation": block}, why_block, you=True)
             raise ValueError(f"the block you wrote cannot be read: {why_block}"
-                             + (f" The entry as you wrote it: {entry}" if entry else ""))
+                             + (f" {entry[0].upper()}{entry[1:]}" if entry else ""))
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
@@ -13917,6 +13950,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if any(c["cut"] for c in calls):
             record["lines_cut"] = [x for c in calls for x in c["cut"]]
         earlier = _code_review.earlier_block(previous)
+        small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
+                     or "(FI did not run the simulation before this reading)")
+        # A part of the code that was read before, with the same text, the same things it uses, the same plan and the same
+        # question, is not read again: its earlier reading is used (:func:`core.code_review.request_key`).
+        kept = _code_review.load_reading_cache(self.quest_root)
+        depends = _code_review.part_dependencies(code, calls)
+        asked_of = [[r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]] for c in calls]
+        keys = [_code_review.request_key(c, depends[i], asked=asked_of[i], reader=str(reader or ""),
+                                         template=self._prompts["code_review"].template, small_run=small_run,
+                                         shown_values=shown_values) for i, c in enumerate(calls)]
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
@@ -13940,17 +13983,36 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # A request is made for each part, and made once more if it fails: those 2 per part are reserved before the
             # reading starts, so a reading is never admitted and then dropped for want of requests. The follow-up ask of a
             # part (up to 2 more) is made only while the requests the later parts need stay reserved.
-            if int(record.get("reader_calls") or 0) + 2 * len(calls) > _code_review.MAX_READER_CALLS:
+            # Only the parts that must be asked are reserved for, one request each: a part read before and not changed is
+            # not asked again. A request that fails is made once more only while the parts still to come keep theirs; when
+            # none is left for them the reading stops partway and the parts not read are recorded (``parts_not_read``).
+            fresh = len({k for k in keys if k not in kept})
+            if int(record.get("reader_calls") or 0) + fresh > _code_review.MAX_READER_CALLS:
                 raise _code_review.BudgetSpent(f"the {_code_review.MAX_READER_CALLS} reader requests of a quest are "
-                                               f"used; this reading needs {2 * len(calls)} more")
+                                               f"used; this reading needs {fresh} more")
             for p_index, call in enumerate(calls, start=1):
+                key = keys[p_index - 1]
+                if key in kept:
+                    hit = kept[key]
+                    p_verdicts = copy.deepcopy(hit.get("verdicts") or [])
+                    logic = _code_review.merge_logic(logic, copy.deepcopy(hit.get("logic") or []))
+                    outside.extend(copy.deepcopy(hit.get("outside") or []))
+                    listed = [*listed, *(c for c in hit.get("listed") or [] if c not in listed)]
+                    part_verdicts.append(p_verdicts)
+                    record["requests"][p_index - 1]["reused"] = True
+                    record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
+                    continue
+                part_found: list[dict[str, Any]] = []
+                part_listed: list[str] = []
+                outside_from = len(outside)
                 sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
                 # only the requirements this request was given the plan's definition of (:func:`core.code_review.asked_ids`)
                 call_reqs = [r for r in reqs if call.get("asked") is None or r["id"] in call["asked"]]
                 for _ask in range(2):
-                    if _ask and int(record.get("reader_calls") or 0) + 2 + 2 * (len(calls) - p_index) > _code_review.MAX_READER_CALLS:
+                    later = len({k for k in keys[p_index:] if k not in kept and k != key})
+                    if _ask and int(record.get("reader_calls") or 0) + 1 + later > _code_review.MAX_READER_CALLS:
                         break  # the follow-up ask would use what the parts still to come need
                     left = [r for r in call_reqs if r["id"] not in {v["id"] for v in p_verdicts or []}]
                     again = ""
@@ -13966,8 +14028,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
                                                              indent=2),
                         plan=call["plan"], open_items=call["open_items"] or "(none)", code=sources, previous=earlier,
-                        small_run=_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
-                        or "(FI did not run the simulation before this reading)"
+                        small_run=small_run
                     ) + again
                     reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
@@ -13976,8 +14037,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     had = got is not None
                     got = _code_review.keep_seen(got, call["shown"], outside, call["cut"]) if got else got
                     if again:
-                        kept = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
-                        p_verdicts = [*kept, *(got or [])] or None
+                        before = [v for v in p_verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
+                        p_verdicts = [*before, *(got or [])] or None
                     else:
                         p_verdicts = [*(p_verdicts or []), *(got or [])] or ([] if had else None)
                     if not call_reqs:
@@ -13988,12 +14049,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                    for f in found if f not in seen)
                     found = seen
                     logic = _code_review.merge_logic(logic, found)
-                    listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
-                                         if c not in listed)]
+                    part_found.extend(found)
+                    said = _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
+                    part_listed.extend(said)
+                    listed = [*listed, *(c for c in said if c not in listed)]
                 if p_verdicts is None and many:
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
                     raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
+                # Only an answer that judged every requirement this part was asked is kept for the next reading of this same
+                # part: a part answered in part is asked again, so what it left unjudged is not left so for good.
+                if p_verdicts is not None and not {r["id"] for r in call_reqs} - {v["id"] for v in p_verdicts}:
+                    kept[key] = {"verdicts": p_verdicts, "logic": part_found, "outside": outside[outside_from:],
+                                 "listed": part_listed, "version": version}
+                    _code_review.save_reading_cache(self.quest_root, kept)
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = ("its answers cited no place in the code it was shown" if outside
@@ -14009,6 +14078,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed, twice ({str(e)[:120] or type(e).__name__})"
             verdicts = p_verdicts if not many else None
+        if verdicts is None:
+            unread = [_code_review.part_label(c, record["code_parts"]) for i, c in enumerate(calls) if keys[i] not in kept]
+            if unread:
+                record["parts_not_read"] = list(dict.fromkeys(unread))
         if outside:
             record["cited_outside_what_was_shown"] = outside[:50]
         same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
@@ -29977,7 +30050,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "code_finding_test",                # a small test that fails on the current code because of one finding
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
-        "improve_speed",        # one change that makes a study that would not fit the time allowed faster
+        "improve_speed",        # one change that makes a long study's simulation faster, same numbers
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence
@@ -31305,6 +31378,11 @@ _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
 _TOPIC_DESIGN_ASKED = "topic_design_asked.json"  # one request per redesign, for a design drafted at the design step
 _SEARCH_ASKS = 2
+#: The most characters of a refusal kept to be sent back to the plan's model with the next request. A block with several
+#: problems gives one sentence for each, and every one must reach the model, so this is room for many, not for a long one.
+_REFUSAL_CHARS = 8000
+#: The most characters of the plan's model's last refused block that go back with the next request, and are kept on disk.
+_REFUSED_BLOCK_CHARS = 12000
 #: How many times the analysis alone is sent back for a difference FI counted in its values (the simulation stands, so
 #: no experiment is run again); each try uses one of the execute-reflect repairs, which stay bounded as before.
 _ANALYSIS_REPAIR_TRIES = 3
@@ -35516,6 +35594,22 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
         for s in (ax.get("series") or [])
         if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line", "reference line")
     ]
+
+
+def _entries_as_written(protocol: Any, why: str | None, *, you: bool = False) -> str:
+    """The entries of ``protocol`` that the problems in ``why`` (one or several, as
+    :func:`core.optimisation_plan.normalize` gives them) name, as written, in one sentence; ``""`` when none is found. One
+    problem gives the same sentence as before (``the entry as written: ...``; ``you``: ``the entry as you wrote it: ...``)."""
+    found: list[str] = []
+    for one in _optim.split_problems(why):
+        entry = _plan.offending_entry(protocol, one)
+        if entry and entry not in found:
+            found.append(entry)
+    if not found:
+        return ""
+    lead = (("the entry as you wrote it" if you else "the entry as written") if len(found) == 1
+            else ("the entries as you wrote them" if you else "the entries as written"))
+    return f"{lead}: " + " | ".join(found)
 
 
 def _one_line(text: Any, limit: int = 60) -> str:
