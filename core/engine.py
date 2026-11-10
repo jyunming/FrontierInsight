@@ -73,6 +73,7 @@ from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
+from . import cite_labels as _cite_labels
 from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import audit_open_items as _audit_open
@@ -24624,6 +24625,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         markdown, literature, dropped = _finalize_paper_sources(
             markdown, state.get("literature") or [], self.config.output.audience,
         )
+        _cite_labels.write_removed(self.quest_root, [str(n) for n in dropped])  # listed in QUALITY.md
         if dropped:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
@@ -32548,50 +32550,69 @@ def _number_list(numbers: list[int]) -> str:
     return ", ".join(parts)
 
 
-def _renumber_citations(body: str, n_papers: int) -> tuple[str, dict[int, int], list[int]]:
+def _renumber_citations(
+    body: str, n_papers: int, web_labels: set[str] | None = None,
+) -> tuple[str, dict[int, int], list[int | str]]:
     """Number the scholarly sources ``body`` cites 1, 2, 3… in the order it
     first cites them, and rewrite its citations to match. Web-page labels
-    ([W1]) stay as they are. A number no source has (above ``n_papers``) is
-    taken out of its citation, and a citation left empty goes.
+    ([W1]) stay as they are. A label no source has (above ``n_papers``, or a
+    web page not in ``web_labels``) is taken out of its citation, and a
+    citation left empty goes.
 
-    Not citations, so left alone: brackets in inline code or math, a bracket
+    A paper written with ``{{cite:N}}`` (core/cite_labels.py) cites by those
+    placeholders alone: FI renders them, and no bracket is read as a citation.
+    A paper with no placeholder was written before that, and its brackets are
+    read as follows (kept only so an old record can be rendered again). Not
+    citations, so left alone: brackets in inline code or math, a bracket
     followed by "(" (a link), one right after a name or another bracket (an
     index: "pixels[2,3]", "m[1][4]"), and one holding a 0 or a year-sized
     number ("[0, 1]", "[1990–2020]").
 
-    Returns the new text, the map from old number to new, and the numbers
+    Returns the new text, the map from old number to new, and the labels
     that were taken out."""
     spans = [(s.start(), s.end()) for s in _NOT_PROSE_RE.finditer(body)]
-    found: list[tuple[re.Match[str], list[str]]] = []
+    found: list[tuple[int, int, list[str], list[str]]] = []
+    placeholders = _cite_labels.has_placeholder(body, spans)
+    if placeholders:
+        for m in _cite_labels.CITE.finditer(body):
+            if not any(s <= m.start() < e for s, e in spans):
+                labels, bad = _cite_labels.split_labels(m.group(1), lambda part: _citation_labels(part))
+                found.append((m.start(), m.end(), labels, bad))
+    else:
+        for m in _CITATION_BRACKET_RE.finditer(body):
+            before = body[m.start() - 1:m.start()]
+            if (body[m.end():m.end() + 1] == "(" or (before.isalnum() or before in "_])" and before != "")
+                    or any(s <= m.start() < e for s, e in spans)):
+                continue
+            labels = _citation_labels(m.group(1))
+            if any(n == 0 or n >= _NOT_A_CITATION_NUMBER for n in (int(x) for x in labels if x.isdigit())):
+                continue
+            found.append((m.start(), m.end(), labels, []))
+    # A label with no source behind it is removed, never turned into a number.
     mapping: dict[int, int] = {}
-    for m in _CITATION_BRACKET_RE.finditer(body):
-        before = body[m.start() - 1:m.start()]
-        if (body[m.end():m.end() + 1] == "(" or (before.isalnum() or before in "_])" and before != "")
-                or any(s <= m.start() < e for s, e in spans)):
-            continue
-        labels = _citation_labels(m.group(1))
-        numbers = [int(label) for label in labels if label.isdigit()]
-        if any(n == 0 or n >= _NOT_A_CITATION_NUMBER for n in numbers):
-            continue
-        found.append((m, labels))
-        for n in numbers:
-            if n <= n_papers and n not in mapping:
+    for _s, _e, labels, _bad in found:
+        for n in (int(x) for x in labels if x.isdigit()):
+            if 0 < n <= n_papers and n not in mapping:
                 mapping[n] = len(mapping) + 1
-    dropped: list[int] = []
+    dropped: list[int | str] = []
     pieces: list[str] = []
     last = 0
-    for m, labels in found:
+    for start, end, labels, bad in found:
         numbers = [int(label) for label in labels if label.isdigit()]
+        unknown_web = [x for x in labels if x.startswith("W") and web_labels is not None and placeholders
+                       and x not in web_labels]
         dropped += [n for n in numbers if n not in mapping and n not in dropped]
+        dropped += [x for x in [*unknown_web, *bad] if x not in dropped]
         new = _number_list(sorted({mapping[n] for n in numbers if n in mapping}))
-        pages = list(dict.fromkeys(label for label in labels if not label.isdigit()))
+        pages = list(dict.fromkeys(label for label in labels if not label.isdigit() and label not in unknown_web))
         inside = ", ".join(([new] if new else []) + pages)
-        start = m.start()
         if not inside:
-            while start > last and body[start - 1] in " \t":
+            while start > last and body[start - 1] in " 	":
                 start -= 1
-        pieces += [body[last:start], f"[{inside}]" if inside else ""]
-        last = m.end()
+        # A rendered citation never touches the word before it, so no later pass reads it as an index.
+        lead = " " if inside and placeholders and start > last and body[start - 1].isalnum() else ""
+        pieces += [body[last:start], lead + (f"[{inside}]" if inside else "")]
+        last = end
     pieces.append(body[last:])
     return "".join(pieces), mapping, dropped
 
@@ -32633,8 +32654,10 @@ def _finalize_paper_sources(
     source the text cites is always under References); ``## Further reading``
     lists the web pages it does not cite. Returns the paper, the reordered
     literature and the citation numbers that named no source."""
-    n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
-    body, mapping, dropped = _renumber_citations(_strip_source_lists(markdown), n_papers)
+    labelled = _labelled_sources(literature, audience)
+    n_papers = sum(1 for label, _m, _i in labelled if not label.startswith("W"))
+    body, mapping, dropped = _renumber_citations(
+        _strip_source_lists(markdown), n_papers, {label for label, _m, _i in labelled if label.startswith("W")})
     ordered = _literature_in_citation_order(literature, mapping, audience)
     refs = build_references(ordered, audience=audience)[:len(mapping)]
     web = build_further_reading(ordered, audience=audience)

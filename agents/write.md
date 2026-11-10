@@ -98,9 +98,9 @@ Recognize this from the topic + analysis. If you're writing about a survey-shape
 
 ## Citing sources
 
-Cite a source inline, where you use it, by its label in the prior-work block in the Inputs section: `[3]` for a scholarly source, `[W2]` for a web page, `[2, 5]` for several. Cite every source you draw on, each time you draw on it, including one you name in the text ("the Kermack–McKendrick model [4]"): a source the text does not cite is not listed.
+Cite a source inline, where you use it, with a placeholder holding its label in the prior-work block in the Inputs section: `{{cite:3}}` for a scholarly source, `{{cite:W2}}` for a web page, `{{cite:2, 5}}` for several. Put it where the citation goes ("the Kermack–McKendrick model {{cite:4}}"); FI turns it into the paper's numbered citation, so never type a bracketed number like `[3]` yourself. A label the prior-work block does not have is taken out. If the earlier draft in the Inputs section shows a citation as `[4]`, write it again as `{{cite:4}}`. Cite every source you draw on, each time you draw on it, including one you name in the text: a source the text does not cite is not listed.
 
-**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. A web page your text cites ([W2]) is listed under References too, with its own label; Further reading lists the web pages you do not cite. Anything you write under either heading is replaced.
+**Do not write a `## References` or a `## Further reading` section.** The engine adds both after your last section. References lists the scholarly sources your text cites, numbered in the order you first cite them, and your citations are renumbered to match. A web page your text cites ({{cite:W2}}) is listed under References too, with its own label (`[W2]`); Further reading lists the web pages you do not cite. Anything you write under either heading is replaced.
 
 Cite only labels that appear in the prior-work block:
 
