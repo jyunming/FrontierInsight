@@ -190,7 +190,10 @@ def per_setting_precision(quest_root: Path, metric: str, target: float, proporti
         if not s or not s["n"]:
             no_value.append(c["key"])
             continue
-        lower, upper, _method = interval(s)
+        # A value that gave only 0 and 1 is judged by the Wilson interval though the plan does not declare it a proportion:
+        # a t interval of 39 successes in 39 trials has width 0, which claims a precision 39 trials cannot show. (The
+        # results table keeps its t interval and says it is undeclared.)
+        lower, upper, _method = interval({**s, "binary": True} if s.get("zero_one") else s)
         if lower is None or upper is None:
             without += 1
             continue

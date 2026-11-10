@@ -72,4 +72,5 @@ def test_the_precision_target_is_held_to_the_interval_the_plan_declares(tmp_path
     t_based = trial_table.per_setting_precision(quest, "sprouted", 0.3)
     lo, hi = stats.wilson_interval(7, 10)
     assert wilson is not None and wilson["widest"] == pytest.approx((hi - lo) / 2.0)
-    assert t_based is not None and t_based["widest"] != pytest.approx(wilson["widest"])
+    # an undeclared value that gave only 0 and 1 is still judged by Wilson (a t interval overstates the precision of few trials)
+    assert t_based is not None and t_based["widest"] == pytest.approx(wilson["widest"])
