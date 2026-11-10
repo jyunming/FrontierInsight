@@ -318,7 +318,14 @@ same PR that adds, splits or renames one.
   harness (`optimise._evaluate`, fresh seeds for `run_trial` via `check_seeds`): `check` (a generator of evaluate
   requests, like `optimise_search.search`; `check_sync` drives it in one process for the tests), `levels_of` (the finer
   levels, the plan's `check` values or `optimisation_plan.check_levels`' fixed rule, and where each came from),
-  `numerical_error` (Roache's grid-convergence estimate per design), `candidates` (the best design of each starting
+  `numerical_error` (Roache's grid-convergence estimate per design; the runs that do not depend on each other are
+  asked for as ONE `evaluate_many` request and judged in the one-after-another order: every design at every level, then
+  every nudge of `_probe`, so the harness runs them `at_once` at a time; the run estimate in
+  `run_checks._size_the_scan` times one whole design of the check at its finest settings whenever a check is planned and
+  prices the check with `cost_model.check_wall_s`, the one rule `cost_model.search_plan` uses too: the requests
+  `optimisation_plan.check_batches` names, in whole waves of the settings the memory lets run together
+  (`execution.at_once_for_memory`), one after another when no slowdown was measured),
+  `candidates` (the best design of each starting
   point), the six checks (refinement, limits, improvement over the baseline against the plan's threshold or the
   numerical error of the two designs, starting points, neighbourhood nudges, the search's budget) and one `verdict`;
   `run_check` writes `needs/OPTIMUM_CHECK.json` (cached in `.fi/optimisation/check.json`; `restore` / `read`),

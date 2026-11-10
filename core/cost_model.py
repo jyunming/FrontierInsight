@@ -395,6 +395,20 @@ class SearchPlan:
     why: str = ""
 
 
+def check_wall_s(per_design_s: float, batches: list[int], *, at_once: int, slowdown: float | None) -> float:
+    """Seconds FI's check at finer settings takes: ``batches`` are the designs of each request it makes (they run together,
+    up to ``at_once`` at a time, in whole waves: a request that ends with a part-filled wave still takes a whole one), each
+    ``per_design_s`` alone and as much slower beside the others as ``slowdown`` measured. A slowdown that was not measured is
+    not assumed: the designs are then counted one after another. The one rule both the run's estimate
+    (core/run_checks.py) and :func:`search_plan` price the check by."""
+    designs = [max(0, int(n)) for n in batches]
+    together = max(1, int(at_once or 1))
+    if together > 1 and slowdown is not None:
+        waves = sum(-(-n // together) for n in designs)
+        return waves * per_design_s * max(1.0, float(slowdown))
+    return sum(designs) * per_design_s
+
+
 def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | None = None, check_runs: int | None = None,
                 scan_s: float | None = None, analysis_s: float = ANALYSIS_RESERVE_S, design: str = "",
                 margin: float = 1.0) -> SearchPlan:
@@ -417,7 +431,7 @@ def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | 
     # Designs share the time only when they run at the same time (as core/run_checks.py `_size_the_scan` prices it) and
     # the slowdown beside each other was measured: an unmeasured slowdown is not assumed, so the check runs one after another.
     at_once = int(model.at_once or 1)
-    share = model.slowdown / at_once if model.slowdown is not None and at_once > 1 else 1.0
+    share = model.slowdown / at_once if model.slowdown is not None and at_once > 1 else 1.0  # per evaluation
 
     def nothing(why: str) -> SearchPlan:
         return SearchPlan(None, None, 0.0, runs, analysis_s, float(scan or 0.0), None, UNKNOWN, why)
@@ -434,11 +448,16 @@ def search_plan(model: CostModel, limit_s: float, *, planned_evaluations: int | 
             return nothing("the time of the coarse scan was not measured, so no number of evaluations is given")
         scan = 0.0
     finer = model.seconds("finer_check_unit")
-    # The live arithmetic (core/run_checks.py, _size_the_scan): ``unit / runs * check_n * share``, where ``unit`` is a whole
-    # setting of ``runs_per_evaluation`` runs; a finer-settings unit is the time of one run of the check.
+    # A finer-settings unit is the time of one run of the check (a whole design's time over its ``check_trials`` runs); the
+    # check is priced by the one rule the run's estimate uses (:func:`check_wall_s`) over the requests it makes.
     per_setting_runs = max(1, int(model.plan.get("runs_per_evaluation") or 1))
     unit = finer if finer is not None else (model.seconds("check_unit") or model.seconds("per_evaluation") or 0.0) / per_setting_runs
-    wanted = runs * unit * share * max(1.0, float(margin))  # ``margin``: the safety factor the estimates use
+    trials = max(1, int(model.plan.get("check_trials") or 1))
+    batches = [int(n) for n in model.plan.get("check_batches") or []]
+    if not batches:  # a record from before the requests were kept: the runs as one request of single-run designs
+        batches, trials = [runs], 1
+    wanted = check_wall_s(unit * trials, batches, at_once=min(at_once, int(model.plan.get("check_at_once") or at_once)),
+                          slowdown=model.slowdown) * max(1.0, float(margin))
     reserve = min(wanted, float(limit_s) / 2.0)  # as the run itself keeps for the check: never more than half the limit
     room = float(limit_s) - scan - reserve - analysis_s
     n = max(0, int(room / wall)) if wall > 0 else 0

@@ -592,11 +592,14 @@ def test_a_check_cut_short_during_the_nudges_keeps_what_it_measured() -> None:
     request, answered = next(gen), 0
     try:
         while True:
-            # Every design at every level (2 designs × 2 levels, each level's designs asked for together), then the
+            # Every design at every level (2 designs × 2 levels, asked for together), then the
             # time is up during the nudges.
             if request["kind"] == "evaluate_many":
+                # the levels (one request), then the nudges (another): the time is up when the nudges are asked for
+                stop = answered >= 4
                 answered += len(request["requests"])
-                request = gen.send([{"values": _bowl(r["cell"])} for r in request["requests"]])
+                request = gen.send([{"stop": "time"} if stop else {"values": _bowl(r["cell"])}
+                                    for r in request["requests"]])
                 continue
             reply = {"values": _bowl(request["cell"])} if answered < 4 else {"stop": "time"}
             answered += 1

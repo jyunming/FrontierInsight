@@ -143,6 +143,29 @@ def _free_mb() -> float | None:
         return None
 
 
+def at_once_for_memory(at_once: int, peak_mb: float | None, *, free_mb: float | None = None,
+                       total_mb: float | None = None) -> int:
+    """How many settings of ``peak_mb`` each (the most one held) the computer's memory lets run together, at most ``at_once``
+    and at least one: :class:`SettingsGate`'s own rule (a new setting starts only when the free memory less the reserve holds
+    one more of 1.25 times that size), worked out ahead for the run's estimate. ``at_once`` itself when the size or the free
+    memory is not known."""
+    at_once = max(1, int(at_once or 1))
+    if not peak_mb or peak_mb <= 0 or at_once == 1:
+        return at_once
+    free = free_mb if free_mb is not None else _free_mb()
+    if free is None:
+        return at_once
+    if total_mb is None:
+        try:
+            import psutil
+
+            total_mb = psutil.virtual_memory().total / 1_048_576
+        except Exception:  # noqa: BLE001
+            total_mb = 0.0
+    reserve = max(1024.0, 0.1 * total_mb)
+    return max(1, min(at_once, int((free - reserve) // (1.25 * peak_mb))))
+
+
 class SettingsGate:
     """Lets at most ``at_once`` settings run together, and fewer when the computer's memory would not hold them.
 

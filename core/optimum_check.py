@@ -311,28 +311,23 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
             reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
         return judge(key, reply)
 
-    def evaluate_level(items: list[dict[str, Any]], level: int):
-        """Every item's design at one level: they do not depend on each other's answers, so they are asked for
-        together (run at the same time), and judged in the items' order as one after another would be."""
+    def ask_together(asks: list[tuple[dict[str, Any], int, str]]):
+        """Every ``(design, level, role)`` in ``asks`` asked for as ONE request: they do not depend on each other's
+        answers, so they run at the same time. The answers wait in ``pending`` and are judged, one by one in the
+        order of ``asks``, by :func:`evaluate`, as one after another would be (the caller clears ``pending``)."""
         todo, keys = [], []
-        for item in items:
-            design = space.canonical(item["design"])
+        for design, level, role in asks:
+            design = space.canonical(design)
             key = (space.key(design), level)
             if key in cache or key in keys:
                 continue
             keys.append(key)
             todo.append({"kind": "evaluate", "cell": {**_search.cell_of(block, design), **levels[level]},
-                         "design": dict(design), "level": level, "role": item["role"]})
+                         "design": dict(design), "level": level, "role": role})
         if len(todo) > 1:
             replies = yield {"kind": "evaluate_many", "requests": todo}
             replies = list(replies) if isinstance(replies, list) else []
             pending.update({key: replies[k] if k < len(replies) else None for k, key in enumerate(keys)})
-        try:
-            # judged item by item, as one after another: a stop keeps the levels of the items before it
-            for item in items:
-                item["levels"][level] = yield from evaluate(item["design"], level, item["role"])
-        finally:
-            pending.clear()
 
     def judge(key: tuple[str, int], reply: Any) -> dict[str, Any]:
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
@@ -348,6 +343,27 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
         cache[key] = judged
         return judged
 
+    def has_answer(design: dict[str, Any], level: int) -> bool:
+        """An answer exists for this design at this level: it came with the batch, or an earlier request had it."""
+        key = (space.key(space.canonical(design)), level)
+        return key in pending or key in cache
+
+    def judge_together(asks: list[tuple[dict[str, Any], int, str, Callable]]):
+        """Judge, in the order of ``asks``, the answers :func:`ask_together` left in ``pending``. Every run that finished
+        is recorded, wherever it stands in the batch; a design that was not run (its answer is a stop) is left as not run;
+        and only after all the finished answers are recorded does the check stop. (Run one after another, the answers
+        before the first stop are the ones that exist, so with no stop the record is the same.)"""
+        stopped = False
+        for design, level, role, store in asks:
+            if stopped and not has_answer(design, level):
+                continue  # no answer exists for this one and the time is up: not run
+            try:
+                store((yield from evaluate(design, level, role)))
+            except _Stop:
+                stopped = True
+        if stopped:
+            raise _Stop
+
     search_base = search_record.get("baseline") or {}
     k = min(_plan.CHECK_CANDIDATES, max(1, int((search_record.get("evaluations") or {}).get("starts") or 1)))
     base = {"design": space.canonical(block["baseline"]["values"]), "role": "baseline",
@@ -360,13 +376,22 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     probes: dict[str, Any] = {}
     finished = True
     try:
-        # The baseline and the best designs at every finer level, coarse to fine; then the neighbourhood of the design
-        # chosen at the finest level, at the finest level.
-        for level in range(len(levels)):
-            yield from evaluate_level([base, *cands], level)
+        # The baseline and the best designs at every finer level, coarse to fine, are asked for as one request (they do
+        # not depend on each other); then the neighbourhood of the design chosen at the finest level, at the finest
+        # level, as another. Each is judged in the order one after another would be, so a stop keeps what came before.
+        every = [(item, level) for level in range(len(levels)) for item in [base, *cands]]
+        try:
+            yield from ask_together([(item["design"], level, item["role"]) for item, level in every])
+            yield from judge_together([(item["design"], level, item["role"], _store(item["levels"], level))
+                                       for item, level in every])
+        finally:
+            pending.clear()
         chosen = _choose(cands, finest, limits, margin, sign)
         if chosen is not None:
-            yield from _probe(space, chosen, finest, evaluate, probes)
+            try:
+                yield from _probe(space, chosen, finest, evaluate, probes, ask_together, has_answer)
+            finally:
+                pending.clear()
     except _Stop:
         finished = False
     return _record(block, search_record, info, base, cands, probes, rows=rows, finished=finished, limits=limits,
@@ -391,12 +416,22 @@ def _choose(entries: list[dict[str, Any]], level: int, limits: list[tuple[str, s
     return min(ok, key=lambda e: sign * e["levels"][level]["objective"])
 
 
-def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, out: dict[str, Any]):
+def _store(slots: list, level: int) -> Callable:
+    def put(judged: dict[str, Any]) -> None:
+        slots[level] = judged
+
+    return put
+
+
+def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, out: dict[str, Any],
+           ask: Callable | None = None, answered: Callable | None = None):
     """Each variable of the chosen design nudged both ways (2% of its range; one whole number), inside its range, into
     ``out`` (filled as it goes, so a check cut short keeps what it did). A design within half a nudge of an edge of its
-    range is at that edge, and is not nudged past it."""
+    range is at that edge, and is not nudged past it. The nudges do not depend on each other's answers: with ``ask``
+    they are asked for as one request, then judged one by one in the order below."""
     design = chosen["design"]
     flat = space.flat(design)
+    plan: list[tuple[str, dict[str, Any], list[tuple[str, dict[str, Any], int]]]] = []
     for k in _probed(space):
         variable, kind = space.scalars[k], space.scalar_kinds[k]
         name = str(variable["name"])  # an element of an array variable is named `source[1,3]`
@@ -405,7 +440,7 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
         low, high, x = float(variable["low"]), float(variable["high"]), float(flat[k])
         step = 1.0 if kind == "integer" else NUDGE * (high - low)
         edge = "low" if x - low < step / 2 else "high" if high - x < step / 2 else None
-        out[name] = {"at_bound": edge, "step": step, "sides": {}, "value": flat[k]}
+        sides: list[tuple[str, dict[str, Any], int]] = []
         for side, value in (("down", max(low, x - step)), ("up", min(high, x + step))):
             if (side == "down" and edge == "low") or (side == "up" and edge == "high"):
                 continue
@@ -414,8 +449,28 @@ def _probe(space: Any, chosen: dict[str, Any], level: int, evaluate: Callable, o
             nudged = space.fold(moved)
             if space.key(space.canonical(nudged)) == space.key(space.canonical(design)):
                 continue
-            judged = yield from evaluate(nudged, level, "probe")
-            out[name]["sides"][side] = {"value": space.flat(space.canonical(nudged))[k], "judged": judged}
+            sides.append((side, nudged, k))
+        plan.append((name, {"at_bound": edge, "step": step, "sides": {}, "value": flat[k]}, sides))
+    if ask is not None:
+        yield from ask([(nudged, level, "probe") for _n, _e, sides in plan for _s, nudged, _k in sides])
+    stopped = False
+    for name, entry, sides in plan:
+        for side, nudged, k in sides:
+            if stopped and not (answered is not None and answered(nudged, level)):
+                continue  # not run: the time is up and no answer exists for this one
+            if not stopped:
+                out.setdefault(name, entry)
+            try:
+                judged = yield from evaluate(nudged, level, "probe")
+            except _Stop:
+                stopped = True
+                continue
+            out.setdefault(name, entry)  # (after a stop, a variable is named once one of its nudges was run)
+            entry["sides"][side] = {"value": space.flat(space.canonical(nudged))[k], "judged": judged}
+        if not sides and not stopped:
+            out[name] = entry  # a variable at both of its edges has no nudge, and is still named
+    if stopped:
+        raise _Stop
 
 
 def _array_of(name: str) -> str:
