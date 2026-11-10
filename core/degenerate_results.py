@@ -264,12 +264,16 @@ def keys_in(value: Any) -> set[str]:
     return out
 
 
-def quantity_problems(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str] = frozenset()
-                      ) -> list[QuantityProblem]:
+def quantity_problems(cells: list[dict[str, Any]], reported: set[str], exempt: set[str] | frozenset[str] = frozenset(),
+                      protocol: dict[str, Any] | None = None) -> list[QuantityProblem]:
     """The constant and the stuck quantities among those the analysis reported (``reported``: the keys it printed or wrote).
     A number per run is judged over the settings and a number per value over the settings and values, each over the records
-    that hold it (:func:`core.in_run.groups`)."""
+    that hold it (:func:`core.in_run.groups`). With the ``protocol``, what its record says stays put at these settings
+    (:func:`expected_by_record`) is not judged."""
     from . import in_run as _in_run
+
+    if protocol is not None:
+        exempt = set(exempt) | expected_by_record(cells, protocol)
 
     return [q for group in _in_run.groups(cells) for q in _quantity_problems_in(group, reported, exempt)]
 
@@ -386,6 +390,44 @@ def expected_constants(protocol: dict[str, Any] | None, design: dict[str, Any] |
         if isinstance(block, dict):
             out |= {str(k) for k in block}
     out |= _declared_references(protocol)
+    return out
+
+
+def expected_by_record(cells: list[dict[str, Any]], protocol: dict[str, Any] | None) -> set[str]:
+    """Names the plan's own record says stay put, read with the run's settings (``cells``):
+
+    * a declared result whose ``depends_on`` (a list, empty too) names none of the settings that vary: the study's ``grid`` and
+      ``in_each_run`` axes (:func:`core.contract.varied_settings`) and every setting whose value differs between the run's
+      settings (a search varies its settings without a grid). The plan says it does not change with them;
+    * the bare-name measure of a declared known-answer check (``special_case`` / ``published_value``) whose value is, in every
+      run at every setting, the check's own expected value within its own tolerance (:func:`core.oracle_check.limit_of`): a
+      constant equal to the answer the plan expects is that answer, not a result that shows nothing."""
+    from . import contract as _contract
+    from . import oracle_check as _oracle
+
+    p = protocol if isinstance(protocol, dict) else {}
+    varied = set(_contract.varied_settings(p))
+    seen: dict[str, set[str]] = {}
+    for c in cells:
+        for k, v in (c.get("cell") or {}).items():
+            seen.setdefault(str(k), set()).add(json.dumps(v, sort_keys=True, default=str))
+    varied |= {k for k, vs in seen.items() if len(vs) > 1}
+    out: set[str] = set()
+    for m in p.get("metrics") if isinstance(p.get("metrics"), list) else []:
+        dep = m.get("depends_on") if isinstance(m, dict) else None
+        if isinstance(m, dict) and m.get("id") and isinstance(dep, list) and not varied & {str(d) for d in dep}:
+            out.add(str(m["id"]))
+    for o in _oracle.declared(p):
+        measure = str(o.get("measure") or "").strip()
+        if not (_IDENT.fullmatch(measure) and _oracle.kind_of(o) in _MEASURED_KINDS):
+            continue
+        expected, limit, _mode = _oracle.limit_of(o)
+        if expected is None or limit is None or not cells:
+            continue
+        runs = [c.get("metrics", {}).get(measure) for c in cells]
+        if all(isinstance(r, list) and r and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+                                                   and abs(x - expected) <= limit for x in r) for r in runs):
+            out.add(measure)
     return out
 
 
