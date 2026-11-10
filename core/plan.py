@@ -306,12 +306,19 @@ def readable_sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[s
     return kept, reasons
 
 
+#: Between two problems in the one reason :func:`_sub_studies` gives (the same words as ``core.optimisation_plan.ALSO``,
+#: which splits them again).
+ALSO = "\nAnd also: "
+
+
 def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]] | None, str | None]:
     """``(the sub-studies, None)`` or ``(None, why)``, read from ``protocol.sub_studies``. Each sub-study names the settings of
     ``protocol.grid`` it varies (``vary``: all their values, crossed) and the value it holds each other setting
     at (``hold``: every setting of the grid it does not vary must say it). The study's settings are the settings of all of
     them together. A setting with several values is compared when some sub-study varies it or the sub-studies hold it at all
-    its values between them; otherwise some of its values would never be run, so that is refused."""
+    its values between them; otherwise some of its values would never be run, so that is refused. ``why`` names every entry
+    that cannot be read (one after the other, joined by :data:`ALSO`), not only the first; when one reads badly the
+    settings of the entries together are not judged, as they cannot be known."""
     where = "`protocol.sub_studies`"
     if not isinstance(grid, dict) or not grid:
         return None, f"{where} divides the settings of `protocol.grid`, which is missing"
@@ -320,11 +327,15 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
                       "`protocol.grid` that part of the study varies and `hold`: the value it holds every other setting at")
     inside = inside if isinstance(inside, dict) else {}
     fixed: list[dict[str, Any]] = []
+    whys: list[str] = []
     for number, sub in enumerate(subs, start=1):
         one, why = _read_sub_study(number, sub, grid, inside)
         if one is None:
-            return None, why
-        fixed.append(one)
+            whys.append(str(why))
+        else:
+            fixed.append(one)
+    if whys:
+        return None, ALSO.join(whys)
     for axis, values in grid.items():
         if len(values) > 1 and not any(axis in sub["vary"] for sub in fixed):
             held_at = [sub["hold"][axis] for sub in fixed if axis in sub["hold"]]
