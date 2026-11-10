@@ -1273,6 +1273,19 @@ def _containers(source: str, quantities: set[str]) -> set[str]:
     return found
 
 
+def _registries(source: str) -> set[str]:
+    """The module-level names ``source`` binds to a non-empty dict literal whose keys are all plain strings (a table of
+    named entries: the roles, kinds or derived results a frame lists). A result the code lacks has no entry anywhere yet,
+    so :func:`_containers` finds no home for it; these are the tables it may be listed in."""
+    found: set[str] = set()
+    for where, _d, node in _frame_assigns(source):
+        targets, value = _targets(node), _dict_value(node)
+        if (where == "" and len(targets) == 1 and isinstance(targets[0], ast.Name) and value is not None and value.keys
+                and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in value.keys)):
+            found.add(targets[0].id)
+    return found
+
+
 def _adds_quantity_entry(node: ast.stmt, quantities: set[str], bound: set[str]) -> bool:
     """Whether an added statement is a set of the finding's quantity entry (``name["quantity"] = ...``, ``+=``,
     annotated) of a name that already holds an entry of that quantity (``bound``: :func:`_containers`). The value
@@ -1377,6 +1390,10 @@ def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[st
         if found is None or not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
             out.append(text)
     bound = _containers(old, quantities)
+    if issue.get("kind") == "quantity":
+        # A finding that a result is missing: the one change that lists it is its own entry in a table of named entries
+        # the code has (nothing else of the table changes: every other statement is held to the rules above).
+        bound |= _registries(old)
     for where, dump, node in news:  # what is added and is no replacement of a statement that went
         if not _adds_quantity_entry(node, quantities, bound):
             out.append(f"{where or 'the module'}: added {dump[:60]}")
@@ -1953,7 +1970,8 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     prompt = env.prompts["code_review_repair"].substitute(
         topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
-        package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
+        package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)",
+        declared=declared_block(env.root))
     framed = _skeleton.has_frame(old)
     if framed:  # the handling of the pilot and the seed is in FI's frame, which a repair keeps as it is
         prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line.",
