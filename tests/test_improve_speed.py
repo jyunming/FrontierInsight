@@ -164,9 +164,13 @@ async def test_an_edit_that_changes_a_real_result_is_not_kept_though_a_varying_n
 
 @pytest.mark.asyncio
 async def test_a_change_that_is_not_faster_is_put_back(tmp_path: Path) -> None:
+    # The change does the same sum three more times and throws it away: the same numbers, clearly slower. (A change that
+    # does nothing at all can come out faster by chance on a loaded machine, so it does not test this reliably.)
     engine = _engine(tmp_path, rounds=1)
-    out = await _speed(engine, _Model([_edit("    total = 0.0\n", "    total = 0.0 + 0.0\n")]))
+    slower = LOOP + "    for _ in range(3):\n        sum(v * v for v in x)\n"
+    out = await _speed(engine, _Model([_edit(LOOP, slower)]))
     assert out["kept"] is False and out["rounds"][0]["outcome"] == "not kept"
+    assert "not faster" in out["rounds"][0]["reason"], out["rounds"][0]
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SLOW
 
 
