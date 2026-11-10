@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import call_record as _calls
 from . import contract as _contract
 from . import trial_runner as _trials
 from .code_layout import _SCRIPT_NAMES, _is_main_guard
@@ -409,7 +410,8 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
                         search: bool | None = None, work_dir: Path | str | None = None, keep: bool = False,
                         sandbox: str = "venv") -> GateResult:
     """Run ``code_dir``'s ``experiment.py`` from start to end in a scratch copy of the quest on a small copy of its
-    recorded raw (see the module docstring) and say how it went. ``quest_root`` is only read. ``search`` (default:
+    recorded raw (see the module docstring) and say how it went. ``quest_root`` is only read, except that the functions
+    the run called are added to its record of calls (core/call_record.py). ``search`` (default:
     the quest recorded a search) adds FI's "not checked" record of the search. The gate always runs the code with its
     own plain executor, never the engine's (whose ``before_run`` would commit the candidate into the quest's code
     history), with ``python`` (default: the quest's own venv interpreter when it has one, else this one). Under
@@ -484,7 +486,14 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
 
         executor = VenvExecutor()  # a plain one: no before_run, so nothing is committed to the quest's code history
         began = time.monotonic()
-        run = await executor.execute([python, "code/experiment.py"], cwd=scratch, timeout_s=timeout_s, env=env)
+        # The small copy is a checking run: it notes which functions of the code were called (core/call_record.py) and
+        # leaves that in the quest's record; nothing else of the quest is written.
+        runner, calls = _calls.prepare(scratch, "gate")
+        try:
+            run = await executor.execute([python, runner, calls.as_posix(), "code/experiment.py"], cwd=scratch,
+                                         timeout_s=timeout_s, env=env)
+        finally:
+            _calls.absorb(quest_root, scratch / calls)
         seconds["derive"] = round(time.monotonic() - began, 2)
         if getattr(run, "timed_out", False):
             return GateResult(False, "derive", TIME, "", f"the analysis was still running after {timeout_s} s",

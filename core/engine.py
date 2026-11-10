@@ -146,6 +146,7 @@ from . import plan_ledger as _ledger
 from . import plan_steps as _plan_steps
 from . import equation_tests as _equation_tests
 from . import outside_run as _outside_run
+from . import call_record as _call_record
 from . import code_reach as _code_reach
 from . import shown_reach as _shown_reach
 from . import rerun_check as _rerun_check
@@ -14102,8 +14103,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         async def run_tests(paths: list[str]) -> dict[str, Any]:
             out: dict[str, Any] = {}
             for path in paths:  # each test in its own process: one test cannot change what another sees
-                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path])],
-                                                         timeout_s=180, env=self._finding_test_env())
+                # A finding's failing test is a checking run: it notes which functions of the code were called (core/call_record.py).
+                runner, calls = _call_record.prepare(self.quest_root, "test")
+                try:
+                    _rc, text, _err = await self._run_in_env([runner, calls.as_posix(), "-c", _finding_repair.harness_source("code", [path])],
+                                                             timeout_s=180, env=self._finding_test_env())
+                finally:
+                    _call_record.absorb(self.quest_root, self.quest_root / calls)
                 out.update(_finding_repair.parse_runs(text, [path]))
             return out
 

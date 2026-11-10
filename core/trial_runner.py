@@ -48,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from . import call_record as _calls
 from . import execution as _execution
 from . import in_run as _in_run
 from . import mc_error as _mc
@@ -2376,11 +2377,18 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
                                 "thresholds": dict(thresholds or {}), "spy_trial": bool(spy_trial),
                                 **({"budget_s": float(budget_s)} if budget_s is not None else {})}, default=str),
                     encoding="utf-8")
-    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
-    result = await _outside_executor(executor, quest_root, log).execute(
-        [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
-        cwd=quest_root, timeout_s=timeout_s, env=env,
-    )
+    # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs. This is a
+    # checking run, so it notes which functions of the study's code were called (core/call_record.py); the study's own
+    # trials (TrialsRunner) never do.
+    runner, calls = _calls.prepare(quest_root, "check")
+    try:
+        result = await _outside_executor(executor, quest_root, log).execute(
+            [str(python), runner, calls.as_posix(), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(),
+             out.relative_to(quest_root).as_posix()],
+            cwd=quest_root, timeout_s=timeout_s, env=env,
+        )
+    finally:
+        _calls.absorb(quest_root, quest_root / calls)
     try:
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):
