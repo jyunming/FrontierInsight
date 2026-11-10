@@ -547,7 +547,7 @@ def _candidate_problems(q: _Quest) -> list[dict[str, str]]:
     except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
         return []
     return [_problem("plan", f"the question \"{_one(c['name'], 80)}\" is answered by the plan's result `{c['planned']}`; the answers step "
-                     f"names `{c['candidate']}`, worked out from it, which may be what the question asks for, and FI kept the plan's",
+                     f"names `{c['candidate']}`, worked out from it, which may be what the question asks for, and FI kept the plan's result",
                      "FI's plan check", "disclosed", ".fi/contract_parts.json") for c in found]
 
 

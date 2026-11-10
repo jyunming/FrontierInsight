@@ -424,7 +424,10 @@ async def test_the_rounds_stop_when_a_round_costs_more_time_than_it_saves_on_the
     out = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 50, {}, {},
                                  SimpleNamespace(seconds=1.0), 100.0)
     assert out["rounds"][0]["outcome"] == "kept" and len(out["rounds"]) == 1
-    assert "more than the" in out["stopped"] and "it saves on the study" in out["stopped"]
+    # Which of the two stops ends the rounds depends on how fast the machine is: after the round, when the round took
+    # longer than it saved; or before the next one, when the last round took longer than the least saving FI keeps.
+    assert ("it saves on the study" in out["stopped"]
+            or "more than the least saving FI keeps would give back on the study" in out["stopped"]), out["stopped"]
 
 
 @pytest.mark.asyncio
