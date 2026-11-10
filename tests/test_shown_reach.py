@@ -334,18 +334,16 @@ def test_the_call_graph_can_start_from_one_function(tmp_path: Path) -> None:
     assert ("model.py", "helper_for_figure") not in got and ("model.py", "helper_unused") not in got
 
 
-def test_a_computed_getattr_on_the_table_fi_hands_a_body_does_not_make_every_function_reached(tmp_path: Path) -> None:
+def test_a_computed_getattr_in_a_study_file_means_fi_cannot_tell_whatever_the_object_is_called(tmp_path: Path) -> None:
+    """Not even a parameter called ``table`` (the name FI gives a body's table) is FI's object in a file the study wrote: the
+    function may be handed anything, so the call graph is not claimed (the answer is "cannot place", never a stop)."""
     engine = _engine(tmp_path)
     root = _quest(engine)
-    (root / "code" / "derive.py").write_text(
-        FILES["derive.py"] + "\n\ndef pick(table, name):\n    return getattr(table, name, None)\n\n\n"
-        "def derive_pick(table):\n    return pick(table, 'mean')\n", encoding="utf-8")
-    got = code_reach.reached(root / "code", scripts=[], harness=None, start=[("derive.py", "derive_pick")])
-    assert got is not None and ("model.py", "helper_unused") not in got
-    (root / "code" / "derive.py").write_text(
-        FILES["derive.py"] + "\n\ndef pick(thing, name):\n    return getattr(thing, name, None)\n\n\n"
-        "def derive_pick(table):\n    return pick(table, 'mean')\n", encoding="utf-8")
-    assert code_reach.reached(root / "code", scripts=[], harness=None, start=[("derive.py", "derive_pick")]) is None
+    for param in ("table", "thing"):
+        (root / "code" / "derive.py").write_text(
+            FILES["derive.py"] + "\n\ndef pick(" + param + ", name):\n    return getattr(" + param + ", name, None)\n\n\n"
+            "def derive_pick(table):\n    return pick(table, 'mean')\n", encoding="utf-8")
+        assert code_reach.reached(root / "code", scripts=[], harness=None, start=[("derive.py", "derive_pick")]) is None
 
 
 # ---- the main result named by the plan --------------------------------------------------------------------------------------------

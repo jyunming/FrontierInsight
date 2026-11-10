@@ -107,6 +107,30 @@ def test_a_function_named_as_outer_dot_inner_is_judged_by_the_function_it_sits_i
     assert not code_reach.never_run(code, "pkg/model.py", "aggregate_and_plot", **kw)
 
 
+def test_a_dead_function_nested_in_a_function_that_runs_is_unreached(tmp_path: Path) -> None:
+    model = ("def fit(rows):\n    def used(x):\n        return x\n\n    def dead(x):\n        return -x\n\n"
+             "    return [used(r) for r in rows]\n")
+    code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", model)
+    (code / "simulate.py").write_text("from pkg.model import fit\n\ndef run_trial(cell):\n    return fit([1])\n",
+                                      encoding="utf-8")
+    kw = {"scripts": ["experiment.py"], "harness": "simulate.py"}
+    assert not code_reach.never_run(code, "pkg/model.py", "fit.used", **kw)
+    assert not code_reach.never_run(code, "pkg/model.py", "fit", **kw)
+    assert code_reach.never_run(code, "pkg/model.py", "fit.dead", **kw)  # judged by the outer function it was kept
+
+
+def test_a_nested_function_of_a_function_that_never_runs_is_unreached_although_another_function_has_its_name(
+        tmp_path: Path) -> None:
+    code = _code(tmp_path, {
+        "experiment.py": "import model\n\nprint(model.score(3))\n",
+        "model.py": ("def score(x):\n    return x\n\ndef never_called(rows):\n    def score(x):\n        return -x\n\n"
+                     "    return [score(r) for r in rows]\n")})
+    kw = {"scripts": ["experiment.py"]}
+    assert code_reach.never_run(code, "model.py", "never_called", **kw)
+    assert code_reach.never_run(code, "model.py", "never_called.score", **kw)  # a name of the same text is reached elsewhere
+    assert not code_reach.never_run(code, "model.py", "score", **kw)  # the top-level one is the one the program calls
+
+
 def test_a_computed_name_in_a_study_file_still_means_fi_cannot_tell_even_in_fi_s_frame(tmp_path: Path) -> None:
     code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", MODEL_NESTED + "\n\ndef pick(obj, n):\n    return getattr(obj, n)\n")
     (code / "simulate.py").write_text("from pkg.model import pick\n\ndef run_trial(cell):\n    return pick(cell, 'a')\n",

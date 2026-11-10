@@ -1,4 +1,5 @@
-"""Which functions of the quest's code the run reaches, read from the code alone (no model, nothing run).
+"""Which functions of the quest's code the run reaches, read from the code, and from FI's record of the calls its checking
+runs saw (:mod:`core.call_record`).
 
 A second model reads the code against the plan and flags problems by file and function. A real paper published, as a
 "plotting defect" of its Figure 3, a finding about ``simulate.py``'s ``main()``, which the run never called: the figure was
@@ -10,7 +11,10 @@ functions FI's trial harness calls (``run_trial``, ``run_cell``, ``oracle`` in e
 :mod:`core.trial_runner`), and every module's top-level code (it runs on import). From there a function is reached when
 reached code names it: a call, or the name passed on as a value (a callback, a table of functions). A bare name is the
 file's own function or the one it imports; ``module.f`` is that module's ``f``; ``obj.f`` on any other object may be any
-function or method called ``f``. Every doubt counts as reached: a file that does not parse, a name computed at run time
+function or method called ``f``. A function nested in another is a function of its own: it is reached when reached code names
+it by name, and it can only run when the function it sits in runs (a nested function is unreached when that function is
+unreached or never writes its name). Every doubt
+counts as reached: a file that does not parse, a name computed at run time
 (``getattr`` with a computed name, ``globals()`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
 function reached, so this can only ever spare a finding about code that is plainly never run.
 
@@ -18,8 +22,12 @@ Two computed ``getattr`` calls are read more closely than that. ``getattr(m, nam
 quest's code may call any function of ``m``, so it reaches all of them (and nothing else). In a file FI wrote itself
 (``experiment.py``, ``fi_table.py``, ``fi_figures.py``, ``fi_frame.py``, ``fi_figure_calls.py``, ``fi_core/``: see
 :func:`_fis_files`) a computed ``getattr`` on any other object reaches only the functions of FI's own files, since FI's text
-is known; so does one on ``table`` or ``fig``, the two objects FI hands every function of ``derive.py`` (:data:`FI_OBJECT_PARAMS`),
-in a file the study's model wrote; on any other object there it still means FI cannot tell.
+is known; in a file the study wrote it still means FI cannot tell, whatever the object is called.
+
+A function's verdict is :func:`verdict`: ``ran`` when FI's record of calls shows it called; ``unreached`` only when the code
+shows it cannot run (nothing the run reaches names it, or the function it is nested in cannot run or never writes its name);
+``cannot tell`` in every other case. The record is no proof of "unreached": the small run takes only some settings, so a function
+that only another setting reaches stays ``cannot tell``.
 """
 
 from __future__ import annotations
@@ -81,22 +89,10 @@ def _definition_time(stmts: list[ast.stmt], *, main: bool) -> list[ast.AST]:
     return out
 
 
-#: The parameters FI gives every function of ``derive.py`` it calls (``analysis_frame.SIGNATURES``): its own table of the trials and
-#: its own figure. A computed ``getattr`` on one of them looks a name up on FI's object, whose text is FI's.
-FI_OBJECT_PARAMS = frozenset({"table", "fig"})
-
-
-def _fis_object(m: "_Module", node: ast.AST | None) -> bool:
-    """Whether ``node`` is a name the module takes as a parameter that FI gives it (:data:`FI_OBJECT_PARAMS`)."""
-    return isinstance(node, ast.Name) and node.id in m.fi_params
-
-
 class _Module:
     def __init__(self, rel: str, tree: ast.Module) -> None:
         self.rel = rel
         self.tree = tree
-        self.fi_params = {a.arg for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                          for a in [*n.args.args, *n.args.kwonlyargs] if a.arg in FI_OBJECT_PARAMS}
         self.functions: dict[str, list[ast.AST]] = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -265,7 +261,7 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
                         target = imported_module(m, node.args[0]) if node.args else None
                         if target is not None:
                             all_of(target)  # a name computed on a module: any function of that module
-                        elif m.rel in fis or _fis_object(m, node.args[0] if node.args else None):
+                        elif m.rel in fis:
                             for rel in fis:  # FI's own text: only FI's own files hold what it can name
                                 all_of(modules[rel])
                         else:
@@ -296,23 +292,108 @@ def run_entries(quest_root: Path) -> tuple[list[str], str | None]:
     return scripts, harness
 
 
-def never_run_in(quest_root: Path) -> "Callable[[Any, Any], bool]":
-    """A test of ``(file, function)`` (relative to the quest's ``code/``): ``True`` only when that function is plainly never
-    run (:func:`never_run`). The code is read once, on the first question."""
-    code = Path(quest_root) / "code"
-    scripts, harness = run_entries(quest_root)
-    cache: list[set[tuple[str, str]] | None] = []
+RAN = "ran"
+UNREACHED = "unreached"
+CANNOT_TELL = "cannot tell"
 
-    def test(file: Any, function: Any) -> bool:
-        file = str(file or "").replace("\\", "/").strip()
-        judged = _judged(code / file, str(function or "").strip()) if file else None
-        if judged is None:
+
+class _Def:
+    """A function a file defines: its qualified name as Python gives it (``Class.method``, ``outer.<locals>.inner``), its own
+    name, its syntax node and the qualified name of the function it is nested in (``None`` for a function or method that is
+    not inside another function)."""
+
+    def __init__(self, qualname: str, node: ast.AST, parent: str | None) -> None:
+        self.qualname = qualname
+        self.node = node
+        self.name: str = node.name  # type: ignore[attr-defined]
+        self.parent = parent
+
+
+def _definitions(tree: ast.AST) -> dict[str, _Def]:
+    out: dict[str, _Def] = {}
+
+    def visit(node: ast.AST, prefix: str, parent: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                q = prefix + child.name
+                out.setdefault(q, _Def(q, child, parent))
+                visit(child, q + ".<locals>.", q)
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".", parent)
+            else:
+                visit(child, prefix, parent)
+
+    visit(tree, "", None)
+    return out
+
+
+def _named(path: Path, function: str) -> dict[str, _Def]:
+    """The functions of ``path`` (by qualified name) that ``function`` names: ``Class.method``, ``outer.inner`` (or
+    ``outer.<locals>.inner``), or an own name. A dotted name no function has is read by its last part; empty when the file
+    defines nothing of that name."""
+    if not function:
+        return {}
+    try:
+        defs = _definitions(ast.parse(path.read_text(encoding="utf-8")))
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return {}
+    parts = [p for p in function.split(".") if p]
+    plain = ".".join(parts)
+    exact = {q: d for q, d in defs.items() if q == function or q.replace(".<locals>.", ".") == plain
+             or (len(parts) == 1 and d.name == plain)}
+    if exact or len(parts) < 2:
+        return exact
+    return {q: d for q, d in defs.items() if d.name == parts[-1]}
+
+
+def _named_in(outer: ast.AST, inner: _Def) -> bool:
+    """Whether the body of ``outer`` writes the name of ``inner`` anywhere but in ``inner``'s own definition: a call, a name
+    handed on, a returned function. A function nested in another can run only through such a name."""
+    skip = {id(n) for n in ast.walk(inner.node)}
+    for node in ast.walk(outer):
+        if id(node) in skip:
+            continue
+        if (isinstance(node, ast.Name) and node.id == inner.name) or (isinstance(node, ast.Attribute) and node.attr == inner.name):
+            return True
+    return False
+
+
+def verdict(code_dir: Path, file: str, function: str, *, scripts: list[str], harness: str | None = None,
+            record: "set[tuple[str, str]] | None" = None) -> str:
+    """:data:`RAN`, :data:`UNREACHED` or :data:`CANNOT_TELL` for the function ``function`` of ``file`` (relative to ``code_dir``).
+    ``record``: the functions FI's checking runs saw called (:func:`core.call_record.load`). ``ran`` is only what the record
+    shows. ``unreached``: a function that nothing the run reaches names, or a function nested in another that cannot run
+    because the function it sits in is unreached or never writes its name. Never a special method (the language runs it
+    without a name) or a decorated nested function (its decorator may hand it on). A function the small run did not call may
+    sit in a setting it skipped, so the record alone never makes a function unreached."""
+    file = str(file or "").replace(chr(92), "/").strip()
+    path = Path(code_dir) / file
+    found = _named(path, str(function or "").strip()) if file else {}
+    if not found:
+        return CANNOT_TELL
+    if any((file, q) in (record or ()) for q in found):
+        return RAN
+    done = reached(code_dir, scripts=scripts, harness=harness)
+    if done is None:
+        return CANNOT_TELL
+    try:
+        defs = _definitions(ast.parse(path.read_text(encoding="utf-8")))
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        return CANNOT_TELL
+
+    def unreached(d: _Def, depth: int = 0) -> bool:
+        if _is_dunder(d.name) or depth > 50:
             return False
-        if not cache:
-            cache.append(reached(code, scripts=scripts, harness=harness))
-        return cache[0] is not None and (file, judged) not in cache[0]
+        if d.parent is None:
+            return (file, d.name) not in done
+        if d.node.decorator_list:  # type: ignore[attr-defined]
+            return False
+        outer = defs.get(d.parent)
+        if outer is None:
+            return False
+        return unreached(outer, depth + 1) or not _named_in(outer.node, d)
 
-    return test
+    return UNREACHED if all(unreached(d) for d in found.values()) else CANNOT_TELL
 
 
 def _defines(path: Path, function: str) -> bool:
@@ -324,7 +405,7 @@ def _defines(path: Path, function: str) -> bool:
 
 
 def _judged(path: Path, function: str) -> str | None:
-    """The function of ``path`` whose reach decides the question about ``function``, or ``None`` when the file does not define it.
+    """(Kept for :mod:`core.shown_reach`, which asks what a helper reaches; the verdict of a finding is :func:`verdict`.) The function of ``path`` whose reach decides the question about ``function``, or ``None`` when the file does not define it.
     A finding may name a nested function (``outer.inner``) or a method (``Class.method``): a function is run when the function it
     sits in is run, so the outermost function the file defines is the one judged (a method has no function around it: its own
     name is judged)."""
@@ -343,13 +424,27 @@ def _judged(path: Path, function: str) -> str | None:
     return None
 
 
-def never_run(code_dir: Path, file: str, function: str, *, scripts: list[str], harness: str | None = None) -> bool:
+def never_run_in(quest_root: Path) -> "Callable[[Any, Any], bool]":
+    """A test of ``(file, function)`` (relative to the quest's ``code/``): ``True`` only when that function is plainly never
+    run (:func:`verdict` says ``unreached``). The record of calls is read once, on the first question."""
+    from . import call_record as _call_record
+
+    code = Path(quest_root) / "code"
+    scripts, harness = run_entries(quest_root)
+    cache: list[Any] = []
+
+    def test(file: Any, function: Any) -> bool:
+        if not cache:
+            cache.append(_call_record.load(quest_root))
+        return verdict(code, str(file or ""), str(function or ""), scripts=scripts, harness=harness,
+                       record=cache[0]) == UNREACHED
+
+    return test
+
+
+def never_run(code_dir: Path, file: str, function: str, *, scripts: list[str], harness: str | None = None,
+              record: "set[tuple[str, str]] | None" = None) -> bool:
     """Whether the function ``function`` of ``file`` (relative to ``code_dir``) is plainly never run: FI can read all the
-    code, finds the function in that file, and nothing the run reaches names it. ``False`` whenever FI cannot tell. A nested
-    ``outer.inner`` or ``Class.method`` is judged by its outermost function (:func:`_judged`)."""
-    file = str(file or "").replace("\\", "/").strip()
-    judged = _judged(Path(code_dir) / file, str(function or "").strip()) if file else None
-    if judged is None:
-        return False
-    done = reached(code_dir, scripts=scripts, harness=harness)
-    return done is not None and (file, judged) not in done
+    code, finds the function in that file, nothing the run reaches names it (a nested one: its outer function does not run or
+    never writes its name) and no checking run saw it called (:func:`verdict`). ``False`` whenever FI cannot tell."""
+    return verdict(code_dir, file, function, scripts=scripts, harness=harness, record=record) == UNREACHED
