@@ -44,8 +44,9 @@ interval's ``degrees_of_freedom`` (a whole number, or ``"normal"``: it says the 
 one multiplier of its standard error), FI recovers the multiplier the code used from the trials' own records,
 ``(upper - lower) / (2 * standard error)`` in each trial, and compares it with the plan's: the Student-t quantile of the
 level with those degrees of freedom, or the normal one. They must agree in every trial of a setting to within
-:data:`MULTIPLIER_TOLERANCE` (relative), plus what the rounding of the three values allows (a code that rounds what it returns
-is read from the values themselves: the unit they were rounded to, :func:`_grain`, never assumed). A setting whose trials do not share one multiplier is a miss too (the interval is not
+:data:`MULTIPLIER_TOLERANCE` (relative), on the values as recorded: no rounding unit is read from the values (a code is told to
+return them unrounded). The scale the interval is symmetric on is the plan's to declare (``known_value.scale``: ``"log"`` for an
+interval of ln(estimate); left out, the estimate's own scale), never measured from the values. A setting whose trials do not share one multiplier is a miss too (the interval is not
 the estimate plus and minus a multiplier of the standard error the trial reports, as the declaration says). One missing
 setting is a fault, sent to repair with both numbers, and a stop if it stays; it needs no true value. Nothing is guessed: a
 plan that declares no ``degrees_of_freedom`` (the multiplier changes between settings, or the plan does not say) is not judged
@@ -59,7 +60,6 @@ from __future__ import annotations
 
 import json
 import math
-import struct
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,15 +89,11 @@ FAMILY_ALPHA = 0.05
 #: The fewest trials of a setting that are judged.
 MIN_TRIALS = 10
 #: The interval's multiplier of the standard error matches the plan's when every trial of a setting lies within this share of
-#: it, plus what the record's own rounding allows (:func:`_grain`). Chosen for a quantile typed with four significant digits
+#: it. Chosen for a quantile typed with four significant digits
 #: (3.182 for 3.1824, off by 1.4e-4, is the plan's), and finer than any difference of multiplier that moves a 95% interval's
 #: coverage by a tenth of a point (t with 40 degrees of freedom against 41 differ by 4e-4, and both lie within it). The
 #: recovered multiplier of an unrounded record agrees to about 1e-12.
 MULTIPLIER_TOLERANCE = 1e-3
-#: A series of values is read as rounded to ``k`` decimals when every value is a multiple of ``10**-k`` to this share of it
-#: (float arithmetic leaves about 1e-16 of the value); with none of 0..:data:`GRAIN_MAX_DECIMALS` it is not rounded.
-GRAIN_MAX_DECIMALS = 10
-_GRAIN_EPS = 1e-12
 #: An estimate is grossly biased when the whole sampling band of (mean estimate - true value) / spread of the estimates lies
 #: beyond this many spreads (a bias of 1.1 spreads takes a right-width 95% interval down to about 0.80, the coverage line).
 BIAS_GROSS = 1.0
@@ -395,8 +391,11 @@ class Quantity:
     #: ``multiplier`` with a plan that gives its multiplier per value: the values the settings ran that the plan does not name
     #: (not judged; the caller says so in ``not_checked``).
     unlisted: list[str] = field(default_factory=list)
-    #: ``multiplier``: the settings whose intervals are symmetric on the log scale, so judged there (:func:`_interval_form`).
+    #: ``multiplier``: the settings whose intervals are symmetric on the log scale, so judged there (declared: ``known_value.scale``).
     on_log: list[str] = field(default_factory=list)
+    #: ``multiplier``: whether the plan declared the interval's scale (``known_value.scale``); when not, it was judged on the
+    #: estimate's own scale and a miss says so.
+    scale_declared: bool = False
     #: The same number over every setting together (at 95%): what catches a moderate miss present everywhere.
     pooled: SettingCheck | None = None
     #: ``se_ratio`` only: the smallest (spread / reported error) ratio this run's trials could have flagged as a gross miss
@@ -461,9 +460,14 @@ class Quantity:
                 used = f"no single multiplier in a setting (trials from {min(lows):.4g} to {max(highs):.4g})"
             fixed = (" or ".join(f"{e:.4g}" for e in sorted(set(self.expected_by.values()), reverse=True))
                      if self.expected_by else f"{exp:.4g}")
-            scale = (f"; the intervals are symmetric on the log scale in {len(self.on_log)} setting(s), as for a normal "
-                     "interval of ln(estimate), and FI judged their multiplier there (the standard error of ln(estimate) "
+            scale = (f"; the plan declares the intervals symmetric on the log scale, as for a normal "
+                     "interval of ln(estimate), and FI judged their multiplier there in "
+                     f"{len(self.on_log)} setting(s) (the standard error of ln(estimate) "
                      "is the reported standard error divided by the estimate)" if self.on_log else "")
+            if self.gross and not self.scale_declared:
+                scale += ("; the plan does not say on which scale the interval is symmetric, so FI judged it as the estimate "
+                          "plus and minus a multiple of the standard error (the plan says `scale: log` for an interval of "
+                          "ln(estimate))")
             return (f"the multiplier of the standard error in the interval `{self.label}`: {used} over {self.judged} "
                     f"setting(s); the plan fixes {fixed} ({fixes}); not the plan's in {self.gross}{scale}")
         if self.kind == "missing":
@@ -562,18 +566,17 @@ def _z_family(k: int) -> float:
     return NormalDist().inv_cdf(1.0 - FAMILY_ALPHA / (2.0 * max(1, k)))
 
 
-def _judge_multiplier(q: "Quantity", per: list[tuple[str, list[tuple[float, float]]]]) -> None:
+def _judge_multiplier(q: "Quantity", per: list[tuple[str, list[float]]]) -> None:
     """Each setting's recovered multiplier of the standard error against the plan's (``q.expected``): ``value`` is the median
     multiplier of the setting's trials, ``low`` / ``high`` the smallest and largest. A setting misses when any trial's multiplier
     lies farther from the plan's than :data:`MULTIPLIER_TOLERANCE` plus that trial's own rounding allowance (so a half-width
     that is not a multiplier of the trial's own standard error misses too). A setting with fewer than :data:`MIN_TRIALS` trials
     is not judged."""
-    for key, pairs in per:
+    for key, mults in per:
         want = q.expected_by.get(key) or q.expected or 0.0
-        mults = [m for m, _a in pairs]
         if len(mults) < MIN_TRIALS or want <= 0:
             continue
-        off = max(abs(m / want - 1.0) - a for m, a in pairs)
+        off = max(abs(m / want - 1.0) for m in mults)
         ordered = sorted(mults)
         mid = len(ordered) // 2
         med = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
@@ -592,7 +595,7 @@ def _multiplier_quantity(kv: dict[str, Any], df: Any, cells: list[dict[str, Any]
     level = kv["level"]
     by_value = df if isinstance(df, dict) else None
     mult = Quantity("multiplier", " .. ".join(kv["interval"]), [*kv["interval"], kv["standard_error"]], level=level,
-                    expected=None if by_value else _quantile_of(df, level), df=df)
+                    expected=None if by_value else _quantile_of(df, level), df=df, scale_declared="scale" in kv)
     per = []
     for c in cells:
         if _undefined_here(spec.get("undefined_when") or {}, c):
@@ -603,12 +606,12 @@ def _multiplier_quantity(kv: dict[str, Any], df: Any, cells: list[dict[str, Any]
             here = table.get(str((c.get("cell") or {}).get(axis)))
             if here is None:
                 shown = (c.get("cell") or {}).get(axis)
-                if shown is not None and str(shown) not in mult.unlisted and _multipliers(c, kv, 1.0):
+                if shown is not None and str(shown) not in mult.unlisted and _multipliers(c, kv):
                     mult.unlisted.append(str(shown))
                 continue
             want = mult.expected_by[key] = _quantile_of(here, level)
-        per.append((key, _multipliers(c, kv, want)))
-        if _interval_form(c, kv) == LOG and per[-1][1]:
+        per.append((key, _multipliers(c, kv)))
+        if _scale_of(kv) == LOG and per[-1][1]:
             mult.on_log.append(key)
     if by_value:
         mult.expected = max(mult.expected_by.values(), default=None)
@@ -660,94 +663,40 @@ def _compared_values_off_the_plan(q: "Quantity", cells: list[dict[str, Any]], id
               "`degrees_of_freedom` per value)")
 
 
-def _grain(values: Iterable[float]) -> float:
-    """The unit a series of values was rounded to, read from the values themselves: ``10**-k`` for the smallest ``k`` from 0 to
-    :data:`GRAIN_MAX_DECIMALS` at which every value is a multiple of it, or 0.0 when none is (the values are not rounded)."""
-    vals = [v for v in values if math.isfinite(v)]
-    for k in range(GRAIN_MAX_DECIMALS + 1):
-        scale = 10.0 ** k
-        if all(abs(v * scale - round(v * scale)) <= 1e-9 + _GRAIN_EPS * abs(v * scale) for v in vals):
-            return 10.0 ** -k
-    return 0.0
-
-
-#: How exactly an interval must be symmetric (relative to its width) to be read as symmetric on a scale.
-SYMMETRY_TOLERANCE = 1e-6
+#: The scale a declared interval is symmetric on: the plan says so (``known_value.scale``); FI never measures it from the
+#: values. Left out, the interval is the estimate plus and minus one multiple of the standard error, which is what
+#: ``degrees_of_freedom`` itself says.
 OWN, LOG = "own", "log"
 
 
-def _slack(grain: float, value: float, exact32: bool) -> float:
-    """Half the unit a value was rounded to: its decimal :func:`_grain`, or, for values that are all exactly single-precision
-    numbers (none is a multiple of a decimal unit), the relative spacing of that precision."""
-    return grain / 2.0 if grain > 0 else (abs(value) * 2.0 ** -24 if exact32 else 0.0)
+def _scale_of(kv: dict[str, Any]) -> str:
+    """The scale the plan declares for the interval of one result: ``"log"`` or ``"own"`` (not declared: own)."""
+    return LOG if kv.get("scale") == LOG else OWN
 
 
-def _is_float32(values: Iterable[float]) -> bool:
-    try:
-        return all(struct.unpack("f", struct.pack("f", v))[0] == v for v in values)
-    except (OverflowError, struct.error):
-        return False
-
-
-def _interval_form(cell: dict[str, Any], kv: dict[str, Any]) -> str:
-    """The scale a setting's intervals are symmetric on, measured from its trials' own records: ``"log"`` when every trial
-    that reports an estimate, both ends and a standard error (all positive) has an interval symmetric on the log scale,
-    ``ln(upper / estimate) = ln(estimate / lower)``, within :data:`SYMMETRY_TOLERANCE`, and not every one is also symmetric
-    on the estimate's own scale; ``"own"`` otherwise (every trial symmetric there, or trials that fit neither form, or trials
-    of mixed forms: today's reading, the fail-closed one)."""
-    lo, hi = kv["interval"]
-    est, se = _series(cell, kv["estimate"]), _series(cell, kv["standard_error"])
-    low, high = _series(cell, lo), _series(cell, hi)
-    own_all, log_all, n = True, True, 0
-    grains = [_grain(x.values()) for x in (est, low, high)]
-    f32 = [g == 0.0 and _is_float32(x.values()) for g, x in zip(grains, (est, low, high))]
-    for i in se:
-        if not (i in low and i in high and i in est and se[i] > 0):
-            continue
-        e, l, u = est[i], low[i], high[i]
-        n += 1
-        width = u - l
-        # What the rounding of the three values (their unit, or single precision) can move each test by is allowed for.
-        se_e, se_l, se_u = (_slack(g, v, f) for g, v, f in zip(grains, (e, l, u), f32))
-        own = width > 0 and abs((u - e) - (e - l)) <= SYMMETRY_TOLERANCE * width + se_l + se_u + 2.0 * se_e
-        log = (e > 0 and l > 0 and u > 0 and u > l
-               and abs(math.log(u / e) - math.log(e / l))
-               <= SYMMETRY_TOLERANCE * math.log(u / l) + se_l / l + se_u / u + 2.0 * se_e / e)
-        own_all, log_all = own_all and own, log_all and log
-    return LOG if n and log_all and not own_all else OWN
-
-
-def _multipliers(cell: dict[str, Any], kv: dict[str, Any], want: float) -> list[tuple[float, float]]:
-    """``(multiplier, allowance)`` for each trial of one setting that reports the interval and a positive standard error: the
-    multiplier of the standard error in the interval, and the share of ``want`` (the plan's multiplier) that the rounding of
-    the values it is read from can move it by: each series' own unit (:func:`_grain`) is half an unit of error per value.
-    On the estimate's own scale it is ``(upper - lower) / (2 * standard error)``. For intervals symmetric on the log scale
-    (:func:`_interval_form`) the standard error the trial holds is the delta-method one of the estimate, so the standard error
-    of its logarithm is ``se / estimate`` and the multiplier is ``ln(upper / lower) / (2 * se / estimate)``."""
+def _multipliers(cell: dict[str, Any], kv: dict[str, Any]) -> list[float]:
+    """The multiplier of the standard error in the interval, for each trial of one setting that reports the interval and a
+    positive standard error. On the scale the plan declares (:func:`_scale_of`): on the estimate's own scale it is
+    ``(upper - lower) / (2 * standard error)``; for an interval the plan declares symmetric on the log scale the standard
+    error the trial holds is the delta-method one of the estimate, so the standard error of its logarithm is
+    ``se / estimate`` and the multiplier is ``ln(upper / lower) / (2 * se / estimate)``. The values are taken as recorded: no
+    allowance for a rounding FI would have to read from the values (a code is told to return them unrounded, and one that
+    rounds them is judged on what it returned); a trial that cannot be read on the declared log scale (no estimate, or a
+    non-positive estimate or end) is not judged."""
     lo, hi = kv["interval"]
     se = _series(cell, kv["standard_error"])
     low, high = _series(cell, lo), _series(cell, hi)
     est = _series(cell, kv["estimate"])
-    on_log = _interval_form(cell, kv) == LOG
-    g_lo, g_hi, g_se, g_est = (_grain(low.values()), _grain(high.values()), _grain(se.values()),
-                               _grain(est.values()))
+    on_log = _scale_of(kv) == LOG
     out = []
     for i in sorted(se):
-        # The standard error the code had may be as small as the value it returned less half its unit: that bounds the error
-        # of the multiplier. A value rounded down to the unit itself says too little to judge that trial.
-        smallest = se[i] - g_se / 2.0
-        if i in low and i in high and se[i] > 0 and smallest > 0:
+        if i in low and i in high and se[i] > 0:
             if on_log:
-                if i not in est:
-                    continue  # no estimate in this trial: the setting is judged on the trials that have one
-                e, l, u = est[i], low[i], high[i]
-                s = se[i] / e
-                q = math.log(u / l) / (2.0 * s)
-                rounding = ((g_hi / u + g_lo / l) / (4.0 * s) + abs(q) * (g_se / 2.0 / smallest + g_est / 2.0 / e))
+                if i not in est or not (est[i] > 0 and low[i] > 0 and high[i] > low[i]):
+                    continue  # the setting is judged on the trials that can be read on the declared scale
+                out.append(math.log(high[i] / low[i]) / (2.0 * se[i] / est[i]))
             else:
-                q = (high[i] - low[i]) / (2.0 * se[i])
-                rounding = ((g_lo + g_hi) / 4.0 + abs(q) * g_se / 2.0) / smallest
-            out.append((q, rounding / want))
+                out.append((high[i] - low[i]) / (2.0 * se[i]))
     return out
 
 
@@ -1208,6 +1157,8 @@ def calibration_directive(faults: list[Quantity]) -> str:
     if plan:
         tail = ("The plan fixes the multiplier of the standard error that each `the multiplier of the standard error` line above "
                 "names; FI recovered the multiplier the code used from the interval and the standard error the trials return. "
+                "Return the estimate, the standard error and the interval ends unrounded (FI reads the multiplier from the values as "
+                "returned, and a rounded value moves it). "
                 "Make every place that forms that interval use the plan's multiplier (check the arguments each call passes, "
                 "such as the degrees of freedom, not only the function that computes the quantile), and return the interval "
                 "and the standard error under exactly these names. Where a line above says the intervals are symmetric on the "
