@@ -820,8 +820,10 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
                 stop_flat: bool = True, stop_stepped: bool = True, stop_unchanged: bool = True) -> dict[str, Any] | None:
     """The best-design record of the search FI already ran for this simulation and plan, as :func:`run_search` would use
     it instead of searching again (the same key: the simulation's code and inputs, the plan's block, the seed, the
-    thresholds, the stops; no continued rounds), with the time limit it stood for not asked (the caller compares it);
-    ``None`` when there is none. A change to the simulation's code changes the key, so its record is not this one."""
+    thresholds, the stops, and the rounds FI asked it to go on for, read from ``continue.json`` as :func:`run_search`
+    reads them), with the time limit it stood for not asked (the caller compares it); ``None`` when there is none. A
+    change to the simulation's code or to the rounds changes the key, so its record is not this one: the record of the
+    search before it was continued is not the continued search."""
     quest_root = Path(quest_root)
     raw_block = block_of(protocol)
     block = _plan.normalize(raw_block)[0] if raw_block is not None else None
