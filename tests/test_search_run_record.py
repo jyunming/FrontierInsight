@@ -33,7 +33,9 @@ async def test_a_search_with_a_scan_writes_the_run_record_with_what_fi_measured(
     evaluations = [r for r in _ledger(root) if r.get("event") == "evaluation" and r.get("stage") != "scan"]
     # the scan: the settings it ran, their trials, their wall time, the most that ran together
     assert run["cells"] == len(summary["cells"]) > 0 and run["trials"] >= run["cells"]
-    assert run["wall_s"] > 0 and run["settings_s"] > 0 and run["trial_sum_s"] > 0 and run["at_once"] >= 1
+    # (the trials' own times are kept to 0.01 s, and the toy's trials can add up to less than that on a fast machine)
+    assert run["wall_s"] > 0 and run["settings_s"] > 0 and run["at_once"] >= 1
+    assert isinstance(run["trial_sum_s"], float) and run["trial_sum_s"] >= 0
     # the search: how many designs it evaluated and their own times, from FI's ledger
     assert run["evaluations"] == len(evaluations) > 0
     assert run["evaluations_s"] == pytest.approx(sum(r["elapsed_s"] for r in evaluations), abs=0.05)
