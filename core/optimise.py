@@ -825,14 +825,15 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
     quest_root = Path(quest_root)
     raw_block = block_of(protocol)
     block = _plan.normalize(raw_block)[0] if raw_block is not None else None
-    if block is None or read_rounds(quest_root, block):
+    if block is None:
         return None
+    rounds = read_rounds(quest_root, block)
     simulate = quest_root / module
     entry = _trials.study_entry(_trials.entries(simulate))
     if not entry:
         return None
     thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
-    keys = _keys(quest_root, simulate, block, int(base_seed), entry, thresholds, [], stop_flat=stop_flat,
+    keys = _keys(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat=stop_flat,
                  stop_stepped=stop_stepped, stop_unchanged=stop_unchanged)
     try:
         record_text = (quest_root / RECORD).read_text(encoding="utf-8")

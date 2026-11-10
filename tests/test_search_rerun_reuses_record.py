@@ -31,13 +31,25 @@ def _count_timings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
-def _search_ran(eng: Any, runner: Any, block: dict[str, Any], *, stopped: str = "time") -> dict[str, Any]:
+def _ask_more(root: Path, block: dict[str, Any]) -> list[dict[str, Any]]:
+    """FI's own request to go on with a search that was still improving (``.fi/optimisation/continue.json``)."""
+    norm = optimise._plan.normalize(block)[0]
+    rounds = [{"added": 60, "target": None, "asked": "FI: the search was still improving when its budget ran out",
+               "read_as": None, "auto": 1}]
+    path = root / optimise.ROUNDS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"block_sha256": optimise.block_sha(norm), "rounds": rounds}), encoding="utf-8")
+    return rounds
+
+
+def _search_ran(eng: Any, runner: Any, block: dict[str, Any], *, stopped: str = "time",
+                rounds: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Write FI's record of a search that ran on the code as it is now, under the cut the sizing recorded, as
     ``optimise.run_search`` writes it."""
     root = eng.quest_root
     cut = run_estimate.read_record(root).get("truncated") or {}
     norm = optimise._plan.normalize(block)[0]
-    key = optimise._run_key(root, runner.simulate, norm, 0, "run_cell", {}, [], True, True, True)
+    key = optimise._run_key(root, runner.simulate, norm, 0, "run_cell", {}, rounds or [], True, True, True)
     search_s = int(3600 - runner.check_reserve_s)
     if runner.search_deadline_s is not None:
         search_s = min(search_s, int(runner.search_deadline_s))
@@ -191,3 +203,60 @@ def test_a_search_made_while_a_repair_was_left_is_kept_once_the_repairs_are_spen
 def test_a_search_that_stopped_on_a_stop_that_is_off_now_is_not_kept(tmp_path: Path) -> None:
     _sim, protocol = _record(tmp_path, "stepped_objective")
     assert optimise.kept_search(tmp_path, "code/simulate.py", protocol, base_seed=0, stop_stepped=False) is None
+
+
+@pytest.mark.asyncio
+async def test_a_continued_search_is_kept_after_a_repair_of_the_analysis(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A search FI continued ("still improving when its budget ran out") is the search of its rounds: after a repair of
+    the analysis only, it is reused, and the study is not timed or sped up again."""
+    eng, runner, block = await _engine(tmp_path)
+    calls = _count_timings(monkeypatch)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    first = len(calls)
+    rounds = _ask_more(eng.quest_root, block)
+    _search_ran(eng, runner, block, rounds=rounds)
+    _fresh_runner_fields(runner)
+    (eng.quest_root / "code" / "derive.py").write_text(FRAME + "def figure_a(fig, table):\n    return None\n",
+                                                        encoding="utf-8")
+    speed_ups: list[Any] = []
+
+    async def speed_up(*a: Any, **k: Any) -> dict[str, Any]:
+        speed_ups.append(1)
+        return {}
+
+    monkeypatch.setattr(type(eng), "_speed_up", speed_up)
+    assert runner.kept_search() is not None
+    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None
+    assert len(calls) == first, "the study was timed again"
+    assert speed_ups == []
+    assert "already ran on this simulation" in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_continued_search_is_run_again_after_a_change_to_the_simulation(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, runner, block = await _engine(tmp_path)
+    calls = _count_timings(monkeypatch)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    rounds = _ask_more(eng.quest_root, block)
+    _search_ran(eng, runner, block, rounds=rounds)
+    _fresh_runner_fields(runner)
+    assert runner.kept_search() is not None
+    sim = eng.quest_root / "code" / "simulate.py"
+    sim.write_text(sim.read_text(encoding="utf-8").replace("** 2", "** 2 + 1"), encoding="utf-8")
+    assert runner.kept_search() is None
+    first = len(calls)
+    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None
+    assert len(calls) > first
+    assert "already ran on this simulation" not in _log(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_search_of_fewer_rounds_is_not_the_continued_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The record of the search before its continuation is not the continued search: it still has to be run."""
+    eng, runner, block = await _engine(tmp_path)
+    _search_ran(eng, runner, block)
+    _ask_more(eng.quest_root, block)
+    _fresh_runner_fields(runner)
+    assert runner.kept_search() is None
