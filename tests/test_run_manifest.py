@@ -1125,6 +1125,6 @@ def test_a_cluster_task_is_given_the_file_for_the_files_it_opened(tmp_path: Path
     root = tmp_path / "q"
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(SIM_TRIAL, encoding="utf-8")
-    trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=1, base_seed=0, deterministic=False, key="k1")
+    trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=1, base_seed=0, deterministic=False, key="same-plan")
     task = json.loads((root / "job" / "fi" / "tasks.json").read_text(encoding="utf-8"))["tasks"][0]
     assert task["argv"][-1] == task["argv"][-2] + trial_runner.OPENED_SUFFIX
