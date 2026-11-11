@@ -113,19 +113,23 @@ def _analysis_paths(root: Path) -> list[Path]:
     return out
 
 
-def files(quest_root: Path | str, part: str, *, by: str = "bytes") -> Files:
+def files(quest_root: Path | str, part: str, *, by: str = "bytes", data: bool = True) -> Files:
     """The digests of one part of the quest's files.
 
     ``"simulation"``: :func:`core.code_layout.simulation_inputs` and ``data/`` (see the module text). ``"analysis"``: the
     analysis FI writes and ``experiment.py``. ``"study"``: both, and ``tests/``. ``by="tokens"`` hashes a Python file as
-    :func:`version_digest` does (the frozen-search lookup only); every computed record is hashed by its bytes."""
+    :func:`version_digest` does (the frozen-search lookup only); every computed record is hashed by its bytes. ``data=False``
+    leaves ``data/`` out (the frozen-search lookup: the confirm stage may not search again, so a change to ``data/`` after
+    the freeze, which main's lookup never saw either, is not a reason to stop it; the confirm run's own trials, keyed with
+    ``data/``, run again)."""
     from . import code_layout as _layout
 
     root = Path(quest_root)
     paths: list[Path] = []
     if part in ("simulation", "study"):
         paths.extend(_layout.simulation_inputs(root))
-        paths.extend(_under_data(root))
+        if data:
+            paths.extend(_under_data(root))
     if part in ("analysis", "study"):
         paths.extend(_analysis_paths(root))
     if part == "study":
@@ -322,7 +326,7 @@ def computed(kind: str, quest_root: Path | str, protocol: Any = None, *, seed: i
         return _build_search(quest_root=root, block=protocol, base=int(seed), entry=str(cfg.get("entry") or ""),
                              thresholds=cfg.get("thresholds"), rounds=rounds, stops=stops)
     if kind in ("search_study", "search_study_bytes"):
-        found = files(root, "simulation", by="tokens" if kind == "search_study" else "bytes")
+        found = files(root, "simulation", by="tokens" if kind == "search_study" else "bytes", data=False)
         settings = {"block": protocol, "entry": str(cfg.get("entry") or ""), "thresholds": cfg.get("thresholds")}
         return Inputs(kind, RULES[kind], found.digests, settings, _fi_code(kind), found.complete, found.unreadable)
     raise ValueError(f"unknown kind of reusable work: {kind!r}")

@@ -327,3 +327,15 @@ def test_a_scan_copy_that_cannot_be_made_leaves_no_copy_of_an_earlier_search(
     monkeypatch.setattr(shutil, "copyfile", lambda *a, **k: (_ for _ in ()).throw(PermissionError("no")))
     optimise.keep_scan_copy(root)
     assert optimise.scan_hashes(root) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_data_file_changed_after_the_freeze_does_not_stop_the_confirm_stage(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6}, grid={"x": [-1.0, 1.0]})
+    await _run(root, protocol)
+    spent = _count(root)
+    (root / "data").mkdir(exist_ok=True)
+    (root / "data" / "readings.csv").write_text("t,v\n0,5\n", encoding="utf-8")
+    kept = await _run(root, protocol, frozen=True)
+    assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems
