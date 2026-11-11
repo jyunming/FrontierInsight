@@ -77,3 +77,12 @@ def test_removed_labels_are_listed_in_the_quality_report(tmp_path: Path) -> None
     assert any("[9]" in t and "taken out" in t for t in texts) and any("[ABC]" in t for t in texts)
     write_removed(tmp_path, [])
     assert not (tmp_path / REMOVED_RECORD).exists()
+
+
+def test_a_range_with_a_web_label_is_removed_not_a_crash() -> None:
+    """A range is two numbers; ``1-W2`` or ``w1-w2`` is no label and is removed and listed like any unknown label."""
+    for bad in ("1-W2", "w1-w2", "W1-W2"):
+        out, mapping, dropped = _renumber_citations("Text {{cite:%s}} and {{cite:2}}." % bad, 3)
+        assert "W" not in out and "{{" not in out
+        assert out.endswith("[1].") and mapping == {2: 1}
+        assert dropped

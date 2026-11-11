@@ -30,7 +30,7 @@ def split_labels(inside: str, expand: "callable") -> tuple[list[str], list[str]]
         part = part.strip()
         if not part:
             continue
-        if re.fullmatch(r"W?\d+\s*[–-]\s*W?\d+", part, re.I):
+        if re.fullmatch(r"\d+\s*[–-]\s*\d+", part):
             labels += expand(part)
         elif _VALID.match(part.upper()):
             labels.append(part.upper())
