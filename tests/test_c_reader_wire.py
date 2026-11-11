@@ -80,6 +80,19 @@ def test_known_positive_a_limit_that_reads_is_made_without_a_question(tmp_path: 
     assert design["protocol"]["optimisation"]["constraints"][0]["limit"] == "<= 150" and not not_applied
 
 
+def test_a_different_unreadable_value_where_the_plan_had_one_is_the_audits_own_fault(tmp_path: Path) -> None:
+    """The plan's own limit is unreadable (`== 1`); the audit rewrites it as another unreadable one (`== 2`) beside a
+    readable budget change: the new fault is the audit's, so it is named and asked about, and the plan's own stays."""
+    eng = _engine(tmp_path, [])
+    before = _amended("== 1", starts=4)
+    design, not_applied = eng._hold_audit_repairs_to_the_schema(before, _amended("== 2", starts=7))
+    assert design["protocol"]["optimisation"]["evaluation_budget"]["starts"] == 4, "no readable limit of the plan's to put back"
+    assert [f["path"] for n in not_applied for f in n["faults"]] == ["protocol.optimisation.constraints[1]"]
+    unchanged, none_applied = eng._hold_audit_repairs_to_the_schema(before, _amended("== 1", starts=7))
+    assert unchanged["protocol"]["optimisation"]["evaluation_budget"]["starts"] == 7 and not none_applied, (
+        "a fault the audit did not touch is the plan's own, not the audit's")
+
+
 @pytest.mark.asyncio
 async def test_the_audit_is_asked_once_about_the_faulted_path_alone_and_its_answer_is_placed_there(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])

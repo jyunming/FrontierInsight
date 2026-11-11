@@ -5543,6 +5543,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         "reason", "part", "faults"}`` per key the audit changed that was not made in full (the faults, each at its path, are
         what the audit is asked to correct once, :meth:`_ask_the_audit_to_correct_parts`)."""
         seen = set(_plan.read_protocol(old_p).paths())
+
+        def new_in(faults: list[Any], current: dict[str, Any]) -> list[Any]:
+            """The faults the plan's own reading did not have: at a path it had no fault at, or where the audit changed the
+            part the plan's own reading faulted (a different unreadable value is the audit's own)."""
+            return [f for f in faults if f.path not in seen
+                    or _reading.value_at(old_p, f.path, "protocol") != _reading.value_at(current, f.path, "protocol")]
         changed = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
         kept_p = dict(new_p)
         items: list[dict[str, Any]] = []
@@ -5588,7 +5594,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         for _round in range(len(changed) + 1):
             reading = _plan.read_protocol(kept_p)
             kept_now = reading.kept if isinstance(reading.kept, dict) else {}
-            fresh = [f for f in reading.faults if f.path not in seen]
+            fresh = new_in(reading.faults, kept_p)
             stopping = [k for k in changed if k not in refused and k in kept_p and any(
                 key_of(f) == k and stops(f, k, kept_now) for f in fresh)]
             if not stopping:
@@ -5597,7 +5603,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 faults = [f for f in fresh if key_of(f) == key]
                 trial = self._plans_own_at(old_p, kept_p, key, [f for f in faults if stops(f, key, kept_now)])
                 if trial is not None and not any(
-                        stops(f, key, {key: 1}) for f in _plan.read_protocol(trial).faults if f.path not in seen
+                        stops(f, key, {key: 1}) for f in new_in(_plan.read_protocol(trial).faults, trial)
                         and key_of(f) == key):
                     # Only the part that cannot be read goes back as the plan had it; the rest of the change is made.
                     kept_p = trial
@@ -5612,7 +5618,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 items.append(say(key, faults))
         reading = _plan.read_protocol(kept_p)
         kept_now = reading.kept if isinstance(reading.kept, dict) else {}
-        fresh = [f for f in reading.faults if f.path not in seen]
+        fresh = new_in(reading.faults, kept_p)
         for key in changed:
             faults = [f for f in fresh if key_of(f) == key]
             if key in refused or key not in kept_p or kept_p.get(key) == old_p.get(key) or not faults:
@@ -5632,7 +5638,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A fault the plan's own reading did not have, left in the protocol as it is now, is the audit's change somewhere
         # else (a part it left as it was can no longer be read beside it): that change is put back, one key at a time.
         for _round in range(len(changed) + 1):
-            stray = [f for f in _plan.read_protocol(kept_p).faults if f.path not in seen]
+            stray = new_in(_plan.read_protocol(kept_p).faults, kept_p)
             if not stray:
                 break
             for key in changed:
@@ -5641,7 +5647,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 trial = {k: v for k, v in kept_p.items() if k != key}
                 if key in old_p:
                     trial[key] = old_p[key]
-                if len([f for f in _plan.read_protocol(trial).faults if f.path not in seen]) < len(stray):
+                if len(new_in(_plan.read_protocol(trial).faults, trial)) < len(stray):
                     kept_p = trial
                     items.append(say(key, stray))
                     break
@@ -8725,6 +8731,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if left_out:
                 self._log.warning("[design] the design step's search block was used in part; left out: %s",
                                   "; ".join(left_out)[:600])
+                self._keep_plan_reading(_optim.read_block(block), "design step: the search block it was asked for")
             design = with_block(taken)
             wanted, missing, why = self._search_problems(state, design)
             if not missing:
