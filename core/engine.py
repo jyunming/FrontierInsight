@@ -23718,7 +23718,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not (placed.left_out or placed.figures or placed.not_done):
                     self._log.info("[evidence_gate] %s: %s; it changes no reported result", issue.get("id"), placed.why)
                 continue
-            if rerun is None and (names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
+            # a rerun that could not run (a failed request, a refused repair, no time left) shows nothing moving: only one
+            # that moved numbers keeps the finding from the plan-text release
+            if (rerun is None or rerun.status != "changed") and (
+                    names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
                 untied.append((issue, names))
                 continue
             if _code_review.about_headline(record, issue, result, headline or []):

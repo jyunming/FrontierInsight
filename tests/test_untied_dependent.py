@@ -147,3 +147,19 @@ def test_a_rerun_that_shows_numbers_moving_is_never_overruled_by_the_plan_text_r
     engine._rerun_shown = reruns  # type: ignore[method-assign,assignment]
     out, record = _gate(engine, PLAN_TEXT_TEST)
     assert not _released(out, record)  # a repair of it moved numbers FI cannot place: the finding is judged as before
+
+
+@pytest.mark.parametrize("status", ["could_not", "unchanged"])
+def test_a_rerun_that_could_not_run_or_moved_nothing_does_not_undo_the_plan_text_release(tmp_path: Path, status: str) -> None:
+    import types
+
+    engine = _engine(tmp_path)
+    verdict = types.SimpleNamespace(status=status, metrics=[], keys=[], unplaced=[], unwritten=[], mode="not_asked",
+                                    why="the request for a repair failed", redrawn=False, notes=[], carried=[])
+
+    async def reruns(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:
+        return {"F-1": verdict}
+
+    engine._rerun_shown = reruns  # type: ignore[method-assign,assignment]
+    out, record = _gate(engine, PLAN_TEXT_TEST)
+    assert _released(out, record)  # a failed or empty rerun adds no evidence that a number is wrong
