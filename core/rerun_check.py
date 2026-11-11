@@ -504,6 +504,7 @@ async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
     finally:
         if not task.done():  # the caller was cancelled: the study's process is stopped with it, as when it is awaited directly
             task.cancel()
+            await asyncio.wait({task})  # its clean-up (the process tree) is finished before the cancel goes on
 
 
 async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
