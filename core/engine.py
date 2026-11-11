@@ -23214,7 +23214,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 began = time.monotonic()
                 verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
                                                    source=source, results_root=self.quest_root,
-                                                   disputed=list(issue.get("disputed") or []) if strict else None)
+                                                   disputed=list(issue.get("disputed") or []) if strict else None,
+                                                   finding=str(issue.get("id") or ""))
                 if budget is not None:
                     budget[0] -= time.monotonic() - began
                 if verdict.status == "could_not" and verdict.crashed and _round == 0:
