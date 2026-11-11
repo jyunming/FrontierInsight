@@ -881,7 +881,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                                                        else "every starting point converged")}
     else:
         compared = search_record.get("compared")
-        levels = [x for x in ((compared or {}).get("levels") or []) if isinstance(x, dict)] if isinstance(compared, dict) else []
+        # The compared alternatives of the search, not the check's own ``levels`` of numerical settings (that name is
+        # kept for the record's "settings" below).
+        alternatives = [x for x in ((compared or {}).get("levels") or []) if isinstance(x, dict)] if isinstance(compared, dict) else []
         alone = {"budget": "its evaluation budget ran out",
                  "share": "each starting point converged or used its share of the budget"}
         why = {"budget": f"the search used its whole budget ({ev.get('search')} of {ev.get('budget')} evaluations) "
@@ -900,10 +902,10 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                                  "changed every number of the design, all gave the baseline's objective or one of a few "
                                  "values"
                }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
-        if len(levels) > 1 and stopped in ("budget", "share"):
+        if len(alternatives) > 1 and stopped in ("budget", "share"):
             # Each alternative has a budget of its own: the sums over them are not one budget that was used.
             why = ("the search did not finish in every alternative (" + _search.alternatives_budget_says(
-                levels, lambda reason: alone.get(reason, reason)) + ")")
+                alternatives, lambda reason: alone.get(reason, reason)) + ")")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "
             "would find with more")}

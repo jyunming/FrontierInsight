@@ -251,6 +251,9 @@ def test_a_search_that_ran_out_of_budget_is_reported() -> None:
     check = _search_then_check(_block(evaluation_budget={"starts": 2, "per_start": 6}), _bowl)
     assert check["checks"]["budget"]["status"] == "failed"
     assert "whole budget" in check["checks"]["budget"]["says"] or "share" in check["checks"]["budget"]["says"]
+    # The search's budget line does not take the place of the check's own settings in the record (the paper's table
+    # names each finer setting from them).
+    assert check["settings"]["levels"] == [{"mesh": 0.2}, {"mesh": 0.1}]
 
 
 # --- (e) the plan's threshold, and FI's default rule ------------------------------------------------------------------------

@@ -134,6 +134,7 @@ def test_the_budget_check_names_each_alternative_and_does_not_pass_when_one_used
     assert check["checks"]["budget"]["status"] == "failed"
     assert "2 alternatives used 802 of the 3200 allowed" in says and "1 alternative used 1600 of the 1600 allowed" in says
     assert "2402 of 4800" not in says
+    assert check["settings"]["levels"] == oc.levels_of(block)["levels"], "the alternatives are not the check's settings"
 
 
 def test_the_merged_end_keeps_an_early_stop_of_an_alternative_when_another_ended_on_its_shares() -> None:
