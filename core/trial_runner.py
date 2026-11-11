@@ -222,6 +222,7 @@ def _fi_capture(cfg):
 def main():
     import os
     clock0 = time.perf_counter()
+    #<audit-begin>
     # Which files under this folder the study opens to read: Python's audit event for opening, nothing else is traced. FI
     # compares what the study read with the files its reuse check compares (core/reuse_key.py); a record whose run read
     # another file is not reused. The folders a run writes into are told apart afterwards, in FI.
@@ -249,11 +250,14 @@ def main():
         sys.addaudithook(_fi_audit)
     except Exception:
         pass
+    #<audit-end>
     spec_path = sys.argv[1]
     with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
         spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
+    #<audit-begin>
     opened_to = sys.argv[3] if len(sys.argv) > 3 else None  # (the study is given no arguments below)
+    #<audit-end>
     nonce = spec.pop("nonce")
     # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
     # from a number of its own.
@@ -386,12 +390,14 @@ def main():
     out.close()
     if profiler is not None:
         profiler.dump_stats(profile_to)
+    #<audit-begin>
     try:  # a file of its own (the third argument, when FI names one), never a row: what reads the rows is not told of another kind
         if opened_to:
             with open(opened_to, "w", encoding="utf-8") as seen:
                 seen.write(json.dumps({"opened": sorted(_fi_opened)}))
     except Exception:
         pass
+    #<audit-end>
     if captured is not None:
         try:
             with open(capture["path"], "w", encoding="utf-8") as fh:
@@ -403,6 +409,20 @@ def main():
 main()
 '''
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n" + HARNESS_BODY
+
+
+def _without_audit(text: str) -> str:
+    """``text`` without the blocks between the ``#<audit-begin>`` and ``#<audit-end>`` lines."""
+    import re
+
+    return re.sub(r"    #<audit-begin>\n.*?    #<audit-end>\n", "", text, flags=re.S)
+
+
+#: The harness as it was before it recorded the files a run opened. A frozen study's search record of an older FI was made with
+#: this text in its key, and is read by that rule (core/optimise.py ``_legacy_study_key``): the confirm stage may not search
+#: again, so a record that was a match must stay one.
+LEGACY_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n"
+                         + _without_audit(HARNESS_BODY))
 
 
 def _grouped_harness(body: str) -> str:

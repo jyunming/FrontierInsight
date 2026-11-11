@@ -238,7 +238,7 @@ def _legacy_run_key(quest_root: Path, simulate: Path, block: dict[str, Any], bas
             parts.append(rel + b"\0" + path.read_bytes())
         except OSError:
             parts.append(rel + b"\0")
-    parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
+    parts.append(_trials.LEGACY_HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     what: list[Any] = [block, base, entry, thresholds]
     if rounds:
@@ -295,7 +295,7 @@ def _legacy_study_key(quest_root: Path, simulate: Path, block: dict[str, Any], e
                                          else path.read_bytes()))
         except OSError:
             parts.append(rel + b"\0")
-    parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
+    parts.append(_trials.LEGACY_HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())
 

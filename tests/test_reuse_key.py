@@ -464,3 +464,14 @@ def test_a_repair_in_the_package_is_not_accepted_as_unchanged_after_a_numeric_st
     marker.write_text(json.dumps({"scripts_sha": engine._scripts_sha(1)}), encoding="utf-8")
     (code / "pkg" / "__init__.py").write_text("K = 3\n", encoding="utf-8")
     assert engine._resume_after_numeric_stop() == {"numeric_warnings_accepted": True}
+
+
+def test_a_frozen_studys_old_search_key_is_made_with_the_harness_as_it_was_before_the_recording_of_opened_files() -> None:
+    """The confirm stage may not search again: the old rule's key holds the harness text of the FI that wrote the record, so
+    a change to the harness (the recording of opened files) must not make that record a stranger. The hash is that of the harness
+    text of the FI before the recording."""
+    import hashlib
+
+    assert "addaudithook" in trial_runner.HARNESS_SOURCE and "addaudithook" not in trial_runner.LEGACY_HARNESS_SOURCE
+    assert hashlib.sha256(trial_runner.LEGACY_HARNESS_SOURCE.encode()).hexdigest() == (
+        "831539879b828b617986db62e3137e8d6026958d2463d008c5eea4fb53019f9c")
