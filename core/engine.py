@@ -19461,25 +19461,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         the checks before it. ``(a stop for the quest or None, the script as the oracle gate repaired it or None, whether FI
         rewrote the code)``. Run once before the sizing and the freeze, and again by :meth:`_verify_gated_code` when the code
         was changed afterwards."""
-        await self._gate_baseline(state)  # the analysis gate's baseline: the code as it is (nothing with the switch off)
-        await self._results_from_computation(state)
-        # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
-        if (static_stop := await self._static_gate(state)) is not None:
-            return static_stop, None, False
-        # A function of derive.py that is still FI's stub, for a result the plan asks for (core/analysis_frame.py).
-        if (stub := self._fis_stub_sendback(state)) is not None:
-            return stub, None, False
-        # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
-        # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
-        stop = self._cannot_repair_stop() or self._code_problems_stop(state)
-        if stop is not None:
-            return stop, None, False
-        # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
-        # function that computes another equation than the plan's is found here, not after the study.
-        # FI runs the simulation on a small case first: a crash goes to the repair of a failed run, and the code is read
-        # with what the run gave (core/small_run.py).
-        if (small := await self._small_run_gate(state, py, exec_env)) is not None:
-            return small, None, False
+        # The checks that run the code without a model reading it (the part a trial of the plan makes too).
+        if (first := await self._gate_pass_first(state, py, exec_env)) is not None:
+            return first, None, False
         if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
             return gated, None, False
         await self._code_review_gate(state)
@@ -19522,6 +19506,28 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if stop is not None:
                 return stop, None, False
         return None, oracle_code, gate_repaired
+
+    async def _gate_pass_first(self, state: QuestState, py: Any, exec_env: Any) -> QuestState | None:
+        """The first part of :meth:`_gate_pass`, in which no model reads the code: typed-in results, the cheap static faults,
+        FI's stub, the equations' labels, then FI's small run with its crash repairs, its one send-back per exact fault, the
+        design moves and the unread settings. A stop or a failed run for the repair, or ``None`` to go on. A trial of the
+        plan (``pauses.plan: after_trial``, :meth:`_try_plan_first`) makes this part and the timing only."""
+        await self._gate_baseline(state)  # the analysis gate's baseline: the code as it is (nothing with the switch off)
+        await self._results_from_computation(state)
+        # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
+        if (static_stop := await self._static_gate(state)) is not None:
+            return static_stop
+        # A function of derive.py that is still FI's stub, for a result the plan asks for (core/analysis_frame.py).
+        if (stub := self._fis_stub_sendback(state)) is not None:
+            return stub
+        # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
+        # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
+        stop = self._cannot_repair_stop() or self._code_problems_stop(state)
+        if stop is not None:
+            return stop
+        # FI runs the simulation on a small case first: a crash goes to the repair of a failed run, and the code is read
+        # with what the run gave (core/small_run.py).
+        return await self._small_run_gate(state, py, exec_env)
 
     async def _verify_gated_code(self, state: QuestState, py: Any, exec_env: Any, seed_path: Path) -> tuple[
             QuestState | None, str | None, bool]:
