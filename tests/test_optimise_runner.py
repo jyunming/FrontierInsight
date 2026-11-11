@@ -668,9 +668,13 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
     assert check["verdict"] == "verified" and best["check"]["verdict"] == "verified", check["says"]
     assert check["ledger_sha256"] == best["ledger_sha256"]
     # The simulation's own count of its calls: FI's small run on the scan's one setting and its evaluation of the baseline
-    # design as the search calls it (core/small_run.py baseline_answer), the oracle's one case, the search once (no
-    # replicate seeds, no second search), then the check's evaluations.
-    assert _count(tmp_path / "quest") == 1 + 1 + best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
+    # design as the search calls it (core/small_run.py baseline_answer), each design variable moved once before the search
+    # (core/design_moves.py, its own record), the oracle's one case, the search once (no replicate seeds, no second
+    # search), then the check's evaluations.
+    moves = json.loads((root / ".fi" / "design_moves.json").read_text(encoding="utf-8"))
+    assert moves["evaluations"] > 0
+    assert _count(tmp_path / "quest") == (1 + 1 + moves["evaluations"] + best["evaluations"]["search"] + 1
+                                          + check["evaluations"]["check"])
     result = artifacts.raw_state["result_json"]
     assert result["fi_search"]["best_objective"] == best["best"]["objective"], "FI's own numbers ride with the result"
     assert result["fi_search"]["check"]["verdict"] == "verified"

@@ -299,6 +299,9 @@ def test_the_small_run_gate_calls_the_pass(monkeypatch: Any) -> None:
         def _unread_in_small_run(self, state: Any, record: Any, simulate: Any) -> None:
             return None
 
+        async def _small_run_checks(self, state: Any, record: Any) -> None:  # the small run against the plan: nothing found
+            return None
+
     assert asyncio.run(RunChecksMixin._small_run_gate(_Engine(), {}, "py", {})) is None
     assert seen == [{"key": "k", "crashed": False}]
 

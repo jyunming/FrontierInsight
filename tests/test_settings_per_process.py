@@ -493,8 +493,10 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # per_run_names, unplaced; no line removed or changed), so the worker's own text is unchanged and the pin moves on purpose. It moves again for `LevelsRefused` (the type every refusal of a per-value result is raised as, which a case's retry and the repair rule read in place of the message), so the search records keyed on the old text are not matched.
     # It moves again for `shape_problem` (a number the plan declares one per run that a run returned per value: one rule for
     # FI and its harness) and for `per_run_names` reading what each run compares wherever the plan wrote it (`of_study`).
+    # It moves again for `search_one_number_names` and `one_number_rule` (a search's objective and limits are one number
+    # per call), added there and nothing else changed.
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "27bcd75bea232066991be230fe26b539aa3193365176a848af2bcff72d66ad7e")
+        "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 
