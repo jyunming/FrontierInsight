@@ -155,6 +155,36 @@ def _at(value: Any, path: str, root: str) -> Any:
     return value
 
 
+def put_at(value: Any, path: str, new: Any, root: str = "") -> Any:
+    """``value`` with ``new`` written at ``path`` (``root``: the name of ``value`` itself, as for :func:`value_at`), as a
+    copy; ``value`` is not changed. A list entry is replaced by its number (from 1) and a mapping key is set (added when it
+    is not there yet) when the places before it are there. ``None`` when ``path`` cannot be reached (so a correction
+    written for a place the answer does not have is not placed anywhere)."""
+    steps = split(path)
+    if root:
+        if not steps or steps[0] != root:
+            return None
+        steps = steps[1:]
+    if not steps:
+        return None
+
+    def go(here: Any, rest: list[Any]) -> Any:
+        step, more = rest[0], rest[1:]
+        if isinstance(step, int) and not isinstance(step, bool) and isinstance(here, list) and 0 < step <= len(here):
+            inner = go(here[step - 1], more) if more else new
+            return _ABSENT if inner is _ABSENT else here[:step - 1] + [inner] + here[step:]
+        if isinstance(step, str) and isinstance(here, dict):
+            key = next((k for k in here if str(k) == step), step)
+            if more and key not in here:
+                return _ABSENT
+            inner = go(here[key], more) if more else new
+            return _ABSENT if inner is _ABSENT else {**here, key: inner}
+        return _ABSENT
+
+    out = go(value, steps)
+    return None if out is _ABSENT else out
+
+
 # --- reading -----------------------------------------------------------------------------------------------------------
 
 Schema = Callable[[dict[str, Any], Any], Reading]

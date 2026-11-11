@@ -36,34 +36,6 @@ UNREADABLE_METHOD = "a local search from the best point of a coarse look, stoppe
 NEW_BASELINE = {"values": {"fin_spacing": 2.5, "fin_thickness": 1.2, "fin_count": 18}, "source": "[4] Table 1"}
 
 
-# -- core.plan.put_back_unread_keys ------------------------------------------------------------------------------------
-
-def test_a_key_the_reader_left_out_of_a_rewrite_is_put_back_as_the_plan_had_it() -> None:
-    before = copy.deepcopy(HEAT_SINK["protocol"])
-    rewrite = {**copy.deepcopy(BLOCK), "evaluation_budget": UNREADABLE_BUDGET, "baseline": NEW_BASELINE}
-    read, notes = plan.repair_protocol({**before, "optimisation": rewrite})
-    assert read is not None and "evaluation_budget" not in read["optimisation"], "the reader leaves the budget out"
-    kept, back = plan.put_back_unread_keys(before, read, "optimisation")
-    assert back == ["evaluation_budget"]
-    assert kept["optimisation"]["evaluation_budget"] == BLOCK["evaluation_budget"]
-    assert kept["optimisation"]["baseline"] == NEW_BASELINE, "the readable change is still made"
-
-
-def test_a_key_that_does_not_read_beside_the_rewrite_is_not_put_back() -> None:
-    """The plan's own key goes back only when the protocol still reads with it: a scan that the rewrite's design variables
-    no longer allow stays out (the rewrite's own reason for it stands)."""
-    before = {**copy.deepcopy(HEAT_SINK["protocol"]),
-              "optimisation": {**copy.deepcopy(BLOCK), "grid": {"fin_count": [8, 15, 30]}}}
-    assert "grid" in (plan.normalize_protocol(before)[0] or {}).get("optimisation", {}), "the plan's own scan reads"
-    rewrite = {k: v for k, v in copy.deepcopy(BLOCK).items()}
-    rewrite["design_variables"] = [v for v in rewrite["design_variables"] if v["name"] != "fin_count"]
-    rewrite["baseline"] = {"values": {"fin_spacing": 3.0, "fin_thickness": 1.0}, "source": "[3] Table 2"}
-    read = plan.repair_protocol({**before, "optimisation": rewrite})[0]
-    assert read is not None and "grid" not in read["optimisation"]
-    kept, back = plan.put_back_unread_keys(before, read, "optimisation")
-    assert "grid" not in back and plan.normalize_protocol(kept)[0] is not None
-
-
 # -- the methodology audit's change (Engine._hold_audit_repairs_to_the_schema) ------------------------------------------
 
 def test_an_audit_rewrite_of_the_search_block_keeps_the_plans_readable_budget_and_method(tmp_path: Path) -> None:

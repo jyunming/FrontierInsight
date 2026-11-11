@@ -117,6 +117,7 @@ from . import paper_patch
 from . import paper_sections as _paper_sections
 from . import paper_scope as _paper_scope
 from . import paper_trim
+from . import answer_reading as _reading
 from . import plan as _plan
 from . import criteria as _criteria
 from . import improve as _improve
@@ -5502,57 +5503,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     new_p = kept_division
                 else:
                     new_p["optimisation"] = kept_division
-                not_applied.extend({"key": f"{where}.{part}", "reason": why_not} for part in refused)
-            kept_p = dict(new_p)
-            base_fixed, base_notes = _plan.repair_protocol(old_p)
-            # Every key the audit changed, added or left out, each tried alone on the protocol as it was; the settings to
-            # compare (`grid`) and the parts of the study (`sub_studies`) are tried together when the audit changed both.
-            changed_keys = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
-            tried: set[str] = set()
-            for key in changed_keys:
-                if key in tried:
-                    continue
-                unit = [key]
-                if key in ("grid", "sub_studies"):
-                    unit = [k for k in ("grid", "sub_studies") if k in changed_keys]
-                tried.update(unit)
-                rest = {k: v for k, v in old_p.items() if k not in unit}
-                trial_fixed, trial_notes = _plan.repair_protocol({**rest, **{k: new_p[k] for k in unit if k in new_p}})
-                gone = sorted(set(base_fixed or {}) - set(trial_fixed or {}) - {k for k in unit if k not in new_p})
-                fresh = [n for n in trial_notes if n not in base_notes]
-                dropped = any(k in old_p and k not in new_p for k in unit)
-                if not gone and not fresh and not dropped:
-                    continue
-                reason = (fresh[0] if fresh else f"`protocol.{', '.join(gone)}` could not be read with it" if gone
-                          else f"the audit left `protocol.{key}` out")
-                item = {"key": f"protocol.{key}", "reason": " ".join("; ".join(fresh[:3]) .split())[:300] if fresh and not gone
-                        and not dropped else " ".join(reason.split())[:300]}
-                if fresh and not gone and not dropped:
-                    item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
-                if (len(unit) == 1 and fresh and not gone and not dropped and key in (trial_fixed or {})
-                        and (trial_fixed or {})[key] != (base_fixed or {}).get(key)):
-                    # Only a part of it cannot be read: the rest of the change is made, that part alone is left out, and
-                    # a key of the block the plan had readable stays as the plan had it (the audit's version of it could
-                    # not be read; its loss would cost the block what it had, e.g. a search its evaluation budget).
-                    trial_fixed, back = _plan.put_back_unread_keys(old_p, trial_fixed, key)
-                    wrote = new_p.get(key) if isinstance(new_p.get(key), dict) else {}
-                    for b in back:
-                        self._log.warning("[design_self_critique] the audit's `protocol.%s.%s` %s, so that change was not "
-                                          "applied: the plan's own is kept as it was", key, b,
-                                          "could not be read" if b in wrote else "was left out of its rewrite")
-                    kept_p[key] = trial_fixed[key]
-                    item["applied"] = "all of it except the part named"
-                    # what each left-out part of the block was refused for, by the part's own path
-                    item["parts"] = {m.group(1): " ".join(n.split())[:300] for n in fresh
-                                     if (m := re.search(r"`(protocol\.%s\.\w+)`" % re.escape(key), n))}
-                else:
-                    for k in unit:
-                        if k in old_p:
-                            kept_p[k] = old_p[k]
-                        else:
-                            kept_p.pop(k, None)
-                not_applied.append(item)
-                not_applied.extend({**item, "key": f"protocol.{k}"} for k in unit[1:])
+                not_applied.extend({"key": f"{where}.{part}", "reason": why_not, "part": "yes", "faults": [_fault_record(
+                    _reading.Fault(f"{where}.{part}", "together", why_not, as_written=theirs.get(part), required=True))]}
+                    for part in refused)
+            kept_p, held = self._read_the_audits_protocol(old_p, new_p)
+            not_applied.extend(held)
             out["protocol"] = kept_p
 
         def readable(d: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -5577,40 +5532,245 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               "applied except one part" if item.get("applied") else "not applied", item["reason"])
         return out, not_applied
 
+    def _read_the_audits_protocol(
+        self, old_p: dict[str, Any], new_p: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """``(protocol, items)``: the protocol the audit rewrote, read once, entry by entry (:func:`core.plan.read_protocol`),
+        against the plan's own. Only a fault the plan's own reading did not have counts, and only at the path it is at: a
+        part the audit changed that cannot be read is left out alone (its path named), and a key of the plan's own block
+        that the rewrite lacks is put back as the plan had it. A fault in a part the study cannot do without (a scan's
+        parts, a search's objective, baseline or limit) keeps the plan's own of that key whole. ``items``: one ``{"key",
+        "reason", "part", "faults"}`` per key the audit changed that was not made in full (the faults, each at its path, are
+        what the audit is asked to correct once, :meth:`_ask_the_audit_to_correct_parts`)."""
+        seen = set(_plan.read_protocol(old_p).paths())
+        changed = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
+        kept_p = dict(new_p)
+        items: list[dict[str, Any]] = []
+
+        def key_of(fault: Any) -> str:
+            steps = _reading.split(fault.path)
+            return str(steps[1]) if len(steps) > 1 else ""
+
+        def say(key: str, faults: list[Any], parts: dict[str, str] | None = None) -> dict[str, Any]:
+            """The item of a key not made in full: its faults, each at its path (the audit is asked about them once). It says
+            the change was made in part (``parts``: each part left out, by its path) only when something of it was made."""
+            why = "; ".join(" ".join(str(f.reason).split()) for f in faults[:3])
+            item: dict[str, Any] = {"key": f"protocol.{key}", "reason": why[:300], "part": "yes",
+                                    "faults": [_fault_record(f) for f in faults]}
+            if parts is not None and kept_p.get(key) != old_p.get(key):
+                item.update(applied="all of it except the part named", parts=parts)
+            return item
+
+        def left_out(faults: list[Any]) -> dict[str, str]:
+            """Each part left out, by the part's own path (the part of the block, not the place inside it)."""
+            parts: dict[str, str] = {}
+            for f in faults:
+                at = "protocol"
+                for step in _reading.split(f.path)[1:3]:
+                    at = _reading.join(at, step)
+                parts.setdefault(at, " ".join(f"could not be read: {f.reason}".split())[:300])
+            return parts
+
+        def stops(fault: Any, key: str, kept_now: dict[str, Any]) -> bool:
+            """A fault in a part the study cannot do without (a part of a list of limits or of scan parts, a search
+            block that can no longer drive a search): the plan's own of that key stays whole."""
+            steps = _reading.split(fault.path)
+            return bool(fault.required and fault.kind != "conflict"
+                        and (len(steps) <= 2 or any(isinstance(x, int) for x in steps) or key not in kept_now))
+
+        for key in changed:
+            if key in old_p and key not in new_p:
+                kept_p[key] = old_p[key]
+                items.append({"key": f"protocol.{key}", "reason": f"the audit left `protocol.{key}` out"})
+        refused: set[str] = set()
+        # The keys with a fault that stops them are put back first, one read after another: a conflict between two keys
+        # (a scan written beside a block that has its own) may be the other key's fault alone.
+        for _round in range(len(changed) + 1):
+            reading = _plan.read_protocol(kept_p)
+            kept_now = reading.kept if isinstance(reading.kept, dict) else {}
+            fresh = [f for f in reading.faults if f.path not in seen]
+            stopping = [k for k in changed if k not in refused and k in kept_p and any(
+                key_of(f) == k and stops(f, k, kept_now) for f in fresh)]
+            if not stopping:
+                break
+            for key in stopping:
+                faults = [f for f in fresh if key_of(f) == key]
+                trial = self._plans_own_at(old_p, kept_p, key, [f for f in faults if stops(f, key, kept_now)])
+                if trial is not None and not any(
+                        stops(f, key, {key: 1}) for f in _plan.read_protocol(trial).faults if f.path not in seen
+                        and key_of(f) == key):
+                    # Only the part that cannot be read goes back as the plan had it; the rest of the change is made.
+                    kept_p = trial
+                    items.append(say(key, faults, left_out(faults)))
+                    refused.add(key)
+                    continue
+                if key in old_p:
+                    kept_p[key] = old_p[key]
+                else:
+                    kept_p.pop(key, None)
+                refused.add(key)
+                items.append(say(key, faults))
+        reading = _plan.read_protocol(kept_p)
+        kept_now = reading.kept if isinstance(reading.kept, dict) else {}
+        fresh = [f for f in reading.faults if f.path not in seen]
+        for key in changed:
+            faults = [f for f in fresh if key_of(f) == key]
+            if key in refused or key not in kept_p or kept_p.get(key) == old_p.get(key) or not faults:
+                continue
+            if key not in kept_now:  # the whole key cannot be read: the plan's own stays
+                if key in old_p:
+                    kept_p[key] = old_p[key]
+                else:
+                    kept_p.pop(key, None)
+                items.append(say(key, faults))
+                continue
+            kept_p[key] = kept_now[key]
+            for name, cause in self._put_back_the_plans_keys(old_p, kept_p, key, new_p.get(key)):
+                self._log.warning("[design_self_critique] the audit's `protocol.%s.%s` %s, so that change was not applied: "
+                                  "the plan's own is kept as it was", key, name, cause)
+            items.append(say(key, faults, left_out(faults)))
+        # A fault the plan's own reading did not have, left in the protocol as it is now, is the audit's change somewhere
+        # else (a part it left as it was can no longer be read beside it): that change is put back, one key at a time.
+        for _round in range(len(changed) + 1):
+            stray = [f for f in _plan.read_protocol(kept_p).faults if f.path not in seen]
+            if not stray:
+                break
+            for key in changed:
+                if kept_p.get(key) == old_p.get(key):
+                    continue
+                trial = {k: v for k, v in kept_p.items() if k != key}
+                if key in old_p:
+                    trial[key] = old_p[key]
+                if len([f for f in _plan.read_protocol(trial).faults if f.path not in seen]) < len(stray):
+                    kept_p = trial
+                    items.append(say(key, stray))
+                    break
+            else:
+                break
+        return kept_p, items
+
+    @staticmethod
+    def _plans_own_at(old_p: dict[str, Any], kept_p: dict[str, Any], key: str, faults: list[Any]) -> dict[str, Any] | None:
+        """``kept_p`` with the plan's own value put back at the path of each of ``faults`` (a part the study cannot do without
+        that the audit's version of cannot be read), or ``None`` when the plan has no readable one there to put back. An
+        entry of a list goes back at its own number only when the audit's list is as long as the plan's (a change made in
+        place); a longer or shorter list is not matched entry by entry."""
+        seen = set(_plan.read_protocol(old_p).paths())
+        out = kept_p
+        for fault in faults:
+            steps = _reading.split(fault.path)
+            if fault.path in seen or len(steps) < 3:
+                return None
+            at = steps[0]
+            for step in steps[1:]:  # every list on the way to the fault must be as long as the plan's
+                if isinstance(step, int):
+                    theirs, mine = _reading.value_at(old_p, at, "protocol"), _reading.value_at(out, at, "protocol")
+                    if not (isinstance(theirs, list) and isinstance(mine, list) and len(theirs) == len(mine)):
+                        return None
+                at = _reading.join(at, step)
+            own = _reading.value_at(old_p, fault.path, "protocol")
+            put = None if own is None else _reading.put_at({"protocol": out}, fault.path, own)
+            if put is None:
+                return None
+            out = put["protocol"]
+        return out
+
+    def _put_back_the_plans_keys(self, old_p: dict[str, Any], kept_p: dict[str, Any], key: str,
+                                 written: Any) -> list[tuple[str, str]]:
+        """Each key of the plan's own ``old_p[key]`` (a mapping) that the rewrite's reading ``kept_p[key]`` lacks, put back as
+        the plan had it into ``kept_p`` when the protocol reads with it no worse than without. A rewrite of one key of a
+        block must not cost the block a key it had (a real audit rewrote a search's block with an evaluation budget that
+        could not be read, and the plan's own readable budget went with it, so the search could not start). Returns
+        ``(key, cause)`` for each one put back."""
+        old = old_p.get(key)
+        if not isinstance(old, dict) or not isinstance(kept_p.get(key), dict):
+            return []
+        wrote = written if isinstance(written, dict) else {}
+        back: list[tuple[str, str]] = []
+        for name, value in old.items():
+            if name in kept_p[key]:
+                continue
+            worse = {f.path for f in _plan.read_protocol(kept_p).faults}
+            trial = {**kept_p, key: {**kept_p[key], name: value}}
+            reading = _plan.read_protocol(trial)
+            held = reading.kept.get(key) if isinstance(reading.kept, dict) else None
+            if not isinstance(held, dict) or name not in held or any(f.path not in worse for f in reading.faults):
+                continue
+            kept_p[key] = trial[key]
+            back.append((str(name), "could not be read" if name in wrote else "was left out of its rewrite"))
+        return back
+
     async def _ask_the_audit_to_correct_parts(
-        self, before: dict[str, Any], amended: dict[str, Any], design: dict[str, Any], not_applied: list[dict[str, str]],
+        self, before: dict[str, Any], amended: dict[str, Any], design: dict[str, Any], not_applied: list[dict[str, Any]],
         node: str,
-    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """``(design, not_applied)`` after the audit's model has been asked ONCE to correct the parts of its change that FI
-        could not read, each with FI's exact reason (as a plan part is asked for again with the reader's reason). What it
-        sends back is held to the same reading; whatever is still unreadable stays left out and is named in ``not_applied``.
-        A failed call or an unreadable answer leaves the first reading as it was."""
-        asked = [n for n in not_applied if n.get("part")]
-        keys = [n["key"].split(".", 1)[1] for n in asked]
+        could not read: one request that names only the faulted paths, each with FI's reason, the entry as the audit wrote
+        it and the values allowed. What comes back is placed at those paths in the audit's change and read again; whatever
+        is still unreadable stays left out (the plan's own of a part the study cannot do without) and is named in
+        ``not_applied``. A failed call or an unreadable answer leaves the first reading as it was. The faults, what was
+        asked and what was left out are kept in ``needs/audit_readings.json``."""
+        asked = [_fault_from_record(r) for n in not_applied for r in n.get("faults") or []]
+        paths = list(dict.fromkeys(f.path for f in asked))
+        asked_keys = {str(_reading.split(p)[1]) for p in paths if len(_reading.split(p)) > 1}
         new_p = amended.get("protocol") if isinstance(amended.get("protocol"), dict) else {}
         self._log.warning("[design_self_critique] asking the audit once to correct %s, with FI's reason for each",
-                          ", ".join(f"`protocol.{k}`" for k in keys))
+                          ", ".join(f"`{p}`" for p in paths))
+        request = _reading.ask_text(asked, "Your amended design could not be used in full.") + (
+            '\n\nReturn ONLY one JSON object of the form {"fixes": {"<path>": <the whole corrected part at that path>}} '
+            "with one entry for each path above, written exactly as named. Fix only what the reason names; keep every other "
+            "part exactly as you wrote it and add nothing. If the fix also needs another part of the same protocol key (for "
+            "example the settings a part of the study varies), give that part too, by its path.")
         try:
             raw_correction, reply = await self._chat_json(
-                _plan.audit_repair_request([(k, new_p.get(k), n["reason"]) for k, n in zip(keys, asked)]),
-                node=node, want=("protocol",), usable=lambda p: isinstance(p.get("protocol"), dict),
-            )
+                request, node=node, want=("fixes",), usable=lambda p: isinstance(p.get("fixes"), dict))
         except Exception as e:  # noqa: BLE001 — the audit is advisory: the first reading stands
             self._log.warning("[design_self_critique] the correction could not be asked for (%r); the first reading stands", e)
+            self._keep_audit_reading(asked, paths, not_applied, answered=False)
             return design, not_applied
         self._keep_plan_answer(raw_correction)
-        given = reply.get("protocol") if isinstance(reply, dict) else None
-        corrected = {k: v for k, v in (given or {}).items() if k in keys}
-        if not corrected:
+        given = reply.get("fixes") if isinstance(reply, dict) else None
+        placed = dict(new_p)
+        used = 0
+        for path, value in (given or {}).items():
+            steps = _reading.split(path) if isinstance(path, str) else []
+            at = (_reading.put_at(placed, path, value, "protocol")
+                  if path in paths or (len(steps) > 1 and str(steps[1]) in asked_keys) else None)
+            if at is not None:
+                placed, used = at, used + 1
+        if not used:
             self._log.warning("[design_self_critique] the correction named none of the asked parts; the first reading stands")
+            self._keep_audit_reading(asked, paths, not_applied, answered=False)
             return design, not_applied
-        again = {**amended, "protocol": {**new_p, **corrected}}
-        design2, not_applied2 = self._hold_audit_repairs_to_the_schema(before, again)
-        left = {n["key"] for n in not_applied2}
-        for n in asked:
-            self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
-                           "still not fully readable" if n["key"] in left else "read in full")
+        design2, not_applied2 = self._hold_audit_repairs_to_the_schema(before, {**amended, "protocol": placed})
+        left = {f["path"] for n in not_applied2 for f in n.get("faults") or []}
+        for path in paths:
+            self._log.info("[design_self_critique] `%s` after the correction: %s", path,
+                           "still not fully readable" if path in left else "read in full")
+        self._keep_audit_reading(asked, paths, not_applied2, answered=True, dropped=[p for p in paths if p in left])
         return design2, not_applied2
+
+    def _keep_plan_reading(self, reading: Any, step: str) -> None:
+        """What a plan answer's reading left out (each fault at its path) and moved, kept in ``needs/plan_readings.json``:
+        every part ends kept, asked or left out, on record. A record that cannot be written raises, as for the audit's."""
+        if not (reading.faults or reading.moved):
+            return
+        entry = _reading.record_entry(reading, step=step, dropped=[f.path for f in reading.faults])
+        _reading.write_record(self.quest_root / "needs" / "plan_readings.json", entry)
+
+    def _keep_audit_reading(self, faults: list[Any], asked: list[str], refused: list[dict[str, Any]], *, answered: bool,
+                            dropped: list[str] | None = None) -> None:
+        """The audit's reading kept (``needs/audit_readings.json``, and best-effort in the trace): the faults, the paths
+        asked about and the paths left out. A record that cannot be written raises: the step stops as on any disk fault and
+        a resume repeats it, so no part goes missing without a word."""
+        left = list(dropped if answered else asked)
+        entry = _reading.record_entry(_reading.Reading(kept=None, faults=list(faults)), step="design_self_critique",
+                                      asked=asked, dropped=left)
+        entry["refused_keys"] = list(dict.fromkeys(str(n.get("key")) for n in refused))
+        entry["answered"] = answered
+        _reading.write_record(self.quest_root / "needs" / "audit_readings.json", entry)
+        self._audit("answer_read", topic="design_self_critique", faults=entry["faults"], asked=entry["asked"],
+                    dropped=entry["dropped"])
 
     @staticmethod
     def _audit_reasons(not_applied: list[dict[str, Any]]) -> dict[str, str]:
@@ -5882,6 +6042,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A draft's study_type that cannot be read, or that contradicts its own block, is put right with a note.
         moved_parts: list[str] = []
         if isinstance(design, dict):
+            for fault in _plan.read_hoist(design).faults:  # a part written beside `protocol` AND in it, the two different
+                self._log.warning("[plan] %s (both versions: %s)", fault.reason, _reading.shown(fault.as_written, 600))
             design, moved_parts = _plan.hoist_protocol_parts(design)  # a part written beside `protocol` belongs under it
             if moved_parts:
                 self._log.warning("[plan] the draft wrote %s beside `protocol`; FI moved %s under it",
@@ -5892,7 +6054,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
             # The protocol is the part a model writes freest. Keep the design, drop the keys that cannot be checked, and
             # say so in the plan, rather than losing the plan for one of them.
-            fixed_protocol, repaired_notes = _plan.repair_protocol(design.get("protocol"))
+            reading, repaired_notes = _plan.read_protocol_with_notes(design.get("protocol"))
+            fixed_protocol = reading.kept
+            self._keep_plan_reading(reading, "plan")
             trial = {k: v for k, v in design.items() if k != "protocol"}
             if fixed_protocol:
                 trial["protocol"] = fixed_protocol
@@ -6243,7 +6407,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         missing = _optim.missing_parts(design, self._scan_limit_s()) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
         if block_why:
-            entry = _entries_as_written(design.get("protocol"), block_why)
+            entry = _entries_as_written(design.get("protocol"), _optim.block_faults(design["protocol"]["optimisation"])[1])
             missing.append(f"its optimisation block cannot be used ({block_why})"
                            + (f"; {entry}" if entry else ""))
         return True, missing, block_why
@@ -6534,7 +6698,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     else:
                         protocol["optimisation"] = block
                 if _plan.normalize_protocol(protocol)[0] is None:
-                    fixed, notes_made = _plan.repair_protocol(protocol)
+                    reading, notes_made = _plan.read_protocol_with_notes(protocol)
+                    fixed = reading.kept
+                    self._keep_plan_reading(reading, "plan.md, a part written beside `protocol`")
                     notes.extend(notes_made)
                     protocol = fixed or {k: v for k, v in protocol.items() if k not in moved}
                 return {**design, "protocol": protocol}
@@ -7659,7 +7825,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 candidate = {**{k: v for k, v in merged.items() if k != "sub_studies"}, part: new_protocol[part]}
             else:
                 candidate = {**merged, part: new_protocol[part]}
-            fixed, why = _plan.normalize_protocol(candidate)
+            fixed, fault = _plan.protocol_fault(candidate)
+            why = fault.reason if fault is not None else None
             if (fixed is None or part not in fixed) and part == "sub_studies" and isinstance(new_protocol[part], list):
                 # One entry that cannot be read does not cost the other parts of the study their answer: the entries that
                 # read are tried together (the rule that every value of the grid is run is still asked), and the reason
@@ -7676,7 +7843,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                           "was" if len(entry_reasons) == 1 else "were", "; ".join(entry_reasons)[:600])
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
-                entry = _plan.offending_entry({part: new_protocol[part]}, why)
+                entry = _plan.offending_entry({part: new_protocol[part]}, fault) if fault is not None else ""
                 reasons.append(f"`protocol.{part}` as you wrote it cannot be read: {why}"
                                + (f" The entry as you wrote it: {entry}" if entry else ""))
                 continue
@@ -8363,8 +8530,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if isinstance(old_block, dict):
             _fixed, why = _optim.normalize(old_block)
             # Every part the reader names, not only the first: the model was asked for all of them at once.
-            unreadable = {m.group(1) for m in (re.match(r"`protocol\.optimisation\.?(\w*)", one)
-                                              for one in _optim.split_problems(why)) if m}
+            unreadable = {(str(_reading.split(f.path)[2]) if len(_reading.split(f.path)) > 2 else "")
+                          for f in _optim.block_faults(old_block)[1]}
             if not isinstance(old_block.get("evaluation_budget"), dict):
                 unreadable.add("evaluation_budget")
             if _optim.scan_problem(old, self._scan_limit_s()):
@@ -8407,11 +8574,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
             block = merged
-        fixed_block, why_block = _optim.normalize(block)
-        if fixed_block is None:
-            entry = _entries_as_written({"optimisation": block}, why_block, you=True)
-            raise ValueError(f"the block you wrote cannot be read: {why_block}"
+        taken, left_out, stopping = _read_a_search_block(block)
+        if taken is None:
+            faults = _optim.block_faults(block)[1] or stopping  # every problem the block has, as the old reason did
+            entry = _entries_as_written({"optimisation": block}, faults, you=True)
+            raise ValueError("the block you wrote cannot be read: " + _optim.ALSO.join(f.reason for f in faults)
                              + (f" {entry[0].upper()}{entry[1:]}" if entry else ""))
+        if left_out:
+            # Taken in part: the entries that cannot be read are left out alone, said in the plan and sent back with the next
+            # request if the plan still lacks anything; the rest of the answer is kept.
+            self._log.warning("[plan] the search block was used in part; left out: %s", "; ".join(left_out)[:600])
+            block = taken
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
@@ -8432,6 +8605,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
             raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
+        if left_out:
+            merged_text = _plan.add_to_section(merged_text, _PART_HEADING, ["", *[f"- {n}" for n in left_out]])
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
@@ -8541,11 +8716,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[design] the design step could not be asked to complete the search: %s", e)
                 continue
             block = obj.get("optimisation") if isinstance(obj, dict) and isinstance(obj.get("optimisation"), dict) else obj
-            if not isinstance(block, dict) or _optim.normalize(block)[0] is None:
+            taken, left_out, stopping = _read_a_search_block(block) if isinstance(block, dict) else (None, [], [])
+            if taken is None:
                 self._log.warning("[design] the design step's answer to complete the search could not be used: %s",
-                                  _optim.normalize(block)[1] if isinstance(block, dict) else "not a JSON object")
+                                  _optim.ALSO.join(f.reason for f in _optim.block_faults(block)[1] or stopping)
+                                  if isinstance(block, dict) else "not a JSON object")
                 continue
-            design = with_block(block)
+            if left_out:
+                self._log.warning("[design] the design step's search block was used in part; left out: %s",
+                                  "; ".join(left_out)[:600])
+            design = with_block(taken)
             wanted, missing, why = self._search_problems(state, design)
             if not missing:
                 self._log.info("[design] the redesign's search block is complete now (asked %d time(s))", count)
@@ -35929,13 +36109,50 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
     ]
 
 
-def _entries_as_written(protocol: Any, why: str | None, *, you: bool = False) -> str:
-    """The entries of ``protocol`` that the problems in ``why`` (one or several, as
-    :func:`core.optimisation_plan.normalize` gives them) name, as written, in one sentence; ``""`` when none is found. One
-    problem gives the same sentence as before (``the entry as written: ...``; ``you``: ``the entry as you wrote it: ...``)."""
+def _read_a_search_block(block: Any) -> tuple[dict[str, Any] | None, list[str], list[Any]]:
+    """``(block, left_out, stopping)`` for a search block a model wrote: ``block`` is what FI uses (every part and entry that
+    could be read, the faulted ones left out alone, the block's own parts as written when it reads whole), ``left_out`` one
+    sentence per part left out, and ``stopping`` the faults that make the block unusable (``block`` is then ``None``).
+    What a search cannot do without stops it: an objective, a baseline, a limit, a design variable whose value at the
+    baseline is not given (a variable that has one is held there and said), or every entry of its scan's settings or parts;
+    every other fault costs only its own part (:func:`core.optimisation_plan.read_block`,
+    :func:`core.optimisation_plan.repair`)."""
+    reading = _optim.read_block(block)
+    if not reading.faults:
+        return block, [], []
+    repaired, notes = _optim.repair(block)
+    stopping = [f for f in reading.faults if f.required and len(_reading.split(f.path)) > 2
+                and str(_reading.split(f.path)[2]) in ("objective", "baseline", "constraints")]
+    # The scan's settings and its parts are the question the search starts from: every entry of one lost would leave the
+    # scan running as a different (larger) one, so the answer is asked again, as for an objective.
+    for part in ("grid", "sub_studies", "in_each_run"):
+        if block.get(part) and repaired is not None and not repaired.get(part):
+            stopping += [f for f in reading.faults if len(_reading.split(f.path)) > 2 and str(_reading.split(f.path)[2]) == part]
+    if repaired is None or stopping or reading.nothing_read:
+        return None, [], stopping or list(reading.faults)
+    return repaired, notes, []
+
+
+def _fault_record(fault: Any) -> dict[str, Any]:
+    """A fault as plain data (for a record or a refused-change item)."""
+    return {"path": fault.path, "kind": fault.kind, "reason": fault.reason, "allowed": list(fault.allowed or []) or None,
+            "as_written": fault.as_written, "required": bool(fault.required)}
+
+
+def _fault_from_record(record: dict[str, Any]) -> Any:
+    """The :class:`~core.answer_reading.Fault` of :func:`_fault_record`."""
+    return _reading.Fault(record["path"], record["kind"], record["reason"],
+                          tuple(record["allowed"]) if record.get("allowed") else None, record.get("as_written"),
+                          bool(record.get("required")))
+
+
+def _entries_as_written(protocol: Any, faults: Any, *, you: bool = False) -> str:
+    """The entries of ``protocol`` that ``faults`` (each at its path) are about, as written, in one sentence; ``""`` when none
+    is found. One entry gives ``the entry as written: ...`` (``you``: ``the entry as you wrote it: ...``). Each entry is
+    found by its fault's path (:func:`core.plan.offending_entry`), not by words in a reason."""
     found: list[str] = []
-    for one in _optim.split_problems(why):
-        entry = _plan.offending_entry(protocol, one)
+    for fault in faults or []:
+        entry = _plan.offending_entry(protocol, fault)
         if entry and entry not in found:
             found.append(entry)
     if not found:
