@@ -530,10 +530,31 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     out.extend(_unit_problems(q))
     out.extend(_candidate_problems(q))
+    out.extend(_unplaced_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
     return out
+
+
+def _unplaced_problems(q: _Quest) -> list[dict[str, str]]:
+    """One row for the plan's dependent variables that FI did not place on any declared result (the plan's own words for them
+    are free text). It says only what FI knows: it never says the study does not report them."""
+    try:
+        from . import code_review as _cr
+        from . import frozen_protocol as _fp
+        from . import plan as _plan
+
+        text = (q.root / "plan.md").read_text(encoding="utf-8", errors="replace")
+        design = _plan.parse(text).design
+        names = _cr.unplaced_dependents(design, _fp.protocol_of(q.root))
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return []
+    if not names:
+        return []
+    shown = "; ".join(f"\"{_one(n, 70)}\"" for n in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    return [_problem("plan", f"the plan names {shown} as a dependent variable; FI did not place it on any declared result, so its "
+                     "check of the code is on the plan's words alone", "FI's plan check", "disclosed", "plan.md")]
 
 
 def _candidate_problems(q: _Quest) -> list[dict[str, str]]:
@@ -1301,6 +1322,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
             "about_plan_text": bool(issue.get("about_plan_text")),
+            "untied_plan_item": [str(n) for n in _list(issue.get("untied_plan_item"))],
             "rerun_unchanged": bool(issue.get("rerun_unchanged")),
             "rerun_moved_checks": bool(issue.get("rerun_moved_checks")),
             "rerun_redrawn": bool(issue.get("rerun_redrawn")),
@@ -1495,6 +1517,10 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         elif row["open"] and row.get("rerun_unchanged"):
             still = ("yes, but the study run again on a repaired copy of the code, with the same random numbers, reports no other "
                      "number beyond its uncertainty: it changes no reported number, and it is kept here")
+        elif row["open"] and row.get("untied_plan_item"):
+            still = ("yes, but the plan names " + ", ".join(row["untied_plan_item"][:2]) + ", and FI did not place it on any "
+                     "declared result; its test fails on text FI wrote from the plan, not on a number the code computed, so no "
+                     "reported number is changed, and it is kept here")
         elif row["open"] and row.get("about_plan_text"):
             still = ("yes, but its test fails on text FI wrote from the plan, not on a number the code computed; no reported "
                      "number is changed, and it is kept here")

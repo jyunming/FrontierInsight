@@ -1587,6 +1587,41 @@ def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
     return names
 
 
+def untied_dependents(record: dict[str, Any], issue: dict[str, Any], ids: list[str], headline: list[str]) -> list[str]:
+    """The plan's dependent variables an issue is about when it is about nothing else and FI placed none of them on a declared
+    result: every requirement the issue stands for (its stored reading) is a dependent variable the reader called missing, and
+    the name is no declared result's id (``ids``: the metrics and derived results of the frozen plan), equal to none by case and
+    punctuation, and is not the plan's main quantity (``headline``). No tie is made from a prefix or a contained id: a name is
+    placed only by being exactly an id. ``[]`` otherwise."""
+    reqs = _requirements_of(record, issue)
+    if not reqs or not missing_quantities(record, issue):
+        return []
+    declared = {_norm(i) for i in ids} - {""}
+    main = {_norm(h) for h in headline} - {""}
+    names: list[str] = []
+    for v in reqs:
+        name = str(v.get("name") or "").strip()
+        if v.get("kind") != "dependent variable" or v.get("headline") or not _norm(name) or _norm(name) in declared | main:
+            return []
+        names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def unplaced_dependents(design: Any, protocol: Any) -> list[str]:
+    """The plan's dependent variables (its own free text) that are not exactly a declared result's id (a metric or a derived
+    result of the frozen plan, case and punctuation ignored): FI has not placed them on any declared result. Empty when the
+    plan declares nothing (an older plan with no contract has no ids to compare with)."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    ids = [str(m.get("id")) for key in ("metrics", "derived") for m in (protocol.get(key) if isinstance(protocol.get(key), list) else [])
+           if isinstance(m, dict) and str(m.get("id") or "").strip()]
+    if not ids or protocol.get("form") != "contract":
+        return []
+    variables = design.get("variables") if isinstance(design, dict) and isinstance(design.get("variables"), dict) else {}
+    dependent = variables.get("dependent") if isinstance(variables.get("dependent"), list) else []
+    declared = {_norm(i) for i in ids}
+    return list(dict.fromkeys(_text(d, 120) for d in dependent if _text(d) and _norm(d) not in declared))
+
+
 def headline_names(design: Any, protocol: Any) -> list[str]:
     """The names of the plan's main quantity: its first dependent variable and the metric its precision target is for."""
     reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
