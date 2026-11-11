@@ -278,3 +278,31 @@ def test_dry_run_changes_nothing_in_the_code_folder(tmp_path: Path) -> None:
     _dry(tmp_path)
     assert {p.name: p.read_text(encoding="utf-8") for p in (tmp_path / "code").glob("*.py")} == before
     assert not (tmp_path / "figures").exists()
+
+
+# ---- the small run as the gate of a repair that is run on a copy -------------------------------------------------------------
+
+
+def _small_refusal(root: Path, simulate: str, protocol: dict[str, Any]) -> str:
+    code = root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(simulate, encoding="utf-8")
+    return asyncio.run(code_checks.small_run_refusal(root, protocol, executor=SharedInterpreterExecutor(python_version="3.11"),
+                                                     env=scrub_secrets(), python=sys.executable, timeout_s=90))
+
+
+def test_the_small_run_refuses_a_form_the_run_contract_does_not_read_and_says_the_contract_whole(tmp_path: Path) -> None:
+    from core import in_run
+
+    protocol = {"grid": {"extra": [1, 2]}, "in_each_run": {"c": [0.5, 1.0]}}
+    keys = [in_run.level_key(lv) for lv in in_run.level_cells(protocol["in_each_run"])]
+    good = f"def run_cell(cell):\n    return {{'q': {{{keys[0]!r}: 1.0, {keys[1]!r}: 2.0}}}}\n"
+    bad = "def run_cell(cell):\n    return {'q': {'at_the_first_value': 1.0, 'at_the_second': 2.0}}\n"
+    assert _small_refusal(tmp_path / "good", good, protocol) == ""
+    said = _small_refusal(tmp_path / "bad", bad, protocol)
+    assert "not one of the values the run was given" in said and "key it" in said and keys[0] in said  # the whole reason, not its start
+
+
+def test_the_small_run_refuses_nothing_for_code_it_cannot_judge(tmp_path: Path) -> None:
+    # no run_cell or run_trial: the check could not be judged (not a fault of the repair), so the study's own run decides
+    assert _small_refusal(tmp_path, "def helper(cell):\n    return {'q': 1.0}\n", {"grid": {"extra": [1, 2]}}) == ""

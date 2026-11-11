@@ -221,6 +221,22 @@ def _equation_run(quest_root: Path, executor: Any, python: Any, log: Any):
     return run
 
 
+async def small_run_refusal(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
+                            env: dict[str, str], timeout_s: int) -> str:
+    """Why FI's small run refuses the code under ``quest_root/code`` (it cannot be loaded, or more than half of the trials of a
+    setting fail, e.g. for a returned form the run contract does not read), or ``""`` when it runs or cannot be judged. The
+    check the evidence gate's repairs go through before they are kept, for a repair that is run on a copy."""
+    for verdict in await _small_run_verdicts(quest_root, protocol, executor=executor, python=python, env=env,
+                                             timeout_s=timeout_s):
+        if verdict.passed is False:
+            # the reasons the trials gave, whole (the line ``says`` is cut short): the model repairing is told what the run
+            # contract asked for ("key it ..."), not the start of the message
+            reasons = [f"{f.get('key') or 'the one setting'}: {r}" for f in verdict.details.get("failures") or []
+                       if isinstance(f, dict) and f.get("fault") for r, _n in (f.get("reasons") or [])[:1]]
+            return f"{verdict.says}; the reason: {_one(reasons[0], 700)}" if reasons else verdict.says
+    return ""
+
+
 async def _equation_verdict(quest_root: Path, protocol: dict[str, Any] | None, *, executor: Any, python: Any,
                             env: dict[str, str], log: Any) -> Verdict:
     code_dir = quest_root / "code"

@@ -460,6 +460,54 @@ def test_a_repair_is_run_only_when_the_findings_own_test_passes_on_it(tmp_path: 
     assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
 
 
+SIM_BREAKS_CONTRACT = "def run_cell(cell):\n    return {'q': {'wrong_key': 1.0}}\n"
+SIM_KEEPS_CONTRACT = "def run_cell(cell):\n    return {'q': 1.0}\n"
+
+
+def test_a_repair_the_small_run_refuses_is_never_run_and_goes_back_once_with_the_reason(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_checks
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    judged: list[Any] = []
+    asked: list[str] = []
+    reason = "run_cell() returned `q` with the key 'wrong_key', which is not one of the values the run was given: key it `c=1`"
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(a)
+        return Verdict("unchanged")
+
+    async def refusal(quest_root: Path, protocol: Any, **k: Any) -> str:
+        return reason if "wrong_key" in (Path(quest_root) / "code" / "simulate.py").read_text(encoding="utf-8") else ""
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        return {"simulate.py": SIM_BREAKS_CONTRACT}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    # refused twice: the study is never run, the model is asked once more with the contract's own reason, and the answer is could_not
+    assert got.status == "could_not" and got.crashed and reason in got.why and judged == []
+    assert len(asked) == 2 and asked[0] == "" and reason in asked[1]
+
+    # a repair that keeps the contract is run as before
+    async def ask_good(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "\n# repaired\n"}
+
+    engine._ask_repair_on_copy = ask_good  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
+
+
 def test_a_failed_call_for_a_rerun_repair_gives_its_request_back_and_no_answer_is_kept(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import finding_repair as fr
