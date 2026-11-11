@@ -1231,6 +1231,126 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
     return lines
 
 
+def _x_is_result(spec: dict[str, Any], table: Any, derived: Any = None) -> bool:
+    """Whether the figure's ``x`` is a result of the plan (one the table serves, or a quantity the plan derives) and not a setting
+    of the study: the plan then draws one result against another, and the default figure pairs them (``_paired_lines``)."""
+    x_name = str(spec.get("x"))
+    try:
+        if any(x_name in dict(table.setting(k)) for k in table.keys()):
+            return False
+    except Exception:  # noqa: BLE001 -- a table that cannot list its settings: the setting path says what it holds
+        return False
+    declared = [str(d) for d in (getattr(table, "declared", None) or [])]
+    return x_name in declared or (isinstance(derived, dict) and x_name in derived)
+
+
+def _x_points(table: Any, x_name: str, key: str, derived: Any = None) -> dict[str, Any]:
+    """The value of the result on ``x`` at setting ``key``, as ``_default_points`` gives a shown result's, except that a derived
+    quantity whose value for the setting is text (a name, a category) is kept: it is drawn as a category."""
+    if isinstance(derived, dict) and x_name in derived:
+        record = derived[x_name]
+        if isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("by_setting"), dict):
+            got = record["by_setting"].get(key)
+            if isinstance(got, str) and got.strip():
+                return {"": got}
+        return _derived_points(record, key)
+    return _default_points(table, x_name, key, derived)
+
+
+def _pairs(table: Any, x_name: str, rid: str, key: str, derived: Any = None) -> list[tuple[Any, float, str]]:
+    """``(x, y, level compared inside the runs or "")`` of the points of result ``rid`` against the result ``x_name`` at setting
+    ``key``. Where the record says the trial each value came from, one point for each trial that gave both, paired by the
+    record's trial numbers (``table.paired``), never by position. Where it does not (a result recorded for each value compared
+    inside the runs, a derived quantity, a record without trial numbers), one point of the two values FI holds for the setting
+    (for each compared value): the same setting, and the same compared value, never two of them."""
+    from_trials = not (isinstance(derived, dict) and (x_name in derived or rid in derived))
+    if from_trials:
+        try:
+            from_trials = bool(table.trials(x_name, key)) and bool(table.trials(rid, key))
+        except Exception:  # noqa: BLE001 -- recorded for each compared value, or a table without trial numbers
+            from_trials = False
+    if from_trials:
+        try:
+            xs, ys = table.paired(x_name, rid, key)
+        except Exception:  # noqa: BLE001
+            xs, ys = [], []
+        return [(a, float(b), "") for a, b in zip(xs, ys) if _plain_number(a) and _plain_number(b)]
+    xp = _x_points(table, x_name, key, derived)
+    if not xp:  # no value on x here: the shown result is not read, so a read that gives no point is not counted as drawn
+        return []
+    yp = _default_points(table, rid, key, derived)
+    return [(xp[level], yp[level], level) for level in xp if level in yp]
+
+
+def _paired_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None
+                  ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
+    """The point clouds of a default figure whose ``x`` is a result: for each result in ``shows`` (and each value of the
+    ``series`` setting, and each value compared inside the runs that a result is recorded for), the points ``_pairs`` gives at
+    every setting that holds ``fixed`` (the panel's setting), in the shape ``_default_lines`` gives. No other setting is held:
+    each point is one trial (or one setting), so the cloud is every trial the study ran there."""
+    x_name, s_name = str(spec.get("x")), spec.get("series")
+    names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+    cells = {k: dict(table.setting(k)) for k in table.keys()}
+    values = _distinct(c[str(s_name)] for c in cells.values() if str(s_name) in c) if s_name else [None]
+    by_compared = False  # the series is a factor compared inside the runs: only a result recorded for each of its values is drawn
+    if s_name and not values:
+        compared = getattr(table, "compared", None)
+        if callable(compared) and s_name in compared():
+            s_name, values, by_compared = None, [None], True
+    # the settings of each series value, in one pass over the settings (never one pass for each value)
+    of_value: dict[Any, list[str]] = {_freeze(v): [] for v in values}
+    for k, cell in cells.items():
+        if any(cell.get(a) != v for a, v in fixed.items()) or (s_name and str(s_name) not in cell):
+            continue
+        group = of_value.get(_freeze(cell.get(str(s_name)) if s_name else None))
+        if group is not None:
+            group.append(k)
+    lines = []
+    for rid in (str(r) for r in spec["shows"]):
+        for value in values:
+            by_level: dict[str, list[tuple[Any, float]]] = {}
+            for k in of_value[_freeze(value)]:
+                for x, y, level in _pairs(table, x_name, rid, k, derived):
+                    by_level.setdefault(level, []).append((x, y))
+            for level, points in by_level.items():
+                if by_compared and not level:
+                    continue
+                tail = (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else [])
+                lines.append((", ".join([str(names.get(rid) or rid)] + tail), [p[0] for p in points], [p[1] for p in points], rid,
+                              ", ".join([rid] + tail), value if s_name else None, level))
+    return lines
+
+
+def _only_drawn(table: Any, spec: dict[str, Any], drawn: set[str]) -> None:
+    """A shown result counts as drawn exactly when FI drew points of it (``drawn``): a read of it that gave a value but no point
+    against the result on x (a value at a setting where x has none) is not a drawing of it, and a quantity FI drew from its
+    derived record (which no read of the table counts) is."""
+    gave = getattr(table, "gave_values", None)
+    if isinstance(gave, set):
+        shows = [str(r) for r in spec.get("shows") or []]
+        gave.difference_update(r for r in shows if r not in drawn)
+        gave.update(r for r in shows if r in drawn)
+
+
+def _holds_any(table: Any, name: str, derived: Any = None) -> bool:
+    """Whether FI holds any value of ``name`` at any setting (a trial's value, a value for a compared value, or a derived one)."""
+    for key in table.keys():
+        if _x_points(table, name, key, derived):
+            return True
+        try:
+            if table.values(name, key):
+                return True
+        except Exception:  # noqa: BLE001 -- recorded for each compared value (read above), or not at all
+            continue
+    return False
+
+
+def _lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None, x_result: bool = False
+           ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
+    """The lines of the default figure: along a setting (``_default_lines``), or the point clouds against a result (``_paired_lines``)."""
+    return (_paired_lines if x_result else _default_lines)(spec, table, fixed, derived)
+
+
 def _grid_order(name: str, values: list[Any], spec: dict[str, Any], compared: Any) -> list[Any]:
     """The values of setting ``name`` in the plan's order: as the plan lists them for what a run compares or for the figure's own
     settings; any other (the plan's grid is not carried) ascending, numbers first. Never in the order of the table's rows."""
@@ -1302,8 +1422,10 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
     call record is marked ``fallback`` and holds no custom drawing; ``namespace`` is the carried plan (``COMPARED``, ``PARTS``,
     ``DERIVED``). A result the plan derives is drawn from ``derived``, FI's record of the derived values (this run's, or in the
     run that only draws the figures that failed, the earlier run's); a line FI holds no value for is left out and said on stderr,
-    never made up. The drawing is lines only: no bars and no error bars. A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default: the
-    outcome is ``dropped`` and says why, and no file is kept."""
+    never made up. The drawing is lines only: no bars and no error bars. A plan whose ``x`` is a result and not a setting (one result
+    against another) gets each trial's paired points instead (``_paired_lines``, drawn with ``fig.points``): no setting is held, a
+    text value of a derived ``x`` is a category, and the outcome is marked ``paired``. A plan that declares no ``shows`` or no ``x``,
+    or a table that holds no value to draw, gives no default: the outcome is ``dropped`` and says why, and no file is kept."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     _remove(out_dir, file)
     _remove_calls(file)
@@ -1321,16 +1443,22 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         if wanted > 1 and panel_by:
             held = [{panel_by: v} for v in list(settings[panel_by])[:wanted]]
         by_panel = panel_by if len(held) > 1 else None
-        hold = _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, namespace, derived)
+        x_result = _x_is_result(spec, table, derived)  # one result against another: each trial's pair, no setting held
+        hold = {} if x_result else _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, namespace, derived)
         labels = spec.get("labels") if isinstance(spec.get("labels"), dict) else {}
         reset = getattr(table, "reset_reads", None)
         if callable(reset):
             reset()
-        drawn = [_default_lines(spec, table, {**one, **hold}, derived) for one in held]
+        drawn = [_lines(spec, table, {**one, **hold}, derived, x_result) for one in held]
         for rid in (str(r) for r in shows):
             if isinstance(derived, dict) and rid in derived and not any(line[3] == rid for lines in drawn for line in lines):
-                sys.stderr.write("fi: the default figure `%s` leaves out `%s`: FI holds no value of it for each setting along `%s`\n" % (
-                    fid, rid, x_name))
+                sys.stderr.write("fi: the default figure `%s` leaves out `%s`: FI holds no value of it for each setting %s `%s`\n" % (
+                    fid, rid, "beside" if x_result else "along", x_name))
+        if not any(drawn) and x_result:
+            none = [r for r in [x_name] + [str(r) for r in shows] if not _holds_any(table, r, derived)]
+            why = ("no trial gave a value of %s" % ", ".join("`%s`" % r for r in none) if none else
+                   "no trial (or setting) of the table gives both `%s` and %s" % (x_name, ", ".join("`%s`" % r for r in shows)))
+            return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: %s." % (fid, why)), fallback=True)
         if not any(drawn):
             return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the table holds no value of %s along `%s`." % (
                 fid, ", ".join("`%s`" % r for r in shows), spec["x"])), fallback=True)
@@ -1340,14 +1468,16 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
             note = "Figure `%s` has %d panel(s) instead of the %d the plan asks for: the table gives no more settings to show one on each." % (
                 fid, len(held), wanted)
         if _frame_has_calls():
-            return _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note, derived)
+            out = _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note, derived, x_result)
+            return dict(out, paired=True) if x_result and out.get("status") == "ok" else out
         plt, fig, axes = _new_figure(len(held))
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
             cats = _distinct(v for _l, xs, _y, _r, _i, _v, _c in lines for v in xs if not _plain_number(v))
             for label, xs, ys, _rid, _sid, _value, _lvl in lines:
-                ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
+                ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label,
+                        **({"linestyle": "none"} if x_result else {}))  # against a result: the trials' points, not a line
             if cats:
                 ax.set_xticks(range(len(cats)), [str(v) for v in cats])
             ax.set_xlabel(str(labels.get(x_name) or x_name))
@@ -1362,9 +1492,12 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
                 record.append({"panel": index + 1, "settings": one, "title": title})
         os.makedirs(out_dir, exist_ok=True)
         fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        if x_result:
+            _only_drawn(table, spec, {line[3] for lines in drawn for line in lines})
         declared = _declared_record(spec, table, out_dir, file)
         out = dict(_outcome(fid, file, "ok", note), fallback=True, **({"panels": record} if record else {}),
-                   **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}))
+                   **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}),
+                   **({"paired": True} if x_result else {}))
         if note:
             out["note"] = note
         return out
@@ -1382,7 +1515,7 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
 
 def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any, held: list[dict[str, Any]],
                         hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str, str, Any, str]]], note: str,
-                        derived: Any = None) -> dict[str, Any]:
+                        derived: Any = None, x_result: bool = False) -> dict[str, Any]:
     """Draw the default figure through ``fig.line`` as a figure body would, with the plan marked ``fallback`` so the call record is.
     A figure whose plan draws one curve per value of a setting passes that value as each line's series, exactly as a body does, so
     every curve is a level of the setting: the legend condenses and the colours run along the setting's values like a body's. A line
@@ -1403,17 +1536,24 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
                 plan["labels"][sid] = label
 
     def body(fig: Any, tbl: Any) -> None:
+        points_of: set[str] = set()
         for index, one in enumerate(held):
-            lines = _default_lines(spec, tbl, {**one, **hold}, derived)  # read again: the reads are recorded from the start of the body
+            lines = _lines(spec, tbl, {**one, **hold}, derived, x_result)  # read again: the reads are recorded from the start of the body
+            points_of.update(line[3] for line in lines)
             for _label, xs, ys, rid, sid, value, level in lines:
                 name = value if as_levels else sid if (level or mixed) else rid
                 if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
                     tbl.gave_values.add(rid)  # FI read this value from its derived record, not from the table
+                if x_result:  # against a result: the points of each trial, the x named as the result it is
+                    fig.points(index, name, (str(spec["x"]), xs), ys, rid)
+                    continue
                 for art in fig.line(index, name, xs, ys, rid):
                     art.set_marker("o")
             if {**one, **hold}:
                 fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
                 fig.declared[index] = {**one, **hold}
+        if x_result:
+            _only_drawn(tbl, spec, points_of)
 
     out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan)  # the lines above are read with the plan's own series
     if out.get("status") != "ok":
