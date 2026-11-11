@@ -2346,7 +2346,8 @@ def merge_outcomes(outcomes, levels, block):
     stops = [o["stopped_because"] for o in outcomes if o["stopped_because"] not in ("failures", NOT_SEARCHED)]
     stops = stops or [o["stopped_because"] for o in outcomes]
     stopped = next((s for s in ("time", "the simulation could not be loaded", "failures", "scan_unchanged") if s in stops),
-                   "budget" if "budget" in stops else "share" if "share" in stops else stops[0])
+                   "budget" if "budget" in stops else
+                   "share" if "share" in stops and stops[0] == "converged" else stops[0])
     first = outcomes[0]
     out = {
         "rows": rows, "evaluations": sum(o["evaluations"] for o in outcomes),

@@ -311,7 +311,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
               + (f" ({method_name(method.get('requested'))} was asked for, but {_plain(method.get('why'))})"
                  if method.get("why") else "")
               + (f"; {ev.get('search')} evaluations in all over {len(alts)} alternatives, each with a budget of its own ("
-                 + _search.alternatives_budget_says(alts, lambda r: _STOPPED.get(r, r)) + ")"
+                 + _search.alternatives_budget_says(
+                     alts, lambda r: re.sub(r"^its ", "the ", _STOPPED.get(r, r))) + ")"
                  if len(alts) > 1 else f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used"))
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"

@@ -100,7 +100,7 @@ def _section_of(monkeypatch, record: dict[str, Any]) -> str:
 def test_the_papers_section_does_not_present_summed_budgets_as_one_budget(monkeypatch) -> None:
     text = _section_of(monkeypatch, _record([(180, 180, "budget")] * 4 + [(10, 180, "failures")]))
     assert "730 evaluations in all over 5 alternatives" in text
-    assert "4 alternatives used 720 of the 720 allowed and stopped because its evaluation budget ran out" in text
+    assert "4 alternatives used 720 of the 720 allowed and stopped because the evaluation budget ran out" in text
     assert "730 of 900 evaluations allowed" not in text
     shares = _section_of(monkeypatch, _record([(401, 1600, "share")] * 8 + [(1625, 1600, "budget")]))
     assert "8 alternatives used 3208 of the 12800 allowed" in shares and "of 14400" not in shares
@@ -134,3 +134,12 @@ def test_the_budget_check_names_each_alternative_and_does_not_pass_when_one_used
     assert check["checks"]["budget"]["status"] == "failed"
     assert "2 alternatives used 802 of the 3200 allowed" in says and "1 alternative used 1600 of the 1600 allowed" in says
     assert "2402 of 4800" not in says
+
+
+def test_the_merged_end_keeps_an_early_stop_of_an_alternative_when_another_ended_on_its_shares() -> None:
+    from tests.test_search_gives_up_early import _block as gblock, _drive, _first_lacks_objective, _stub
+    block = gblock()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), _first_lacks_objective)
+    merged = osearch.merge_outcomes([_stub(osearch, outcome, "flat_objective"), _stub(osearch, outcome, "share")],
+                                    [{"shape": "cup"}, {"shape": "mug"}], block)
+    assert merged["stopped_because"] == "flat_objective"
