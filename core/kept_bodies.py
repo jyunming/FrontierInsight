@@ -157,20 +157,34 @@ def write_receipt(root: Path, before: dict[str, Any], dropped: list[str] | tuple
     function of that run is kept: it is written again, never a stop. ``dropped``: the paths the run wrote into FI's own folders
     that the copy did not bring back (core/outside_run.py ``left_out``): a write under ``code/`` means the analysis changed its own
     code while it ran, which the quest's files cannot show."""
+    return record_run(root, before, dropped) is None
+
+
+def record_run(root: Path, before: dict[str, Any], dropped: list[str] | tuple[str, ...] = ()) -> str | None:
+    """:func:`write_receipt`, saying why no receipt was written: ``None`` when it was; ``""`` when there is nothing to keep (the
+    analysis is not FI's: there is no ``derive.py`` and it wrote no record of FI's), so nothing needs saying; else the reason in
+    plain words, for run.log."""
     from . import reuse_key as _reuse_key
 
     root = Path(root)
     (root / RECEIPT).unlink(missing_ok=True)
     derived = root / _analysis.DERIVED_PATH
-    if (not before.get("complete") or not derived.is_file() or any(str(d).startswith("code/") for d in dropped)
-            or receipt_inputs(root, before.get("summary")) != before):
-        return False
+    if not derived.is_file():
+        if not (root / "code" / _analysis.DERIVE_FILE).is_file():
+            return ""
+        return f"the analysis wrote no record of its run ({_analysis.DERIVED_PATH.as_posix()})"
+    if not before.get("complete"):
+        return "a file the analysis started with could not be read"
+    if any(str(d).startswith("code/") for d in dropped):
+        return "the analysis changed its own code while it ran"
+    if receipt_inputs(root, before.get("summary")) != before:
+        return "the files the analysis started with changed while it ran"
     try:
         (root / RECEIPT).write_text(json.dumps({"schema": 1, "inputs": before, "derived_sha": _reuse_key.digest(derived)}),
                                     encoding="utf-8")
-    except OSError:
-        return False
-    return True
+    except OSError as exc:
+        return f"FI could not write its receipt of the run ({exc})"
+    return None
 
 
 def _receipt(root: Path) -> tuple[bool, bool]:

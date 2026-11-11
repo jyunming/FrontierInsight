@@ -2174,9 +2174,9 @@ class TrialsRunner:
         self._steps.mark(_step_writes.ANALYSIS)
         if result.returncode == 0:
             dropped = list(getattr(getattr(analysis_box, "last", None), "left_out", None) or [])
-            if not _kept_bodies.write_receipt(self.quest_root, started_with, dropped) and self.log is not None:
-                self.log.info("[execute] the analysis changed its own code while it ran, or its record is missing, so FI does not "
-                              "keep its functions as run")
+            why = _kept_bodies.record_run(self.quest_root, started_with, dropped)
+            if why and self.log is not None:
+                self.log.info("[execute] FI does not keep the analysis's functions as run: %s", why)
         else:
             (self.quest_root / _kept_bodies.RECEIPT).unlink(missing_ok=True)
         from . import analysis_frame as _analysis

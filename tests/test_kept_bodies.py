@@ -316,3 +316,24 @@ async def test_a_change_in_the_raw_folder_beside_the_summary_or_a_write_under_co
     (root / "raw" / "ledger.jsonl").write_text("1\n", encoding="utf-8")
     assert not kb.write_receipt(root, before, ["code/helper.py"]), "the run wrote under code/ in its copy"
     assert not (root / kb.RECEIPT).exists()
+
+
+def test_an_analysis_that_is_not_fis_gives_no_receipt_and_nothing_to_say_but_fis_without_its_record_says_so(tmp_path: Path) -> None:
+    """No receipt is written without FI's record of the run; when the analysis is not FI's (no derive.py) there is nothing to
+    keep and nothing is said, and when it is FI's the reason names the record it did not write."""
+    root = tmp_path
+    (root / "code").mkdir()
+    (root / ".fi").mkdir()
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    before = kb.receipt_inputs(root, None)
+    assert kb.record_run(root, before) == "" and not kb.write_receipt(root, before)
+    (root / "code" / af.DERIVE_FILE).write_text("def derive_peak(table):\n    return 1\n", encoding="utf-8")
+    before = kb.receipt_inputs(root, None)
+    why = kb.record_run(root, before)
+    assert why and "derived.json" in why and "is missing" not in why
+    (root / af.DERIVED_PATH).parent.mkdir(parents=True)
+    (root / af.DERIVED_PATH).write_text("{}", encoding="utf-8")
+    before = kb.receipt_inputs(root, None)
+    assert "own code" in kb.record_run(root, before, ["code/helper.py"])
+    assert kb.record_run(root, before) is None and (root / kb.RECEIPT).is_file()
