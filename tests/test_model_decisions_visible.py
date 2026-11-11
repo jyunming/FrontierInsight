@@ -115,6 +115,18 @@ def test_how_each_finding_sits_against_the_literature(tmp_path: Path) -> None:
     assert support["finding"] == "RK4 drifts less"
 
 
+def test_a_result_that_was_not_searched_is_not_recorded_as_a_neutral_check(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    _called(eng, "cross_check")
+    eng._audit_claims("cross_check", {"cross_check": [
+        {"finding": "A", "status": "not_checked", "summary": "(not checked: FI left it out)", "supporting": [],
+         "conflicting": [], "neutral": [], "candidates": []},
+        {"finding": "B", "status": "checked", "summary": "silent", "supporting": [], "conflicting": [],
+         "neutral": [], "candidates": []}]})
+    decisions = {c["finding"]: c["decision"] for c in _claims(eng) if c["topic"] == "literature_verdict"}
+    assert decisions == {"A": "not checked", "B": "neutral"}
+
+
 def test_a_repair_s_patch_summary_and_a_give_up_reason(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     _called(eng, "execute_reflect")

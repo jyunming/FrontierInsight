@@ -1274,8 +1274,9 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         "[FI NOTE] Before the main run the engine checked the protocol's oracles against the expected values and "
         "tolerances the protocol fixes:\n" + "\n".join(lines) + "\n"
         "These verdicts are the ones that count. If the results below also judge these oracles (a pass/fail flag, or the "
-        "script's own copy of an expected value or tolerance), that copy can be out of date: report the engine's verdicts "
-        "and numbers above, and do not report an oracle as failed or passed on the script's word.\n\n"
+        "script's own copy of an expected value or tolerance), that copy can be out of date: use the engine's verdicts "
+        "above and do not report the script's own (FI states them in the paper), and do not report an oracle as failed "
+        "or passed on the script's word.\n\n"
     )
 
 

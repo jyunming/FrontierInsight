@@ -19,6 +19,7 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig,
     NodeEnsembleConfig, OutputConfig, ProviderConfig,
 )
+from core import cross_check_items as cci
 from core.engine import Engine, _format_cross_check
 from core.knowledge import RetrievedDoc
 
@@ -47,6 +48,22 @@ def _mk_cfg(
         # (on by default), which the DOI-bearing fake docs would trigger.
         pauses={"papers": False},
     )
+
+
+def _item(result: str = "r1", label: str = "Result one", query: str = "result one literature query",
+          sentence: str = "Result one: 1.5.", status: str = cci.TO_CHECK, why_not: str = "",
+          quantity: str | None = None) -> cci.Item:
+    return cci.Item(result, label, query, sentence, status, why_not, quantity)
+
+
+@pytest.fixture(autouse=True)
+def _what_is_looked_up(monkeypatch: pytest.MonkeyPatch) -> list[cci.Item]:
+    """What the literature check looks up is FI's own record (core/cross_check_items.py, tested in its own file); these
+    tests are about the node's search, classification and route, so they are handed one result with a value. A test that
+    wants other items changes the list this fixture returns."""
+    held: list[cci.Item] = [_item()]
+    monkeypatch.setattr("core.engine._cross_check_items.items", lambda **kw: list(held))
+    return held
 
 
 # --- _format_cross_check helper --------------------------------------------
@@ -83,13 +100,14 @@ def test_format_cross_check_renders_supporting_and_conflicting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_check_skipped_when_no_findings(tmp_path: Path) -> None:
+async def test_cross_check_skipped_when_nothing_to_look_up(tmp_path: Path, _what_is_looked_up: list[cci.Item]) -> None:
+    _what_is_looked_up.clear()
     eng = Engine(_mk_cfg(tmp_path))
     chat_mock = AsyncMock(return_value="{}")
     eng._client = type("Stub", (), {"chat": chat_mock})()
     eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
-    patch = await eng._node_cross_check({"analysis": {"key_findings": []}})
+    patch = await eng._node_cross_check({"analysis": {"key_findings": ["FI's own note, restated"]}})
 
     assert patch == {"cross_check": [], "cross_check_route": "write"}
     chat_mock.assert_not_awaited()
@@ -107,13 +125,18 @@ async def test_cross_check_disabled_when_k_is_zero(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_check_classifies_each_finding(tmp_path: Path) -> None:
-    """For each finding, the node searches literature with the FINDING
-    TEXT as query (not the topic) and asks the LLM to classify hits.
-    Result lands in `state['cross_check']` for the write prompt."""
+async def test_cross_check_classifies_each_result(tmp_path: Path, _what_is_looked_up: list[cci.Item]) -> None:
+    """For each result FI holds a value of, the node searches literature with the item's query (never the analysis's
+    text) and asks the LLM to classify hits against the sentence FI wrote. Result lands in `state['cross_check']`."""
+    _what_is_looked_up[:] = [
+        _item("r1", "Gain", "gain at setting three", "Gain: 2.3.", quantity="measured gain"),
+        _item("r2", "Load", "load scaling", "Load: 0.5."),
+    ]
     eng = Engine(_mk_cfg(tmp_path))
+    queries: list[str] = []
 
     async def fake_search(query, **kw):  # noqa: ANN001
+        queries.append(query)
         return [
             RetrievedDoc(
                 content="A 2015 study reports F_SE ≈ 2.3 in the same regime.",
@@ -137,15 +160,18 @@ async def test_cross_check_classifies_each_finding(tmp_path: Path) -> None:
     patch = await eng._node_cross_check({
         "topic": "EUV-MOR SE-yield",
         "analysis": {
-            "key_findings": ["F_SE ≈ 2.3 at 92 eV", "Dose scales sub-linearly"],
+            "key_findings": ["The engine-checked oracles all passed", "3 of 6 figures drawn"],
             "next_step": "publish",
         },
     })
 
+    assert queries == ["gain at setting three", "load scaling"]
     assert "cross_check" in patch
     assert len(patch["cross_check"]) == 2
     first = patch["cross_check"][0]
-    assert first["finding"] == "F_SE ≈ 2.3 at 92 eV"
+    assert first["finding"] == "Gain: 2.3."
+    assert first["result"] == "r1" and first["status"] == "checked" and first["quantity"] == "measured gain"
+    assert patch["cross_check"][1]["quantity"] is None
     assert len(first["supporting"]) == 1
     assert len(first["conflicting"]) == 1
     assert first["candidates"][0]["doi"] == "10.1117/12.X"
@@ -201,61 +227,69 @@ async def test_cross_check_does_not_bump_when_publishing(tmp_path: Path) -> None
     assert "iteration" not in patch
 
 
-_FAILED_RUN = {
-    "exec_result": {"returncode": 1, "stdout_tail": "Traceback ..."},
-    "result_json": {},
-    "analysis": {
-        "key_findings": ["The execution failed before generating any simulated observations."],
-        "next_step": "re_experiment",
-    },
-    "iteration": 0,
-}
-
-
 @pytest.mark.asyncio
-async def test_cross_check_makes_no_search_or_model_call_when_the_run_has_no_results(tmp_path: Path) -> None:
+async def test_a_result_with_no_value_is_not_searched_and_says_why(tmp_path: Path,
+                                                                    _what_is_looked_up: list[cci.Item]) -> None:
+    _what_is_looked_up[:] = [_item("r1", "Result one", "", "", cci.NOT_HELD, "FI left it out of the results")]
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     chat_mock = AsyncMock(return_value="{}")
     eng._client = type("Stub", (), {"chat": chat_mock})()
     search_mock = AsyncMock(return_value=[])
     eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
+    state = {"analysis": {"key_findings": ["x"], "next_step": "re_experiment"}, "iteration": 0}
 
-    patch = await eng._node_cross_check(dict(_FAILED_RUN))
+    patch = await eng._node_cross_check(dict(state))
 
     search_mock.assert_not_awaited()
     chat_mock.assert_not_awaited()
-    assert len(patch["cross_check"]) == 1
-    assert "no results" in patch["cross_check"][0]["summary"]
-    # The analysis's request to run again is not followed on its word: a run with no results goes to the evidence
-    # check, which sends it back to the design once from its own record. The request costs no round.
+    entry = patch["cross_check"][0]
+    assert entry["status"] == "not_checked" and entry["why_not"] == "FI left it out of the results"
+    assert "not checked" in entry["summary"]
+    # The route reads the analysis's request, FI's precision record and the rounds left, never the entries' number.
     assert "iteration" not in patch
-    assert eng._route_after_cross_check({**_FAILED_RUN, **patch}) == "write"
+    assert eng._route_after_cross_check({**state, **patch}) == "write"
 
 
 @pytest.mark.asyncio
-async def test_cross_check_still_searches_when_the_run_has_results(tmp_path: Path) -> None:
-    eng = Engine(_mk_cfg(tmp_path))
-    chat_mock = AsyncMock(return_value="{}")
-    eng._client = type("Stub", (), {"chat": chat_mock})()
-    search_mock = AsyncMock(return_value=[])
-    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
-
-    state = {**_FAILED_RUN, "exec_result": {"returncode": 0}, "result_json": {"x": 1.0}}
-    await eng._node_cross_check(state)
-
-    search_mock.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_failed_after_writing_some_results_is_still_checked(tmp_path: Path) -> None:
-    """A run stopped part way (a time limit, a later setting failing) has results: they are checked as before."""
-    eng = Engine(_mk_cfg(tmp_path))
+async def test_a_run_with_no_item_still_routes_by_next_step_and_spends_the_round(tmp_path: Path,
+                                                                                  _what_is_looked_up: list[cci.Item]) -> None:
+    """A study with nothing to look up (no protocol, a survey) used to write at once; the node now decides the route
+    itself and bumps the round, so a literature loop stays bounded by engine.max_iterations."""
+    _what_is_looked_up.clear()
+    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
-    search_mock = AsyncMock(return_value=[])
-    eng.knowledge.asearch = search_mock  # type: ignore[method-assign]
-    state = {**_FAILED_RUN, "exec_result": {"returncode": 1, "timed_out": True}, "result_json": {"x": 1.0}}
-    await eng._node_cross_check(state)
-    search_mock.assert_awaited_once()
+    state = {"analysis": {"key_findings": [], "next_step": "broaden_lit"}, "iteration": 0}
+
+    patch = await eng._node_cross_check(dict(state))
+
+    assert patch["cross_check"] == [] and patch["cross_check_route"] == "broaden_lit" and patch["iteration"] == 1
+    last = {"analysis": state["analysis"], "iteration": 2}
+    assert (await eng._node_cross_check(dict(last)))["cross_check_route"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_the_analysis_text_is_never_searched_or_classified(tmp_path: Path) -> None:
+    """The root of the live fault: a note of FI's restated as a finding became a query and the sentence to classify."""
+    eng = Engine(_mk_cfg(tmp_path))
+    seen: list[str] = []
+
+    async def fake_search(query, **kw):  # noqa: ANN001
+        seen.append(query)
+        return [RetrievedDoc(content="a study", metadata={"title": "T", "doi": "10.1/x"})]
+    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+    prompts: list[str] = []
+
+    async def chat(self, prompt, *a, **kw):  # noqa: ANN001
+        prompts.append(str(prompt))
+        return "{}"
+    eng._client = type("Stub", (), {"chat": chat})()
+    note = "[FI NOTE] The engine-checked oracles all passed; 3 of 6 figures drawn."
+
+    await eng._node_cross_check({"analysis": {"key_findings": [note, {"finding": note}], "next_step": "publish"}})
+
+    assert seen == ["result one literature query"]
+    assert all(note not in q for q in seen) and all(note not in p for p in prompts)
+    assert any("Result one: 1.5." in p for p in prompts)
 
 
 # --- CoVe verification pass ------------------------------------------------
@@ -1003,7 +1037,7 @@ async def test_the_last_round_is_followed_not_spent_with_no_re_route(tmp_path: P
 @pytest.mark.asyncio
 async def test_a_skipped_cross_check_never_follows_an_earlier_route(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, max_iter=3))
-    stale = {"analysis": {"key_findings": [], "next_step": "broaden_lit"}, "iteration": 1, "cross_check_route": "broaden_lit"}
+    stale = {"analysis": {"key_findings": [], "next_step": "publish"}, "iteration": 1, "cross_check_route": "broaden_lit"}
     patch = await eng._node_cross_check(dict(stale))
     assert eng._route_after_cross_check({**stale, **patch}) == "write"
 

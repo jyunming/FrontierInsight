@@ -42,7 +42,9 @@ The `verification_notes` field is what makes this auditable. Include one entry p
 ## Topic
 $topic
 
-## Finding under check
+## FI's record of the result under check
+This is FI's own record of the result (its value, from the study's trial record), not a claim from a paper. Judge whether each paper reports a consistent or contradicting value or direction; a different scale or metric is neutral.
+
 $finding
 
 ## First-pass classification

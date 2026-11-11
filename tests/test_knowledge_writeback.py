@@ -130,12 +130,14 @@ async def test_quest_writeback_invokes_axon_when_enabled(
     assert len(captured) == 1
     assert captured[0]["quest_id"] == engine.quest_id
     assert captured[0]["paper_md_exists"] is True
-    assert "Two points plotted." in captured[0]["summary"]
-    assert "- linear" in captured[0]["summary"]
+    # The summary is the paper's own abstract and the findings come from FI's record, never the analysis text.
+    assert "Two points plotted." not in captured[0]["summary"]
+    assert "- linear" not in captured[0]["summary"]
     # Rich metadata threaded through: verdict + structured findings.
     meta = captured[0]["metadata"]
     assert meta["verdict"] == "accept"
-    assert meta["key_findings"] == ["linear"]
+    assert meta["claims_from"] == "record"
+    assert "linear" not in meta["key_findings"]
     assert meta["provider"] == "openai"
     # How the idea was chosen travels with the summary, under the same name the branch ledger uses.
     assert meta["idea_selection"] in ("ensemble", "tournament", "reflection", "model", "none")
