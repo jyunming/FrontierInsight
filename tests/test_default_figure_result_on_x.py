@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import types
 from typing import Any
 
@@ -124,3 +125,81 @@ def test_a_setting_on_x_is_still_drawn_as_lines_along_the_setting(tmp_path, fram
     assert out["status"] == "ok" and "paired" not in out
     series = _record(frame5, "f.png")["panels"][0]["series"]
     assert [e["kind"] for e in series] == ["line"] and series[0]["x"] == [1, 2, 3]
+
+
+def test_a_shown_result_that_gives_no_point_is_not_recorded_as_drawn(tmp_path, frame5):
+    """``stem`` is recorded (without trial numbers) only at a setting where no trial gave ``height``: it has a value, but no
+    point against ``height``, so the figure's record must not count it as drawn."""
+    table = _table(declared=("height", "leaf_area", "stem"))
+    extra = {"cell": {"water": 4, "soil": "clay"}, "key": "water=4,soil=clay", "planned": 1, "ok": 1, "failed": 0,
+             "metrics": {"stem": {"values": [5.0]}}}
+    table = type(table)(table._cells + [extra], list(table.declared))
+    spec = {"id": "f", "file": "f.png", "shows": ["leaf_area", "stem"], "x": "height"}
+    out = af.default_figure(spec, table, str(tmp_path))
+    assert out["status"] == "ok"
+    assert out["declared"]["drawn"] == ["leaf_area"] and out["declared"]["not_drawn"] == ["stem"]
+
+
+class _Many:
+    """A light table of many settings, each with its own value of the series setting ``plot`` and one trial."""
+
+    def __init__(self, n):
+        self.declared = ["height", "leaf_area"]
+        self.n = n
+
+    def keys(self):
+        return ["plot=%d" % i for i in range(self.n)]
+
+    def setting(self, key):
+        return {"plot": int(key.split("=")[1])}
+
+    def trials(self, name, key):
+        return [0]
+
+    def paired(self, a, b, key):
+        i = float(key.split("=")[1])
+        return [i], [2.0 * i]
+
+
+def test_the_points_of_each_series_value_are_gathered_in_one_pass_over_the_settings():
+    """A series with as many values as there are settings must not scan every setting once for each value: on a record of tens of
+    thousands of settings that is billions of comparisons."""
+    spec = {"id": "f", "file": "f.png", "shows": ["leaf_area"], "x": "height", "series": "plot"}
+    began = time.monotonic()
+    lines = af._paired_lines(spec, _Many(4000), {})
+    assert len(lines) == 4000 and all(len(line[1]) == 1 for line in lines)
+    assert time.monotonic() - began < 3.0  # one pass: a few hundredths of a second; once per value: well over ten seconds
+
+
+def test_a_result_read_for_a_compared_value_with_no_point_against_x_is_not_recorded_as_drawn(tmp_path, frame5):
+    """Two arms compared inside each run: ``height`` and ``leaf_area`` are recorded for arm ``a``, ``stem`` only for arm ``b``.
+    Reading ``stem`` gives a value, but no point against ``height`` (another arm), so it is not drawn and not recorded as drawn."""
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = []
+    for w in (1, 2):
+        key = "water=%d" % w
+        cells.append({"cell": {"water": w}, "key": key, "planned": 1, "ok": 1, "failed": 0, "metrics": {}})
+        cells.append({"cell": {"water": w, "arm": "a"}, "level": {"arm": "a"}, "key": key + ",arm=a", "planned": 1, "ok": 1,
+                      "failed": 0, "metrics": {"height": {"values": [1.0 * w]}, "leaf_area": {"values": [2.0 * w]}}})
+        cells.append({"cell": {"water": w, "arm": "b"}, "level": {"arm": "b"}, "key": key + ",arm=b", "planned": 1, "ok": 1,
+                      "failed": 0, "metrics": {"stem": {"values": [3.0 * w]}}})
+    table = ns["Table"](cells, ["height", "leaf_area", "stem"])
+    spec = {"id": "f", "file": "f.png", "shows": ["leaf_area", "stem"], "x": "height"}
+    out = af.default_figure(spec, table, str(tmp_path))
+    assert out["status"] == "ok" and out.get("paired") is True
+    assert out["declared"]["drawn"] == ["leaf_area"] and out["declared"]["not_drawn"] == ["stem"]
+    series = _record(frame5, "f.png")["panels"][0]["series"]
+    assert len(series) == 1 and sorted(zip(series[0]["x"], series[0]["y"])) == [(1.0, 2.0), (2.0, 4.0)]
+
+
+def test_a_derived_shown_result_drawn_without_the_drawing_calls_is_recorded_as_drawn(tmp_path):
+    table = _table()
+    derived = {"vigour": {"status": "ok", "by_setting": {k: float(table.setting(k)["water"]) for k in table.keys()}}}
+    spec = {"id": "f", "file": "f.png", "shows": ["vigour"], "x": "height"}
+    out = af.default_figure(spec, table, str(tmp_path), None, derived)
+    assert out["status"] == "ok" and out.get("paired") is True
+    assert out["declared"]["drawn"] == ["vigour"] and out["declared"]["not_drawn"] == []

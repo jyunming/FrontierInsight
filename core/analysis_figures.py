@@ -1275,7 +1275,10 @@ def _pairs(table: Any, x_name: str, rid: str, key: str, derived: Any = None) -> 
         except Exception:  # noqa: BLE001
             xs, ys = [], []
         return [(a, float(b), "") for a, b in zip(xs, ys) if _plain_number(a) and _plain_number(b)]
-    xp, yp = _x_points(table, x_name, key, derived), _default_points(table, rid, key, derived)
+    xp = _x_points(table, x_name, key, derived)
+    if not xp:  # no value on x here: the shown result is not read, so a read that gives no point is not counted as drawn
+        return []
+    yp = _default_points(table, rid, key, derived)
     return [(xp[level], yp[level], level) for level in xp if level in yp]
 
 
@@ -1294,13 +1297,19 @@ def _paired_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deriv
         compared = getattr(table, "compared", None)
         if callable(compared) and s_name in compared():
             s_name, values, by_compared = None, [None], True
+    # the settings of each series value, in one pass over the settings (never one pass for each value)
+    of_value: dict[Any, list[str]] = {_freeze(v): [] for v in values}
+    for k, cell in cells.items():
+        if any(cell.get(a) != v for a, v in fixed.items()) or (s_name and str(s_name) not in cell):
+            continue
+        group = of_value.get(_freeze(cell.get(str(s_name)) if s_name else None))
+        if group is not None:
+            group.append(k)
     lines = []
     for rid in (str(r) for r in spec["shows"]):
         for value in values:
             by_level: dict[str, list[tuple[Any, float]]] = {}
-            for k, cell in cells.items():
-                if any(cell.get(a) != v for a, v in fixed.items()) or (s_name and cell.get(str(s_name)) != value):
-                    continue
+            for k in of_value[_freeze(value)]:
                 for x, y, level in _pairs(table, x_name, rid, k, derived):
                     by_level.setdefault(level, []).append((x, y))
             for level, points in by_level.items():
@@ -1310,6 +1319,17 @@ def _paired_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deriv
                 lines.append((", ".join([str(names.get(rid) or rid)] + tail), [p[0] for p in points], [p[1] for p in points], rid,
                               ", ".join([rid] + tail), value if s_name else None, level))
     return lines
+
+
+def _only_drawn(table: Any, spec: dict[str, Any], drawn: set[str]) -> None:
+    """A shown result counts as drawn exactly when FI drew points of it (``drawn``): a read of it that gave a value but no point
+    against the result on x (a value at a setting where x has none) is not a drawing of it, and a quantity FI drew from its
+    derived record (which no read of the table counts) is."""
+    gave = getattr(table, "gave_values", None)
+    if isinstance(gave, set):
+        shows = [str(r) for r in spec.get("shows") or []]
+        gave.difference_update(r for r in shows if r not in drawn)
+        gave.update(r for r in shows if r in drawn)
 
 
 def _holds_any(table: Any, name: str, derived: Any = None) -> bool:
@@ -1472,6 +1492,8 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
                 record.append({"panel": index + 1, "settings": one, "title": title})
         os.makedirs(out_dir, exist_ok=True)
         fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        if x_result:
+            _only_drawn(table, spec, {line[3] for lines in drawn for line in lines})
         declared = _declared_record(spec, table, out_dir, file)
         out = dict(_outcome(fid, file, "ok", note), fallback=True, **({"panels": record} if record else {}),
                    **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}),
@@ -1514,8 +1536,10 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
                 plan["labels"][sid] = label
 
     def body(fig: Any, tbl: Any) -> None:
+        points_of: set[str] = set()
         for index, one in enumerate(held):
             lines = _lines(spec, tbl, {**one, **hold}, derived, x_result)  # read again: the reads are recorded from the start of the body
+            points_of.update(line[3] for line in lines)
             for _label, xs, ys, rid, sid, value, level in lines:
                 name = value if as_levels else sid if (level or mixed) else rid
                 if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
@@ -1528,6 +1552,8 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
             if {**one, **hold}:
                 fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
                 fig.declared[index] = {**one, **hold}
+        if x_result:
+            _only_drawn(tbl, spec, points_of)
 
     out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan)  # the lines above are read with the plan's own series
     if out.get("status") != "ok":
