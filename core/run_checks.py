@@ -1547,9 +1547,29 @@ class RunChecksMixin:
         FI observed, not a reading of the text). The same consequence as the reading of the code above, which runs later and
         still runs: a setting the study compares sends the simulation back (a failed run, while a repair is left, before the
         freeze); any other is one line in plan.md and run.log. The grid is never changed. ``None`` to go on."""
+        if _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return None
+        found = self._unread_small_run_facts(state, record, simulate)
+        if found is None:
+            return None
+        never, sent, conditional, asked, grid = found
+        if sent:
+            return self._unread_compared_setting(state, grid, sent, simulate, ran=True, asked=asked)
+        self._note_unread_setting(
+            f"FI's small run: the simulation never asked for {', '.join(f'`{k}`' for k in never)}"
+            + (f" (the code does read {', '.join(f'`{k}`' for k in conditional)}, under a condition the small run did not reach)"
+               if conditional else "") + "; every setting is kept and run.")
+        return None
+
+    def _unread_small_run_facts(self, state: Any, record: dict[str, Any], simulate: Path) -> tuple[
+            list[str], dict[str, str], list[str], list[str], dict[str, Any]] | None:
+        """What FI's small run saw of the settings the code never asked for: ``(never asked for, the ones the study
+        compares that the code's text never looks up either {setting: why it is compared}, the ones the text reads under a
+        condition, the names the code asked for that the grid does not give, the grid)``; ``None`` when every setting of
+        two values or more was asked for."""
         reads = record.get("reads") if isinstance(record.get("reads"), dict) else {}
         never = [str(a) for a in reads.get("never") or []]
-        if not never or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+        if not never:
             return None
         protocol = self._draft_protocol(state) or {}  # type: ignore[attr-defined]
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
@@ -1570,14 +1590,8 @@ class RunChecksMixin:
         seen = set(_unread.setting_reads(files, analysis=False)[0] or ()) | _literal_keys(
             {rel: text for rel, text in files.items() if rel != "experiment.py"})
         sent = {a: why for a, why in compared.items() if a not in seen}
-        if sent:
-            return self._unread_compared_setting(state, grid, sent, simulate, ran=True, asked=asked)
         conditional = [a for a in never if a in seen]
-        self._note_unread_setting(
-            f"FI's small run: the simulation never asked for {', '.join(f'`{k}`' for k in never)}"
-            + (f" (the code does read {', '.join(f'`{k}`' for k in conditional)}, under a condition the small run did not reach)"
-               if conditional else "") + "; every setting is kept and run.")
-        return None
+        return never, sent, conditional, asked, grid
 
     def _settings_the_study_compares(self, state: Any, protocol: dict[str, Any], axes: list[str]) -> dict[str, str]:
         """``{setting: why it is part of the study}`` for each of ``axes`` that the study compares, from FI's records
@@ -1779,7 +1793,7 @@ class RunChecksMixin:
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
                     "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
                     "once_s": est.once_s, "once_axes": list(est.once_axes),
-                    "at_once": est.at_once}
+                    "at_once": est.at_once, "at_least": bool(est.at_least)}
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
             # More settings than FI lists: the whole grid is never built. The settings the time allowed can reach are planned,
@@ -2795,6 +2809,124 @@ class RunChecksMixin:
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+
+    # ---- trying the plan before the study (``pauses.plan: after_trial``, core/feasibility.py) ---------------------------
+
+    async def _try_plan_first(self, state: Any, runner: Any, py: Any, exec_env: Any) -> dict[str, Any] | None:
+        """With ``pauses.plan: after_trial``, before the full checks: the part of them in which no model reads the code
+        (:meth:`_gate_pass_first`: the small run with its crash repairs and send-backs), then the timing of the whole study
+        with its pilot (:meth:`_size_the_run`, whose stop is taken here as a record, never as the quest's stop), then the
+        record ``needs/FEASIBILITY.json`` and a stop for the person. A failed run the repairs can still take goes to them as
+        today. On the resume after the stop the trial is made again only when the plan or the code changed since it (or its
+        record is incomplete); otherwise the full checks and the study go on. ``None`` to go on, which is all a study that
+        did not ask for a trial ever gets: nothing here runs for it."""
+        from . import feasibility as _feas
+
+        if not _feas.asked(self.config) or _frozen.load(self.quest_root) is not None \
+                or int(state.get("iteration", 0) or 0) > 0:  # type: ignore[attr-defined]
+            return None
+        from . import outside_run as _outside_run
+        from . import small_run as _small
+
+        protocol = self._draft_protocol(state)  # type: ignore[attr-defined]
+        plan_sha = _frozen.sha256(protocol or {})
+        code_version = _outside_run.code_version(self.quest_root)  # type: ignore[attr-defined]
+        if _feas.read_marker(self.quest_root) is not None:  # type: ignore[attr-defined]
+            if _feas.on_resume(self.quest_root, plan_sha256=plan_sha, code_version=code_version) == _feas.DONE:  # type: ignore[attr-defined]
+                _feas.went_on(self.quest_root)  # type: ignore[attr-defined]
+                self._log.info("[trial] FI tried this plan before the stop: the full checks and the study go on")  # type: ignore[attr-defined]
+                return None
+            self._log.info("[trial] the plan or the code changed since FI tried it (or its record is incomplete): "  # type: ignore[attr-defined]
+                           "trying it again")
+        if self._agent_mode():  # type: ignore[attr-defined]
+            return self._stop_not_tried(state, "FI does not try a plan whose code a coding agent writes yet")
+        self._log.info("[trial] trying the plan on a small case before the study")  # type: ignore[attr-defined]
+        if (first := await self._gate_pass_first(state, py, exec_env)) is not None:  # type: ignore[attr-defined]
+            return first  # a stop or a failed run for the repairs, as without a trial
+        small = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+        timing_failed = stopped = stopped_kind = ""
+        if not small.get("crashed"):  # a small run that still crashes with no repair left: nothing more to time
+            sized = await self._size_the_run(state, runner, py, self._first_run_env(exec_env, record=False))  # type: ignore[attr-defined]
+            if sized is not None:
+                result = sized.get("exec_result") if isinstance(sized.get("exec_result"), dict) else {}
+                if sized.get("exec_give_up_reason"):
+                    # The sizing's stop (too long; the pilot's finding its repairs left): a record, never the quest's stop.
+                    stopped = str(sized["exec_give_up_reason"])
+                    stopped_kind = "too_long" if result.get("too_long") else ""
+                elif int(state.get("exec_reflect_iter") or 0) < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+                    return sized  # a setting failed while FI timed the study: the repair of a failed run, as today
+                else:
+                    timing_failed = str(result.get("stderr_tail") or "a setting failed")
+        unread, conditional = [], []
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        if small and not small.get("crashed") and simulate.is_file():
+            found = self._unread_small_run_facts(state, small, simulate)
+            if found is not None:
+                unread, conditional = sorted(found[1]), list(found[2])
+        record = _feas.build(self.quest_root, protocol, quest_id=self.quest_id, plan_sha256=plan_sha,  # type: ignore[attr-defined]
+                             code_version=_outside_run.code_version(self.quest_root),  # type: ignore[attr-defined]
+                             docker=self.config.execution.sandbox == "docker", timing_failed=timing_failed,  # type: ignore[attr-defined]
+                             unread=unread, conditional=conditional, stopped=stopped, stopped_kind=stopped_kind)
+        # what the timing cut (fewer runs per setting) is part of the plan that was tried
+        record["plan_sha256"] = _frozen.sha256(self._draft_protocol(state) or {})  # type: ignore[attr-defined]
+        return self._stop_after_trial(record, self._draft_protocol(state))  # type: ignore[attr-defined]
+
+    def _stop_not_tried(self, state: Any, why: str) -> dict[str, Any] | None:
+        """A study FI does not try (no simulation; code a coding agent writes): with ``pauses.plan: after_trial`` it still
+        writes one record, every check ``not_applicable`` with ``why``, and stops once, so the caller gets a record and
+        decides. Once per quest: a resume goes on. ``None`` when no trial was asked for or the stop was made already."""
+        from . import feasibility as _feas
+
+        if not _feas.asked(self.config):  # type: ignore[attr-defined]
+            return None
+        if _feas.read_marker(self.quest_root) is not None:  # type: ignore[attr-defined]
+            _feas.went_on(self.quest_root)  # type: ignore[attr-defined]
+            return None
+        root = self.quest_root  # type: ignore[attr-defined]
+        supplied = _feas.supplied_files(root)
+        collected = int(state.get("auto_collected_count") or 0)
+        data_line = (f"FI collected {collected} file(s) and was given {supplied} supplied file(s); their use was not "
+                     "checked." if state.get("no_simulation_resolved") else
+                     f"The study was given {supplied} supplied file(s); their use was not checked.")
+        protocol = self._draft_protocol(state)  # type: ignore[attr-defined]
+        record = _feas.not_tried(root, quest_id=self.quest_id, plan_sha256=_frozen.sha256(protocol or {}),  # type: ignore[attr-defined]
+                                 why=why, data_line=data_line)
+        return self._stop_after_trial(record, protocol)
+
+    def _tried_plan_approval(self, protocol: Any) -> str:
+        """At the freeze of a plan FI tried before the study: the record gets what changed after the trial (each change with
+        the check of FI's that made it), and the freeze's ``approved_by`` when a person approved the tried plan with
+        ``--approve-as`` on the resume after the trial, naming every such change as not seen by them. ``""`` when no plan
+        was tried or nobody approved it (the freeze then says so as it always did)."""
+        from . import feasibility as _feas
+
+        root = self.quest_root  # type: ignore[attr-defined]
+        if not _feas.asked(self.config) or _feas.read_marker(root) is None:  # type: ignore[attr-defined]
+            return ""
+        changes = _feas.changed_after_trial(root, protocol if isinstance(protocol, dict) else None)
+        _feas.record_changes(root, changes)
+        got = _feas.approval(root)
+        if got is None:
+            return ""
+        return _feas.approved_by(root, str(got["who"]), str(got["plan_sha256"]), changes)
+
+    def _stop_after_trial(self, record: dict[str, Any], tried: dict[str, Any] | None) -> dict[str, Any]:
+        """The stop after a trial, each step finished before the next: (1) the record, written to a temporary file and
+        renamed; (2) the marker with what the trial was made on; (3) the pause (``kind: trial``), which a resume runs the
+        step again from. Never returns."""
+        from . import feasibility as _feas
+
+        path = _feas.write(self.quest_root, record, tried)  # type: ignore[attr-defined]
+        _feas.write_marker(self.quest_root, record)  # type: ignore[attr-defined]
+        self._log.info("[trial] %s (the record: %s)", record.get("line"), path)  # type: ignore[attr-defined]
+        print(f"[FI] {record.get('line')}")
+        headline, steps, recommended, alternatives = _feas.stop_card(record, self.quest_root, self.quest_id)  # type: ignore[attr-defined]
+        self._pause_for_human(  # type: ignore[attr-defined]
+            kind="trial", interaction="supply", headline=headline, steps=steps, recommended=recommended,
+            alternatives=alternatives,
+            payload={"trial_stage": True, "quest_id": self.quest_id, "feasibility_file": str(path),  # type: ignore[attr-defined]
+                     "verdict": record.get("verdict"), "line": record.get("line")})
+        raise AssertionError("unreachable: the trial's stop interrupts the quest")  # pragma: no cover
 
     async def _small_run_checks(self, state: Any, record: dict[str, Any]) -> dict[str, Any] | None:
         """The small run against the frozen plan (core/small_run.py): the shape of each number the plan declares one per

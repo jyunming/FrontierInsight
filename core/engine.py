@@ -976,6 +976,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            from . import feasibility as _feasibility
+
+            if (approved_by or "").strip() and not from_step and _feasibility.note_approval(self.quest_root, approved_by):
+                self._log.info("[trial] %s approved the plan FI tried; the study goes on", approved_by.strip())
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             # Before anything is written: lines another program added to the quest's records since FI last wrote them
             # are moved aside (core/record_anchor.py), so this run does not chain onto them.
@@ -11579,6 +11583,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             _walk_folder, _render_file_manifest, _render_content_blocks,
         )
 
+        # With ``pauses.plan: after_trial``, before a model reads the data: FI does not try such a study, so it writes one
+        # record that says so (with what it was given) and stops once (core/feasibility.py).
+        from .feasibility import NOT_TRIED_YET
+
+        self._stop_not_tried(state, NOT_TRIED_YET)
         if _phased.enabled(self.config):
             # Explore, then confirm: the rows held back are taken out (or, in the confirm stage, are the only ones in
             # place) before anything below reads the data (off the event loop: the files may be large).
@@ -12338,6 +12347,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if filled and approved_by.startswith("human"):
             unsourced_note += (f"; FI wrote where the expected value of {', '.join(repr(n) for n in filled)} comes from "
                                "after the plan was read (their numbers are as read)")
+        # A plan FI tried before the study (pauses.plan: after_trial): approved by a person only through `--approve-as` on
+        # the resume after the trial, and every change FI's checks made after it is named as not seen by them.
+        approved_by = self._tried_plan_approval(protocol) or approved_by
         approved_by += unsourced_note
         replaced = _frozen.open_replacement(self.quest_root)
         if replaced is not None:
@@ -19879,6 +19891,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
+        # With ``pauses.plan: after_trial``: FI tries the plan on a small case first and stops with its record
+        # (core/feasibility.py); a resume goes on from here. Nothing happens for a study that did not ask for it.
+        if (tried := await self._try_plan_first(state, runner, py, exec_env)) is not None:
+            return tried
         if self._agent_mode():
             # The coding agent fixes what the checks find, round by round, until they pass (core/agent_build.py).
             stop, oracle_code, gate_repaired = await self._agent_build(state, py, exec_env, seed_path)
@@ -24293,8 +24309,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # results hold, so the reason the quest reports is the one that stopped it.
             why = str(exec_result[stopped])  # type: ignore[index]
             fit = exec_result.get("too_long_fit") if stopped == "too_long" else None  # type: ignore[union-attr]
+            # A plan FI tried before the study (pauses.plan: after_trial) is not rewritten after the trial: a new plan is the
+            # caller's decision, so the quest takes the plain stop below, which says what FI measured.
             if (isinstance(fit, dict) and int(state.get("evidence_fit_redesigns") or 0) < 1
-                    and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(self.quest_root).is_file()):
+                    and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(self.quest_root).is_file()
+                    and self.config.pauses.plan != "after_trial"):
                 # The plan was written before anything was timed: its model is told what FI measured and asked, once, for
                 # a study that fits (FI itself never chooses which settings to leave out). The new design is timed again.
                 self._log.warning("[evidence_gate] %s; the plan is asked once for a study that fits the time FI measured",

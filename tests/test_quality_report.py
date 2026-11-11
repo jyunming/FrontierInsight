@@ -476,3 +476,26 @@ def test_a_current_record_of_untraced_numbers_is_listed_as_kept(tmp_path: Path) 
     _w(root / ".fi" / "paper_record_check.json", {"hits": [], "untraced_numbers": _OLD_RECORD["removed_numbers"]})
     text = qr.render(qr.build(root))
     assert "Numbers not traced to the plan" in text and "Numbers taken out of the paper" not in text
+
+
+def test_a_trial_of_the_plan_has_its_own_section_and_key(tmp_path: Path) -> None:
+    """FI's trial of the plan before the study (needs/FEASIBILITY.json): the verdict's line and one sentence per check, in
+    plain words; a quest that made no trial has neither."""
+    root = tmp_path / "q"
+    _w(root / ".fi" / "pause.json", {"kind": "trial", "headline": "FI tried the plan on a small case: it does not look "
+                                     "feasible", "decide": ""})
+    assert qr.build(root, running=False)["feasibility"] is None
+    assert "## Trial" not in qr.render(qr.build(root, running=False))
+    _w(root / "needs" / "FEASIBILITY.json", {
+        "schema": "fi.feasibility/v1", "verdict": "not_feasible",
+        "line": "Not feasible: the whole study does not fit the time allowed: about 9 h of the 2 h.",
+        "checks": [{"id": "runs", "result": "pass", "says": "The simulation ran to the end at the 3 settings FI tried (9 trials)."},
+                   {"id": "time", "result": "fail", "says": "The whole study does not fit the time allowed: about 9 h of the 2 h."}],
+        "goals": {"state": "could_not_judge"}, "small_changes": [], "changed_after_trial": None})
+    report = qr.build(root, running=False)
+    assert report["feasibility"]["verdict"] == "not_feasible"
+    assert [c["result"] for c in report["feasibility"]["checks"]] == ["pass", "fail"]
+    md = qr.render(report)
+    assert "## Trial" in md and "Not feasible: the whole study does not fit" in md
+    assert "- time (failed): The whole study does not fit the time allowed" in md
+    assert "Paused: FI tried the plan on a small case" in md

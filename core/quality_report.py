@@ -520,6 +520,14 @@ def _scope_summary(q: _Quest) -> dict[str, Any] | None:
             "lines": [_sc.nobody_line(), *[_one(c.get("question"), 300) for c in cards if c.get("question")]]}
 
 
+def _feasibility_summary(q: _Quest) -> dict[str, Any] | None:
+    """What FI's trial of the plan before the study found (``needs/FEASIBILITY.json``, :mod:`core.feasibility`): the
+    verdict, its one line, each check's result and sentence. ``None`` when the quest made no trial."""
+    from . import feasibility as _feasibility
+
+    return _feasibility.summary(q.root)
+
+
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     sb = q.search_asked
@@ -1485,6 +1493,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
         "scope": _scope_summary(q),
+        "feasibility": _feasibility_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1730,6 +1739,11 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
+    tried = report.get("feasibility")
+    if tried:
+        from . import feasibility as _feasibility
+
+        lines += ["", "## Trial", "", *_feasibility.report_lines(tried)]
     scope = report.get("scope")
     if scope:
         lines += ["", "## The study", "", scope["lines"][0]]

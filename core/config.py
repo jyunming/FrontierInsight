@@ -612,7 +612,7 @@ PauseForUserInput = Literal[
 # by Config's root validator, so existing YAML keeps working.
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
-PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
+PlanPause = Literal["off", "ask", "after_trial"]   # stop once plan.md is written, or after FI tried the plan on a small case
 ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
@@ -660,7 +660,9 @@ class PausesConfig(BaseModel):
     # the experiment's design, what would count as support), so you can read it and edit it, or ask for a
     # change (``--revise-plan``), before compute is spent. ``--resume`` then runs the design that is in the
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
-    # not wait for you, so unattended and fleet runs are not held up.
+    # not wait for you, so unattended and fleet runs are not held up. ``"after_trial"``: stop after FI tried the plan on a
+    # small case (it ran the simulation at a few settings and timed the whole study) and wrote what it found to
+    # ``needs/FEASIBILITY.json``; ``--resume`` (with ``--approve-as <you>``) then runs the tried study.
     plan: PlanPause = "off"
     # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
     # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
