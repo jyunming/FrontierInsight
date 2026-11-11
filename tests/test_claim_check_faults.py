@@ -358,3 +358,63 @@ def test_a_sentence_citing_a_retracted_source_is_taken_out(tmp_path: Path) -> No
     eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
     body = path.read_text(encoding="utf-8").split("## Limitations")[0]
     assert "counted every minute" not in body and "Queues form at booths." in body
+
+
+# --- why a sentence went stays on record ---------------------------------------------------------------------------------
+
+def test_a_taken_out_sentence_keeps_its_fault_and_keys_in_the_record(tmp_path: Path) -> None:
+    """Old code: the record of a taken-out sentence held only its claim, evidence and sentence, so QUALITY.md and a later
+    pass could not tell why it went."""
+    body, record = _deliver(tmp_path)
+    by_claim = {r["claim"]: r for r in record["removed"]}
+    assert by_claim[_plain(SETTING)]["fault"] == "scope"
+    assert by_claim[_plain(NO_SOURCE)]["fault"] == "no_source" and by_claim[_plain(UNREAD)]["fault"] == "unread"
+
+
+def test_the_record_writer_and_the_take_out_carry_fault_and_keys(tmp_path: Path) -> None:
+    from core import paper_facts, record_claims
+
+    paper = "# T\n\n## Results\n\nThe wait at a load of 5 is {{v:wait @ load=3}} minutes. Done here.\n"
+    claim = {"claim": "The wait at a load of 5 is 0.2 minutes", "basis": "unsupported", "fault": "scope",
+             "keys": ["v:wait @ load=3"], "evidence": "the value is the one at load 3",
+             "where": [{"passage": "The wait at a load of 5 is {{v:wait @ load=3}} minutes."}]}
+    _text, removed = record_claims.take_out_unsupported_numbers(
+        paper, [claim], same=lambda a, b: False, holds_number=lambda _s: True, plain=lambda s: " ".join(s.split()),
+        keyed=lambda s: s)
+    assert [(r["fault"], r["keys"]) for r in removed] == [("scope", ["v:wait @ load=3"])]
+    (tmp_path / ".fi").mkdir()
+    assert paper_facts.write_unsupported_record(tmp_path, [], removed=removed)
+    kept = json.loads((tmp_path / paper_facts.UNSUPPORTED_RECORD).read_text(encoding="utf-8"))["removed"]
+    assert kept[0]["fault"] == "scope" and kept[0]["keys"] == ["v:wait @ load=3"]
+    # an entry from before faults were named is written as it was, with no empty fields
+    assert paper_facts.write_unsupported_record(tmp_path / "old", [], removed=[{"claim": "c", "evidence": "e",
+                                                                               "sentence": "s"}])
+    old = json.loads((tmp_path / "old" / paper_facts.UNSUPPORTED_RECORD).read_text(encoding="utf-8"))["removed"]
+    assert old == [{"claim": "c", "evidence": "e", "sentence": "s"}]
+
+
+def test_the_same_sentence_again_gives_an_earlier_entry_its_fault(tmp_path: Path) -> None:
+    from core import paper_facts
+
+    (tmp_path / ".fi").mkdir()
+    old = {"claim": "c", "evidence": "e", "sentence": "s"}
+    assert paper_facts.write_unsupported_record(tmp_path, [], removed=[old])
+    assert paper_facts.write_unsupported_record(tmp_path, [], removed=[{**old, "fault": "scope", "keys": ["v:x"]}])
+    kept = json.loads((tmp_path / paper_facts.UNSUPPORTED_RECORD).read_text(encoding="utf-8"))["removed"]
+    assert kept == [{**old, "fault": "scope", "keys": ["v:x"]}]
+
+
+def test_quality_report_says_why_each_taken_out_sentence_went(tmp_path: Path) -> None:
+    """Old code: every taken-out sentence was said to state a number not in the run's results."""
+    from core import quality_report
+
+    (tmp_path / ".fi").mkdir()
+    rows = [{"claim": "Queues settle fast", "evidence": "x", "sentence": "s1", "fault": "no_source"},
+            {"claim": "The wait is 0.2 at load 5", "evidence": "y", "sentence": "s2", "fault": "scope"},
+            {"claim": "Old entry 7.5", "evidence": "z", "sentence": "s3"}]
+    (tmp_path / ".fi" / "unsupported_claims.json").write_text(json.dumps({"claims": [], "removed": rows}),
+                                                             encoding="utf-8")
+    text = " ".join(str(p) for p in quality_report._paper_problems(quality_report._Quest(tmp_path)))
+    assert "rested on a source that backs nothing" in text and "Queues settle fast" in text
+    assert "under the wrong setting, label or interval" in text
+    assert "stated a number the claim check did not find" in text  # the old entry, as before

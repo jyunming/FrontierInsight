@@ -232,6 +232,17 @@ def _first_said(item: dict[str, Any]) -> str:
     return ""
 
 
+# What a sentence the claim check took out of the paper did wrong, by its fault (core/engine.py _CLAIM_FAULTS_TAKEN_OUT);
+# an entry written before faults were named is the old take-out's: a sentence with a number.
+_TAKEN_OUT_BECAUSE = {
+    "number": "that stated a number the claim check did not find in the run's results",
+    "scope": "that stated a true value of the run under the wrong setting, label or interval",
+    "no_source": "that rested on a source that backs nothing (held as its title only, or retracted)",
+    "unread": "whose claim check verdict could not be read after asking once more",
+    "": "that stated a number the claim check did not find in the run's results",
+}
+
+
 def _problem(stage: str, text: str, by: str, status: str, source: str) -> dict[str, str]:
     return {"stage": stage, "text": _one(text, 220), "found_by": by, "status": status, "source": source}
 
@@ -846,8 +857,8 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
                             "FI's records", "left out", ".fi/record_claims_taken_out.json"))
     for r in q.unsupported_removed:
         r = _dict(r)
-        out.append(_problem("paper", f"a sentence that stated a number the claim check did not find in the run's results was "
-                            f"taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
+        out.append(_problem("paper", f"a sentence {_TAKEN_OUT_BECAUSE.get(str(r.get('fault') or ''), _TAKEN_OUT_BECAUSE[''])} "
+                            f"was taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
                             "FI's claim check", "left out", ".fi/unsupported_claims.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",

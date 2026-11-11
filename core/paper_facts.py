@@ -624,9 +624,9 @@ def unsupported_claims_text(record: Any) -> str:
     """What the Limitations tell a reader about the sentences FI's last claim check found supported by neither the run's
     results nor a cited source (:data:`UNSUPPORTED_RECORD`): how many, that QUALITY.md lists them, and each one quoted (at
     most :data:`_MAX_UNSUPPORTED_LISTED`, and how many more there are) to be read as unconfirmed. The sentences stay in the
-    paper; the check's own lists stay in QUALITY.md. Sentences of the writer's that stated a number the check found
-    unsupported were taken out of the paper (``removed`` in the record): that is said too, without quoting them (the number
-    is the one that was not supported). ``""`` when the record holds neither."""
+    paper; the check's own lists stay in QUALITY.md. Sentences of the writer's whose claim the check found wrong against the
+    record were taken out of the paper (``removed`` in the record): that is said too, without quoting them (what they said
+    is what was not supported). ``""`` when the record holds neither."""
     rows = record.get("claims") if isinstance(record, dict) else None
     quoted: list[str] = []
     for row in rows or []:
@@ -645,8 +645,9 @@ def unsupported_claims_text(record: Any) -> str:
     gone = [r for r in (record.get("removed") if isinstance(record, dict) else None) or [] if isinstance(r, dict)]
     if gone:
         n = len(gone)
-        out = (("One sentence" if n == 1 else f"{n} sentences") + " of the draft, stating a number that FI's check of the "
-               "claims did not find in the run's results, " + ("was" if n == 1 else "were")
+        out = (("One sentence" if n == 1 else f"{n} sentences") + " of the draft that FI's check of the claims could not "
+               "confirm against the run's results or its sources (a number not in the results, a true value under the "
+               "wrong setting, a source that backs nothing, or a verdict FI could not read) " + ("was" if n == 1 else "were")
                + " taken out of this paper (QUALITY.md lists " + ("it" if n == 1 else "them") + ")")
         said = f"{said}. {out}" if said else out
     return said
@@ -656,8 +657,9 @@ def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]
                              removed: list[dict[str, Any]] | None = None) -> bool:
     """Keep the claims the last claim check judged unsupported, with its evidence words (:data:`UNSUPPORTED_RECORD`); an
     empty list empties the record, so a sentence an earlier pass stated is gone when the Limitations block is written again.
-    ``removed``: the claims whose sentence FI took out of the paper (``claim``, ``evidence``, ``sentence``), added to those an
-    earlier pass took out of this draft, never replaced. Returns whether the record could be written."""
+    ``removed``: the claims whose sentence FI took out of the paper (``claim``, ``evidence``, ``sentence``, and why it went:
+    the claim check's ``fault`` and the ``keys`` of FI's values it is about, when given), added to those an earlier pass
+    took out of this draft, never replaced. Returns whether the record could be written."""
     path = Path(quest_root) / UNSUPPORTED_RECORD
     rows = [{"claim": _one(c.get("claim")), "evidence": _one(c.get("evidence"))} for c in claims if _one(c.get("claim"))]
     record: dict[str, Any] = {"claims": rows}
@@ -666,12 +668,23 @@ def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]
     except (OSError, ValueError):
         earlier = {}
     kept = [r for r in (earlier.get("removed") if isinstance(earlier, dict) else None) or [] if isinstance(r, dict)]
-    seen = {str(r.get("sentence")) for r in kept}
+    by_sentence = {str(r.get("sentence")): r for r in kept}
     for r in removed or []:
-        if _one(r.get("sentence")) not in seen:
-            seen.add(_one(r.get("sentence")))
-            kept.append({"claim": _one(r.get("claim")), "evidence": _one(r.get("evidence")),
-                         "sentence": _one(r.get("sentence"))})
+        row = {"claim": _one(r.get("claim")), "evidence": _one(r.get("evidence")), "sentence": _one(r.get("sentence"))}
+        if _one(r.get("fault")):
+            row["fault"] = _one(r.get("fault"))
+        keys = [_one(k) for k in r.get("keys") or [] if _one(k)] if isinstance(r.get("keys"), list) else []
+        if keys:
+            row["keys"] = keys
+        earlier_row = by_sentence.get(row["sentence"])
+        if earlier_row is None:
+            by_sentence[row["sentence"]] = row
+            kept.append(row)
+        else:
+            # The same sentence again: the earlier entry stays, and gains why it went if it did not say.
+            for field in ("fault", "keys"):
+                if field in row and not earlier_row.get(field):
+                    earlier_row[field] = row[field]
     if kept:
         record["removed"] = kept
     try:
