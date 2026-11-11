@@ -5604,7 +5604,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 trial = self._plans_own_at(old_p, kept_p, key, [f for f in faults if stops(f, key, kept_now)])
                 if trial is not None and not any(
                         stops(f, key, {key: 1}) for f in new_in(_plan.read_protocol(trial).faults, trial)
-                        and key_of(f) == key):
+                        if key_of(f) == key):
                     # Only the part that cannot be read goes back as the plan had it; the rest of the change is made.
                     kept_p = trial
                     items.append(say(key, faults, left_out(faults)))
