@@ -23097,7 +23097,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             results = self.quest_root / "data" / "results"
             extra = {"protocol": _reuse_key.digest_text(json.dumps(_frozen.protocol_of(self.quest_root) or {}, sort_keys=True, default=str)),
                      "allowed": int(allowed or 0),
-                     "delivered": {p.name: _reuse_key.digest(p) for p in sorted(results.glob("*.json"))} if results.is_dir() else {},
+                     "delivered": {p.relative_to(self.quest_root).as_posix(): _reuse_key.digest(p)
+                                   for folder in (results, self.quest_root / "raw") if folder.is_dir()
+                                   for p in sorted(folder.glob("*.json"))},
                      "finding": _reuse_key.digest_text(json.dumps({k: issue.get(k) for k in ("text", "test", "file", "line", "where", "note", "fix", "name")},
                                                                   sort_keys=True, default=str))}
             mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed, extra=extra)
