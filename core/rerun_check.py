@@ -431,8 +431,85 @@ async def _run(executor: Any, python: Path | str, argv: list[str], cwd: Path, ti
     return await executor.execute([str(python), "-B", *argv], cwd=cwd, timeout_s=int(timeout_s), env=env)
 
 
+#: How often a rerun that is still going says where it is (the main run's "still running" line uses 30 s too).
+PROGRESS_EVERY_S = 30.0
+_MARK = "_fi_rerun_progress.txt"
+#: Runs the study's own ``run.py`` unchanged and notes each setting (or design of the search) it finishes in ``_MARK`` beside it,
+#: with the number of settings first when the study's grid gives it; ``run.py`` is not edited (its text is part of what the
+#: trials' cache key hashes). A note that cannot be written is skipped: the line then says only that the study is running.
+_WRAPPER = r'''import os, runpy, subprocess, sys
+here = os.path.dirname(os.path.abspath(__file__))
+mark = os.path.join(here, "_fi_rerun_progress.txt")
+run = os.path.join(here, "run.py")
+try:
+    import json
+    study = json.load(open(os.path.join(here, "study.json"), encoding="utf-8"))
+    if study.get("entry") and not study.get("optimisation") and not study.get("sub_studies"):
+        n = 1
+        for values in (study.get("grid") or {}).values():
+            n *= len(values)
+        print("total=%d" % n, file=open(mark, "a"))
+except BaseException:
+    pass
+_call = subprocess.call
+def _noted(args, *a, **k):
+    r = _call(args, *a, **k)
+    try:
+        for word, tag in (("--cell", "c"), ("--evaluate", "e")):
+            if word in args:
+                print(tag, file=open(mark, "a"))
+    except BaseException:
+        pass
+    return r
+subprocess.call = _noted
+sys.argv = ["run.py"] + sys.argv[1:]
+runpy.run_path(run, run_name="__main__")
+'''
+
+
+def progress_of(copy: Path, elapsed_s: float) -> str:
+    """Where a rerun of the whole study is, in the words of the main run's "still running" line (core/run_estimate.py:
+    ``progress_line``): how many settings are done and about how long is left; empty when nothing was noted."""
+    try:
+        notes = (copy / _MARK).read_text(encoding="utf-8").split()
+    except OSError:
+        return ""
+    total = next((int(n[6:]) for n in notes if n.startswith("total=") and n[6:].isdigit()), 0)
+    done = notes.count("c")
+    designs = notes.count("e")
+    if total > 0:
+        from . import run_estimate as _estimate
+
+        return _estimate.progress_line(min(done, total), total, min(done, total), total, elapsed_s)
+    bits = ([f"{done} setting{'s' if done != 1 else ''} done"] if done else []) +            ([f"{designs} design{'s' if designs != 1 else ''} tried"] if designs else [])
+    return ", ".join(bits)
+
+
+async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
+    """Await ``task``; every ``PROGRESS_EVERY_S`` seconds say where the rerun is, as the main run does."""
+    from .run_estimate import plain_duration
+
+    began = time.monotonic()
+    who = f"the rerun of finding {finding}" if finding else "the rerun of the study with a repair"
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=PROGRESS_EVERY_S)
+            if done:
+                return task.result()
+            try:
+                where = progress_of(copy, time.monotonic() - began)
+                say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {where}" if where else ""))
+            except Exception:  # noqa: BLE001 - a line about progress never stops the rerun
+                pass
+    finally:
+        if not task.done():  # the caller was cancelled: the study's process is stopped with it, as when it is awaited directly
+            task.cancel()
+            await asyncio.wait({task})  # its clean-up (the process tree) is finished before the cancel goes on
+
+
 async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
-                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None) -> tuple[str, Path | None, str, float, bool]:
+                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None, *, say: Any = None,
+                   finding: str = "") -> tuple[str, Path | None, str, float, bool]:
     """Run the study of a copy of ``code/``: ``(mode, folder holding data/ and raw/ it wrote or None, why not, seconds, crashed)``.
     Only the analysis, on the recorded trials, when the changed ``files`` are all analysis files; else the study's own entry
     (``run.py``). A run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends
@@ -455,7 +532,19 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         out = copy / "output"
         if not (copy / "run.py").is_file():
             return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
-        ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
+        wrapped = False
+        if say is not None:
+            try:
+                (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
+                (copy / _MARK).unlink(missing_ok=True)
+                wrapped = True
+            except OSError:  # no note of progress then: the study itself still runs
+                pass
+        if not wrapped:
+            ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
+        else:
+            ran = await _say_while(asyncio.ensure_future(
+                _run(executor, python, ["_fi_rerun_run.py"], copy, max(1, int(timeout_s)), env)), copy, say, finding)
         wrote = (out / "data/results/derived.json").is_file() and (out / "raw/trials.json").is_file()
     secs = time.monotonic() - began
     if getattr(ran, "timed_out", False):
@@ -496,9 +585,10 @@ def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
 
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json", disputed: list[str] | None = None) -> Verdict:
+                derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "") -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
-    delivered (``results_root``, the quest folder by default). ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
+    delivered (``results_root``, the quest folder by default). ``finding``: the id of the finding the repair is for; while the whole study runs, the quest's run.log says
+    every 30 s which finding is being rerun, how many settings are done and about how long is left. ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
     unwritten, or whose rerun never compared a disputed quantity, is "could not rerun", never "unchanged"."""
     changed = await asyncio.to_thread(changed_files, quest_root, copy)
     if not changed:
@@ -508,7 +598,11 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
         return Verdict("could_not", "FI has no record of how long the study takes, so a rerun cannot be bounded", source=source, files=files)
     work = Path(tempfile.mkdtemp(prefix="fi_rerun_"))
     try:
-        mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root)
+        logger = logging.getLogger(f"frontier_insight.{Path(quest_root).name}")  # the quest's own log, when it has one
+        if not logger.handlers:
+            logger = _LOG
+        mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root,
+                                                       say=lambda line: logger.info("[evidence_gate] %s", line), finding=finding)
         if out is None:
             return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed)
         base_root = Path(results_root or quest_root)

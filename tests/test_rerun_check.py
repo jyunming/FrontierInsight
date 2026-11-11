@@ -1011,3 +1011,43 @@ def test_a_run_that_stops_early_forgets_the_writers_of_the_files_it_changed(tmp_
             w.mark(step_writes.SIMULATION)
             raise RuntimeError
     assert step_writes.read(root) == {}
+
+
+# ---- a rerun that takes long says where it is in run.log ---------------------------------------------------------------------------
+def _slow_quest(tmp_path: Path, qid: str) -> tuple[Path, Path]:
+    """A quest folder whose study has three settings that take about a second each, and a copy of its code with one file changed."""
+    root = tmp_path / qid
+    code = root / "code"
+    code.mkdir(parents=True)
+    (code / "run.py").write_text(code_project.RUN_SOURCE, encoding="utf-8")
+    (code / "study.json").write_text(json.dumps({"entry": "run_cell", "grid": {"a": [1, 2, 3]}, "runs_per_setting": 1}), encoding="utf-8")
+    (code / "simulate.py").write_text("import time\n\n\ndef run_cell(cell):\n    time.sleep(1.0)\n    return {'est': float(cell['a'])}\n",
+                                      encoding="utf-8")
+    (code / "experiment.py").write_text("import json, pathlib\np = pathlib.Path('data/results')\np.mkdir(parents=True, exist_ok=True)\n"
+                                        "(p / 'derived.json').write_text(json.dumps({'derived': {'est': {'by_setting': {'x': 1.0}}}}))\n",
+                                        encoding="utf-8")
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    (root / "data" / "results").mkdir(parents=True)
+    (root / "data" / "results" / "derived.json").write_text(json.dumps({"derived": {"est": {"by_setting": {"x": 1.0}}}}), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "simulate.py").write_text((copy / "simulate.py").read_text(encoding="utf-8") + "\n# repaired\n", encoding="utf-8")
+    return root, copy
+
+
+def test_a_long_rerun_says_in_run_log_which_finding_it_is_and_how_far_it_has_got(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import _close_quest_logger, _quest_logger
+
+    qid = "q_progress"
+    root, copy = _slow_quest(tmp_path, qid)
+    monkeypatch.setattr(rerun_check, "PROGRESS_EVERY_S", 1.2)
+    _quest_logger(qid, root / ".fi")
+    try:
+        asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 120, None, source="a repair", finding="F-9"))
+    finally:
+        _close_quest_logger(qid)
+    text = (root / ".fi" / "run.log").read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if "rerun of finding F-9" in ln]
+    assert lines, text
+    assert any("of 3 settings done" in ln for ln in lines), lines
+    print("\n".join(lines))
