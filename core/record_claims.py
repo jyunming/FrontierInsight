@@ -233,22 +233,22 @@ def take_out_unsupported_numbers(
         paper_md: str, claims: list[dict[str, Any]], *, same: Callable[[str, str], bool],
         holds_number: Callable[[str], bool], plain: Callable[[str], str],
         keyed: Callable[[str], str] | None = None) -> tuple[str, list[dict[str, Any]]]:
-    """``paper_md`` without the writer's sentences that the claim check judged ``unsupported`` and that state a number,
-    and one entry for each sentence taken out (``claim``, ``evidence``, ``sentence``).
+    """``paper_md`` without the writer's sentences of the ``unsupported`` claims in ``claims``, and one entry for each
+    sentence taken out (``claim``, ``evidence``, ``sentence``, and the claim's ``fault`` and ``keys`` when it has them).
 
-    The claim check holds every number of a result to FI's records: a number that is not in them, or is the number of
-    another setting or of the whole run where the sentence says one setting, makes the claim ``unsupported`` (the verdict is
-    the check's, no wording is read here). A sentence like that is not delivered: FI cannot say which value the writer
-    meant, so it does not put one in, and the Limitations say that it was taken out. An ``unsupported`` claim with no number
-    (a statement no source backs, a remark the check could not tie to a result) stays, and is stated as unconfirmed in the
-    Limitations as before.
+    Which claims go is the caller's choice, made from each claim's fault alone (core/engine.py ``_CLAIM_FAULTS_TAKEN_OUT``:
+    a number not in FI's records, a true value under a wrong setting, label or interval, a source that backs nothing, a
+    verdict FI could not read); the engine passes every such claim and ``holds_number`` always true, so no wording or
+    number of the sentence is read to decide. A sentence like that is not delivered: FI cannot say which value or source
+    the writer meant, so it does not put one in, and the Limitations say that it was taken out. A claim whose fault keeps
+    its sentence (its words go beyond the record) stays, and is stated as unconfirmed in the Limitations.
 
     A sentence is cut only when it is identified exactly, never by likeness of wording: its keyed text must equal the claim's
     own passage (``where`` in the claim list, the writer's sentence with its keys). A claim with no passage, or none that equals
     a sentence of the paper, cuts nothing and stays stated as unconfirmed. Only running
     prose is read: FI's blocks, fenced code, tables, headings and figure lines are not the writer's sentences.
 
-    ``holds_number(sentence)``: whether the sentence (with FI's value marks still in it) states a number; ``plain(sentence)``
+    ``holds_number(sentence)``: whether a placed sentence is cut (with FI's value marks still in it); ``plain(sentence)``
     is the sentence as a reader sees it; ``keyed(sentence)`` is the sentence with FI's values as the writer's keys."""
     from . import paper_patch
 
@@ -274,8 +274,13 @@ def take_out_unsupported_numbers(
         hits = [u for u in units if u[3] in passages]  # no passage, or none equal to a sentence: nothing is cut
         for start, end, sentence, _k in hits:
             if holds_number(paper_md[start:end]):
-                chosen.setdefault((start, end), {"claim": text.strip(), "evidence": str(claim.get("evidence") or "").strip(),
-                                                 "sentence": sentence})
+                entry = {"claim": text.strip(), "evidence": str(claim.get("evidence") or "").strip(), "sentence": sentence}
+                # Why it went stays with it: the check's fault and the keys of FI's values it is about.
+                if claim.get("fault"):
+                    entry["fault"] = str(claim["fault"])
+                if isinstance(claim.get("keys"), list) and claim["keys"]:
+                    entry["keys"] = [str(k) for k in claim["keys"]]
+                chosen.setdefault((start, end), entry)
     if not chosen:
         return paper_md, []
     return _cut(paper_md, list(chosen)), [chosen[k] for k in sorted(chosen)]

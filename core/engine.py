@@ -25320,7 +25320,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # grounding cleared, and the review forces ``citations_unchecked``.
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
-            _, parsed = await self._chat_json(
+            reply, parsed = await self._chat_json(
                 prompt, node="claim_check", want=("claims",), usable=lambda p: isinstance(p.get("claims"), list),
             )
         except _ModelAnswerProblem:
@@ -25344,13 +25344,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         parsed_ok = isinstance(parsed, dict) and isinstance(parsed.get("claims"), list)
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
         n_refs = len(refs)
+        # Each claim's basis and fault are closed choices: a claim whose choice cannot be read is asked once more, alone
+        # with the others that failed (the rest of the answer is kept); one still unreadable is ``unread``.
+        raw_claims = await self._reask_claim_choices(prompt, reply, raw_claims or [])
         claims: list[dict[str, Any]] = []
         for c in (raw_claims or []):
             if not isinstance(c, dict) or not str(c.get("claim") or "").strip():
                 continue
-            basis = str(c.get("basis") or "unsupported").strip().lower()
-            if basis not in ("experiment", "citation", "unsupported"):
-                basis = "unsupported"
+            unread = _claim_choice_problem(c)
+            basis = "unsupported" if unread else str(_claim_choice(c.get("basis")))
+            fault = "unread" if unread else _claim_choice(c.get("fault"))
             # A "citation" basis only counts if it points at a real source: a
             # References number in [1, n_refs] or a Further reading label
             # W1..W<len(further)>. Anything else is effectively unsupported (a
@@ -25371,12 +25374,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     cite_idx = number
             quote = " ".join(str(c.get("quote") or "").split())
             evidence = str(c.get("evidence") or "").strip()
+            if unread:
+                evidence = (f"{evidence} (FI could not read the check's verdict on this claim after asking once: {unread}; "
+                            "it counts as unsupported)").strip()
+            # FI's own look-up of a citation: a claim it cannot place in a source's text is unsupported, and its sentence
+            # stays and is stated in the Limitations (fault ``wording``): a quote FI cannot find does not show the sentence
+            # false, only that FI could not confirm it.
             if basis == "citation" and cite_idx is None:
-                basis = "unsupported"
+                basis, fault = "unsupported", "wording"
             elif basis == "citation" and not _quote_in_source(quote, sources[str(cite_idx)][1]):
                 # The model had the source's text; a citation it cannot quote
                 # from that text is not one the source supports.
-                basis = "unsupported"
+                basis, fault = "unsupported", "wording"
                 why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
                 if quote and _quote_in_source(quote, readings_of.get(str(cite_idx), "")):
                     why = (f"the quote is a model's reading of a figure of [{cite_idx}], not the source's text: an "
@@ -25385,6 +25394,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
+                "fault": fault,
+                "keys": _claim_keys(c.get("keys")),
                 "citation_index": cite_idx,
                 "quote": quote,
                 "evidence": evidence,
@@ -25411,6 +25422,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             claims.extend(kept)
             self._log.info("[claim_check] %d sentence(s) an earlier check found unsupported are still in the paper unchanged "
                            "and this check did not judge them again: they stay unsupported", len(kept))
+        # FI's own checks set the fault where they fired: a retracted source backs nothing (``no_source``), and a sentence
+        # the check found unsupported that states a number the writer typed and FI cannot trace is ``number``.
+        plan_of_typed = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
+        topic_of_typed = str(self.config.topic or "")
+        claims = _claim_faults_from_sources(
+            claims, sources,
+            lambda passage: bool(_paper_facts.untraced_typed(passage, plan_of_typed, topic_of_typed, self.quest_root)))
+        n_unread = sum(1 for c in claims if c.get("fault") == "unread")
+        if n_unread:
+            self._log.warning("[claim_check] %d claim(s) whose verdict could not be read after asking once count as "
+                              "unsupported, and their sentences are taken out of the paper", n_unread)
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
@@ -25453,6 +25475,61 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         else:
             self._clear_check_stop("claim_check")
         return {"claim_grounding": grounding, "claim_check_failed": failed}
+
+    async def _reask_claim_choices(self, prompt: str, reply: str, raw_claims: list[Any]) -> list[Any]:
+        """The claim check's claims with the ones whose ``basis`` or ``fault`` is not a closed choice asked ONCE more, those
+        claims alone and each by what was wrong (``agents/json_reanswer_part.md``): every other claim is kept as written.
+        A new answer is matched to its claim by the claim's words; only when one claim was asked and one answer came back
+        is an answer with other words taken for it (two or more are never matched by order, which could mix them up). A
+        claim still unreadable, or a call that fails, leaves the claim as it was, and the reader then makes it ``unread``."""
+        asked = [(i, c) for i, c in enumerate(raw_claims)
+                 if isinstance(c, dict) and str(c.get("claim") or "").strip() and _claim_choice_problem(c)]
+        if not asked:
+            return raw_claims
+        wrong = "; ".join(f"the claim {' '.join(str(c['claim']).split())[:160]!r}: {_claim_choice_problem(c)}"
+                          for _i, c in asked)
+        what = (f"{wrong}. Give `claims` as a list holding only these {len(asked)} claim(s), each with `claim` copied as "
+                "you wrote it, its `basis` (experiment, citation or unsupported), its `fault` (JSON null for experiment "
+                "or citation; number, scope or wording for unsupported), `keys`, `citation_index`, `quote` and `evidence`")
+        self._log.warning("[claim_check] %d claim(s) gave a basis or fault that is not one of the choices; asking once "
+                          "more for those claims only", len(asked))
+        echo = (f"\nYour previous reply, for reference (say the same things for these claims):\n\n{reply}\n"
+                if len(reply or "") <= self._REANSWER_ECHO_CHARS else "")
+        retry = self._prompts["json_reanswer_part"].substitute(
+            original_prompt=prompt, what_was_wrong=what, keys="`claims`", earlier_reply=echo)
+        try:
+            again = await self._chat(retry, node="claim_check")
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a failed ask leaves those claims unread, never the whole check failed
+            self._log.warning("[claim_check] the ask for those claims failed (%s: %s); they count as unsupported",
+                              type(e).__name__, str(e)[:200])
+            return raw_claims
+        answer = _parse_json_lenient(again, node="claim_check", want=("claims",)) or {}
+        given = [c for c in (answer.get("claims") if isinstance(answer, dict) else None) or [] if isinstance(c, dict)]
+
+        def words(c: dict[str, Any]) -> str:
+            return " ".join(str(c.get("claim") or "").split()).lower()
+
+        out = list(raw_claims)
+        left = list(asked)
+        unmatched: list[dict[str, Any]] = []
+        for g in given:
+            hit = next(((i, c) for i, c in left if words(c) == words(g)), None)
+            if hit is None:
+                unmatched.append(g)
+                continue
+            left.remove(hit)
+            out[hit[0]] = {**hit[1], **{k: v for k, v in g.items() if k != "claim"}}
+        if len(left) == len(asked) == len(unmatched) == len(given) == 1:
+            for (i, c), g in zip(left, unmatched):
+                out[i] = {**c, **{k: v for k, v in g.items() if k != "claim"}}
+        still = sum(1 for i, _c in asked if _claim_choice_problem(out[i]))
+        if still:
+            self._log.warning("[claim_check] %d of those claim(s) still could not be read", still)
+        else:
+            self._log.info("[claim_check] the %d claim(s) asked again could be read", len(asked))
+        return out
 
     async def _node_citation_check(self, state: QuestState) -> QuestState:
         """The last step before the paper is delivered: its citations are read against their sources
@@ -26661,8 +26738,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "## Claims",
             ]
             for c in grounding["claims"]:
-                tag = (f"cite [{c['citation_index']}]"
-                       if c["basis"] == "citation" else c["basis"])
+                tag = (f"cite [{c['citation_index']}]" if c["basis"] == "citation"
+                       else f"{c['basis']}: {c['fault']}" if c.get("fault") else c["basis"])
                 lines.append(f"- **[{tag}]** {c['claim']}"
                              + (f" — {c['evidence']}" if c["evidence"] else "")
                              + (f" — quoted: \"{c['quote']}\"" if c.get("quote") else ""))
@@ -26942,14 +27019,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             standing = [c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
-            # A sentence the check found unsupported that states a number is not delivered (core/record_claims.py): it is
-            # taken out of the paper and the Limitations say so. One with no number stays and is stated as unconfirmed.
+            # A sentence whose claim's fault takes it out (a number not in the record, a true value under a wrong setting or
+            # label, a source that backs nothing, a verdict FI could not read) is not delivered (core/record_claims.py): it
+            # is taken out of the paper and the Limitations say so. A ``wording`` claim, and one with no fault on record,
+            # stays and is stated as unconfirmed. Only the fault decides: what the sentence holds is not read.
             # The paper, the claim list, the receipt, the record and the Limitations change together: if any write fails,
             # every file is put back as it was and nothing is reported as taken out.
             snapshot = self._snapshot_files(paper_path)
             removed: list[dict[str, Any]] = []
             try:
-                text, removed = self._plan_take_out_unsupported_numbers(state, paper_path, by_wording)
+                text, removed = self._plan_take_out_unsupported_numbers(
+                    state, paper_path, [c for c in by_wording if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT])
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
                     _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
@@ -27006,20 +27086,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
 
     def _plan_take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
                                            standing: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-        """``(the paper without them, the entries taken out)``: the writer's sentences the last claim check found unsupported
-        that state a number, found exactly (core/record_claims.py::take_out_unsupported_numbers). Nothing is written here;
-        :meth:`_state_unsupported_claims` writes the paper, the claim list, the receipt and the record together."""
+        """``(the paper without them, the entries taken out)``: the writer's sentences of ``standing`` (claims whose fault
+        takes the sentence out, chosen by the caller), found exactly (core/record_claims.py::take_out_unsupported_numbers).
+        The claim's fault decides, never what the sentence holds, so every exactly placed sentence of these claims goes.
+        Nothing is written here; :meth:`_state_unsupported_claims` writes the paper, the claim list, the receipt and the
+        record together."""
         before = Path(paper_path).read_bytes().decode("utf-8")
-        plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
-        topic = str(self.config.topic or "")
-
-        def holds_number(sentence: str) -> bool:
-            if _paper_values._MARK.search(sentence) or _paper_values._SPAN.search(sentence):
-                return True
-            return bool(_paper_facts.untraced_typed(sentence, plan, topic, self.quest_root))
-
         return _record_claims.take_out_unsupported_numbers(
-            before, standing, same=_same_statement, holds_number=holds_number,
+            before, standing, same=_same_statement, holds_number=lambda _sentence: True,
             plain=lambda raw: " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split()),
             keyed=lambda raw: " ".join(_paper_facts.to_placeholders(raw).split()))
 
@@ -30976,6 +31050,80 @@ def _title_only_sentences(
     return found
 
 
+# The claim check's closed choices (agents/claim_check.md): a claim's basis, and what is wrong with an unsupported one.
+_CLAIM_BASES = ("experiment", "citation", "unsupported")
+_CLAIM_MODEL_FAULTS = ("number", "scope", "wording")
+# FI's own faults: ``no_source``, a claim whose source can back nothing (held as its title only, retracted); ``unread``, a
+# claim whose basis or fault could not be read after the one ask (it counts as unsupported and its sentence goes).
+_CLAIM_FAULTS = (*_CLAIM_MODEL_FAULTS, "no_source", "unread")
+# The faults whose sentence is taken out of the paper; a ``wording`` claim stays and is stated in the Limitations.
+_CLAIM_FAULTS_TAKEN_OUT = frozenset({"number", "scope", "no_source", "unread"})
+
+
+def _claim_choice(value: Any) -> str | None:
+    """A closed choice as written (spaces and case aside); ``None`` for JSON null; anything else as its text."""
+    if value is None:
+        return None
+    return str(value).strip().lower()
+
+
+def _claim_choice_problem(c: dict[str, Any]) -> str:
+    """``""`` when the claim check's ``basis`` and ``fault`` for claim ``c`` are among the closed choices and agree, else
+    what is wrong, in plain words. A supported claim with no ``fault`` key is read as ``null``: its basis already says it is
+    supported. Nothing else is read leniently: an unknown word is asked again, never mapped to the nearest choice."""
+    basis = _claim_choice(c.get("basis"))
+    if basis not in _CLAIM_BASES:
+        return f"its basis {c.get('basis')!r} is not one of experiment, citation, unsupported"
+    fault = _claim_choice(c.get("fault"))
+    if basis == "unsupported":
+        if fault not in _CLAIM_MODEL_FAULTS:
+            return (f"it is unsupported and its fault {c.get('fault')!r} is not one of number, scope, wording"
+                    if "fault" in c else "it is unsupported and gives no fault (one of number, scope, wording)")
+    elif fault is not None:
+        return f"its basis is {basis} and its fault {c.get('fault')!r} is given; a supported claim's fault is null"
+    return ""
+
+
+def _claim_keys(value: Any) -> list[str]:
+    """The ``{{v:...}}`` keys a claim's fault is about, as the check wrote them, without their braces."""
+    out: list[str] = []
+    for k in value if isinstance(value, list) else []:
+        key = str(k or "").strip()
+        if key.startswith("{{") and key.endswith("}}"):
+            key = key[2:-2].strip()
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _claim_faults_from_sources(claims: list[dict[str, Any]], sources: dict[str, tuple[dict[str, Any], str]],
+                               typed_untraced: Callable[[str], bool]) -> list[dict[str, Any]]:
+    """``claims`` with the fault FI's own checks set: a claim the retracted-source rule made unsupported (or that rests on a
+    retracted source) is ``no_source``; a ``wording`` claim, or one with no fault, whose stored passage states a number the
+    writer typed that FI cannot trace to the plan or its records (``typed_untraced(passage)``) is ``number`` (an old record
+    with no fault too: the take-out cut such a sentence before faults were named). A fault the check gave that already
+    takes the sentence out is kept. A ``no_source`` claim with no stored passage (one FI's rule added) gets its own
+    sentence as its passage. The caller's claims are not changed in place."""
+    retracted = {label for label, (meta, _text) in sources.items() if _retractions.is_retracted(meta)}
+    out: list[dict[str, Any]] = []
+    for c in claims:
+        c = dict(c)
+        if c.get("basis") == "unsupported" and c.get("fault") not in _CLAIM_FAULTS_TAKEN_OUT:
+            if str(c.get("citation_index")) in retracted:
+                c["fault"] = "no_source"
+            elif any(typed_untraced(str(w.get("passage") or "")) for w in c.get("where") or []
+                     if isinstance(w, dict) and str(w.get("passage") or "").strip()):
+                c["fault"] = "number"
+        c.setdefault("fault", None)
+        c.setdefault("keys", [])
+        if c["fault"] == "no_source" and not c.get("where"):
+            # A sentence FI's own rule added (it cites a title-only or retracted source and the check did not list it) is
+            # the paper's sentence itself: it is its own passage, so the take-out finds it exactly.
+            c["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(str(c.get("claim") or "")).split())}]
+        out.append(c)
+    return out
+
+
 def _unsupported_still_in(paper_text: str, earlier: list[Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The claims of an earlier check of this quest marked ``unsupported`` whose text, or a passage the check stored for
     it (:func:`_passage_stands`), the paper still holds word for word (spacing aside) and that ``claims`` (this check's)
@@ -31022,14 +31170,15 @@ def _apply_title_only_rule(
     claims: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
     """``claims`` with the sentences that rest on title-only sources marked
-    ``unsupported``, and how many were changed or added.
+    ``unsupported`` with fault ``no_source`` (their sentence is taken out of the paper), and how many were changed or added.
 
     For each sentence :func:`_title_only_sentences` finds: a claim the check
     grounded in one of its citations is marked ``unsupported`` (the quote it gave
     can only have been the title), and a sentence the check did not list as a claim
-    at all is added as one. A claim the check already marked ``unsupported`` is
-    left as it is, and so is one it grounded in the run's results: a result the
-    experiment produced does not need the citation beside it."""
+    at all is added as one. A claim the check already marked ``unsupported`` keeps
+    its basis and gets fault ``no_source`` (unless its fault already takes the
+    sentence out); one it grounded in the run's results is left as it is: a result
+    the experiment produced does not need the citation beside it."""
     found = _title_only_sentences(paper_md, sources)
     if not found:
         return claims, 0
@@ -31037,7 +31186,17 @@ def _apply_title_only_rule(
     changed = 0
     for sentence, labels, words in found:
         same = [c for c in out if _same_statement(c["claim"], sentence)]
-        if any(c["basis"] in ("unsupported", "experiment") for c in same):
+        if any(c["basis"] == "experiment" for c in same):
+            continue
+        weaker = [c for c in same if c["basis"] == "unsupported" and c.get("fault") not in _CLAIM_FAULTS_TAKEN_OUT]
+        if any(c["basis"] == "unsupported" for c in same):
+            # The check found it unsupported already; the source it cites backs nothing, so its fault is FI's.
+            for claim in weaker:
+                claim["fault"] = "no_source"
+                claim.setdefault("where", [])
+                if not claim["where"]:
+                    claim["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(sentence).split())}]
+            changed += bool(weaker)
             continue
         first = labels[0]
         why = (
@@ -31047,11 +31206,15 @@ def _apply_title_only_rule(
         cited = [c for c in same if c["basis"] == "citation" and str(c.get("citation_index")) in labels]
         if cited:
             for claim in cited:
-                claim.update(basis="unsupported", quote="", evidence=why)
+                claim.update(basis="unsupported", fault="no_source", quote="", evidence=why)
+                if not claim.get("where"):
+                    claim["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(sentence).split())}]
         elif not same:
             out.append({
                 "claim": sentence,
                 "basis": "unsupported",
+                "fault": "no_source",
+                "keys": [],
                 "citation_index": int(first) if first.isdigit() else first,
                 "quote": "",
                 "evidence": why,

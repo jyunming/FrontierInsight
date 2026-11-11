@@ -19,19 +19,20 @@ PAPER = (f"# T\n\n## Abstract\nThe study measures a period. {MARKED} {TYPED} Don
          "## Limitations\nFew settings were run.\n\n## References\n1. A.\n")
 
 
-def _claim(text: str, basis: str, evidence: str = "x", passage: str | None = None) -> dict:
+def _claim(text: str, basis: str, evidence: str = "x", passage: str | None = None, fault: str | None = None) -> dict:
     where = [{"id": "1.1", "section": "S", "passage": passage}] if passage else []
-    return {"claim": text, "basis": basis, "citation_index": None, "quote": "", "evidence": evidence, "where": where}
+    return {"claim": text, "basis": basis, "fault": fault, "citation_index": None, "quote": "", "evidence": evidence,
+            "where": where}
 
 
 def _grounding(status: str = "ok") -> dict:
     claims = [
         _claim("At a step of 0.0025 s the error was 1.374e-11 to 2.164e-07 across the settings", "unsupported",
                "the range at that step is 1.374e-11 to 3.122e-11; this one was pooled over all steps",
-               "At a step of 0.0025 s the error was {{v:err @ dt=all | range}} across the settings."),
+               "At a step of 0.0025 s the error was {{v:err @ dt=all | range}} across the settings.", "scope"),
         _claim("The fit stays above 0.9991 in every case", "unsupported", "the table shows 0.9990875",
-               "The fit stays above 0.9991 in every case."),
-        _claim(SOFT, "unsupported", "no source or result shows it", SOFT + "."),
+               "The fit stays above 0.9991 in every case.", "number"),
+        _claim(SOFT, "unsupported", "no source or result shows it", SOFT + ".", "wording"),
         _claim("The settle time was 4.2 s", "experiment"),
     ]
     return {"claims": claims, "total": len(claims), "status": status,
