@@ -138,8 +138,11 @@ _SEARCH_BLOCK: dict[str, Any] = {
     "in_each_run": {"depth": [1.0, 2.0, 4.0]},
 }
 _READS_ONE = "def run_cell(cell):\n    return {'f': float(cell['x']) ** 2 + float(cell['depth'])}\n"
+# (it returns the objective too: code that returned only its numbers per value would fail every evaluation of the search,
+# which the small run now names, core/small_run.py ``judge_baseline``)
 _READS_EACH = ("def run_cell(cell):\n"
-               "    return {f'f_depth{d:g}': float(cell['x']) ** 2 + d for d in cell['depth']}\n")
+               "    out = {f'f_depth{d:g}': float(cell['x']) ** 2 + d for d in cell['depth']}\n"
+               "    return {**out, 'f': sum(out.values())}\n")
 
 
 @pytest.mark.usefixtures("this_python")
@@ -165,3 +168,32 @@ def test_a_search_gets_the_small_run_on_its_scan_settings(tmp_path: Path, code: 
     else:
         assert sent is None
         assert "ran" in eng._small_run_note  # type: ignore[attr-defined]
+
+
+_PER_VALUE = ("def run_cell(cell):\n"
+              "    return {'f': {f'depth={d:g}': float(cell['x']) ** 2 + d for d in cell['depth']}}\n")
+
+
+@pytest.mark.usefixtures("this_python")
+def test_a_search_objective_returned_per_value_is_sent_back_once_and_never_stops(tmp_path: Path) -> None:
+    """A search whose objective came back as one number per value compared inside each run failed every evaluation, found
+    only after the long run had started. The small run's evaluation of the baseline design, judged as the search judges it,
+    sends it back once (on its own counter: a spent crash counter does not block it); the same fault after that is a line in
+    plan.md, and the quest goes on."""
+    from tests.test_disclosure import _engine
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(_PER_VALUE, encoding="utf-8")
+    (root / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    eng = _engine(root)
+    eng.executor = SharedInterpreterExecutor(python_version="3.11")  # type: ignore[assignment]
+    eng._trial_mode, eng._trial_entries = True, {"run_cell"}  # type: ignore[attr-defined]
+    eng._protocol_block = lambda state: {"optimisation": _SEARCH_BLOCK}  # type: ignore[assignment]
+    state = {"exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
+    sent = asyncio.run(eng._small_run_gate(state, sys.executable, {}))
+    assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
+    assert sent["exec_result"]["gate_repair"] is True
+    assert "the objective `f` is returned per value of depth" in sent["exec_result"]["stderr_tail"]
+    assert asyncio.run(eng._small_run_gate(state, sys.executable, {})) is None
+    assert "sent back to be repaired once" in (root / "plan.md").read_text(encoding="utf-8")

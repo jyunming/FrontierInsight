@@ -701,6 +701,25 @@ def one_number_rule(protocol):
             "on " + ("one of those settings" if len(inside) == 1 else "those settings") + " is returned per value.")
 
 
+def shape_problem(protocol, values):
+    """``{name: why}`` for each number one run returned in another shape than the plan declares (``{}`` when none):
+    a number the plan declares one per run (:func:`per_run_names`) returned as a number per value of what the run
+    compares inside it (a mapping keyed by those values). ``values`` is what one run returned (as
+    :func:`read_returned` keeps it). The same rule for FI and for its trial harness, which carries this file."""
+    inside = of_study(protocol) or {}
+    if not inside or not isinstance(values, dict):
+        return {}
+    factors = ", ".join("`{}` ({})".format(k, ", ".join(str(x) for x in list(v)[:4])) for k, v in inside.items())
+    out = {}
+    for name in sorted(per_run_names(protocol)):
+        v = values.get(name)
+        if isinstance(v, dict) and v:
+            out[name] = ("`{}` came back as one number per value of {} ({} numbers), but the plan declares it one "
+                         "number per run: it depends on none of the values each run compares inside it"
+                         .format(name, factors, len(v)))
+    return out
+
+
 def unplaced(values, levels, named, names):
     """Why a check cannot read ``names`` at the value its case names, or "" when it can. The run is given every value
     compared inside it; when the case names one of them and the run returned a plain number for a name (not a number per
