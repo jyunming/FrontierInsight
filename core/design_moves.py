@@ -132,22 +132,33 @@ class Point:
     constraints: dict[str, float] = field(default_factory=dict)
     feasible: bool | None = None
 
-    def take(self, answer: dict[str, Any] | None, judged: dict[str, Any] | None) -> None:
-        """What :func:`core.optimise_search.judge` read from the evaluation's ``answer`` (``None``: the time ran out)."""
+    def take(self, answer: dict[str, Any] | None, judged: dict[str, Any] | None, objective: str,
+             limits: list[str]) -> None:
+        """What the evaluation's ``answer`` gave (``None``: the time ran out). The objective and each limit's quantity are
+        read on their own, as :func:`core.optimise_search.judge` reads a number (a finite number, not one per value of
+        what each run compares): a missing limit never hides a readable objective, nor a missing objective a limit."""
         if answer is None or judged is None:
             self.status = "not_measured"
-        elif judged["status"] == "ok":
-            self.status, self.objective, self.constraints = "tested", judged["objective"], dict(judged["constraints"])
-            self.feasible = bool(judged["feasible"])
-            self.reason = "" if self.feasible else "this design breaks a limit of the plan"
-        elif "values" not in answer:
+            return
+        if "values" not in answer:
             # The simulation gave no answer for this design (it raised, or its process was stopped from outside): a
             # design it refuses, the search's own rule for a design it can never choose, says nothing of the objective.
             self.status, self.reason = "not_tested", str(answer.get("failed") or judged.get("reason") or "no answer")
+            return
+        values = answer["values"] if isinstance(answer["values"], dict) else {}
+        self.constraints = {c: float(values[c]) for c in limits if c in values and _search._number(values[c])}
+        c_failed = judged["status"] != "ok"
+        if c_failed:
+            self.reason = str(judged.get("reason") or "the evaluation failed")
+        if objective in values and _search._number(values[objective]):
+            self.status, self.objective = "tested", float(values[objective])
+            if not c_failed:
+                self.feasible = bool(judged["feasible"])
+                self.reason = "" if self.feasible else "this design breaks a limit of the plan"
         else:
             # It answered, and the answer has no objective the search can read (missing, not finite): an outcome of
             # the design, which the search sees.
-            self.status, self.reason = "no_objective", str(judged.get("reason") or "the evaluation failed")
+            self.status = "no_objective"
 
 
 @dataclass
@@ -163,11 +174,15 @@ class Variable:
 
     @property
     def moved_constraints(self) -> list[str]:
-        """The limits whose quantity differs between two of its designs that gave one, each judged on its own."""
-        tested = [p for p in self._evaluated() if p.status == "tested"]
-        names = sorted({c for p in tested for c in p.constraints})
-        return [c for c in names if len(tested) >= 2 and any(not _same(p.constraints.get(c), tested[0].constraints.get(c))
-                                                             for p in tested)]
+        """The limits whose quantity differs between two of its designs that gave it, each judged on its own (whether
+        or not those designs gave an objective)."""
+        points = [p for p in self._evaluated() if p.status in ("tested", "no_objective")]
+        out = []
+        for c in sorted({c for p in points for c in p.constraints}):
+            seen = [p.constraints[c] for p in points if c in p.constraints]
+            if len(seen) >= 2 and any(not _same(v, seen[0]) for v in seen):
+                out.append(c)
+        return out
 
     @property
     def verdict(self) -> str:
@@ -198,7 +213,7 @@ class Variable:
         said = []
         for p in self._evaluated():
             if p.status == "tested":
-                said.append(f"{_search._fmt(p.objective)} {p.label}")
+                said.append(f"{_search._fmt(p.objective)} {p.label}" + (f" ({p.reason})" if p.reason else ""))
             elif p.status == "no_objective":
                 said.append(f"no objective {p.label} ({p.reason})")
             elif p.status == "not_tested":
@@ -259,8 +274,8 @@ class Moves:
             return ""
         names = ", ".join(f"`{v.name}`" for v in flat)
         return (f"FI's small run moved each design variable before the search: {names} changed nothing of the objective "
-                f"`{self.objective}` at {'its' if len(flat) == 1 else 'their'} ends. That does not show the simulation "
-                f"ignores {'it' if len(flat) == 1 else 'them'}; every variable stays in the search.")
+                f"`{self.objective}` at the designs FI could evaluate (run.log lists them). That does not show the "
+                f"simulation ignores {'it' if len(flat) == 1 else 'them'}; every variable stays in the search.")
 
     def for_reader(self) -> str:
         """What the code's reader is shown: one sentence per variable."""
@@ -345,12 +360,15 @@ async def measure(block: dict[str, Any], evaluate: Evaluate, *, budget_s: float,
             moves.elapsed.append(float(answer["elapsed_s"]))
         judged.append((answer, _search.judge(sub, answer.get("values") if "values" in answer else None,
                                              str(answer.get("failed") or ""))))
-    base = judged[0][1]
-    if base is not None and base["status"] != "ok":
+    base_answer, base = judged[0]
+    quantity = moves.objective
+    if base is not None and not (isinstance(base_answer.get("values"), dict) and quantity in base_answer["values"]
+                                 and _search._number(base_answer["values"][quantity])):
         moves.baseline_reason = str(base.get("reason") or "no reason given")
+    limits = [str(c.get("quantity")) for c in block.get("constraints") or [] if isinstance(c, dict)]
     for points in where:
         for point, k in points:
-            point.take(*judged[k])
+            point.take(*judged[k], moves.objective, limits)
     moves.seconds = clock() - began
     return moves
 
@@ -404,23 +422,30 @@ def read_record(quest_root: Path | str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _plan_line(engine: Any, line: str) -> None:
-    """``line`` once in plan.md (the section of checks already made), as a version by the engine."""
+def _plan_line(engine: Any, line: str, before: str = "") -> bool:
+    """``line`` once in plan.md (the section of checks already made), as a version by the engine; ``before``, the line an
+    earlier pass wrote on code that has changed since, is taken out (``line`` empty: only taken out)."""
     from . import engine as _e
     from . import plan as _plan
 
     path = _plan.plan_path(engine.quest_root)
     try:
         text = path.read_text(encoding="utf-8")
-        if line in text:
-            return
-        edited = _plan.add_to_section(text, _e._PART_HEADING, ["", f"- {line}"])
+        edited = text
+        if before and before != line:
+            edited = edited.replace(f"\n- {before}\n", "\n").replace(f"- {before}", "")
+        if line and line not in edited:
+            edited = _plan.add_to_section(edited, _e._PART_HEADING, ["", f"- {line}"])
+        if edited == text:
+            return True
         _plan.note_edit(engine.quest_root, text)
         path.write_text(edited, encoding="utf-8")
         _plan.record_version(engine.quest_root, edited, by="engine",
                              note="FI moved each design variable before the search; nothing was changed")
     except OSError as e:
         engine._log.warning("[execute] FI could not add that line to plan.md: %r", e)
+        return False
+    return True
 
 
 async def disclose(engine: Any, state: Any, py: Any, exec_env: Any, small_record: dict[str, Any] | None) -> None:
@@ -443,6 +468,7 @@ async def disclose(engine: Any, state: Any, py: Any, exec_env: Any, small_record
         key = key_of(str(small_record.get("key") or ""), block)
         record = read_record(engine.quest_root)
         if record.get("key") != key:
+            before = str(record.get("notice") or "")
             thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
             got = await run(engine.executor, py, engine.quest_root, simulate.relative_to(engine.quest_root).as_posix(), block,
                             timeout_s=_small.budget(engine.config.execution.timeout_s), env=dict(exec_env or {}),
@@ -450,14 +476,19 @@ async def disclose(engine: Any, state: Any, py: Any, exec_env: Any, small_record
                             at_once=_trials.settings_at_once(engine.config.execution.settings_at_once))
             if got is None:
                 return
-            record = {"key": key, **got.record()}
+            record = {"key": key, **got.record(), "plan_before": before, "plan_pending": True}
+            engine._log.info("[execute] %s", record["says"])
+            for variable in got.variables:
+                engine._log.info("[execute]   %s", variable.sentence(got.objective))
+            if record.get("notice"):
+                engine._log.warning("[execute] %s", record["notice"])
+        if record.get("plan_pending"):
+            # Written to plan.md before it is marked done, so a plan.md that could not be changed is tried again.
+            notice, before = str(record.get("notice") or ""), str(record.get("plan_before") or "")
+            record["plan_pending"] = bool(notice or before) and not _plan_line(engine, notice, before)
             path = engine.quest_root / RECORD
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
-            engine._log.info("[execute] %s", record["says"])
-            if record.get("notice"):
-                engine._log.warning("[execute] %s", record["notice"])
-                _plan_line(engine, str(record["notice"]))
         reader = str(record.get("for_reader") or "")
         note = str(getattr(engine, "_small_run_note", "") or "")
         if reader and reader not in note:

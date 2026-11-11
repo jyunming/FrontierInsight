@@ -329,3 +329,134 @@ def test_the_pass_runs_through_the_search_s_own_entry_and_leaves_the_quest_as_it
     assert got["width"].verdict == "moves" and got["unused"].verdict == "no_change"
     assert moves.evaluations == 5 and len(moves.elapsed) == 5
     assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == before
+
+
+def _two_variable_block() -> dict[str, Any]:
+    block = _block(design_variables=[{"name": "width", "kind": "continuous", "low": 1.0, "high": 5.0}])
+    block["baseline"]["values"] = {"width": 2.0}
+    return block
+
+
+def test_a_missing_limit_never_hides_a_readable_objective() -> None:
+    def no_limit_at_the_high(cell: dict[str, Any]) -> dict[str, Any]:
+        return {"loss": 1.0} if cell["width"] == 5.0 else {"loss": 1.0, "cost": 2.0}
+
+    width = _measure(_two_variable_block(), _Calls(no_limit_at_the_high)).variables[0]
+    assert width.ends[1].status == "tested" and width.ends[1].objective == 1.0
+    assert width.verdict == "no_change"  # the objective is 1.0 at every design: a missing limit is not a moved objective
+
+
+def test_a_limit_is_judged_even_where_the_objective_is_missing() -> None:
+    def no_objective_at_the_high(cell: dict[str, Any]) -> dict[str, Any]:
+        return {"cost": 8.0} if cell["width"] == 5.0 else {"loss": 1.0, "cost": 2.0}
+
+    width = _measure(_two_variable_block(), _Calls(no_objective_at_the_high)).variables[0]
+    assert width.ends[1].status == "no_objective"
+    assert width.moved_constraints == ["cost"]
+
+
+def test_the_plan_line_names_only_designs_that_were_evaluated() -> None:
+    moves = _measure(_block(), _Calls(reached=4))  # unused's high end not reached
+    unused = _by(moves)["unused"]
+    assert unused.verdict == "no_change" and unused.ends[1].status == "not_measured"
+    assert "at the designs FI could evaluate" in moves.notice() and "two ends" not in moves.notice()
+
+
+def test_a_plan_line_of_an_earlier_pass_is_taken_out_when_the_code_changed(tmp_path: Path, monkeypatch: Any) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (root / "plan.md").write_text("# Plan\n\n## Checks already made\n\n- nothing yet\n", encoding="utf-8")
+    model = [_model]
+
+    async def fake_run(executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any],
+                       **kwargs: Any) -> dm.Moves:
+        return await dm.measure(block, _Calls(model[0]), budget_s=kwargs["timeout_s"])
+
+    monkeypatch.setattr(dm, "run", fake_run)
+
+    class _Log:
+        def __getattr__(self, name: str) -> Any:
+            return lambda *a, **k: None
+
+    class _Exec:
+        timeout_s = 600
+        settings_at_once = 2
+
+    class _Cfg:
+        execution = _Exec()
+
+    class _Engine:
+        quest_root = root
+        executor = None
+        config = _Cfg()
+        _log = _Log()
+        _small_run_note = ""
+
+        def _protocol_block(self, state: Any) -> dict[str, Any]:
+            return {"optimisation": _block()}
+
+    asyncio.run(dm.disclose(_Engine(), {}, sys.executable, {}, {"key": "code-a", "crashed": False}))
+    assert "`unused`" in (root / "plan.md").read_text(encoding="utf-8")
+    model[0] = lambda cell: {**_model(cell), "loss": _model(cell)["loss"] + cell["unused"]}  # the repaired code reads it
+    asyncio.run(dm.disclose(_Engine(), {}, sys.executable, {}, {"key": "code-b", "crashed": False}))
+    text = (root / "plan.md").read_text(encoding="utf-8")
+    assert "`unused`" not in text and "nothing yet" in text
+
+
+def test_a_readable_baseline_objective_is_never_said_missing_and_a_refused_limit_is_said() -> None:
+    block = _two_variable_block()
+    block["constraints"] = [{"quantity": "cost", "limit": "about ten"}]  # a limit that cannot be read
+    moves = _measure(block, _Calls(lambda cell: {"loss": (cell["width"] - 2.5) ** 2, "cost": 1.0}))
+    assert moves.baseline_reason == ""
+    width = moves.variables[0]
+    assert width.verdict == "moves" and "cannot be read" in width.sentence("loss")
+
+
+def _engine_for(root: Path, logged: list[str]) -> Any:
+    class _Log:
+        def __getattr__(self, name: str) -> Any:
+            return lambda msg, *a, **k: logged.append(msg % a if a else msg)
+
+    class _Exec:
+        timeout_s = 600
+        settings_at_once = 2
+
+    class _Cfg:
+        execution = _Exec()
+
+    class _Engine:
+        quest_root = root
+        executor = None
+        config = _Cfg()
+        _log = _Log()
+        _small_run_note = ""
+
+        def _protocol_block(self, state: Any) -> dict[str, Any]:
+            return {"optimisation": _block()}
+
+    return _Engine()
+
+
+def test_run_log_lists_each_variable_and_a_plan_line_not_written_is_tried_again(tmp_path: Path, monkeypatch: Any) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")
+    (root / "plan.md").mkdir()  # plan.md cannot be read or written for now
+    runs: list[int] = []
+
+    async def fake_run(executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any],
+                       **kwargs: Any) -> dm.Moves:
+        runs.append(1)
+        return await dm.measure(block, _Calls(), budget_s=kwargs["timeout_s"])
+
+    monkeypatch.setattr(dm, "run", fake_run)
+    logged: list[str] = []
+    asyncio.run(dm.disclose(_engine_for(root, logged), {}, sys.executable, {}, {"key": "code-a", "crashed": False}))
+    assert any(line.startswith("[execute]   `unused`: no change") for line in logged)  # each variable's own line
+    assert dm.read_record(root)["plan_pending"] is True
+    (root / "plan.md").rmdir()
+    (root / "plan.md").write_text("# Plan\n\n## Checks already made\n\n- nothing yet\n", encoding="utf-8")
+    asyncio.run(dm.disclose(_engine_for(root, logged), {}, sys.executable, {}, {"key": "code-a", "crashed": False}))
+    assert len(runs) == 1 and "`unused`" in (root / "plan.md").read_text(encoding="utf-8")
+    assert dm.read_record(root)["plan_pending"] is False
