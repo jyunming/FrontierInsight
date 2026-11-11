@@ -23654,7 +23654,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not (placed.left_out or placed.figures or placed.not_done):
                     self._log.info("[evidence_gate] %s: %s; it changes no reported result", issue.get("id"), placed.why)
                 continue
-            if (names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
+            if rerun is None and (names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
                 untied.append((issue, names))
                 continue
             if _code_review.about_headline(record, issue, result, headline or []):
@@ -30070,6 +30070,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
         "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "plan_answers",                     # ... and which result answers each quantity the topic asks for
+        "plan_dependents",                  # ... and what a dependent variable that is no declared result is (adds checks only)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers

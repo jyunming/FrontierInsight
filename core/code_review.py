@@ -121,6 +121,20 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     dependent = [d for d in (variables.get("dependent") if isinstance(variables.get("dependent"), list) else []) if _text(d)]
     for i, name in enumerate(dependent):
         add("dependent variable", f"the dependent variable {_text(name)} is computed and reported in the result", i == 0, str(name))
+    # What the plan's model said its list of dependent variables is (core/dependent_map.py): only adds. The wording is added to the
+    # item of each result it names (the original item for the entry above stays), and the first entry's results join the main
+    # quantity's names.
+    mapped = _dependent_placements(protocol)
+    named_by: dict[str, list[str]] = {}
+    for entry, ids in mapped.items():
+        for rid in ids:
+            named_by.setdefault(rid, []).append(entry)
+    first_ids = set(mapped.get(_text(dependent[0]), [])) if dependent else set()
+
+    def also(rid: str) -> str:
+        names = named_by.get(rid)
+        return "; the plan's list of dependent variables also names it as " + " and ".join(f'"{_text(n, 80)}"' for n in names) if names else ""
+
     for m in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(m, dict) and _text(m.get("id")):
             mid = _text(m["id"])
@@ -129,8 +143,9 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
             if any(isinstance(d, dict) and _text(d.get("metric")) == mid
                    for d in (protocol.get("definitions") if isinstance(protocol.get("definitions"), list) else [])):
                 defined.append(["definitions", mid])
-            add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
-                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
+            add("metric", f"the result reports {mid}" + (f" ({est})" if est else "") + also(mid),
+                (bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower())) or mid in first_ids,
+                mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
         add("figure", f"the script draws the planned figure {figure_file(fig)}")
     grid, inside = _settings_of(protocol)  # where the plan view takes them from
@@ -150,6 +165,25 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`",
             defined_by=[["equations", str(eid)]])
+    have = {r["name"] for r in out if r["kind"] == "metric"}
+    for rid in dict.fromkeys(i for ids in mapped.values() for i in ids):  # a derived result the plan's model named: one more item
+        if _text(rid, 80) not in have:
+            add("metric", f"the result reports {_text(rid)}" + also(rid), rid in first_ids, rid)
+    return out
+
+
+def _dependent_placements(protocol: dict[str, Any]) -> dict[str, list[str]]:
+    """``{entry text: [declared result ids]}`` of the ``dependent_map`` the plan's model answered with ``result`` (the ids are
+    kept to the metrics and derived results the frozen plan declares)."""
+    raw = protocol.get("dependent_map") if isinstance(protocol.get("dependent_map"), dict) else {}
+    ids = {_text(m.get("id")) for k in ("metrics", "derived") for m in (protocol.get(k) if isinstance(protocol.get(k), list) else [])
+           if isinstance(m, dict) and _text(m.get("id"))}
+    out: dict[str, list[str]] = {}
+    for entry, row in raw.items():
+        if isinstance(row, dict) and row.get("answer") == "result" and isinstance(row.get("by"), list):
+            by = [_text(i) for i in row["by"] if _text(i) in ids]
+            if by:
+                out[_text(entry)] = by
     return out
 
 
@@ -1607,14 +1641,15 @@ def untied_dependents(record: dict[str, Any], issue: dict[str, Any], ids: list[s
     return list(dict.fromkeys(names))
 
 
-def unplaced_dependents(design: Any, protocol: Any) -> list[str]:
+def unplaced_dependents(design: Any, protocol: Any, contract_only: bool = True) -> list[str]:
     """The plan's dependent variables (its own free text) that are not exactly a declared result's id (a metric or a derived
     result of the frozen plan, case and punctuation ignored): FI has not placed them on any declared result. Empty when the
-    plan declares nothing (an older plan with no contract has no ids to compare with)."""
+    plan declares nothing. ``contract_only``: only a frozen plan of the contract form (the plan's model is asked before
+    that form is written, so it passes False)."""
     protocol = protocol if isinstance(protocol, dict) else {}
     ids = [str(m.get("id")) for key in ("metrics", "derived") for m in (protocol.get(key) if isinstance(protocol.get(key), list) else [])
            if isinstance(m, dict) and str(m.get("id") or "").strip()]
-    if not ids or protocol.get("form") != "contract":
+    if not ids or (contract_only and protocol.get("form") != "contract"):
         return []
     variables = design.get("variables") if isinstance(design, dict) and isinstance(design.get("variables"), dict) else {}
     dependent = variables.get("dependent") if isinstance(variables.get("dependent"), list) else []

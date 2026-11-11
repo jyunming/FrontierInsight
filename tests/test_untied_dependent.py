@@ -132,3 +132,18 @@ def test_the_quality_report_names_the_unplaced_entries_without_saying_the_study_
     rows = quality_report._unplaced_problems(quality_report._Quest(root))
     text = json.dumps(rows)
     assert rows and "did not place it on any declared result" in text and "does not report" not in text
+
+
+def test_a_rerun_that_shows_numbers_moving_is_never_overruled_by_the_plan_text_release(tmp_path: Path) -> None:
+    import types
+
+    engine = _engine(tmp_path)
+    moved = types.SimpleNamespace(status="changed", metrics=["failed trials"], keys=[], unplaced=[], unwritten=[], why="",
+                                  redrawn=False, notes=[], carried=[])
+
+    async def reruns(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:
+        return {"F-1": moved}
+
+    engine._rerun_shown = reruns  # type: ignore[method-assign,assignment]
+    out, record = _gate(engine, PLAN_TEXT_TEST)
+    assert not _released(out, record)  # a repair of it moved numbers FI cannot place: the finding is judged as before

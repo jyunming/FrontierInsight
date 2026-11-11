@@ -526,6 +526,10 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
             from . import contract_parts as _cparts
 
             why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
+            if part == "dependents":  # asked alone: it never moves the plan's form
+                out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS[part]} ({why}); they stay unplaced",
+                                    "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+                continue
             out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     out.extend(_unit_problems(q))
@@ -538,23 +542,35 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
 
 
 def _unplaced_problems(q: _Quest) -> list[dict[str, str]]:
-    """One row for the plan's dependent variables that FI did not place on any declared result (the plan's own words for them
-    are free text). It says only what FI knows: it never says the study does not report them."""
+    """What FI knows of the plan's dependent variables that are not exactly a declared result (the plan's own words for them
+    are free text): one row for what the plan's model answered about them (and which model), one for those still unplaced. It
+    never says the study does not report an entry on FI's own word; only the plan's model's answer says that."""
     try:
         from . import code_review as _cr
+        from . import dependent_map as _dep
         from . import frozen_protocol as _fp
         from . import plan as _plan
 
+        protocol = _fp.protocol_of(q.root)
         text = (q.root / "plan.md").read_text(encoding="utf-8", errors="replace")
-        design = _plan.parse(text).design
-        names = _cr.unplaced_dependents(design, _fp.protocol_of(q.root))
+        names = _cr.unplaced_dependents(_plan.parse(text).design, protocol)
+        given = _dep.rows_of(protocol)
     except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
         return []
-    if not names:
-        return []
-    shown = "; ".join(f"\"{_one(n, 70)}\"" for n in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
-    return [_problem("plan", f"the plan names {shown} as a dependent variable; FI did not place it on any declared result, so its "
-                     "check of the code is on the plan's words alone", "FI's plan check", "disclosed", "plan.md")]
+    out: list[dict[str, str]] = []
+    if given:
+        models = sorted({_who(r) for r in q.calls if str(r.get("node", "")).split(".")[0] == "plan_contract"} - {""})
+        said = "; ".join(_dep.sentence(entry, row) for entry, row in list(given.items())[:5]) + (
+            f" and {len(given) - 5} more" if len(given) > 5 else "")
+        out.append(_problem("plan", f"the plan's model ({', '.join(models) or 'model not recorded'}) said {said}; added to the checks "
+                            "only, and a small model ties wrongly 1 time in 20", "FI's plan check", "disclosed",
+                            ".fi/contract_parts.json"))
+    names = [n for n in names if n not in given]
+    if names:
+        shown = "; ".join(f"\"{_one(n, 70)}\"" for n in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        out.append(_problem("plan", f"the plan names {shown} as a dependent variable; FI did not place it on any declared result, "
+                            "so its check of the code is on the plan's words alone", "FI's plan check", "disclosed", "plan.md"))
+    return out
 
 
 def _candidate_problems(q: _Quest) -> list[dict[str, str]]:
