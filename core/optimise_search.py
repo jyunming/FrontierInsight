@@ -2488,6 +2488,7 @@ def merge_outcomes(outcomes, levels, block):
     out = {
         "rows": rows, "evaluations": sum(o["evaluations"] for o in outcomes),
         "scan_evaluations": sum(o["scan_evaluations"] for o in outcomes), "budget": sum(o["budget"] for o in outcomes),
+        "plan_budget": first["budget"] * len(outcomes),  # the first alternative is always searched, with the plan's whole budget
         "starts": first["starts"], "per_start": first["per_start"], "levels": per, "level_count": len(outcomes),
         "stopped_because": stopped, "budget_ran_out": any(o["budget_ran_out"] for o in outcomes),
         "method_requested": first["method_requested"], "method_used": first["method_used"],
@@ -2591,9 +2592,11 @@ def build_comparison(outcomes, per, block):
         elif close:
             near = close[0]
             tol = _tolerance(block, near["best"])
-            if sign * (near["best"] - leader["best"]) == 0:
-                out["says_1"] = (f"{level_says(leader['level'])} and {level_says(near['level'])} both reach "
-                                 f"{_fmt(leader['best'])}{unit}; no alternative is shown better.")
+            tied = [a for a in ranked if sign * (a["best"] - leader["best"]) == 0]
+            if len(tied) > 1:
+                names = [level_says(a["level"]) for a in tied]
+                out["says_1"] = (f"{', '.join(names[:-1])} and {names[-1]} all reach " if len(tied) > 2 else
+                                 f"{names[0]} and {names[1]} both reach ") + f"{_fmt(leader['best'])}{unit}; no alternative is shown better."
             else:
                 out["says_1"] = (f"{level_says(leader['level'])} reaches {_fmt(leader['best'])}{unit} and "
                                  f"{level_says(near['level'])} {_fmt(near['best'])}{unit}; the difference is not more than "
@@ -2689,6 +2692,24 @@ def start_build(block, method=None):
 def not_searched_says(entry):
     """The plain sentence for an alternative that was not searched (``status`` ``not_searched``) and why."""
     return f"{level_says(entry['level'])} was not searched: {entry.get('not_searched_because') or NOT_SEARCHED_BECAUSE}"
+
+
+def same_as_group_says(entries):
+    """One sentence for every alternative that was not searched because it gave the results of the same other one: how many,
+    which, and at how many designs. One entry reads as :func:`same_as_says`."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        groups.setdefault(level_key(e["same_as"]), []).append(e)
+    out = []
+    for group in groups.values():
+        if len(group) == 1:
+            out.append(same_as_says(group[0]))
+            continue
+        n = max(int(e.get("probes") or 0) for e in group)
+        out.append(f"{len(group)} alternatives gave the same objective and limits as {level_says(group[0]['same_as'])} at "
+                   f"the {n} designs checked and were not searched on their own: "
+                   + ", ".join(level_says(e["level"]) for e in group) + " (their other results at those designs are their own)")
+    return out
 
 
 def same_as_says(entry):
@@ -3082,7 +3103,10 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
             if p.get("status") == NOT_SEARCHED:
                 says += " " + not_searched_says(p) + "."
     else:
-        says = (f"Best design found in {outcome['evaluations']} evaluation(s) (of {outcome['budget']} allowed): "
+        plan = outcome.get("plan_budget")
+        allowed = (f"of {outcome['budget']} allowed; the plan allowed {plan}" if plan and plan > outcome["budget"]
+                   else f"of {outcome['budget']} allowed")
+        says = (f"Best design found in {outcome['evaluations']} evaluation(s) ({allowed}): "
                 f"{_describe(best['design'])}; {objective['quantity']} = {_fmt(best['objective'])}{u}")
         if improvement is not None:
             says += (f", against {_fmt(baseline['objective'])}{u} for the baseline "
@@ -3092,19 +3116,20 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
             says += ")"
         says += "."
         if outcome.get("levels"):
-            shown = "; ".join(level_says(p["level"]) + (
-                ": not searched on its own" if p.get("same_as") or p.get("status") == NOT_SEARCHED else
-                ": " + _fmt(p["best"]["objective"]) + u if p["best"] else ": no design that meets every limit")
-                              for p in outcome["levels"])
             same = [p for p in outcome["levels"] if p.get("same_as")]
+            shown = "; ".join(level_says(p["level"]) + (
+                ": " + _fmt(p["best"]["objective"]) + u if p["best"] else ": no design that meets every limit")
+                              for p in outcome["levels"] if not (p.get("same_as") or p.get("status") == NOT_SEARCHED))
+            if same or any(p.get("status") == NOT_SEARCHED for p in outcome["levels"]):
+                shown += ("; " if shown else "") + "the others were not searched on their own, named below"
             skipped = [p for p in outcome["levels"] if p.get("status") == NOT_SEARCHED]
             says += (f" It is the best design found over {len(outcome['levels'])} alternatives ({shown}), under "
                      f"{level_says(best['level'])}.")
             comparison = outcome.get("comparison")
             if isinstance(comparison, dict) and comparison.get("says_1"):
                 says += " " + comparison["says_1"]
-            for p in same:
-                says += " " + same_as_says(p) + "."
+            for sentence in same_as_group_says(same):
+                says += " " + sentence + "."
             for p in skipped:
                 says += " " + not_searched_says(p) + "."
     rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]

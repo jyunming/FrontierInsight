@@ -344,6 +344,7 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
         lines += [f"**Alternatives compared.** {len(compared)} alternatives were compared. The comparison is made between "
                   "the best designs of the alternatives that were searched on their own, with the plan's own variables "
                   "and budget:", ""]
+        same_done = False
         for p in compared:
             name = ", ".join(f"{k} = {v}" for k, v in (p.get("level") or {}).items())
             top = p.get("best") if isinstance(p.get("best"), dict) else None
@@ -354,10 +355,10 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                 lines.append(f"- {name}: not searched, because {why}; {p.get('evaluations')} evaluation(s).")
                 continue
             if p.get("same_as"):
-                other = ", ".join(f"{k} = {v}" for k, v in p["same_as"].items())
-                lines.append(f"- {name}: not searched on its own: at each of the {p.get('probes')} designs tried at both, "
-                             f"it gave {other}'s objective and limits (its other results at those designs are its own); "
-                             f"{p.get('evaluations')} evaluation(s).")
+                if not same_done:
+                    same_done = True
+                    lines += [f"- {x}; {sum(int(q.get('evaluations') or 0) for q in compared if q.get('same_as'))} "
+                              "evaluation(s) in all." for x in _search.same_as_group_says([q for q in compared if q.get("same_as")])]
                 continue
             mine = by_level.get(_search.level_key(p.get("level"))) or {}
             counts = (f" ({mine.get('starts')} starting point(s); {mine.get('answered')} answered, {mine.get('failed')} "

@@ -95,9 +95,9 @@ def test_the_record_says_in_plain_words_which_alternatives_were_not_searched() -
     outcome = _run(block, Sim("nothing"), ["mass"])
     record = osearch.best_design(outcome, block, seed=0)
     n = outcome["levels"][1]["probes"]
-    assert (f"shape = mug was not searched on its own: at each of the {n} designs tried at both, it gave shape = cup's "
-            "objective and limits (its other results at those designs are its own)") in record["says"]
-    assert "shape = bowl was not searched on its own" in record["says"]
+    assert (f"2 alternatives gave the same objective and limits as shape = cup at the {n} designs checked and were not "
+            "searched on their own: shape = mug, shape = bowl (their other results at those designs are their own)") in record["says"]
+    assert "shape = bowl: not searched on its own" not in record["says"], "named once, not one line each"
     assert "each searched on its own" not in record["says"] and "the winner is" not in record["says"]
     assert "FI names no best alternative" in record["says"]
     assert record["compared"]["levels"][1]["same_as"] == CUP

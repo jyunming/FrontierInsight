@@ -121,8 +121,10 @@ def test_an_alternative_that_differs_only_in_a_result_the_search_does_not_read_i
     assert mug["same_as"] == {"shape": "cup"} and bowl["same_as"] == {"shape": "cup"}
     assert mug["best"] is None and bowl["best"] is None, "no best design is claimed for an alternative not searched"
     record = osearch.best_design(outcome, block, seed=0)
-    assert "was not searched on its own: at each of the" in record["says"]
-    assert "objective and limits (its other results at those designs are its own)" in record["says"]
+    assert "2 alternatives gave the same objective and limits as shape = cup at the" in record["says"]
+    assert "were not searched on their own: shape = mug, shape = bowl (their other results at those designs are their own)" in record["says"]
+    assert record["says"].count("were not searched on their own:") == 1, "named in one sentence, not one line each"
+    assert "the plan allowed" in record["says"]
     assert outcome["comparison"]["statement_1"] is False
     assert "FI names no best alternative" in record["says"]
 
@@ -384,3 +386,9 @@ def test_a_design_measured_at_several_alternatives_is_ranked_by_its_best_measure
     rows = [{"design": {"x": 1.0}, "values": {"f": 100.0}}, {"design": {"x": 1.0}, "values": {"f": 1.0}},
             {"design": {"x": 2.0}, "values": {"f": 2.0}}]
     assert [d["x"] for d in osearch.shared_starts(block, rows)] == [1.0, 2.0], "the worse first sighting is not kept"
+
+
+def test_a_tie_of_more_than_two_names_every_tied_alternative() -> None:
+    c = _comparison([10.0, 10.0, 10.0])
+    assert c["statement_1"] is False
+    assert "shape = cup, shape = mug and shape = bowl all reach 10 J; no alternative is shown better" in c["says_1"]
