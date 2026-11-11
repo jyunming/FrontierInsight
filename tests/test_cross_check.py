@@ -1054,3 +1054,22 @@ def test_a_redesign_from_the_precision_record_is_told_the_target_and_the_size(tm
     assert "non-physical" not in prompt and "REJECTED" not in prompt
     # a design pass the precision record did not send gets no such block
     assert "PRECISION TARGET" not in eng._design_prompt({**state, "cross_check_route": "write"})
+
+
+# --- old cross-quest memory is shown as not checked -----------------------------------------------------------------
+
+
+def test_an_old_quest_entry_is_labelled_as_not_checked_against_fis_record() -> None:
+    from core.engine import _format_lit_header
+    old = {"kind": "fi_quest_summary", "quest_id": "q-old", "title": "A past study"}
+    head = _format_lit_header(old, 1)
+    assert "findings taken from the model's text, not checked against FI's record" in head
+
+
+def test_a_record_backed_quest_entry_and_an_ordinary_source_carry_no_label() -> None:
+    from core.engine import _format_lit_header
+    checked = {"kind": "fi_quest_summary", "quest_id": "q-new", "claims_from": "record", "title": "A past study"}
+    local_spine = {"kind": "fi_paper_spine", "title": "A local paper"}
+    external = {"title": "An external paper", "doi": "10.1/x"}
+    for meta in (checked, local_spine, external):
+        assert "not checked against FI's record" not in _format_lit_header(meta, 1)

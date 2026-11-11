@@ -30110,6 +30110,18 @@ _THIN_TEXT_CHARS = 100
 _THIN_MARKS = {"title": "title only", "blurb": "short blurb only"}
 
 
+#: The kinds a finished quest writes to Axon (accepted and preliminary standing).
+_QUEST_MEMORY_KINDS = frozenset({"fi_quest_summary", "fi_quest_paper", "fi_paper_spine", "fi_preliminary_summary",
+                                 "fi_preliminary_paper", "fi_preliminary_spine"})
+
+
+def _unchecked_quest_memory(meta: dict[str, Any]) -> bool:
+    """Whether ``meta`` is an entry a quest wrote before its findings were taken from FI's record: written by a quest
+    (it names one), of a kind a quest writes, and without ``claims_from == "record"``. Never a store write: read only."""
+    return (meta.get("kind") in _QUEST_MEMORY_KINDS and bool(meta.get("quest_id"))
+            and meta.get("claims_from") != "record")
+
+
 def _has_full_text(meta: dict[str, Any]) -> bool:
     """Whether a source's text is its full text: its ``content_quality`` when it has one (a fetch that returned only
     the abstract or a table of contents is not), else whether a fetch returned anything (an entry from before
@@ -30193,6 +30205,9 @@ def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) ->
         # The record holds no more than this says, and the writer is told so
         # where it reads the entry (see agents/write.md, "Citing sources").
         line1 += f" [{_THIN_MARKS[thin]}]"
+    if _unchecked_quest_memory(meta):
+        # An entry an earlier quest wrote from the model's own text: a precedent only as far as that text is.
+        line1 += " [findings taken from the model's text, not checked against FI's record]"
     if _retractions.is_retracted(meta):
         # Crossref lists a retraction of it (core/retractions.py): every block that names it says so.
         line1 += " [retracted]"
