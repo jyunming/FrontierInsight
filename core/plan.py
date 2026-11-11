@@ -1154,7 +1154,9 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
     notes: list[str] = []
     faults: list[_reading.Fault] = []
     moved: list[_reading.Moved] = []
-    for _ in range(len(out) + 64):
+    from .optimisation_plan import _size
+
+    for _ in range(64 + _size(out)):  # each round leaves out one entry or part, so this many rounds always end it
         fixed, fault = protocol_fault(out)
         if fault is None:
             return _reading.Reading(kept=fixed, faults=faults, moved=moved), notes
@@ -1163,8 +1165,7 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
         key = str(steps[1]) if len(steps) > 1 else ""
         if key not in out:  # (every fault names a part of the protocol it read; kept for safety)
             faults.append(fault)
-            out.pop(key, None)
-            return (_reading.Reading(kept=out or None, faults=faults, moved=moved),
+            return (_reading.Reading(kept=None, faults=faults, moved=moved),
                     notes + [f"the protocol could not be repaired ({why})"])
         block = out.get("optimisation") if isinstance(out.get("optimisation"), dict) else None
         if key in ("sub_studies", "in_each_run", "numerical_settings") and block is not None and fault.kind == "conflict" \

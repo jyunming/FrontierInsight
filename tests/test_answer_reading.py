@@ -370,3 +370,10 @@ def test_many_extra_baseline_values_never_cost_the_whole_block():
     block["baseline"]["values"].update({f"extra_{i}": i for i in range(100)})
     fixed, _notes = optim.repair(block)
     assert fixed is not None and set(fixed["baseline"]["values"]) == {"width_mm", "speed"}
+
+
+def test_many_bad_numerical_settings_never_cost_the_whole_protocol():
+    settings = {f"step_{i}": {"search": -1} for i in range(80)}
+    settings["mesh_mm"] = {"search": 0.2}
+    kept, notes = plan.repair_protocol({"grid": {"width_mm": [1, 2]}, "numerical_settings": settings})
+    assert kept is not None and set(kept["numerical_settings"]) == {"mesh_mm"} and len(notes) == 80
