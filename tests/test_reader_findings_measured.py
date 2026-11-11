@@ -289,3 +289,32 @@ def test_a_test_request_that_could_not_be_made_is_undecided_never_not_shown(tmp_
     assert calls == ["demonstrate"]
     assert rc["removed_quantities"] == ["cover"] and rc["checks"][0]["measured"]["status"] == "could_not"
     assert rc["checks"][0]["measured"]["why"].startswith("not asked")
+
+
+def test_after_a_test_request_not_made_the_next_pass_decides_as_usual(tmp_path, monkeypatch) -> None:
+    from core import finding_repair
+
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=False, verdict=None, calls=calls)
+    first = engine._demonstrate_reader_finding
+
+    async def not_asked(issue: Any, record: Any, state: Any) -> bool:
+        raise finding_repair.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._demonstrate_reader_finding = not_asked  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None
+    engine._demonstrate_reader_finding = first  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None  # answered now: no test shows it
+    rc = _rc(engine.quest_root)
+    assert rc["removed_quantities"] == [] and rc["kept_differences"][0]["measured"]["status"] == "not_shown"
+
+
+def test_a_rerun_whose_repair_request_was_not_made_is_asked_again_on_the_same_code(tmp_path, monkeypatch) -> None:
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("could_not", why="not asked: x", mode="not_asked"),
+                            calls=calls)
+    assert _measure(engine, record, ["est_a"]) is None
+    rc = _rc(engine.quest_root)
+    assert rc["checks"][0]["measured"]["status"] == "could_not" and "version" not in rc["checks"][0]["measured"]
+    assert _measure(engine, record, ["est_a"]) is None
+    assert [c for c in calls if c != "demonstrate"] == [("rerun", True, [["cover"]])] * 2, "the same code is asked again"

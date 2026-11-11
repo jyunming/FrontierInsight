@@ -23323,6 +23323,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         by_fid: dict[str, list[dict[str, Any]]] = {}
         shown: dict[str, bool] = {}
         kept: list[dict[str, Any]] = []
+        not_asked: set[str] = set()  # findings whose test request could not be made in this pass
         version = _code_review.version(self.quest_root / "code")
         for c in checks:
             fid = str((differing.get(str(c["quantity"])) or {}).get("fid") or "")
@@ -23337,9 +23338,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     shown[fid] = (saved.get("demonstrated") is True and has_test) or await self._demonstrate_reader_finding(saved, record, state)
                 except _finding_repair.NotAsked as exc:  # no answer is no finding of "not shown": undecided, asked again next time
                     shown[fid] = False
+                    not_asked.add(fid)
                     for x in checks:
                         if str((differing.get(str(x["quantity"])) or {}).get("fid") or "") == fid:
-                            x["measured"] = {"status": "could_not", "why": f"not asked: {exc}"[:200]}
+                            x["measured"] = {"status": "could_not", "why": f"not asked: {exc}"[:200], "not_asked": True}
                 _code_review.save(self.quest_root, record)
                 if shown[fid]:
                     pairs.append(({**saved, "disputed": [str(x["quantity"]) for x in checks if
@@ -23354,7 +23356,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             v = reruns.get(fid)
             for c in group:
                 if not shown.get(fid):
-                    if "measured" not in c:
+                    if "measured" not in c or (c["measured"].get("not_asked") and fid not in not_asked):
                         c["measured"] = {"status": "not_shown", "why": "no test FI could write fails on the delivered code because of it"}
                         kept.append(c)
                         self._log.warning("[evidence_gate] no test shows that `%s` is computed differently from the plan: a word alone "
@@ -23363,6 +23365,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 c["measured"] = ({"status": v.status, "why": v.why, "metrics": v.metrics, "notes": v.notes, "mode": v.mode,
                                   "version": version} if v is not None else {"status": "could_not", "why": "not run", "version": version})
+                if v is not None and v.mode == "not_asked":  # a request not made is no answer for this code: asked again next time
+                    c["measured"] = {k: x for k, x in c["measured"].items() if k != "version"} | {"not_asked": True}
                 if v is not None and v.status == "unchanged":
                     kept.append(c)
                 elif v is not None and v.status == "changed":
