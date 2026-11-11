@@ -435,7 +435,7 @@ async def _run(executor: Any, python: Path | str, argv: list[str], cwd: Path, ti
 PROGRESS_EVERY_S = 30.0
 _MARK = "_fi_rerun_progress.txt"
 #: Runs the study's own ``run.py`` unchanged and notes each setting (or design of the search) it finishes in ``_MARK`` beside it,
-#: with the number of settings first when the study lists them up front; ``run.py`` is not edited (its text is part of what the
+#: with the number of settings first when the study's grid gives it; ``run.py`` is not edited (its text is part of what the
 #: trials' cache key hashes). A note that cannot be written is skipped: the line then says only that the study is running.
 _WRAPPER = r'''import os, runpy, subprocess, sys
 here = os.path.dirname(os.path.abspath(__file__))
@@ -444,9 +444,10 @@ run = os.path.join(here, "run.py")
 try:
     import json
     study = json.load(open(os.path.join(here, "study.json"), encoding="utf-8"))
-    if study.get("entry") and not study.get("optimisation"):
-        defs = runpy.run_path(run, run_name="fi_listing")
-        n = len(defs["cells"](study.get("grid") or {}, study.get("sub_studies")))
+    if study.get("entry") and not study.get("optimisation") and not study.get("sub_studies"):
+        n = 1
+        for values in (study.get("grid") or {}).values():
+            n *= len(values)
         print("total=%d" % n, file=open(mark, "a"))
 except BaseException:
     pass
@@ -461,7 +462,7 @@ def _noted(args, *a, **k):
         pass
     return r
 subprocess.call = _noted
-sys.argv = [run] + sys.argv[1:]
+sys.argv = ["run.py"] + sys.argv[1:]
 runpy.run_path(run, run_name="__main__")
 '''
 
@@ -490,15 +491,19 @@ async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
 
     began = time.monotonic()
     who = f"the rerun of finding {finding}" if finding else "the rerun of the study with a repair"
-    while True:
-        done, _pending = await asyncio.wait({task}, timeout=PROGRESS_EVERY_S)
-        if done:
-            return task.result()
-        try:
-            where = progress_of(copy, time.monotonic() - began)
-            say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {where}" if where else ""))
-        except Exception:  # noqa: BLE001 - a line about progress never stops the rerun
-            pass
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=PROGRESS_EVERY_S)
+            if done:
+                return task.result()
+            try:
+                where = progress_of(copy, time.monotonic() - began)
+                say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {where}" if where else ""))
+            except Exception:  # noqa: BLE001 - a line about progress never stops the rerun
+                pass
+    finally:
+        if not task.done():  # the caller was cancelled: the study's process is stopped with it, as when it is awaited directly
+            task.cancel()
 
 
 async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
@@ -526,11 +531,17 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         out = copy / "output"
         if not (copy / "run.py").is_file():
             return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
-        if say is None:
+        wrapped = False
+        if say is not None:
+            try:
+                (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
+                (copy / _MARK).unlink(missing_ok=True)
+                wrapped = True
+            except OSError:  # no note of progress then: the study itself still runs
+                pass
+        if not wrapped:
             ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
         else:
-            (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
-            (copy / _MARK).unlink(missing_ok=True)
             ran = await _say_while(asyncio.ensure_future(
                 _run(executor, python, ["_fi_rerun_run.py"], copy, max(1, int(timeout_s)), env)), copy, say, finding)
         wrote = (out / "data/results/derived.json").is_file() and (out / "raw/trials.json").is_file()
