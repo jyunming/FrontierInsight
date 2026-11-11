@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from core import optimise, run_estimate
+from core import optimise, reuse_key, run_estimate
 from tests.test_cost_wiring import _engine
 from tests.test_run_checks import _log
 
@@ -56,8 +56,9 @@ def _search_ran(eng: Any, runner: Any, block: dict[str, Any], *, stopped: str = 
     ledger = json.dumps({"event": "evaluation", "status": "ok", "design": {"x": 0.0}, "objective": 0.0}) + "\n"
     best = {"evaluations": {"stopped_because": stopped}, "time": {"seconds": 10.0, "limit_seconds": search_s},
             "run_id": cut.get("run_id", "")}
+    inputs = optimise._run_inputs(root, norm, 0, "run_cell", {}, rounds or [], True, True, True)
     optimise._save(root, key, ledger, json.dumps(best), "", False,
-                   optimise._study_key(root, runner.simulate, norm, "run_cell", {}))
+                   optimise._study_keys(root, norm, "run_cell", {})[0].key, reuse=reuse_key.stamp(inputs))
     return {"search_s": search_s, "cut": cut, "key": key}
 
 
@@ -188,7 +189,9 @@ def _record(tmp_path: Path, stopped: str) -> tuple[Path, dict[str, Any]]:
     norm = optimise._plan.normalize(block)[0]
     key = optimise._run_key(tmp_path, sim, norm, 0, "run_cell", {}, [], True, True, True)
     ledger = json.dumps({"event": "evaluation", "status": "ok", "design": {"x": 0.0}, "objective": 0.0}) + "\n"
-    optimise._save(tmp_path, key, ledger, json.dumps({"evaluations": {"stopped_because": stopped}}), "", False)
+    inputs = optimise._run_inputs(tmp_path, norm, 0, "run_cell", {}, [], True, True, True)
+    optimise._save(tmp_path, key, ledger, json.dumps({"evaluations": {"stopped_because": stopped}}), "", False,
+                   reuse=reuse_key.stamp(inputs))
     return sim, protocol
 
 

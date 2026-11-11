@@ -621,6 +621,11 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
     out += _precision_per_setting(q)
+    # A kept search of a frozen study whose simulation changed only in comments or line endings after it (core/optimise.py).
+    reused = _dict(_dict(_json(q.root / ".fi" / "optimisation" / "run.json")).get("reuse")).get("note")
+    if reused:
+        out.append(_problem("run", _one(str(reused), 400), "FI's reuse check (recorded only)", "not fixed",
+                            ".fi/optimisation/run.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",

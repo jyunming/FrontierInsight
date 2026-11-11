@@ -352,7 +352,7 @@ def test_a_frozen_search_is_not_run_again_on_the_confirm_seeds(tmp_path: Path) -
                                           timeout_s=5, frozen=True))
     assert run.problems and "searching again" in run.problems[0] and executor.calls == 0
     # Exploration's search record for this simulation and plan is kept, whatever the seed.
-    study_key = optimise._study_key(root, root / "code" / "simulate.py", block, "run_cell", None)
+    study_key = optimise._legacy_study_key(root, root / "code" / "simulate.py", block, "run_cell", None)
     ledger = json.dumps({"event": "evaluation", "status": "ok", "design": {"x": 0.5}, "objective": 1.0}) + "\n"
     best = json.dumps({"best": {"design": {"x": 0.5}, "objective": 1.0}}) + "\n"
     optimise._save(root, "exploration-key", ledger, best, "", False, study_key)
@@ -419,12 +419,12 @@ def test_the_search_and_the_version_agree_on_what_is_unchanged(tmp_path: Path) -
 
     _code(tmp_path)
     block = {"evaluation_budget": {"starts": 1, "per_start": 2}}
-    before = optimise._study_key(tmp_path, tmp_path / "code" / "simulate.py", block, "run_cell", None)
+    before = optimise._legacy_study_key(tmp_path, tmp_path / "code" / "simulate.py", block, "run_cell", None)
     fp = phased.fingerprint(tmp_path)["code_sha256"]
     text = (tmp_path / "code" / "simulate.py").read_text(encoding="utf-8")
     (tmp_path / "code" / "simulate.py").write_bytes(("# note\n" + text).replace("\n", "\r\n").encode("utf-8"))
     assert phased.fingerprint(tmp_path)["code_sha256"] == fp
-    assert optimise._study_key(tmp_path, tmp_path / "code" / "simulate.py", block, "run_cell", None) == before
+    assert optimise._legacy_study_key(tmp_path, tmp_path / "code" / "simulate.py", block, "run_cell", None) == before
 
 
 def test_code_changed_during_the_confirm_run_confirms_nothing(tmp_path: Path) -> None:
@@ -463,7 +463,7 @@ def test_the_confirm_run_of_a_frozen_search_checks_the_kept_design_again_on_its_
         "baseline": {"values": {"x": 0.0}, "source": "the design in use"},
         "evaluation_budget": {"starts": 1, "per_start": 4}, "search_method": "bounded_local"}}
     block, _ = optimise._plan.normalize(protocol["optimisation"])
-    study_key = optimise._study_key(root, root / "code" / "simulate.py", block, "run_cell", None)
+    study_key = optimise._legacy_study_key(root, root / "code" / "simulate.py", block, "run_cell", None)
     ledger = json.dumps({"event": "evaluation", "status": "ok", "design": {"x": 0.5}, "objective": 1.0}) + "\n"
     optimise._save(root, "exploration-key", ledger, json.dumps({"best": {"design": {"x": 0.5}}}) + "\n", "", False,
                    study_key)
