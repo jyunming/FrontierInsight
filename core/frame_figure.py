@@ -374,13 +374,14 @@ class FigureCalls:
 
     def _set_x(self, rec, x_id, checked=True):
         settings = list(getattr(self, "settings", []) or [])
-        if x_id in self._results():
+        results = self._results() + [d for d in (getattr(self, "derived_ids", []) or []) if d not in self._results()]
+        if x_id in results:  # a result the table holds, or a quantity the plan derives (as ``what`` may be one)
             kind = "result"
         elif x_id in settings:
             kind = "setting"
         else:
             raise UnknownResult("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
-                             % (x_id, ", ".join(settings) or "(none)", ", ".join(self._results()) or "(none)"))
+                             % (x_id, ", ".join(settings) or "(none)", ", ".join(results) or "(none)"))
         new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": "linear"}
         if rec["x"] is not None and rec["x"]["id"] != x_id:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
