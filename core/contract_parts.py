@@ -7,6 +7,8 @@ cannot be used (at most :data:`MAX_ASKS` asks of a part in all):
 * ``roles``: for every declared result, what kind of number it is and which settings it changes with;
 * ``names``: for every name the plan relies on and does not declare (:func:`core.contract.undeclared_names`), whether it
   is a result, a reference value, a diagnostic, or computed afterwards from the results;
+* ``dependents``, only when the plan lists a dependent variable that is not exactly a declared result: what each is (a
+  result, a setting, or not reported). Its answer only adds checks and disclosure (:mod:`core.dependent_map`);
 * ``comparisons``: which results the study compares between values of one setting;
 * ``formulas``, only when FI works out the analysis itself (core/analysis_frame.py) and the plan has a formula FI cannot
   work out as written (:func:`core.contract.from_design` with ``fi_analysis``): a formula FI can work out for each, or that
@@ -34,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from . import contract as _contract
+from . import dependent_map as _dependents
 from . import oracle_forms as _forms
 from . import plan as _plan
 from . import skeleton as _skeleton
@@ -46,10 +49,11 @@ PART_WORDS = {"roles": "what kind of number each result is, what it may change w
               "comparisons": "which results are compared between values of a setting",
               "formulas": "a formula FI can work out for each quantity the plan works out with one",
               "figures": "what each figure the plan names shows",
+              "dependents": "what the plan's dependent variables that are no declared result are",
               "answers": "which result answers each quantity the topic asks for, and at which setting"}
 #: The parts whose answer the plan's form does not wait on: a formula still not workable, or a figure still not declared,
 #: is left out alone.
-_OWN_PARTS = ("formulas", "figures", "answers")
+_OWN_PARTS = ("formulas", "figures", "answers", "dependents")
 _ROLE_HINT = {"reference": "its plan gives a formula, so it is a reference", "diagnostic": "a check of the plan measures it as a "
               "size of disagreement, so it is a diagnostic"}
 
@@ -115,6 +119,15 @@ def _formulas_prompt(templates: dict[str, string.Template], design: dict[str, An
         formulas="\n".join(f"- {i}: {rows.get(i, {}).get('formula')} ({why})" for i, why in faults.items()),
         known=", ".join(dict.fromkeys(known)) or "(nothing)", formula_language=_forms.ANALYSIS_FORMULA_LANGUAGE,
         method=_short(design.get("method")), again=_problems_text(problems, last))
+
+
+def _dependents_prompt(templates: dict[str, string.Template], design: dict[str, Any], entries: dict[str, str],
+                       problems: list[str], last: str) -> str:
+    p = design.get("protocol") or {}
+    return templates["plan_dependents"].substitute(
+        method=_short(design.get("method")), settings=_settings_lines(p),
+        results=_dependents.results_lines(p, _results_lines(p)), names=_dependents.names_lines(entries),
+        again=_problems_text(problems, last))
 
 
 def _formula_faults(design: dict[str, Any]) -> dict[str, str]:
@@ -614,11 +627,11 @@ def _apply_comparisons(p: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
 
 
 def strip_fi_keys(design: Any) -> Any:
-    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``, ``figure_declarations``, and the ``asked`` mark on a comparison or derived quantity): a model's own word for them is never
+    """``design`` without the keys only FI writes (``form``, ``parts_left_out``, ``names_not_asked``, ``figure_declarations``, ``dependent_map``, and the ``asked`` mark on a comparison or derived quantity): a model's own word for them is never
     believed."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
-    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "figure_declarations")}
+    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "figure_declarations", "dependent_map")}
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
             protocol[key] = [{k: v for k, v in r.items() if k not in ("asked", "as_planned", "for_question")} if isinstance(r, dict) else r
@@ -632,7 +645,7 @@ def without_answers(design: Any) -> Any:
     results and the keys only FI writes. The methodology audit's verdict is on the rest (core/receipts.design_core)."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
-    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results", "figure_declarations")}
+    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results", "figure_declarations", "dependent_map")}
     if isinstance(protocol.get("metrics"), list):
         protocol["metrics"] = [{k: v for k, v in m.items() if k not in _ANSWER_KEYS} if isinstance(m, dict) else m
                                for m in protocol["metrics"]]
@@ -688,6 +701,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
     names = {} if only else _contract.undeclared_names(current, not_asked)
     derived_ids: list[str] = []
     order = ["roles"] + (["names"] if names else []) + (["formulas"] if fi_analysis else []) + ["comparisons"]
+    order.append("dependents")  # after the parts that declare results (a derived result may be what an entry is)
     if fi_analysis:
         order.append("figures")  # last: a figure may show a quantity the parts before it declared
     if topic_quantities:
@@ -699,6 +713,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
             continue  # the plan stays in the older form, which FI does not write the analysis for
         faults = (_formula_faults(current) if part == "formulas" else figure_faults(current) if part == "figures"
                   else (topic_quantities or {}) if part == "answers" else {})
+        entries = _dependents.asked(current) if part == "dependents" else {}
+        if part == "dependents" and not entries:
+            continue  # every dependent variable is exactly a declared result
         if part in ("formulas", "figures", "answers") and not faults:
             continue  # every formula is one FI can work out, every figure is declared: nothing to ask
         record: dict[str, Any] = {"asks": 0, "valid": False, "problems": []}
@@ -706,9 +723,10 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
         problems: list[str] = []
         last = ""
         try:
-            while record["asks"] < MAX_ASKS and not record["valid"]:
+            while record["asks"] < (_dependents.MAX_ASKS if part == "dependents" else MAX_ASKS) and not record["valid"]:
                 record["asks"] += 1
-                reply = await ask(_formulas_prompt(templates, current, faults, problems, last) if part == "formulas" else
+                reply = await ask(_dependents_prompt(templates, current, entries, problems, last) if part == "dependents" else
+                                  _formulas_prompt(templates, current, faults, problems, last) if part == "formulas" else
                                   _figures_prompt(templates, current, faults, problems, last) if part == "figures" else
                                   _answers_prompt(templates, current, faults, problems, last) if part == "answers" else
                                   _prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids,
@@ -719,12 +737,13 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     problems = ["the answer was not one JSON object"]
                     continue
                 value = got.get({"roles": "results", "names": "names", "comparisons": "comparisons", "formulas": "formulas",
-                                "figures": "figures", "answers": "answers"}[part])
+                                "figures": "figures", "answers": "answers", "dependents": "names"}[part])
                 if part == "comparisons":
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids,
                              "_labels": _contract.family_labels(current["protocol"])}
                 conflicts: dict[str, tuple[str, str]] = {}  # answers: units that still differ at the last ask (stated in the paper)
-                problems = (_check_formulas(value, faults, current) if part == "formulas" else
+                problems = (_dependents.check(value, entries, current) if part == "dependents" else
+                            _check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else
                             _check_answers(value, faults, current, conflicts if record["asks"] >= MAX_ASKS else None)
                             if part == "answers" else
@@ -732,7 +751,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 if problems:
                     continue
                 p = current["protocol"]
-                if part == "roles":
+                if part == "dependents":
+                    kept, checked = _dependents.apply(p, value, entries), None
+                elif part == "roles":
                     kept, checked = _apply_roles(p, value), None
                 elif part == "formulas":
                     kept, checked = _apply_formulas(p, value), None

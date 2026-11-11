@@ -23626,6 +23626,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
         figures: list[tuple[dict[str, Any], str, list[str]]] = []
         about_plan: list[dict[str, Any]] = []
+        untied: list[tuple[dict[str, Any], list[str]]] = []  # a failing test on text FI wrote, about a plan entry FI placed on no result
         changed: dict[str, set[str]] = {}  # per finding: the printed keys the study run again with a repair of it showed changed
         unchanged: list[dict[str, Any]] = []
         moved_checks: dict[str, bool] = {}  # unchanged because the rerun moved only check measures -> its draws changed
@@ -23714,6 +23715,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not (placed.left_out or placed.figures or placed.not_done):
                     self._log.info("[evidence_gate] %s: %s; it changes no reported result", issue.get("id"), placed.why)
                 continue
+            if rerun is None and (names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
+                untied.append((issue, names))
+                continue
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif _code_review.missing_quantities(record, issue):
@@ -23771,6 +23775,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               "changes no reported number and does not stop the quest", issue.get("id"))
         if about_plan and not (left_out or not_done or figures):
             _code_review.save(self.quest_root, record)
+        for issue, names in untied:
+            # The plan lists a dependent variable that FI placed on no declared result, and the failing test reads only text FI
+            # wrote from the plan: no computed number is shown wrong. Kept in the quality report only, never in the paper.
+            saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict):
+                saved["changes_result"] = False
+                saved["untied_plan_item"] = names
+            self._log.warning("[evidence_gate] %s is about %s, which FI did not place on any declared result, and its test reads "
+                              "only text FI wrote from the plan: it changes no reported number and does not stop the quest",
+                              issue.get("id"), ", ".join(names)[:200])
+        if untied and not (left_out or not_done or figures):
+            _code_review.save(self.quest_root, record)
         for issue, how, keys, _q in left_out:
             self._log.warning("[evidence_gate] %s: %s; FI leaves %s out of the results the paper may use, and the paper says "
                               "so", issue.get("id"), how, ", ".join(keys)[:200])
@@ -23806,6 +23822,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 figures=[(f, h) for _i, h, files in figures for f in files],
                 changed=changed_by_quantity)
         return None
+
+    def _untied_plan_text_only(self, record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str],
+                               reach: "_shown_reach.Reach | None") -> list[str]:
+        """The plan's dependent variables a finding is about, when FI's own records show the one thing the gate may release it
+        for: they are placed on no declared result (:func:`core.code_review.untied_dependents`), the frozen plan is of the
+        contract form, the run's results and the analysis record exist, and the failing test reads only text FI wrote from the
+        plan: no key that holds a value, no trial run, no figure, no result. Anything missing returns ``[]`` (the finding is
+        judged as before)."""
+        contract = getattr(reach, "contract", None)
+        if reach is None or getattr(contract, "form", "") != "contract" or not reach.ids:
+            return []
+        if not (isinstance(result, dict) and result) or not _analysis_frame.read_record(self.quest_root):
+            return []
+        names = _code_review.untied_dependents(record, issue, reach.ids, headline)
+        if not names:
+            return []
+        try:
+            if reach.reads_held_key(issue, result):
+                return []
+            placed = reach.effect(record, issue, result)
+        except Exception as exc:  # noqa: BLE001 - what cannot be read is not released
+            self._log.warning("[evidence_gate] %s: FI's records could not place the test (%r)", issue.get("id"), exc)
+            return []
+        if placed is None or not placed.plan_text or placed.stop or placed.left_out or placed.not_done or placed.figures                 or placed.probes or placed.extra_keys or placed.cannot:
+            return []
+        return names
 
     @staticmethod
     def _part_not_done_or_stop(stops: list, not_done: list, issue: dict[str, Any], how: str, record: dict[str, Any], result: Any,
@@ -30165,6 +30207,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
         "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "plan_answers",                     # ... and which result answers each quantity the topic asks for
+        "plan_dependents",                  # ... and what a dependent variable that is no declared result is (adds checks only)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers

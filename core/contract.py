@@ -271,7 +271,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", "dependent_map", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
