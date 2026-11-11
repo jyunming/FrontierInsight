@@ -325,11 +325,10 @@ def keep_scan_copy(quest_root: Path) -> None:
         source = root / _trials.RAW_DIRNAME / name
         target = root / SCAN_DIR / name
         try:
+            target.unlink(missing_ok=True)  # never a copy of an earlier search beside this one's record
             if source.is_file():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
-            else:
-                target.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -923,6 +922,20 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
     return kept[0] if kept is not None else None
 
 
+def _same_study_but_unreadable(record: dict[str, Any], study: Any) -> bool:
+    """A file of a frozen study that could be read when its search was kept cannot be read now: the study key has one file
+    less, so it differs from the record's, although every file that can be read is as it was. The confirm stage may not
+    search again, so that is the same study (the files that can be read, the plan's block and FI's code all as recorded)."""
+    if study.complete:
+        return False
+    old = (record.get("reuse") or {}).get("study_token_inputs")
+    if not isinstance(old, dict) or not isinstance(old.get("files"), dict):
+        return False
+    now = study.as_json()
+    return (all(old["files"].get(name) == digest for name, digest in now["files"].items())
+            and old.get("settings") == now["settings"] and old.get("fi_code") == now["fi_code"])
+
+
 def _adopt(quest_root: Path, record: dict[str, Any], files: dict[str, str], log: Any) -> dict[str, str]:
     """A frozen study's search record of an older FI is kept by the rule it was written with; from now on the search's own
     copy of its scan file is bound into the record, so a later change to the scan file is seen. FI cannot show that the
@@ -1041,7 +1054,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             elif record.get("study_key") == _legacy_study_key(quest_root, simulate, block, entry, thresholds):
                 record = {**record, "study_key": study_key}
                 adopt = not (record.get("reuse") or {}).get("adopted")
-        elif record.get("study_key") == study_key:
+        elif record.get("study_key") == study_key or _same_study_but_unreadable(record, study_tokens):
+            record = {**record, "study_key": study_key}
             moved = study_bytes.changed((record.get("reuse") or {}).get("study_inputs"))
             if (record.get("reuse") or {}).get("study_bytes") not in (None, study_bytes.key) and moved:
                 note = ("the simulation's comments or line endings changed after its search (" + ", ".join(moved[:4])
@@ -1458,7 +1472,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
     reuse = {**_reuse.stamp(inputs, outputs=scan_hashes(quest_root) if scan_rows else {}),
-             "study_bytes": study_bytes.key, "study_inputs": study_bytes.as_json()}
+             "study_bytes": study_bytes.key, "study_inputs": study_bytes.as_json(),
+             "study_token_inputs": study_tokens.as_json()}
     record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key, reuse)
     journal.unlink(missing_ok=True)
     record = json.loads(best_text)

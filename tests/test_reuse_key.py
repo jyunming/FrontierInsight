@@ -290,3 +290,40 @@ async def test_a_frozen_record_from_before_study_keys_is_kept_by_its_exploration
     monkeypatch.setattr(phased, "load", lambda _root: {"explore_seed_bases": [0]})
     kept = await _run(root, protocol, frozen=True)
     assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_becomes_unreadable_after_the_search_does_not_stop_a_frozen_study(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _quest(tmp_path)
+    (root / "code" / "params.txt").write_text("k = 1\n", encoding="utf-8")
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6})
+    await _run(root, protocol)
+    spent = _count(root)
+    real = reuse_key.version_digest
+
+    def version_digest(path: Any) -> str:
+        if Path(path).name == "params.txt":
+            raise PermissionError("locked")
+        return real(path)
+
+    monkeypatch.setattr(reuse_key, "version_digest", version_digest)
+    kept = await _run(root, protocol, frozen=True)
+    assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems
+    # a readable file that really changed is still another study
+    (root / "code" / "simulate.py").write_text(SIM.replace("** 2", "** 3"), encoding="utf-8")
+    assert (await _run(root, protocol, frozen=True)).problems
+
+
+def test_a_scan_copy_that_cannot_be_made_leaves_no_copy_of_an_earlier_search(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    root = _toy(tmp_path)
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text("{}", encoding="utf-8")
+    (root / optimise.SCAN_DIR).mkdir(parents=True)
+    (root / optimise.SCAN_DIR / "trials.json").write_text('{"older": true}', encoding="utf-8")
+    monkeypatch.setattr(shutil, "copyfile", lambda *a, **k: (_ for _ in ()).throw(PermissionError("no")))
+    optimise.keep_scan_copy(root)
+    assert optimise.scan_hashes(root) == {}
