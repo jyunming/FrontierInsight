@@ -390,6 +390,8 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     (root / CAPTURED).unlink(missing_ok=True)
     out: dict[str, list[dict[str, Any]]] = {}
     called_at: dict[str, list[int]] = {}
+    counted: dict[str, dict[str, int]] = {}
+    observed: list[int] = []
     ran: list[int] = []
     took: dict[int, float] = {}
     seeds: dict[int, Any] = {}
@@ -410,9 +412,14 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
             if isinstance(got["row"].get("duration_s"), (int, float)):
                 took[index] = float(got["row"]["duration_s"])
             seeds[index] = got["row"].get("seed")
+            # Observed: the setting ran to the end and the recording gave its counts. Only there does a function with no
+            # call mean "not called"; anywhere else it is "not observed".
+            if isinstance(got.get("counts"), dict):
+                observed.append(index)
         for n, count in (got.get("counts") or {}).items():
             if str(n) in names and isinstance(count, int) and count > 0:
                 called_at.setdefault(str(n), []).append(index)
+                counted.setdefault(str(n), {})[str(index)] = count
         for n, keys in (got.get("returned") or {}).items():
             if str(n) in names and isinstance(keys, list):
                 returned.setdefault(str(n), set()).update(str(k) for k in keys)
@@ -434,7 +441,7 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
         setup = {"entry": "run_cell" if deterministic else "run_trial", "cell": {**cells[at], **inside},
                  "kind": (kinds or [])[at] if at < len(kinds or []) else "scan",
                  "thresholds": dict(thresholds or {}), "seed": seeds.get(at), "duration_s": took.get(at)}
-    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "ran": ran, "took": {str(i): s for i, s in took.items()}, "setup": setup,
+    (root / CAPTURED).write_text(json.dumps({"cases": out, "called_at": called_at, "calls": counted, "observed": observed, "ran": ran, "took": {str(i): s for i, s in took.items()}, "setup": setup,
                                              "returned": {n: sorted(k) for n, k in returned.items()},
                                              "cells": [dict(c) for c in cells],
                                              "kinds": [(kinds or [])[i] if i < len(kinds or []) else "scan"
@@ -486,7 +493,9 @@ async def _run_instrumented(run: Callable[[list[str]], Awaitable[Any]], root: Pa
 
 def read_captured(quest_root: Path | str) -> dict[str, Any]:
     """The record :func:`capture_inputs` saved: ``cases`` (calls by function), ``called_at`` (the indices of the cells
-    each function was called at), ``ran`` (the indices of the cells that ran to the end), ``returned`` (for a function that
+    each function was called at), ``calls`` (how many calls each function got at each such cell), ``observed`` (the cells
+    that ran to the end with their calls recorded: only there is a function with no call "not called"), ``ran`` (the
+    indices of the cells that ran to the end), ``returned`` (for a function that
     returned a dict, every key it returned) and ``cells``; ``{}`` when there is none."""
     try:
         data = json.loads((Path(quest_root) / CAPTURED).read_text(encoding="utf-8"))
@@ -612,6 +621,8 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
     kinds = record.get("kinds") or []
     called_at = record.get("called_at") or {}
     ran = [i for i in record.get("ran") or [] if isinstance(i, int)]
+    # A record made before the observed settings were kept has every setting that ran as observed.
+    seen = [i for i in (record.get("observed") if isinstance(record.get("observed"), list) else ran) if isinstance(i, int)]
     keys = {_criteria._key(h) for h in headline}
     plain_runs: dict[tuple[int, int], dict[str, Any]] = {}
     deadline = time.monotonic() + budget_s if budget_s else None
@@ -704,7 +715,10 @@ async def dependence(run: Callable[[list[str]], Awaitable[Any]], quest_root: Pat
             continue
         where = [i for i in called_at.get(name) or [] if isinstance(i, int) and 0 <= i < len(cells)]
         if not where:
-            out[name] = {"status": NOT_CALLED, "settings_run": len(ran)}
+            if not seen:
+                out[name] = {"status": NOT_RUN, "why": "the calls were not observed at any setting FI ran"}
+            else:
+                out[name] = {"status": NOT_CALLED, "settings_run": len(seen)}
             continue
         if name in thrown_away:  # shown from the code itself; no run of FI's is needed to say it
             out[name] = {"status": DISCARDED, "calls": thrown_away[name]}
@@ -1537,6 +1551,13 @@ class SecondImpl:
         asked for, so no request is spent on a function that can only end unconfirmed."""
         base = example_inputs(spec, self.protocol, self.captured)
         if not base:
+            record = read_captured(self.root)
+            called = [i for i in (record.get("called_at") or {}).get(spec.name) or [] if isinstance(i, int)]
+            if called:
+                return f"called at {len(called)} settings; FI could not keep its inputs"
+            seen = record.get("observed") if isinstance(record.get("observed"), list) else record.get("ran")
+            if not seen:  # no record at all, or no setting whose calls were recorded
+                return "the plan gives no example inputs to call it with, and FI could not observe the calls of its run of the simulation"
             return "the plan gives no example inputs to call it with, and FI's run of the simulation did not call it"
         if not all(p in base for p in _required(spec.signature)):
             return "the example inputs do not cover the function's parameters"
