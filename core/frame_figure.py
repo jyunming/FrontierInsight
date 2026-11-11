@@ -60,7 +60,8 @@ class BadArgument(ValueError):
 
 
 RECORD_VERSION = 2  # 2: a curve's name and y are FI's, series carry ``x_checked`` / ``neutral``, "range" bars are checked
-NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values
+NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values (or, for a result
+# on x, did not find to be the trials' own pairs of the two results)
 #: Set by FI for the last run, when no repair of a figure is left: a line FI cannot name is then left out of the figure and
 #: recorded in ``removed``, where before it is refused (sent to the figure's repair).
 LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
@@ -562,24 +563,113 @@ class FigureCalls:
     def _x_checked(self, x_id, xs, ys):
         """Whether every drawn x is a value of the setting ``x_id`` in FI's table (a number compared as a number): then the axis
         may carry the setting's name and the claims that read x may be offered. An x that is a result, a transform of the setting
-        (1/N), a point with no x, a figure without a table, or no x at all cannot be checked, which counts as not (fail closed)."""
+        (1/N), a point with no x, a figure without a table, or no x at all cannot be checked, which counts as not (fail closed).
+        (A result on x may still carry its name: when every point is one trial's pair of the two results, ``_pair_check``.)"""
         if getattr(self, "table", None) is None or x_id not in (getattr(self, "settings", None) or []):
             return False
         pts = [x for x, y in zip(xs, ys) if y is not None and _finite(y)]  # a gap has no point, so its x says nothing
         return bool(pts) and all(x is not None and self._keys_at(x_id, x) for x in pts)
 
+    def _x_is_table_result(self, x_id):
+        """Whether ``x_id`` is a result the table holds (declared) and not a setting: a figure of one result against another."""
+        return x_id in self._results() and x_id not in (getattr(self, "settings", None) or [])
+
+    def _record_pairs(self, what, x_id, level):
+        """The ``(x, y)`` pairs FI's own record holds of result ``x_id`` and result ``what``, as FI's default figure draws them: at
+        each setting (only those of ``level``'s value of the series setting, when the series is one), one pair for each trial that
+        gave both, paired by the record's trial numbers; at a setting whose record does not say the trials of both, one pair of
+        the two values FI holds for the setting (its mean of each, or the means of each value compared inside the runs, value by
+        value). Reads that fail give no pair. The check is FI's, not the body's: what the reads gave, served and raised is put back
+        as it was, so a body that read nothing is still seen to have read nothing."""
+        table = self.table
+        saved = {name: copy.copy(getattr(table, name)) for name in ("last_error", "gave_values", "served")
+                 if isinstance(getattr(table, name, None), (dict, set, list))}
+        out = []
+        try:
+            keys = list(table.keys())
+            if level is not None:  # the points of one level of the series setting come from its settings only
+                at = set(self._keys_at(level["setting"], level["value"]))
+                keys = [k for k in keys if k in at]
+            for key in keys:
+                try:
+                    by_trial = bool(table.trials(x_id, key)) and bool(table.trials(what, key))
+                except Exception:  # noqa: BLE001 -- recorded for each compared value, or a table without trial numbers
+                    by_trial = False
+                if by_trial:
+                    try:
+                        a, b = table.paired(x_id, what, key)
+                    except Exception:  # noqa: BLE001
+                        a, b = [], []
+                    out += [(float(u), float(v)) for u, v in zip(a, b) if _finite(u) and _finite(v)]
+                    continue
+                xa, yb = self._setting_values(x_id, key), self._setting_values(what, key)
+                out += [(xa[t], yb[t]) for t in xa if t in yb]
+        finally:
+            for name, was in saved.items():
+                now = getattr(table, name)
+                now.clear()
+                (now.extend if isinstance(now, list) else now.update)(was)
+        return out
+
+    def _setting_values(self, ident, key):
+        """``{"": mean}`` of result ``ident`` at setting ``key``, or ``{compared value: mean}`` for a result recorded for each value
+        compared inside the runs; ``{}`` when the table holds none."""
+        table = self.table
+        try:
+            m = table.mean(ident, key)
+            return {"": float(m)} if _finite(m) else {}
+        except Exception:  # noqa: BLE001 -- recorded for each compared value: read by value below
+            try:
+                return {str(t): float(m) for t, m in table.level_means(ident, key).items() if _finite(m)}
+            except Exception:  # noqa: BLE001
+                return {}
+
+    def _pair_check(self, what, x_id, xs, ys, level=None):
+        """``matches`` when every drawn point (a gap is skipped) is one of FI's own pairs of result ``x_id`` and result ``what``
+        (``_record_pairs``) exactly, each pair used by one point at most; ``differs`` when FI holds pairs and a drawn point is
+        none of them (a pairing of two trials, of two settings, or by position, or a value changed on the way: a recorded value is
+        drawn as it is, so no tolerance is given); ``not compared`` when FI holds no pair, there is no table, or no point was
+        drawn. Then the axis may carry the result's name and y the result's."""
+        if getattr(self, "table", None) is None:
+            return "not compared"
+        pts = [(x, y) for x, y in zip(xs, ys) if y is not None and _finite(y)]
+        if not pts:
+            return "not compared"
+        left = {}
+        for pair in self._record_pairs(what, x_id, level):
+            left[pair] = left.get(pair, 0) + 1
+        if not left:
+            return "not compared"
+        for x, y in pts:
+            if x is None or isinstance(x, bool) or not _finite(x):
+                return "differs"
+            pair = (float(x), float(y))
+            if not left.get(pair):
+                return "differs"
+            left[pair] -= 1
+        return "matches"
+
     def _checked_what(self, what, form, x_id, xs, ys):
         """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
         from it. A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
-        not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting, a figure
-        without a table, a point the table cannot say, a series with no finite y. ``form`` (default the mean) says which statistic
-        of the trials y is. No case refuses the call."""
+        not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting whose
+        points are not FI's own pairs of the two results (``_pair_check``), a figure without a table, a point the table cannot
+        say, a series with no finite y. ``form`` (default the mean) says which statistic of the trials y is. No case refuses the
+        call."""
         return self._check_of_what(what, form, x_id, xs, ys)[0]
 
-    def _check_of_what(self, what, form, x_id, xs, ys):
+    def _check_of_what(self, what, form, x_id, xs, ys, level=None):
         """``(checked what, how)``: how is ``matches``, ``differs`` (FI compared and the values are not the table's) or
-        ``not compared`` (FI had nothing to compare the series with), from what the check did."""
-        if what == "other" or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+        ``not compared`` (FI had nothing to compare the series with), from what the check did. A series whose x is a result of the
+        table (one result against another) is checked point by point against the trials' own pairs (``_pair_check``)."""
+        if what == "other" or what not in self._results():
+            return "other", "not compared"
+        if self._x_is_table_result(x_id):
+            if form != "mean":  # a statistic of the trials (sd, max, ...) against a result is no trial's pair
+                return "other", "not compared"
+            how = self._pair_check(what, x_id, xs, ys, level)
+            return (what if how == "matches" else "other"), how
+        if x_id not in (getattr(self, "settings", None) or []):
             return "other", "not compared"
         if form not in Y_FORMS:
             return "other", "not compared"
@@ -729,8 +819,12 @@ class FigureCalls:
                                  "one of upper widths)" % (len(lo), len(ys)))
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         declared = what
-        what, how = self._check_of_what(what, form, x_id, xs, ys)
+        what, how = self._check_of_what(what, form, x_id, xs, ys, level)
         x_ok = self._x_checked(x_id, xs, ys)
+        # One result against another: when every point is one of FI's own pairs of the two results (the check above kept the
+        # result), both axes carry the results' names. ``x_checked`` stays False: the x values are no setting's, so no claim
+        # that reads x (a trend, an order at an x, a crossing) is offered.
+        x_paired = what != "other" and self._x_is_table_result(x_id)
         # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
         # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
         neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
@@ -743,7 +837,7 @@ class FigureCalls:
                 level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
         legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
         with _undone(ax, rec):
-            self._set_x(rec, x_id, x_ok)
+            self._set_x(rec, x_id, x_ok or x_paired)
             self._set_y(rec, what)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
@@ -755,7 +849,8 @@ class FigureCalls:
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
                                   "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
-                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
+                                  "x_checked": x_ok, **({"x_paired": True} if x_paired else {}),
+                                  **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
                                   **({"level": level} if level else {})})
             loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
             for k, e in enumerate(loose, 1):
@@ -1044,7 +1139,7 @@ class FigureCalls:
         if meaning in ("ci95", "sd", "range"):
             meaning = self._checked_band_meaning(meaning, what, x_id, xs, los, his, drawn)
         with _undone(ax, rec):
-            self._set_x(rec, x_id, any(e["x"] == xs and e.get("x_checked") for e in drawn))
+            self._set_x(rec, x_id, any(e["x"] == xs and (e.get("x_checked") or e.get("x_paired")) for e in drawn))
             self._set_y(rec, what)
             stepped = any(e["step"] for e in drawn if e["x"] == xs)  # the edges of a band follow the steps of its line
             art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0, step="post" if stepped else None)
@@ -1295,7 +1390,8 @@ class FigureCalls:
         An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
         result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
         itself is never a label. Two results on one axis are joined with " / "; ``what="other"`` is "computed value". The x label
-        comes from the id of the call's ``x=``. In an image panel the vertical axis is "row".
+        comes from the id of the call's ``x=``; it is "computed x" when FI could not check the drawn x (not the setting's values,
+        or, for a result on x, not the trials' own pairs of the two results). In an image panel the vertical axis is "row".
 
         Series whose x, y, error bars, kind and result are equal within ``IDENTICAL_RTOL`` (relative) are one line to the reader:
         the later ids go to the first one's ``merged_with`` (both entries stay in the record, since both were drawn) and the
