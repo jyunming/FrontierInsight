@@ -88,6 +88,10 @@ def test_a_different_unreadable_value_where_the_plan_had_one_is_the_audits_own_f
     design, not_applied = eng._hold_audit_repairs_to_the_schema(before, _amended("== 2", starts=7))
     assert design["protocol"]["optimisation"]["evaluation_budget"]["starts"] == 4, "no readable limit of the plan's to put back"
     assert [f["path"] for n in not_applied for f in n["faults"]] == ["protocol.optimisation.constraints[1]"]
+    other_field = _amended("== 1", starts=7)
+    other_field["protocol"]["optimisation"]["constraints"][0]["unit"] = "kg"  # the same unreadable limit, another field changed
+    unchanged, none_applied = eng._hold_audit_repairs_to_the_schema(before, other_field)
+    assert unchanged["protocol"]["optimisation"]["constraints"][0]["unit"] == "kg" and not none_applied
     unchanged, none_applied = eng._hold_audit_repairs_to_the_schema(before, _amended("== 1", starts=7))
     assert unchanged["protocol"]["optimisation"]["evaluation_budget"]["starts"] == 7 and not none_applied, (
         "a fault the audit did not touch is the plan's own, not the audit's")

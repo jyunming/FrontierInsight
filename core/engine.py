@@ -5542,13 +5542,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         parts, a search's objective, baseline or limit) keeps the plan's own of that key whole. ``items``: one ``{"key",
         "reason", "part", "faults"}`` per key the audit changed that was not made in full (the faults, each at its path, are
         what the audit is asked to correct once, :meth:`_ask_the_audit_to_correct_parts`)."""
-        seen = set(_plan.read_protocol(old_p).paths())
+        base_faults = _plan.read_protocol(old_p).faults
+        known = {(f.path, f.reason) for f in base_faults}
 
         def new_in(faults: list[Any], current: dict[str, Any]) -> list[Any]:
-            """The faults the plan's own reading did not have: at a path it had no fault at, or where the audit changed the
-            part the plan's own reading faulted (a different unreadable value is the audit's own)."""
-            return [f for f in faults if f.path not in seen
-                    or _reading.value_at(old_p, f.path, "protocol") != _reading.value_at(current, f.path, "protocol")]
+            """The faults the plan's own reading did not have: at a path it had no fault at, or with another reason at the
+            same path (a different unreadable value is the audit's own; a change to another field of the same entry is not)."""
+            return [f for f in faults if (f.path, f.reason) not in known]
         changed = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
         kept_p = dict(new_p)
         items: list[dict[str, Any]] = []
