@@ -3157,10 +3157,14 @@ class RunChecksMixin:
         values = _pairs.plan_values(protocol)
 
         async def ask(prompt: str, who: str, kind: str) -> str:
+            # a failed call reaches ask_again, which gives its count back and leaves the test to be asked later (NotAsked);
+            # an answer the model gave that cannot be used is still no test, as before
+            from .provider import _ModelAnswerProblem
+
             try:
                 return await self._chat(prompt, node="implement.finding_test")  # type: ignore[attr-defined]
-            except Exception as exc:  # noqa: BLE001 - a request that cannot be made shows nothing and stops nothing
-                self._log.warning("[evidence_gate] the code model could not be asked again for the test of %s: %s",  # type: ignore[attr-defined]
+            except _ModelAnswerProblem as exc:
+                self._log.warning("[evidence_gate] the code model's answer for the test of %s could not be used: %s",  # type: ignore[attr-defined]
                                   issue.get("id"), _one(str(exc)))
                 return ""
 

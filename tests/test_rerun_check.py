@@ -460,6 +460,43 @@ def test_a_repair_is_run_only_when_the_findings_own_test_passes_on_it(tmp_path: 
     assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
 
 
+def test_a_failed_call_for_a_rerun_repair_gives_its_request_back_and_no_answer_is_kept(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import finding_repair as fr
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    asked: list[str] = []
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        raise fr.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    assert got.status == "could_not" and got.mode == "not_asked" and got.why.startswith("not asked")
+    assert record["rerun_calls"] == 0 and asked == [""]
+    # the gate keeps no answer for this version of the code: its next pass asks again
+    out = asyncio.run(type(engine)._rerun_shown(engine, [(record["issues"]["F-1"], "shown")], record, {}))
+    assert out["F-1"].mode == "not_asked" and "rerun" not in record["issues"]["F-1"]
+
+
+def test_a_rerun_repair_that_gave_no_usable_file_is_one_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    asked: list[str] = []
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        return {}
+
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    # a reply that could not be placed is asked for once more inside the request (core/finding_repair.py), not again here
+    assert got.status == "could_not" and got.why == "no repair of it could be written"
+    assert asked == [""] and record["rerun_calls"] == 1
+
+
 def test_nothing_is_run_when_the_time_of_the_check_is_spent_and_no_request_is_spent_in_docker(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine, root, issue, record = _engine_with_code(tmp_path)

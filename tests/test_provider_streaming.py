@@ -618,3 +618,58 @@ async def test_run_cli_streaming_captures_stderr_on_no_output_reap_timeout() -> 
 
 
 
+
+
+@pytest.mark.asyncio
+async def test_an_account_error_the_cli_names_is_not_retried_and_stops_the_model(tmp_path: Path) -> None:
+    """The claude CLI names the kind of a failed call in its stream (an assistant message with ``error``). An account
+    error (here: no credit left; the text is neutral on purpose, so only the named kind can sort it) is a limit that does
+    not clear: not retried, and the model is not asked again in the run. A network failure is still retried."""
+    from core.provider import ProviderLimitError, _is_fatal_provider_error, _retry_cli_error, _stays_unusable
+
+    said = "The account cannot be charged for this request."
+    events = [
+        {"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant",
+                                          "content": [{"type": "text", "text": said}]}, "error": "billing_error"},
+        {"type": "result", "subtype": "success", "is_error": True, "result": said},
+    ]
+    _, spec = _make_fake_streaming_binary(tmp_path, events=events, exit_code=1)
+    with pytest.raises(ProviderLimitError) as caught:
+        await _run_cli(spec, "any prompt", timeout_s=5.0, inactivity_timeout_s=3.0)
+    err = caught.value
+    assert "billing_error" in str(err)
+    assert not _retry_cli_error(err) and _stays_unusable(err) and _is_fatal_provider_error(err)
+    # the same shape for a passing failure: retried as before
+    events[0]["error"] = "server_error"
+    (tmp_path / "b").mkdir()
+    _, spec = _make_fake_streaming_binary(tmp_path / "b", events=events, exit_code=1)
+    with pytest.raises(_CliTransientError) as caught:
+        await _run_cli(spec, "any prompt", timeout_s=5.0, inactivity_timeout_s=3.0)
+    assert not isinstance(caught.value, ProviderLimitError) and _retry_cli_error(caught.value)
+
+
+def test_the_clis_own_no_credit_sentence_sorts_as_a_limit_when_only_text_reaches_fi() -> None:
+    from core.provider import _is_fatal_provider_error, _retry_cli_error, _stays_unusable
+
+    # the failure as one run logged it: the claude CLI, an API key with no credit left
+    err = _CliTransientError("claude.EXE exited rc=1 (stream error: Credit balance is too low): ")
+    assert not _retry_cli_error(err) and _stays_unusable(err) and _is_fatal_provider_error(err)
+
+
+@pytest.mark.asyncio
+async def test_an_account_error_the_cli_names_is_raised_on_every_way_the_stream_ends(tmp_path: Path) -> None:
+    """Named alone and then exit 0 (no error envelope), or named and then silent until FI's inactivity limit: still a
+    limit, never an answer and never retried."""
+    from core.provider import ProviderLimitError, _retry_cli_error
+
+    named = {"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant",
+                                              "content": [{"type": "text", "text": "It cannot go on."}]},
+             "error": "authentication_failed"}
+    _, spec = _make_fake_streaming_binary(tmp_path, events=[named], exit_code=0)
+    with pytest.raises(ProviderLimitError) as caught:
+        await _run_cli(spec, "any prompt", timeout_s=5.0, inactivity_timeout_s=3.0)
+    assert "authentication_failed" in str(caught.value) and not _retry_cli_error(caught.value)
+    (tmp_path / "hang").mkdir()
+    _, spec = _make_fake_streaming_binary(tmp_path / "hang", events=[named], inter_delay_s=30.0)
+    with pytest.raises(ProviderLimitError):
+        await _run_cli(spec, "any prompt", timeout_s=20.0, inactivity_timeout_s=2.0)

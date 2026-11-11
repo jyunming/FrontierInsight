@@ -23104,7 +23104,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
                                       type(exc).__name__, exc)
                     out[fid] = _rerun_check.Verdict("could_not", f"{type(exc).__name__}: {exc}"[:200])
-            if isinstance(saved, dict):
+            if isinstance(saved, dict) and out[fid].mode != "not_asked":  # a request not made is asked again next time
                 saved["rerun"] = {**out[fid].record(), "version": version, "strict": strict,
                                   "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else []}
             self._log_rerun(fid, out[fid])
@@ -23191,14 +23191,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     record["rerun_calls"] = int(record.get("rerun_calls") or 0) + 1
                     _code_review.save(self.quest_root, record)
                     trial = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work / f"a{_round}")
-                    tried = await self._ask_repair_on_copy(issue, rel, trial, protocol, state, problem)
-                    if not tried:
-                        verdict = _rerun_check.Verdict("could_not", "no repair of it could be written")
-                        if _round == 0:  # the reply held no usable file: asked once more, told so
-                            problem = ("Your reply held no whole file. Reply with ONE fenced Python block whose first line inside the "
-                                       f"fence is `# file: {rel}` and that holds the whole corrected file.")
-                            continue
-                        return verdict
+                    try:
+                        tried = await self._ask_repair_on_copy(issue, rel, trial, protocol, state, problem)
+                    except _finding_repair.NotAsked as exc:
+                        # a failed call is no answer: the request is given back and nothing is kept for this code
+                        record["rerun_calls"] = max(0, int(record.get("rerun_calls") or 0) - 1)
+                        _code_review.save(self.quest_root, record)
+                        return _rerun_check.Verdict("could_not", f"not asked: {exc}"[:200], mode="not_asked")
+                    if not tried:  # a reply that could not be placed was already asked for once more inside the request
+                        return _rerun_check.Verdict("could_not", "no repair of it could be written")
                     for target, text in tried.items():
                         (trial / target).write_text(text, encoding="utf-8")
                     ok, said = await self._repair_passes_own_test(issue, trial)
@@ -23327,6 +23328,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         by_fid: dict[str, list[dict[str, Any]]] = {}
         shown: dict[str, bool] = {}
         kept: list[dict[str, Any]] = []
+        not_asked: set[str] = set()  # findings whose test request could not be made in this pass
         version = _code_review.version(self.quest_root / "code")
         for c in checks:
             fid = str((differing.get(str(c["quantity"])) or {}).get("fid") or "")
@@ -23337,7 +23339,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             saved.setdefault("id", fid)
             if fid not in shown:
                 has_test = bool(saved.get("test") and (self.quest_root / str(saved["test"])).is_file())
-                shown[fid] = (saved.get("demonstrated") is True and has_test) or await self._demonstrate_reader_finding(saved, record, state)
+                try:
+                    shown[fid] = (saved.get("demonstrated") is True and has_test) or await self._demonstrate_reader_finding(saved, record, state)
+                except _finding_repair.NotAsked as exc:  # no answer is no finding of "not shown": undecided, asked again next time
+                    shown[fid] = False
+                    not_asked.add(fid)
+                    for x in checks:
+                        if str((differing.get(str(x["quantity"])) or {}).get("fid") or "") == fid:
+                            x["measured"] = {"status": "could_not", "why": f"not asked: {exc}"[:200], "not_asked": True}
                 _code_review.save(self.quest_root, record)
                 if shown[fid]:
                     pairs.append(({**saved, "disputed": [str(x["quantity"]) for x in checks if
@@ -23352,7 +23361,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             v = reruns.get(fid)
             for c in group:
                 if not shown.get(fid):
-                    if "measured" not in c:
+                    if "measured" not in c or (c["measured"].get("not_asked") and fid not in not_asked):
                         c["measured"] = {"status": "not_shown", "why": "no test FI could write fails on the delivered code because of it"}
                         kept.append(c)
                         self._log.warning("[evidence_gate] no test shows that `%s` is computed differently from the plan: a word alone "
@@ -23361,6 +23370,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 c["measured"] = ({"status": v.status, "why": v.why, "metrics": v.metrics, "notes": v.notes, "mode": v.mode,
                                   "version": version} if v is not None else {"status": "could_not", "why": "not run", "version": version})
+                if v is not None and v.mode == "not_asked":  # a request not made is no answer for this code: asked again next time
+                    c["measured"] = {k: x for k, x in c["measured"].items() if k != "version"} | {"not_asked": True}
                 if v is not None and v.status == "unchanged":
                     kept.append(c)
                 elif v is not None and v.status == "changed":
