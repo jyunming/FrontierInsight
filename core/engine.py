@@ -23209,13 +23209,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
-                left = allowed if budget is None else min(allowed, budget[0])
-                if left < _rerun_check.FLOOR_S:
-                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
                 refused = await self._repair_small_run_refusal(copy_dir, protocol, env)
+                if budget is not None:
+                    budget[0] -= time.monotonic() - began  # the small run is part of the time of the check
+                    began = time.monotonic()
+                left = allowed if budget is None else min(allowed, budget[0])
+                if left < _rerun_check.FLOOR_S and not refused:
+                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 if refused:
                     verdict = _rerun_check.Verdict("could_not", "the repaired simulation does not run: " + refused,
                                                    source=source, files=sorted(_rerun_check.changed_files(self.quest_root, copy_dir)),
@@ -23245,11 +23248,26 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         files = sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir))
         if all(Path(f).name in _rerun_check.ANALYSIS_FILES and "/" not in f for f in files):
             return ""
-        try:
+        async def refusal(root: Path) -> str:
             return await _code_checks.small_run_refusal(
-                copy_dir.parent, protocol if isinstance(protocol, dict) else None, executor=self.executor,
+                root, protocol if isinstance(protocol, dict) else None, executor=self.executor,
                 python=self.executor.python_path(self.quest_root), env=dict(env),
                 timeout_s=int(self.config.execution.timeout_s))
+
+        try:
+            refused = await refusal(copy_dir.parent)
+            if not refused:
+                return ""
+            # The copy holds only ``code/``: a study that reads a file of the quest outside it fails there whatever the repair.
+            # A refusal counts only for what the repair changed: the code as it is must pass the same small run in the same place.
+            scratch = Path(tempfile.mkdtemp(prefix="fi_small_base_"))
+            try:
+                base = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, scratch)
+                if await refusal(base.parent):
+                    return ""
+            finally:
+                await asyncio.to_thread(shutil.rmtree, scratch, True)
+            return refused
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made refuses nothing: the study's own run decides
             self._log.warning("[rerun] the small run of the repair could not be made (%r); the study's own run decides", exc)
             return ""
