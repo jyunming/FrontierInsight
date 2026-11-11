@@ -113,3 +113,9 @@ def test_a_record_made_before_observed_settings_were_kept_still_reads(tmp_path: 
     out = asyncio.run(si.dependence(_run(root), root, "pkg", NAMES, {"width"}, deterministic=True))
     assert out["never_used"]["status"] == si.NOT_CALLED
     assert _problem(root, {}, "takes_object") == "called at 1 settings; FI could not keep its inputs"
+
+
+def test_with_no_record_of_the_run_it_is_not_observed_rather_than_not_called(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    why = _problem(root, {}, "never_used")
+    assert "could not observe" in why and "did not call it" not in why

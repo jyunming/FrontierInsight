@@ -1556,7 +1556,7 @@ class SecondImpl:
             if called:
                 return f"called at {len(called)} settings; FI could not keep its inputs"
             seen = record.get("observed") if isinstance(record.get("observed"), list) else record.get("ran")
-            if record and not seen:
+            if not seen:  # no record at all, or no setting whose calls were recorded
                 return "the plan gives no example inputs to call it with, and FI could not observe the calls of its run of the simulation"
             return "the plan gives no example inputs to call it with, and FI's run of the simulation did not call it"
         if not all(p in base for p in _required(spec.signature)):
