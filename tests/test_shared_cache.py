@@ -176,39 +176,53 @@ def test_a_stopped_setting_alone_leaves_nothing_and_beside_others_keeps_what_it_
 
 
 class _WritesValue:
-    """Finishes one value in the shared folder (written whole under its own name), then is stopped for its time while
-    working out a second one, leaving that one's lock and temporary file."""
+    """Writes one value in the shared folder whole under its own name, then (when ``stop``) is stopped for its time
+    while working out a second one, leaving its lock, a temporary file, a ``.partial`` file and an ``.npy`` cut off
+    under its final name."""
+
+    def __init__(self, stop: bool) -> None:
+        self.stop = stop
 
     async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
         cache = Path(cwd) / SHARED_CACHE
         cache.mkdir(parents=True, exist_ok=True)
-        (cache / "done.json").write_text('{"v": 7}', encoding="utf-8")
+        if not self.stop:
+            (cache / "done.json").write_text('{"v": 7}', encoding="utf-8")
+            return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=1.0)
         (cache / "next.json.lock").write_text("x", encoding="utf-8")
         (cache / "next.json.tmp123").write_text("{", encoding="utf-8")
+        (cache / "result.partial").write_text("half", encoding="utf-8")
+        (cache / "result.npy").write_bytes(b"NUMPY-cut")
         return ExecutionResult(returncode=-9, stdout="", stderr="", duration_s=1.0, timed_out=True)
 
 
-def test_a_value_a_stopped_setting_finished_is_kept_for_the_next(tmp_path: Path) -> None:
+def test_a_value_a_finished_setting_wrote_is_kept_and_what_a_stopped_one_left_goes_whatever_its_name(tmp_path: Path) -> None:
     root = _quest(tmp_path)
-    ex = OutsideExecutor(_WritesValue(), root, base=tmp_path / "s", log=logging.getLogger("t"))
+    ex = OutsideExecutor(_WritesValue(stop=False), root, base=tmp_path / "s", log=logging.getLogger("t"))
     asyncio.run(ex.execute(["python", "x"], cwd=root, timeout_s=5))
+    ex = OutsideExecutor(_WritesValue(stop=True), root, base=tmp_path / "s", log=logging.getLogger("t"))
+    asyncio.run(ex.execute(["python", "y"], cwd=root, timeout_s=5))
     cache = root / SHARED_CACHE
     assert (cache / "done.json").read_text(encoding="utf-8") == '{"v": 7}', "a finished value is kept"
-    assert not (cache / "next.json.lock").exists() and not (cache / "next.json.tmp123").exists()
+    for name in ("next.json.lock", "next.json.tmp123", "result.partial", "result.npy"):
+        assert not (cache / name).exists(), name
 
 
-def test_a_stopped_trials_finished_shared_values_survive_its_cleanup(tmp_path: Path) -> None:
+def test_a_stopped_trials_files_in_the_shared_folder_stay_only_when_a_finished_setting_recorded_them(tmp_path: Path) -> None:
     root = _quest(tmp_path)
-    before = outside_run.working_files(root)
     cache = root / SHARED_CACHE
     cache.mkdir(parents=True)
-    for name in ("a.npz", "b.json", "b.json.lock", "c.npz.tmp99", "d.12.tmp"):
+    start = outside_run.working_states(root)
+    (cache / "a.npz").write_text("whole", encoding="utf-8")  # written by a setting that finished
+    outside_run.record_finished(root, start)
+    before = outside_run.working_files(root) - {f"{SHARED_CACHE}/a.npz"}
+    for name in ("b.json", "b.json.lock", "c.npz.tmp99", "d.12.tmp", "result.partial", "result.npy"):
         (cache / name).write_text("x", encoding="utf-8")
     (root / "data" / "made.tmp").write_text("x", encoding="utf-8")
     gone = outside_run.remove_created_since(root, before)
-    assert sorted(gone) == sorted([f"{SHARED_CACHE}/b.json.lock", f"{SHARED_CACHE}/c.npz.tmp99",
-                                   f"{SHARED_CACHE}/d.12.tmp", "data/made.tmp"])
-    assert (cache / "a.npz").exists() and (cache / "b.json").exists()
+    assert sorted(gone) == sorted([f"{SHARED_CACHE}/{n}" for n in ("b.json", "b.json.lock", "c.npz.tmp99", "d.12.tmp",
+                                                                   "result.partial", "result.npy")] + ["data/made.tmp"])
+    assert (cache / "a.npz").exists()
 
 
 def test_a_folder_of_other_code_that_cannot_be_moved_aside_is_not_shared(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

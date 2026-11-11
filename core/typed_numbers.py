@@ -6,7 +6,8 @@ each number only one question, is it
 
 * a number of the frozen plan (a numeric field of ``needs/FROZEN_PROTOCOL.json``, or a number in one of its formulas) or of the
   topic, written exactly as the plan writes it (a percent may be written as the plan's fraction times 100), or
-* a structural label (``Figure 2``, ``Section 3``, ``Table 1``, ``[4]``, a heading's or list's number), or
+* a structural label (``Figure 2``, ``Section 3``, ``Table 1``, ``[4]``, a heading's or list's number; not a percentile's
+  or a confidence level's number), or
 * a whole number from 0 to 10 inside math (an exponent, an index, the 2 in ``sqrt(2(n-1))``)?
 
 Anything else is a number the writer typed that FI did not fill, and is reported. There is no tolerance, no "near a record
@@ -21,16 +22,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from core.figure_facts import RUN_FIGURE_RE
 
 #: What FI puts where a result key it cannot fill stood (:mod:`core.paper_facts`); a typed number is never replaced.
 REMOVED = "[number removed]"
-#: The level of every interval FI computes and states (``95% t interval``, ``95% Wilson interval``, :mod:`core.paper_values`):
-#: the writer who names the level of FI's intervals types a number FI itself states in each of them.
-INTERVAL_LEVEL_PERCENT = Decimal(95)
 #: The most sentences one report names; the rest are counted in one more line.
 MAX_SENTENCES = 30
 #: Plan fields whose numbers are run facts: the paper gets them through placeholders, never typed.
@@ -71,8 +69,6 @@ _LABEL_WORDS = (r"(?:Figures?|Figs?\.|Tables?|Eqs?\.|Equations?|Sections?|§§?|
                 r"Supplement\w*)[ \t\u00a0]*\(?")
 _LABEL = re.compile(_LABEL_WORDS + r"$")
 _LABEL_LIST = re.compile(_LABEL_WORDS + r"(?:\d+[a-z]?[ \t]*(?:,|and|&|or|to|\u2013|-)[ \t]*)+$")
-#: A quantile level written as a name of the method, "the 97.5th percentile": a label of the level, not a value.
-_LEVEL_AFTER = re.compile(r"(?:st|nd|rd|th)[ \t-]*(?:percentile|quantile)", re.I)
 _CITE = re.compile(r"\[\s*W?\d+(?:\s*[–-]\s*\d+)?(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*\s*\]")
 
 
@@ -268,7 +264,7 @@ def numbers(markdown: str) -> list[Typed]:
             token=(markdown or "")[s:e].strip(), start=s, end=e, value=value, pct=bool(m.group("pct")),
             integer=not m.group("frac") and exp == 0 and not m.group("pct"),
             in_math=any(x <= s < y for x, y in maths),
-            structural=label or any(x <= s < y for x, y in cites) or bool(_LEVEL_AFTER.match(text, e)),
+            structural=label or any(x <= s < y for x, y in cites),
             sentence=_plain(sentence), cited=bool(_CITE.search(text[clause_start:clause_end])),
             power_of_ten=bool(_POWER_OF_TEN.search(t[max(0, m.start() - 8):m.start()]))))
     return out
@@ -347,21 +343,6 @@ def plan_numbers(protocol: dict[str, Any] | None, topic: str = "") -> frozenset[
     return frozenset(found)
 
 
-def _rounds_to(n: Typed, plan: frozenset[Decimal]) -> bool:
-    """The number is a number of the plan written to fewer decimals (``16.118`` for a plan's ``16.11809565``): the plan's
-    value rounded to the places the writer wrote is the writer's number. Needs four significant digits, so a short number
-    never matches by chance."""
-    if n.pct or n.integer:
-        return False
-    exp = n.value.as_tuple().exponent
-    if not isinstance(exp, int) or exp >= 0 or len(n.value.as_tuple().digits) < 4:
-        return False
-    step = Decimal(1).scaleb(exp)
-    return any(p != n.value and p.as_tuple().exponent != 0 and
-               any(p.quantize(step, rounding=r) == n.value for r in (ROUND_HALF_UP, ROUND_HALF_EVEN))
-               for p in plan if p.is_finite() and abs(p) < Decimal(10) ** 15)
-
-
 def allowed(n: Typed, plan: frozenset[Decimal], facts: frozenset[Decimal] = frozenset()) -> bool:
     """Rule R1 for one typed number. ``facts`` are the numbers of FI's own records of the run (how many settings and trials,
     the sizes of the plan's grid: :func:`core.paper_facts.run_numbers`), which the writer may state as FI states them."""
@@ -370,11 +351,11 @@ def allowed(n: Typed, plan: frozenset[Decimal], facts: frozenset[Decimal] = froz
     if n.power_of_ten and n.value == n.value.to_integral_value() and abs(n.value) < 400 and Decimal(10) ** int(n.value) in plan:
         return True  # ``10^{-12}`` writes the plan's 1e-12
     known = plan | facts
+    # A KEPT EXCEPTION (maintainer decision pending): a number equal, digit for digit, to a number of the plan or of FI's
+    # records passes as that number, though a result that happens to equal a plan number is traced as the plan's. Nothing
+    # looser passes: not a "95%" (the level is FI's ``{{interval_level}}``), not a number that only rounds to a plan number
+    # (a rounded constant or quantile is a ``{{calc:}}``), and not an "Nth percentile" (its level is a number to trace).
     if n.value in known or (n.pct and n.value / 100 in known):
-        return True
-    if n.pct and n.value == INTERVAL_LEVEL_PERCENT:
-        return True
-    if _rounds_to(n, plan):
         return True
     return n.in_math and n.integer and abs(n.value) <= 10
 
@@ -422,7 +403,8 @@ def hits(markdown: str, plan: frozenset[Decimal], name: str = "paper_record_mism
             "leave it out or say it in words. A number of the method is written exactly as the plan writes it; one the plan "
             "does not state but that is computed from the plan's numbers (a quantile, a confidence level, a reference value, "
             "a count from the grid, a cutoff or bound from a formula of the plan's constants, also one shown after an "
-            "equals sign) is written as {{calc:EXPR}} with the plan's numbers in it, which FI computes. "
+            "equals sign) is written as {{calc:EXPR}} with the plan's declared constant names in it, which FI computes; the "
+            "confidence level of FI's intervals is written {{interval_level}}% (FI fills the number). "
             f"— “{sentence[:400]}”")
     rest = sum(len(tokens) for _s, tokens in rep.sentences[MAX_SENTENCES:])
     if rest:

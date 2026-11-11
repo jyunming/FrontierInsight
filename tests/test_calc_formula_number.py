@@ -24,10 +24,12 @@ def test_the_patch_prompt_and_the_hit_message_name_a_cutoff_from_a_formula() -> 
 
 
 def test_a_formula_value_is_filled_from_the_plans_numbers_and_an_unplanned_number_is_not() -> None:
-    ok = paper_values.calc("40 / (2.5 * 1.6) - 1", PLAN, TOPIC)
+    ok = paper_values.calc("area / (flow * gain) - 1", PLAN, TOPIC)
     assert ok.filled and ok.text == "9"
-    bad = paper_values.calc("40 / (2.5 * 1.7) - 1", PLAN, TOPIC)  # 1.7 is no number of the plan
+    bad = paper_values.calc("area / (flow * 1.7) - 1", PLAN, TOPIC)  # 1.7 is no number of the plan
     assert not bad.filled
+    # the plan's digits typed instead of its names are refused: only the name carries the plan's value
+    assert not paper_values.calc("40 / (2.5 * 1.6) - 1", PLAN, TOPIC).filled
     # a typed result-looking number that no plan number gives is still not allowed
     assert typed_numbers.hits("The cutoff is 9.4 here.", typed_numbers.plan_numbers(PLAN, TOPIC))
 
@@ -46,7 +48,7 @@ def test_the_writer_is_told_every_function_a_calc_may_call() -> None:
 
 def test_a_normal_tail_power_is_filled_from_the_plans_numbers() -> None:
     plan = {"constants": {"alpha": 0.05, "shift": 2.5}}
-    got = paper_values.calc("1 - ndtr(ndtri(1 - 0.05) - 2.5)", plan, "")
+    got = paper_values.calc("1 - ndtr(ndtri(1 - alpha) - shift)", plan, "")
     assert got.filled and got.text == "0.8038"
 
 

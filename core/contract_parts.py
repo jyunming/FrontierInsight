@@ -353,20 +353,29 @@ def _worked_from(protocol: dict[str, Any], ident: str) -> list[str]:
                  if isinstance(d, dict) and d.get("id") == ident and d.get("role", "result") == "result"), [])
 
 
-def _refined_by(protocol: dict[str, Any], planned: str, answered: str) -> str:
-    """The plan's own ``by`` (``planned``), unless the answer names a derived result worked out from the very result the
-    plan mapped: a number computed from a result (a crossing, a rate, an order) is the quantity itself where the result is only
-    what it was computed from. Any other answer leaves the plan's map as it is."""
+def _answers_question(protocol: dict[str, Any], ident: str, question: str) -> bool:
+    """Whether FI's record of the names step says the derived result ``ident`` was made for the question ``question``
+    (``for_question`` on the entry, written by :func:`_apply_names` from the names step's own reply)."""
+    return any(isinstance(d, dict) and d.get("id") == ident and d.get("asked") and d.get("for_question") == question
+               for d in protocol.get("derived") or [])
+
+
+def _better_candidate(protocol: dict[str, Any], planned: str, answered: str) -> str:
+    """The result the answer names (``metric:<id>``) when FI's own record shows it is a derived result worked out from the very
+    result the plan mapped (a crossing, a rate, an order computed from it), else ``""``. It is only a candidate: the plan model's
+    map stands, and the candidate is listed beside it in the quality report. A second model call replaces the first one's map
+    only for a derived result the names step made for that very question (:func:`_answers_question`)."""
     head, _s, name = planned.partition(":")
     new_head, _s, new_name = answered.partition(":")
     if head.strip() == "metric" and new_head.strip() == "metric" and name.strip() in _worked_from(protocol, new_name.strip()):
         return f"metric:{new_name.strip()}"
-    return planned
+    return ""
 
 
 def _unit_key(text: Any) -> str:
-    """A unit as written, compared by its letters only: case and spaces do not matter, and a pure number (``""``) is ``1``."""
-    return "".join(str(text if text is not None else "").lower().split()) or "1"
+    """A unit as written, compared by its characters only: spaces do not matter, case does (``m`` is a metre, ``M`` a molar), and a
+    pure number (``""``) is ``1``. FI parses no unit algebra: two spellings of one unit give a note, which only discloses."""
+    return "".join(str(text if text is not None else "").split()) or "1"
 
 
 def _unit_of(design: dict[str, Any], result: str, stated: Any) -> Any:
@@ -384,11 +393,6 @@ def _differ(asked_in: Any, got: Any) -> tuple[str, str] | None:
     if asked_in is None or got is None or _unit_key(asked_in) == _unit_key(got):
         return None
     return str(asked_in).strip() or "1", str(got).strip() or "1"
-
-
-def _same_unit(asked_in: Any, got: Any) -> bool:
-    """Whether both units are given and are the same unit."""
-    return asked_in is not None and got is not None and _unit_key(asked_in) == _unit_key(got)
 
 
 def unit_gaps(row: Any, planned: str, design: dict[str, Any]) -> dict[str, tuple[str, str] | None]:
@@ -450,20 +454,20 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
         if not q.get("by") and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
             out.append(f"`{ident}`: `by` must be `metric:<id>` with an id of {', '.join(ids)}, `equation:<id>` with an id of "
                        f"{', '.join(sorted(eqs)) or '(none)'}, or `none`")
-        # The unit the question asks in against the unit of the result it will be answered by: the plan's map when the answer
-        # keeps it, else the result the answer names. A change of the plan's map is taken only in _apply_answers, when the
-        # plan's own result is in another unit.
+        # The unit the question asks in against the unit of the result it will be answered by: the plan's map where the plan
+        # has one (a difference of units never moves it), else the result the answer names.
         planned = q.get("by", "")
-        kept = bool(planned) and by in ("", planned)
         gaps = unit_gaps(row, planned, design)
-        units = gaps["planned"] if kept else gaps["chosen"] if not planned or gaps["planned"] else None
-        if units:
-            result = planned if kept else by
-            if conflicts is None:
-                out.append(f"`{ident}`: the question asks for a quantity in `{units[0]}`, but `{result}` is in `{units[1]}`; "
-                           f"answer a result that is in `{units[0]}`, or `none` (the paper then states both units and converts nothing)")
-            else:
-                conflicts[ident] = units  # the last ask: both units are stated in the paper, nothing is converted
+        units = gaps["planned"] if planned else gaps["chosen"]
+        if units and conflicts is not None:
+            conflicts[ident] = units  # the last ask: both units are stated in the paper, nothing is converted
+        elif units and not planned:
+            out.append(f"`{ident}`: the question asks for a quantity in `{units[0]}`, but `{by}` is in `{units[1]}`; "
+                       f"answer a result that is in `{units[0]}`, or `none` (the paper then states both units and converts nothing)")
+        elif units and by in ("", planned):  # an answer naming another result changes nothing, so only this one is asked again
+            out.append(f"`{ident}`: the question asks for a quantity in `{units[0]}`, but `{planned}` (the plan's answer) is in `{units[1]}`; "
+                       "if a unit is mistaken or written in another notation than the rest, correct it, else answer as before "
+                       "(the paper then states both units and converts nothing)")
         stat = row.get("statistic")
         if stat not in (None, "") and stat not in STATISTICS:
             out.append(f"`{ident}`: `statistic` must be one of {', '.join(STATISTICS)}")
@@ -490,7 +494,9 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
 
 def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any],
                    asked: dict[str, dict[str, str]], conflicts: dict[str, tuple[str, str]] | None = None) -> dict[str, Any]:
-    """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept), and
+    """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept, except for a
+    derived result the names step made for that very question; any other derived result the model names that is worked out from
+    it is recorded as ``other_candidate``, disclosed and never used), and
     an entry added where the plan had none and the model named a result; ``none`` adds nothing. Where the result an entry ends
     on is in another unit than the question asks in, the entry carries ``unit_conflict`` (both units): the paper states them
     beside the answer, and FI converts nothing."""
@@ -510,13 +516,15 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
                 m["statistic"] = stat
             else:
                 m.pop("statistic", None)  # the answer is the value: an earlier entry's bias or sd no longer holds
-            before_by = str(m.get("by") or "")
-            m["by"] = _refined_by(design["protocol"], before_by, by)
-            refined = m["by"] != before_by  # the answer's own result (worked out from the plan's) is the one used in the end
             m.pop("unit_conflict", None)
-            if gone and not (ident in (conflicts or {}) or by == "none") and _same_unit(row.get("unit"), _unit_of(design, by, row.get("by_unit"))):
-                m["by"] = by  # the plan's result is in another unit and the answer names a result in the question's unit
-            elif ident in (conflicts or {}) or gone or refined:
+            m.pop("other_candidate", None)
+            refined = False
+            if candidate := _better_candidate(design["protocol"], str(m.get("by") or ""), by):
+                if _answers_question(design["protocol"], candidate.partition(":")[2], ident):
+                    m["by"], refined = candidate, True  # the names step made this derived result for this very question
+                else:
+                    m["other_candidate"] = candidate  # disclosed only: the plan's map stands
+            if ident in (conflicts or {}) or gone or refined:  # a unit difference is only a note: it never moves the plan's map
                 note = _unit_gap(design, row, str(m["by"]), planned, by)
                 if note:
                     m["unit_conflict"] = note
@@ -528,13 +536,21 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
 
 
 def _prompt(part: str, templates: dict[str, string.Template], design: dict[str, Any], names: dict[str, str],
-            problems: list[str], last: str, derived: list[str]) -> str:
+            problems: list[str], last: str, derived: list[str], questions: dict[str, dict[str, str]] | None = None) -> str:
     p = design.get("protocol") or {}
     return templates[f"plan_{part}"].substitute(
         method=_short(design.get("method")), settings=_settings_lines(p), results=_results_lines(p),
         names=_names_lines(names), equations=", ".join(sorted(_contract._model_equation_ids(p))) or "(none)",
         derived=", ".join(derived) or "(none)", again=_problems_text(problems, last),
-        formula_language=_forms.EXPECTED_FORMULA_LANGUAGE)
+        formula_language=_forms.EXPECTED_FORMULA_LANGUAGE, questions=_questions_lines(questions))
+
+
+def _questions_lines(questions: dict[str, dict[str, str]] | None) -> str:
+    """The questions the topic asks, one line each, for the names step (``""`` when none): a number that answers one is tied to it."""
+    if not questions:
+        return ""
+    return ("\nThe questions the topic asks (a number you answer \"derived\" may be the answer to one of them):\n"
+            + "\n".join(f"- {i}: {q['name']}" for i, q in questions.items()) + "\n")
 
 
 def _apply_roles(p: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
@@ -551,7 +567,8 @@ def _apply_roles(p: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
     return {**p, "metrics": metrics}
 
 
-def _apply_names(p: dict[str, Any], answer: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _apply_names(p: dict[str, Any], answer: dict[str, Any],
+                 questions: dict[str, dict[str, str]] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """``(kept, to_check)``. A name never becomes a result every run must return: a quantity computed afterwards, or a
     reference FI computes from a formula of the settings, is a ``derived`` entry; a name the model calls a result, or a
     reference by a model equation, is recorded in ``named_results`` (the contract's notes) and nothing requires it. ``to_check``
@@ -563,7 +580,9 @@ def _apply_names(p: dict[str, Any], answer: dict[str, Any]) -> tuple[dict[str, A
         if _contract.is_family_label(row):  # not a result: another name for results already declared
             named.append({"id": name, "answer": "label", "what": what, "of": list(row["inputs"])})
         elif row["answer"] == "derived":
-            derived.append({"id": name, "inputs": list(row["inputs"]), "role": "result", "label": what, "asked": True})
+            link = row.get("question")  # a question the topic asks, tied only when it is one of them
+            derived.append({"id": name, "inputs": list(row["inputs"]), "role": "result", "label": what, "asked": True,
+                            **({"for_question": link} if isinstance(link, str) and link in (questions or {}) else {})})
         elif row["answer"] == "reference" and isinstance(row.get("formula"), str) and row["formula"].strip():
             formula = row["formula"].strip()
             derived.append({"id": name, "inputs": [], "role": "reference", "formula": formula, "label": what, "asked": True})
@@ -601,7 +620,7 @@ def strip_fi_keys(design: Any) -> Any:
     protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "figure_declarations")}
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
-            protocol[key] = [{k: v for k, v in r.items() if k not in ("asked", "as_planned")} if isinstance(r, dict) else r
+            protocol[key] = [{k: v for k, v in r.items() if k not in ("asked", "as_planned", "for_question")} if isinstance(r, dict) else r
                              for r in protocol[key]]
     return design if protocol == design["protocol"] else {**design, "protocol": protocol}
 
@@ -691,7 +710,8 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 reply = await ask(_formulas_prompt(templates, current, faults, problems, last) if part == "formulas" else
                                   _figures_prompt(templates, current, faults, problems, last) if part == "figures" else
                                   _answers_prompt(templates, current, faults, problems, last) if part == "answers" else
-                                  _prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids))
+                                  _prompt(part, templates, current, names if part == "names" else {}, problems, last, derived_ids,
+                                          topic_quantities if part == "names" else None))
                 last = reply or ""
                 got = parse(reply) if reply else None
                 if not isinstance(got, dict):
@@ -720,7 +740,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 elif part == "answers":
                     kept, checked = _apply_answers(p, current, value, faults, conflicts), None
                 elif part == "names":
-                    kept, checked = _apply_names(p, value)
+                    kept, checked = _apply_names(p, value, topic_quantities)
                 else:
                     kept, checked = _apply_comparisons(p, value["comparisons"]), None
                 fixed, why = _plan.normalize_protocol(checked if checked is not None else kept)

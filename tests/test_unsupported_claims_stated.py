@@ -119,3 +119,61 @@ async def test_the_last_step_before_delivery_states_the_claims_whatever_route_br
     out = await eng._node_citation_check({"paper_md": str(path)})  # type: ignore[arg-type]
     assert out["citation_next"] == "done"
     assert f'"{FIRST}"' in path.read_text(encoding="utf-8")
+
+
+# A claim kept by the exact passage the check stored for it, not by its wording (backlog -434, G32).
+_PASSAGE = "The cooling rate doubles whenever the fan speed is halved"
+_REWORDED = "Halving fan speed leads to a twofold gain in how fast heat leaves"
+
+
+def _grounding_with_passage(claim: str, passage: str) -> dict:
+    g = _grounding(claim)
+    g["claims"][0]["where"] = [{"passage": passage, "section": "Results"}]
+    return g
+
+
+def test_a_claim_reworded_after_the_check_is_still_listed_by_its_stored_passage(tmp_path: Path) -> None:
+    """Old code: the claim's wording was matched with the paper, so a reworded claim was dropped from the Limitations."""
+    eng, path = _paper(tmp_path)
+    n = eng._state_unsupported_claims(  # type: ignore[arg-type]
+        {"paper_md": str(path), "claim_grounding": _grounding_with_passage(_REWORDED, _PASSAGE)})
+    text = path.read_text(encoding="utf-8")
+    assert n == 1 and f'"{_REWORDED}"' in text.split("## Limitations")[1]
+
+
+def test_a_claim_whose_stored_passage_is_gone_from_the_paper_is_not_listed(tmp_path: Path) -> None:
+    eng, path = _paper(tmp_path)
+    n = eng._state_unsupported_claims(  # type: ignore[arg-type]
+        {"paper_md": str(path),
+         "claim_grounding": _grounding_with_passage(_REWORDED, "The pump never failed during any trial of the study")})
+    assert n == 0 and "not found supported" not in path.read_text(encoding="utf-8")
+
+
+def test_a_claim_in_the_limitations_block_only_is_not_found_by_its_passage(tmp_path: Path) -> None:
+    eng, path = _paper(tmp_path)
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding(FIRST)})  # type: ignore[arg-type]
+    # the writer removes the sentence; FI's own Limitations block still quotes it and must not keep it alive
+    path.write_text(path.read_text(encoding="utf-8").replace(f"{FIRST}. ", "", 1), encoding="utf-8")
+    n = eng._state_unsupported_claims(  # type: ignore[arg-type]
+        {"paper_md": str(path), "claim_grounding": _grounding_with_passage(_REWORDED, FIRST)})
+    assert n == 0 and "not found supported" not in path.read_text(encoding="utf-8")
+
+
+def test_an_unchanged_claim_with_a_passage_is_listed_as_before(tmp_path: Path) -> None:
+    eng, path = _paper(tmp_path)
+    n = eng._state_unsupported_claims(  # type: ignore[arg-type]
+        {"paper_md": str(path), "claim_grounding": _grounding_with_passage(FIRST, FIRST)})
+    text = path.read_text(encoding="utf-8")
+    assert n == 1 and f'"{FIRST}"' in text and text.count("not found supported") == 1
+
+
+def test_an_earlier_unsupported_claim_is_carried_by_its_stored_passage_when_its_wording_is_not_in_the_paper() -> None:
+    """A claim the check wrote as a paraphrase, with the paper's own sentence stored as its passage, is carried over to the
+    next check by that passage: a later check that leaves it out cannot clear it while the passage is still there."""
+    from core.engine import _unsupported_still_in
+
+    earlier = [{"claim": "The method applies to every design", "basis": "unsupported", "evidence": "no result shows it",
+                "where": [{"passage": FIRST}]}]
+    kept = _unsupported_still_in(PAPER, earlier, [])
+    assert [c["claim"] for c in kept] == ["The method applies to every design"]
+    assert _unsupported_still_in(PAPER.replace(FIRST, "The fan was run at three speeds"), earlier, []) == []

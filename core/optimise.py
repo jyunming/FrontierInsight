@@ -229,16 +229,13 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
 
 
 def _below_code(code: Path) -> list[Path]:
-    """The files in folders below ``code/`` the simulation may use (the model's package, a parameter file in it): not
-    notes (``*.md``), the package's unit tests (``code/tests/``), caches or hidden folders (``__pycache__``, ``.git``,
-    ``.pytest_cache``)."""
-    out = []
-    for p in code.rglob("*"):
-        parts = p.relative_to(code).parts
-        if (p.is_file() and len(parts) > 1 and p.suffix.lower() != ".md" and parts[0] != "tests"
-                and not any(part == "__pycache__" or part.startswith(".") for part in parts)):
-            out.append(p)
-    return sorted(out)
+    """The files in folders below ``code/`` the simulation may use (the model's package, a parameter file or a note in it):
+    the same list every other key uses (:func:`core.code_layout.simulation_inputs`), so no file is left out by its suffix
+    or a leading dot; not the package's unit tests, the analysis FI writes or tool caches."""
+    from . import code_layout as _code_layout
+
+    return sorted(p for p in _code_layout.simulation_inputs(code.parent, code)
+                  if p.is_relative_to(code) and len(p.relative_to(code).parts) > 1)
 
 
 def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:

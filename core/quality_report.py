@@ -529,10 +529,26 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
             out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     out.extend(_unit_problems(q))
+    out.extend(_candidate_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
     return out
+
+
+def _candidate_problems(q: _Quest) -> list[dict[str, str]]:
+    """A question for which the answers part named a result worked out from the plan's own result for it (``other_candidate``
+    on the plan's ``topic_map`` entry), listed once. The paper answers by the plan's result; the other may be the number the
+    question asks for, which only a person can say, so it is ``disclosed``."""
+    from . import paper_facts as _paper_facts
+
+    try:
+        found = _paper_facts.other_candidates(q.root)
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return []
+    return [_problem("plan", f"the question \"{_one(c['name'], 80)}\" is answered by the plan's result `{c['planned']}`; the answers step "
+                     f"names `{c['candidate']}`, worked out from it, which may be what the question asks for, and FI kept the plan's result",
+                     "FI's plan check", "disclosed", ".fi/contract_parts.json") for c in found]
 
 
 def _unit_problems(q: _Quest) -> list[dict[str, str]]:

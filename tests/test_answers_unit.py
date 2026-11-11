@@ -1,5 +1,5 @@
 """The answers part (core/contract_parts.py) asks the plan's model, for each quantity, the unit the topic asks it in and the unit
-of the result it names (and of the result the plan maps it to); a result in another unit is asked again, and a quantity still in
+of the result it names (and of the result the plan maps it to); a result in another unit is asked again (to correct a mistaken unit), and a quantity still in
 two units keeps the plan's result with both units (``unit_conflict``): the paper answers by that result and states both units. The fake model is a function. Neutral made-up study: a pond."""
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def test_a_plan_map_in_another_unit_than_the_question_is_asked_again_with_both_u
     good = {"answers": {"Q1": {"unit": "m", "by": "none", "plan_unit": "1"}}}
     out, seen = _ask(design, [bad, good], ASKED)
     assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == 2
-    assert "question asks for a quantity in `m`, but `metric:algae_peak` is in `1`" in seen[1]
+    assert "question asks for a quantity in `m`, but `metric:algae_peak` (the plan's answer) is in `1`" in seen[1]
     row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
     assert row["unit_conflict"] == GAP
 
@@ -39,13 +39,36 @@ def test_a_plan_map_still_in_another_unit_after_the_last_ask_is_kept_as_not_answ
     assert row["unit_conflict"] == GAP
 
 
-def test_a_result_in_the_questions_unit_replaces_a_plan_map_in_another_unit() -> None:
+def test_a_result_in_the_questions_unit_does_not_replace_a_plan_map_in_another_unit() -> None:
+    """A unit difference never moves the plan's map: the plan's result stands and both units are stated."""
     design = _map([{"item": "Q1", "by": "metric:algae_peak"}])
     reply = {"answers": {"Q1": {"unit": "m", "by": "metric:bloom", "by_unit": "m", "plan_unit": "1"}}}
-    out, seen = _ask(design, [reply], ASKED)
-    assert len(seen) == 1
+    out, seen = _ask(design, [reply] * cp.MAX_ASKS, ASKED)
+    assert out.parts["answers"]["valid"]
+    assert len(seen) == 1  # the answer names another result: nothing it says moves the map, so it is not asked again
     row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
-    assert row["by"] == "metric:bloom" and "unit_conflict" not in row
+    assert row["by"] == "metric:algae_peak" and row["unit_conflict"] == GAP
+
+
+def test_a_mean_in_one_unit_is_not_swapped_for_another_result_in_the_questions_unit() -> None:
+    """Planted: the question is about a mean latency; the plan maps the mean (ms), the model offers a maximum (s) that is in the
+    question's unit. The number printed must stay the mean."""
+    p = {**PROTOCOL, "metrics": [{**PROTOCOL["metrics"][0], "id": "latency_mean", "physical_unit": "ms"},
+                                 {**PROTOCOL["metrics"][1], "id": "latency_max", "physical_unit": "s"}],
+         "topic_map": [{"item": "Q1", "by": "metric:latency_mean"}]}
+    design = {**DESIGN, "protocol": p}
+    asked = {"Q1": {"name": "mean latency", "stated": "report the mean", "by": "metric:latency_mean"}}
+    row = cp._apply_answers(p, design, {"Q1": {"unit": "s", "by": "metric:latency_max", "by_unit": "s"}}, asked)["topic_map"][0]
+    assert row["by"] == "metric:latency_mean" and row["unit_conflict"]["asked"] == "s" and row["unit_conflict"]["result"] == "ms"
+
+
+def test_a_metre_and_a_molar_are_not_the_same_unit() -> None:
+    design = _map([{"item": "Q1", "by": "metric:algae_peak"}])
+    reply = {"answers": {"Q1": {"unit": "m", "by": "metric:algae_peak", "by_unit": "M"}}}
+    out, _seen = _ask(design, [reply] * cp.MAX_ASKS, ASKED)
+    row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
+    assert row["unit_conflict"] == {"asked": "m", "result": "M", "declared": False}
+    assert cp._differ("m", "M") == ("m", "M") and cp._differ("m s", "m  s") is None  # spaces are ignored, case is not
 
 
 def test_none_or_another_result_leaves_a_plan_map_in_the_same_unit_as_it_was() -> None:
@@ -58,9 +81,9 @@ def test_none_or_another_result_leaves_a_plan_map_in_the_same_unit_as_it_was() -
         assert row["by"] == "metric:algae_peak" and "unit_conflict" not in row
 
 
-def test_a_plan_map_kept_in_the_same_unit_is_not_flagged_and_spelling_of_case_and_spaces_is_ignored() -> None:
+def test_a_plan_map_kept_in_the_same_unit_is_not_flagged_and_spaces_are_ignored() -> None:
     design = _map([{"item": "Q1", "by": "metric:algae_peak"}])
-    reply = {"answers": {"Q1": {"unit": "Mg / L", "by": "metric:algae_peak", "by_unit": "mg/l"}}}
+    reply = {"answers": {"Q1": {"unit": "mg / L", "by": "metric:algae_peak", "by_unit": "mg/L"}}}
     out, seen = _ask(design, [reply], ASKED)
     assert len(seen) == 1 and out.parts["answers"]["valid"]
     assert "unit_conflict" not in next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
@@ -98,7 +121,7 @@ def test_the_paper_answers_by_the_result_and_states_both_units(tmp_path, monkeyp
     assert "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text  # the known positive is unchanged
 
 
-def test_a_replacement_whose_unit_is_not_stated_does_not_replace_the_plans_map() -> None:
+def test_a_replacement_never_replaces_the_plans_map_whatever_its_unit() -> None:
     p = {**PROTOCOL, "metrics": [*PROTOCOL["metrics"], {"id": "depth", "kind": "mean", "estimand": "pond depth", "unit": "one pond run"}],
          "topic_map": [{"item": "peak algae", "by": "metric:bloom"}]}
     design = {**DESIGN, "protocol": p}
@@ -106,7 +129,7 @@ def test_a_replacement_whose_unit_is_not_stated_does_not_replace_the_plans_map()
     answer = {"Q1": {"unit": "m", "plan_unit": "1", "by": "metric:depth"}}
     row = cp._apply_answers(p, design, answer, asked)["topic_map"][0]
     assert row["by"] == "metric:bloom" and row["unit_conflict"]["asked"] == "m"
-    answer["Q1"]["by_unit"] = "m"
+    answer["Q1"]["by_unit"] = "m"  # a unit difference alone never moves the plan's map
     row = cp._apply_answers(p, design, answer, asked)["topic_map"][0]
-    assert row["by"] == "metric:depth" and "unit_conflict" not in row
+    assert row["by"] == "metric:bloom" and row["unit_conflict"]["asked"] == "m"
 

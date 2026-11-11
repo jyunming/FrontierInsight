@@ -567,6 +567,14 @@ def package_sources(code_dir: Path) -> dict[str, str]:
 #: Folders a run writes into (caches, results, figures). They are never a simulation's input: a key that covered them
 #: would change with every run and never be reused.
 GENERATED_FOLDERS = ("cache", "results", "figures", "raw", "__pycache__")
+#: Tool caches that are left out of the key by their exact name: nothing the simulation computes comes from them. Every
+#: other hidden file or folder in ``code/`` (a ``.config/`` of parameters, a ``.env``) is a file the run can see.
+TOOL_CACHES = ("__pycache__", ".git", ".pytest_cache", ".venv")
+#: The notes FI writes and rewrites itself at the top of ``code/`` (core/code_project.py, core/code_layout.py; the same
+#: project files :data:`core.changelog.DOCUMENTATION` names as never read by FI's own runs). ``CHANGELOG.md`` is filled in
+#: after a run finishes, so a key that covered it would no longer match the run it was made for. A note the coding agent
+#: writes (``model/parameters.md``) is not here: the agent's changes to these three are discarded (``FI_OWNED_FILES``).
+FI_NOTES = ("README.md", "CHANGELOG.md", "METHODS.md")
 #: The analysis script, which reads what the simulation wrote and changes nothing the simulation computes.
 ANALYSIS_SCRIPT = "experiment.py"
 #: FI's reader of the trial record (core/frame_table.py, written beside the frame's runtime): the analysis uses it, the trials do not.
@@ -597,7 +605,10 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
     the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`) and its drawing calls (:data:`FIGURE_CALLS_SCRIPT`), the rest of the analysis FI
     writes (``derive.py`` with FI's frame and ``fi_figures.py`` with FI's text; FI's calculator ``fi_core/`` by its name), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
-    notes (``.md``), caches (``__pycache__``), hidden files and folders, and what a run writes (:data:`GENERATED_FOLDERS`).
+    the three notes FI writes itself (:data:`FI_NOTES`), tool caches by their exact name (:data:`TOOL_CACHES`), and what a run writes (:data:`GENERATED_FOLDERS`) except a
+    ``.py`` file, which is code wherever it sits. Every other note (``.md``) and hidden file or folder is listed: a run can read
+    them, and a key that left one out would reuse a result its change should have made again; a recompute is the only
+    cost of listing too much.
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
     any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
     :func:`core.trial_runner._run_key`, :func:`core.optimise._run_key` all hash these files)."""
@@ -609,11 +620,13 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
             if not path.is_file():
                 continue
             parts = path.relative_to(code_dir).parts
-            if any(p.startswith(".") or p in GENERATED_FOLDERS for p in parts):
+            if any(p in TOOL_CACHES for p in parts):
+                continue
+            if path.suffix != ".py" and any(p in GENERATED_FOLDERS for p in parts):
                 continue
             if parts[0] in (TESTS_DIR, SKILLS_FOLDER, FI_CORE_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
                 continue
-            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,), (FIGURE_CALLS_SCRIPT,)) or path.suffix.lower() == ".md":
+            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,), (FIGURE_CALLS_SCRIPT,)) or (len(parts) == 1 and parts[0] in FI_NOTES):
                 continue
             if path.suffix == ".py" and parts[0] in _ANALYSIS_PARTS and _analysis_part(code_dir, "/".join(parts)):
                 continue  # the analysis FI writes (derive.py, its figure step, its formula calculator): a repair of it runs no trial again

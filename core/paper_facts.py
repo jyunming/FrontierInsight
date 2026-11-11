@@ -13,7 +13,9 @@ flagged. So the writer no longer types these facts at all:
   run time and the topic's time limit with the verdict. FI puts it at the end of the Methods (:func:`place_blocks`); the
   writer does not state these facts. The single placeholders of older drafts (:data:`FACT_NAMES`: ``{{seed}}``,
   ``{{run_time}}``, ``{{time_limit}}``, ``{{time_limit_met}}``, ``{{trials_per_setting}}``, ``{{settings}}``,
-  ``{{trials_failed}}``) are still filled, but no longer offered or asked for.
+  ``{{trials_failed}}``) are still filled, but no longer offered or asked for. One is offered: ``{{interval_level}}``, the
+  percent level of every interval FI computes ("95"), so a method sentence that names the level ("a {{interval_level}}%
+  interval") types no 95 of its own (:func:`core.typed_numbers.allowed` no longer lets a typed 95% pass).
 * **Placeholders.** Each thing the study did not do is one item (:func:`required_items`) with one plain sentence from
   FI's record; they are the bullets of the Limitations block. A ``{{not_done:<id>}}`` of an older draft is still filled.
 * **Blocks.** ``{{results_table}}`` (:data:`BLOCK_NAMES`) is a whole block FI writes: its tables of every setting with
@@ -68,7 +70,8 @@ RECORD = Path(".fi") / "paper_record_check.json"
 NOT_RECORDED = "not recorded"
 
 #: The single placeholders of older drafts: still filled, no longer offered (the paragraph ``{{run_facts}}`` replaces them).
-FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed")
+FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed",
+              "interval_level")
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
@@ -1252,12 +1255,21 @@ def _limit_and_met(root: Path, topic: str, wall: float | None, least: float | No
     return limit, "over" if least is not None and least > limit else ""
 
 
+def interval_level_percent() -> str:
+    """The percent level of every interval FI computes, as ``{{interval_level}}`` fills it (``95``): from the one level
+    :data:`core.paper_values.INTERVAL_LEVEL`, so the paper's words and FI's intervals cannot differ."""
+    from decimal import Decimal
+
+    return format((Decimal(_values.INTERVAL_LEVEL) * 100).normalize(), "f")
+
+
 def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> dict[str, Fact]:
     """The run's facts FI holds, by placeholder name (a fact FI does not hold is not in it). The paper gets them as one
     paragraph FI writes itself (:func:`run_facts_text`); these are what an older draft's ``{{seed}}`` and the like are
     filled with."""
     root = Path(quest_root)
     out: dict[str, Fact] = {}
+    out["interval_level"] = Fact("interval_level", interval_level_percent())
     seed = _seed_text(root)
     if seed:
         out["seed"] = Fact("seed", seed)
@@ -1705,6 +1717,28 @@ def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
         valued = (isinstance(conflict, dict) and rec is not None and bool(rec.cells) and bool(metric) and metric not in rec.by_run
                   and (metric in rec.metrics() or metric in rec.answers))
         out.append({"name": name, "conflict": conflict, "metric": metric, "valued": valued})
+    return out
+
+
+def other_candidates(quest_root: Path | str) -> list[dict[str, str]]:
+    """The questions for which the answers part named a better result than the plan's map (``other_candidate`` on the plan's
+    ``topic_map`` entry, a derived result FI's record shows is worked out from the mapped one): ``{"name", "planned", "candidate"}``.
+    The plan's map is what the paper answers by; this is read by the quality report alone."""
+    from . import topic_requirements as _topic_req
+
+    root = Path(quest_root)
+    req = _read(root, f".fi/{_topic_req.FILE}")
+    protocol = plan_protocol(root)
+    asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
+    if not asked or not isinstance(protocol, dict):
+        return []
+    plan = _topic_req.view({}, protocol)
+    out: list[dict[str, str]] = []
+    for item in asked:
+        name = " ".join(str(item.get("name") or "").split())
+        entry = next((m for m in _topic_req.map_entries(req, plan, "quantities", item) if m.get("other_candidate")), None)
+        if name and entry:
+            out.append({"name": name, "planned": str(entry.get("by") or ""), "candidate": str(entry["other_candidate"])})
     return out
 
 

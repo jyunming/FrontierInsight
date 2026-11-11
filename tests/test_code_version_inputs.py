@@ -101,12 +101,12 @@ def test_what_a_run_writes_under_code_does_not_change_the_key(tmp_path: Path) ->
 
 def test_simulation_inputs_lists_the_files_in_sorted_order(tmp_path: Path) -> None:
     """The helper's own listing: the simulation, its helper, its data file and the person's input file are listed; the
-    analysis script, the tests and the notes are not; the order is stable (by path)."""
+    analysis script, the tests and tool caches are not; a note is (a run can read it); the order is stable (by path)."""
     root = _quest(tmp_path)
     (root / "code" / "notes.md").write_text("notes\n", encoding="utf-8")
     names = [p.relative_to(root).as_posix() for p in code_layout.simulation_inputs(root)]
     assert names == sorted(names)
-    assert names == ["code/helper_gain.py", "code/params.json", "code/simulate.py", "inputs/table.csv"]
+    assert names == ["code/helper_gain.py", "code/notes.md", "code/params.json", "code/simulate.py", "inputs/table.csv"]
 
 
 def test_a_file_of_any_suffix_under_code_changes_the_code_version(tmp_path: Path) -> None:
@@ -122,3 +122,68 @@ def test_a_file_of_any_suffix_under_code_changes_the_code_version(tmp_path: Path
     version = outside_run.code_version(root)
     (root / "code" / "constants").write_text("gain 4\n", encoding="utf-8")
     assert outside_run.code_version(root) != version
+
+
+def _design_key(root: Path) -> str:
+    from core import cost_model
+
+    return cost_model.design_key({"grid": {"gain": [1, 2]}}, root / "code" / "simulate.py")
+
+
+def test_a_note_or_a_hidden_file_in_code_changes_every_key(tmp_path: Path) -> None:
+    """Old code: ``*.md`` files and every hidden file or folder were left out of the keys (and the search timing's key
+    left out every file but ``.py``), so a parameter note or ``.cfg/c.json`` the simulation reads could change and the old
+    result, search or timing was reused. Maintainer decision: they count; a recompute is the only cost."""
+    root = _quest(tmp_path)
+    (root / "code" / "model").mkdir()
+    (root / "code" / "model" / "parameters.md").write_text("gain = 3", encoding="utf-8")
+    (root / "code" / ".cfg").mkdir()
+    (root / "code" / ".cfg" / "c.json").write_text('{"gain": 3}', encoding="utf-8")
+    for edit in (root / "code" / "model" / "parameters.md", root / "code" / ".cfg" / "c.json"):
+        before = (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root))
+        edit.write_text(edit.read_text(encoding="utf-8") + "# changed", encoding="utf-8")
+        after = (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root))
+        assert all(a != b for a, b in zip(before, after)), edit.name
+
+
+def test_a_tool_cache_does_not_change_any_key(tmp_path: Path) -> None:
+    """Known positive for what stays out: tool caches, by their exact name."""
+    root = _quest(tmp_path)
+    before = (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root))
+    for folder in ("__pycache__", ".git", ".pytest_cache", ".venv"):
+        (root / "code" / folder).mkdir()
+        (root / "code" / folder / "x.txt").write_text("one", encoding="utf-8")
+    (root / "code" / "pkg" / "__pycache__").mkdir(parents=True)
+    (root / "code" / "pkg" / "__pycache__" / "m.pyc").write_bytes(b"AB")
+    assert (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root)) == before
+
+
+def test_a_helper_module_in_a_folder_named_for_results_is_part_of_the_key(tmp_path: Path) -> None:
+    """A ``.py`` file is code wherever it sits (the coding agent's helper may live in ``code/results/``), while a data file
+    there is a product and stays out."""
+    root = _quest(tmp_path)
+    (root / "code" / "results").mkdir()
+    helper = root / "code" / "results" / "helper2.py"
+    helper.write_text("K = 1", encoding="utf-8")
+    (root / "code" / "results" / "values.json").write_text("{}", encoding="utf-8")
+    before = (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root))
+    (root / "code" / "results" / "values.json").write_text('{"a": 1}', encoding="utf-8")
+    assert (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root)) == before
+    helper.write_text("K = 2", encoding="utf-8")
+    assert all(a != b for a, b in zip(before, (outside_run.code_version(root), _run_key(root), _block_key(root),
+                                              _design_key(root))))
+
+
+def test_the_notes_fi_writes_itself_do_not_change_any_key(tmp_path: Path) -> None:
+    """FI fills in ``code/CHANGELOG.md`` after a run finishes (core/code_project.py ``fill_pending``) and rewrites its
+    README and METHODS: a key that covered them would never match the run it was made for."""
+    root = _quest(tmp_path)
+    for name in ("README.md", "CHANGELOG.md", "METHODS.md"):
+        (root / "code" / name).write_text("one", encoding="utf-8")
+    before = (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root))
+    for name in ("README.md", "CHANGELOG.md", "METHODS.md"):
+        (root / "code" / name).write_text("two: the results did not change", encoding="utf-8")
+    assert (outside_run.code_version(root), _run_key(root), _block_key(root), _design_key(root)) == before
+    (root / "code" / "pkg").mkdir()
+    (root / "code" / "pkg" / "README.md").write_text("a note of the model's package", encoding="utf-8")
+    assert outside_run.code_version(root) != before[0], "only the three top-level notes of FI are left out"

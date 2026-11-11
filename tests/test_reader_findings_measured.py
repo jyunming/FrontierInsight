@@ -153,7 +153,9 @@ def test_a_precision_on_a_result_worked_out_afterwards_is_the_plans_precision() 
     assert rerun_check.declared_precision(plan) == ("limit", 1e-4)
     base = {"derived/derived/limit": 22.81384918}
     changes = rerun_check.compare(base, {"derived/derived/limit": 22.81384926}, 1e-9)
-    assert changes and rerun_check.counted(changes, plan, None, False)[0] == []
+    # a result worked out afterwards has no standard error in the trial record: nothing excuses its move, and the verdict says so
+    kept, notes = rerun_check.counted(changes, plan, None, False)
+    assert changes and kept == changes and any("limit has no standard error" in x for x in notes)
     moved = rerun_check.compare(base, {"derived/derived/limit": 22.9}, 1e-9)
     assert len(rerun_check.counted(moved, plan, None, False)[0]) == 1  # a real move still counts
 

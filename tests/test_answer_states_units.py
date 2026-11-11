@@ -101,16 +101,30 @@ def test_a_plan_of_the_older_form_keeps_its_reading_in_the_paper_and_the_quality
     assert [p["status"] for p in problems] == ["left out"] and "peak algae" in problems[0]["text"]
 
 
-def test_an_answer_refined_to_a_result_in_another_unit_carries_that_results_unit() -> None:
-    """The plan links a result in the question's unit; the answer names a result worked out from it, in another unit."""
+def test_an_answer_naming_a_result_worked_out_from_the_plans_does_not_move_the_map_or_its_unit_note() -> None:
+    """The plan links a result in the question's unit; the answer names a result worked out from it, in another unit. The plan's
+    result stays, with no unit note (it is in the question's unit), and the other result is only a disclosed candidate."""
     p = {**PROTOCOL, "derived": [{"id": "log_peak", "role": "result", "inputs": ["algae_peak"]}],
          "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]}
     design = {**DESIGN, "protocol": p}
     row = {"Q1": {"unit": "count", "plan_unit": "count", "by": "metric:log_peak", "by_unit": "1"}}
     entry = cp._apply_answers(p, design, row, ASKED)["topic_map"][0]
-    assert entry["by"] == "metric:log_peak" and entry["unit_conflict"] == {"asked": "count", "result": "1", "declared": False}
-    row["Q1"]["by_unit"] = "count"  # the known positive: the refined result is in the question's unit
-    assert "unit_conflict" not in cp._apply_answers(p, design, row, ASKED)["topic_map"][0]
+    assert entry["by"] == "metric:algae_peak" and entry["other_candidate"] == "metric:log_peak" and "unit_conflict" not in entry
+
+
+def test_the_quality_report_lists_a_candidate_the_answers_part_named_as_disclosed(tmp_path, monkeypatch) -> None:
+    rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "other_candidate": "metric:bloom"}]
+    from core import frozen_protocol as frozen
+
+    root = _quest(tmp_path, monkeypatch, rows)
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {**PROTOCOL, "topic_map": rows})
+    monkeypatch.setattr(frozen, "protocol_of", lambda r: {**PROTOCOL, "topic_map": rows})
+    (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
+    found = qr._candidate_problems(qr._Quest(root))
+    assert [p["status"] for p in found] == ["disclosed"]
+    assert "`metric:algae_peak`" in found[0]["text"] and "`metric:bloom`" in found[0]["text"] and "peak algae" in found[0]["text"]
+    rows[0].pop("other_candidate")  # the known positive: no candidate, no row
+    assert qr._candidate_problems(qr._Quest(root)) == []
 
 
 def test_every_writer_is_handed_the_units_note_from_the_same_record(tmp_path, monkeypatch) -> None:

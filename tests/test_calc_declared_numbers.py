@@ -50,7 +50,20 @@ def test_other_small_numbers_do_not_make_a_number_the_plan_fixes(protocol, expr)
 
 
 def test_known_positive_unchanged() -> None:
-    assert paper_values.calc("1 - 0.05 / 2", {"thresholds": {"alpha": 0.05}}, "").text == "0.975"
+    assert paper_values.calc("1 - alpha / 2", {"thresholds": {"alpha": 0.05}}, "").text == "0.975"
+
+
+def test_a_bare_number_equal_to_a_plan_number_is_not_the_plans() -> None:
+    """A result that happens to equal a plan number must not pass as the plan's: ``0.05 * 9 * 9`` passed because 0.05 is the
+    plan's alpha and 9 is a small whole number. Only the name carries the plan's value."""
+    protocol = {"thresholds": {"alpha": 0.05}, "constants": {"scale": 12.5}}
+    for expr in ("0.05 * 9 * 9", "1 - 0.05 / 2", "12.5 * 2", "0.05"):
+        value = paper_values.calc(expr, protocol, "A counter has a level of 0.05.")
+        assert value.text == NOT and value.hit is not None, (expr, value)
+    assert paper_values.calc("alpha * 9 * 9", protocol, "").text == "4.05"
+    assert paper_values.calc("scale * 2", protocol, "").text == "25"
+    # FI's own interval level as a quantile's probability is still allowed without a name
+    assert paper_values.calc("t_quantile(0.975, 9) * alpha", protocol, "").hit is None
 
 
 def test_declared_names_reads_only_constants_and_thresholds() -> None:
