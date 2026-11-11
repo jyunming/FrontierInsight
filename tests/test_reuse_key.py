@@ -244,3 +244,49 @@ def test_the_quality_report_says_a_kept_search_met_changed_comments(tmp_path: Pa
                                                             encoding="utf-8")
     rows = quality_report._run_problems(quality_report._Quest(root))
     assert any("comments or line endings changed" in str(r) for r in rows), rows
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_study_is_not_stopped_by_a_missing_scan_copy_or_an_unreadable_file(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _quest(tmp_path)
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6}, grid={"x": [-1.0, 1.0]})
+    await _run(root, protocol)
+    spent = _count(root)
+    # the search's own copy of its scan is gone: main kept the search while the scan file in raw/ was there
+    shutil_rmtree = __import__("shutil").rmtree
+    shutil_rmtree(root / optimise.SCAN_DIR)
+    kept = await _run(root, protocol, frozen=True)
+    assert kept.reused is True and not kept.problems and _count(root) == spent
+    # a file of the study that cannot be read: main skipped it in the key, so the frozen study is not refused for it
+    real = reuse_key.digest
+
+    def digest(path: Any) -> str:
+        if Path(path).name == "simulate.py":
+            raise PermissionError("locked")
+        return real(path)
+
+    monkeypatch.setattr(reuse_key, "digest", digest)
+    again = await _run(root, protocol, frozen=True)
+    assert again.reused is True and not again.problems and _count(root) == spent
+
+
+@pytest.mark.asyncio
+async def test_a_frozen_record_from_before_study_keys_is_kept_by_its_exploration_seed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import phased
+
+    root = _quest(tmp_path)
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6}, grid={"x": [-1.0, 1.0]})
+    await _run(root, protocol)
+    spent = _count(root)
+    block = optimise._plan.normalize(protocol["optimisation"])[0]
+    path = root / optimise.RECORD
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.pop("reuse")
+    record.pop("study_key")
+    record["key"] = optimise._legacy_run_key(root, root / "code" / "simulate.py", block, 0, "run_cell", None)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(phased, "load", lambda _root: {"explore_seed_bases": [0]})
+    kept = await _run(root, protocol, frozen=True)
+    assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems

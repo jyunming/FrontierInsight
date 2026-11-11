@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -166,8 +167,10 @@ class Inputs:
     def key(self) -> str:
         """The hash of the canonical JSON of the inputs. An incomplete read has a key no other read can match."""
         text = json.dumps(self.as_json(), sort_keys=True, default=str)
-        if not self.complete:
-            text += "|unreadable:" + ",".join(self.unreadable) + f"|{id(self)}"
+        if not self.complete and not self.kind.startswith("search_study"):
+            # (A frozen study's lookup key skips the unreadable file as before: the confirm stage may not search again,
+            # so refusing it would stop a quest that did nothing wrong.)
+            text += "|unreadable:" + ",".join(self.unreadable) + f"|{uuid.uuid4().hex}"
         return _sha(text.encode("utf-8"))
 
     def changed(self, other: "Inputs | dict[str, Any] | None") -> list[str]:

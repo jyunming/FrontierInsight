@@ -345,7 +345,7 @@ def scan_hashes(quest_root: Path) -> dict[str, str]:
     return out
 
 
-def _scan_there(quest_root: Path, record: dict[str, Any]) -> bool:
+def _scan_there(quest_root: Path, record: dict[str, Any], frozen: bool = False) -> bool:
     """Whether the coarse scan a kept search stands for is there: a record written by :mod:`core.reuse_key`'s rule needs
     the search's own copy, byte for byte as it was taken (a later writer of ``raw/`` changes nothing); a record of an older
     FI keeps its old condition, the scan file in ``raw/`` (and the copy is made from it when the record is adopted)."""
@@ -353,7 +353,12 @@ def _scan_there(quest_root: Path, record: dict[str, Any]) -> bool:
         return True
     if _reuse.is_current(record, "search"):
         wanted = {k: v for k, v in ((record.get("reuse") or {}).get("outputs") or {}).items() if k.startswith(SCAN_DIR.as_posix())}
-        return bool(wanted) and scan_hashes(quest_root) == wanted
+        if wanted and scan_hashes(quest_root) == wanted:
+            return True
+        if not frozen:
+            return False
+        # A frozen study's confirm stage may not search again: its search is kept on today's old condition (the scan file
+        # is there) even when the search's own copy is gone, so no new stop is added.
     return (Path(quest_root) / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file()
 
 
@@ -876,7 +881,7 @@ def _kept(quest_root: Path, record: Any, record_text: str, key: str | dict[str, 
         best = json.loads(files.get(BEST_PATH.as_posix(), ""))
     except ValueError:
         best = None
-    scan_there = _scan_there(quest_root, record)
+    scan_there = _scan_there(quest_root, record, frozen)
     worked = any(r.get("event") == "evaluation" and r.get("status") == "ok" for r in rows)
     stopped = ((best or {}).get("evaluations") or {}).get("stopped_because")
     limit = ((best or {}).get("time") or {}).get("limit_seconds")
@@ -923,6 +928,8 @@ def _adopt(quest_root: Path, record: dict[str, Any], files: dict[str, str], log:
     copy of its scan file is bound into the record, so a later change to the scan file is seen. FI cannot show that the
     scan file in ``raw/`` is the one that search wrote (the record never said), which run.log says."""
     keep_scan_copy(quest_root)
+    if record.get("scan") and not scan_hashes(quest_root):
+        return files  # the copy could not be made: the record stays as it was, read by its own rule again next time
     try:
         saved = json.loads(files[RECORD.as_posix()])
     except (KeyError, ValueError, TypeError):
@@ -1029,11 +1036,12 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 seeds = (_phased.load(quest_root) or {}).get("explore_seed_bases") or []
                 if record.get("key") in {_legacy_run_key(quest_root, simulate, block, int(s), entry, thresholds)
                                          for s in seeds}:
-                    record = {**record, "study_key": _legacy_study_key(quest_root, simulate, block, entry, thresholds)}
+                    record = {**record, "study_key": study_key}
+                    adopt = True
             elif record.get("study_key") == _legacy_study_key(quest_root, simulate, block, entry, thresholds):
                 record = {**record, "study_key": study_key}
                 adopt = not (record.get("reuse") or {}).get("adopted")
-        elif record.get("study_key") == study_key and study_tokens.complete:
+        elif record.get("study_key") == study_key:
             moved = study_bytes.changed((record.get("reuse") or {}).get("study_inputs"))
             if (record.get("reuse") or {}).get("study_bytes") not in (None, study_bytes.key) and moved:
                 note = ("the simulation's comments or line endings changed after its search (" + ", ".join(moved[:4])
