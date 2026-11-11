@@ -174,6 +174,146 @@ async def test_a_change_that_is_not_faster_is_put_back(tmp_path: Path) -> None:
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SLOW
 
 
+# ---- the speed is judged on repeated, alternating timings, never on one pair (fixed fake timings, not the machine's) ----
+
+#: A rewrite of the loop that computes the same numbers at the same speed (what a model may offer that changes nothing).
+SAME_SUM = "total = total + v * v"
+SAME = "    total = 0.0\n    for v in x:\n        " + SAME_SUM + "\n"
+#: The unchanged code's four timings (a busy machine: they spread by a tenth) and a change that does nothing, whose
+#: timings come from the same spread: its first look can pass by chance, its repeats overlap the old ones.
+BUSY_OLD = [1.0, 1.1, 0.95, 1.05]
+DO_NOTHING = [0.85, 1.0, 0.9, 1.05]
+REAL_GAIN = [0.70, 0.75, 0.68, 0.72]
+
+
+def test_a_gain_inside_the_spread_of_the_repeats_is_not_a_gain_and_a_real_one_is() -> None:
+    assert not sp.clearly_faster(BUSY_OLD, DO_NOTHING)
+    assert sp.clearly_faster(BUSY_OLD, REAL_GAIN)
+    # every new time under every old time, but the medians differ by less than a tenth: not kept
+    assert not sp.clearly_faster([1.0, 1.02, 1.01, 1.03], [0.97, 0.98, 0.96, 0.99])
+    # the medians differ by a third, but one slow run of the new version is above the fastest old one: not kept
+    assert not sp.clearly_faster([1.0, 1.1, 1.05, 1.02], [0.6, 0.62, 0.61, 1.01])
+    # too few timings to judge
+    assert not sp.clearly_faster([1.0], [0.5]) and not sp.clearly_faster([], [])
+
+
+@pytest.mark.asyncio
+async def test_the_two_versions_are_timed_alternately_and_a_run_that_fails_ends_the_timing() -> None:
+    order: list[str] = []
+
+    def timer(name: str, seconds: list[float], fail_at: int | None = None):
+        async def call() -> sp.Sample:
+            order.append(name)
+            n = order.count(name)
+            return sp.Sample(seconds=seconds[n - 1], failed="boom" if fail_at == n else "")
+        return call
+
+    old_t, new_t, why = await sp.alternate(timer("old", BUSY_OLD), timer("new", REAL_GAIN), pairs=4)
+    assert order == ["old", "new"] * 4 and old_t == BUSY_OLD and new_t == REAL_GAIN and why == ""
+    order.clear()
+    old_t, new_t, why = await sp.alternate(timer("old", BUSY_OLD), timer("new", REAL_GAIN, fail_at=2), pairs=4)
+    assert why == "boom" and order == ["old", "new", "old", "new"] and len(new_t) == 1
+
+
+def _scripted(monkeypatch: pytest.MonkeyPatch, engine: Engine, old: list[float], new: list[float],
+              marker: str = SAME_SUM) -> list[str]:
+    """Replace the timing by fixed numbers: each run of the sample takes the next ``repeats`` numbers of the version whose
+    code is on disk (the one with ``marker`` in simulate.py is the new one). Returns the order of versions timed."""
+    queues = {"old": list(old), "new": list(new)}
+    seen: list[str] = []
+
+    async def fake(executor, python, quest_root, module, cells, *, repeats: int = sp.REPEATS, **kw):  # noqa: ANN001
+        which = "new" if marker in (Path(quest_root) / "code" / "simulate.py").read_text(encoding="utf-8") else "old"
+        (Path(quest_root) / tr.HARNESS_PATH).write_text(tr.HARNESS_SOURCE, encoding="utf-8")  # the breakdown step needs it
+        times = [queues[which].pop(0) for _ in range(repeats)]
+        seen.append(which)
+        return sp.Sample(seconds=min(times), times=times, wall_s=0.01,
+                         values={tr.cell_key(c): [{"x": 1.0}] for c in cells})
+
+    monkeypatch.setattr(sp, "run_sample", fake)
+    return seen
+
+
+async def _one_round(engine: Engine, replace: str) -> dict[str, Any]:
+    return await _speed(engine, _Model([_edit(LOOP, replace)]), seconds=10_000.0)
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_does_nothing_is_put_back_though_its_first_timing_looks_faster(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a busy machine the first look (the least of two runs of each) can show a do-nothing change a tenth faster and
+    beyond the gap between two runs of the same code; the repeats, old and new alternating, show their timings overlap."""
+    engine = _engine(tmp_path, rounds=1)
+    # first look: old 1.0 / 0.95 (two samples of the unchanged code, noise 0.05); new 0.85: a saving of 0.10 beyond the noise
+    seen = _scripted(monkeypatch, engine, old=[1.0, 1.1, 1.05, 0.95] + BUSY_OLD, new=[0.85, 0.9] + DO_NOTHING)
+    assert sp.fast_enough(0.95, 0.85, 0.05)  # the old rule alone keeps it
+    out = await _one_round(engine, SAME)
+    assert out["kept"] is False and out["rounds"][0]["outcome"] == "not kept"
+    assert "not faster" in out["rounds"][0]["reason"] and out["rounds"][0]["repeats_new"] == DO_NOTHING
+    assert seen[-8:] == ["old", "new"] * 4
+    assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SLOW
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_is_a_third_faster_in_every_repeat_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path, rounds=1)
+    _scripted(monkeypatch, engine, old=[1.0, 1.1, 1.05, 0.95] + BUSY_OLD, new=[0.7, 0.75] + REAL_GAIN)
+    out = await _one_round(engine, SAME)
+    assert out["kept"] is True and out["rounds"][0]["outcome"] == "kept"
+    assert out["rounds"][0]["repeats_old"] == BUSY_OLD and out["rounds"][0]["repeats_new"] == REAL_GAIN
+    assert SAME_SUM in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+def _confirm_setup(tmp_path: Path, run) -> tuple[Path, dict[str, str], dict[str, str], sp.Sample]:  # noqa: ANN001
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    old, new = {"simulate.py": "A = 1" + chr(10)}, {"simulate.py": "A = 2" + chr(10)}
+    improve.restore(root, new)
+    after = sp.Sample(seconds=0.7, times=[0.7, 0.75], wall_s=1.0, values={"k": [{"x": 1.0}]})
+    return root, old, new, after
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_that_returns_other_numbers_or_touches_a_guarded_file_or_raises_is_not_kept(tmp_path: Path) -> None:
+    def runner(second_x: float = 1.0, boom: bool = False):
+        calls: list[int] = []
+
+        async def sample(repeats: int = 1) -> sp.Sample:
+            calls.append(1)
+            if boom and len(calls) == 3:
+                raise OSError("disk")
+            new = "A = 2" in (root / "code" / "simulate.py").read_text(encoding="utf-8")
+            x = second_x if new and len(calls) > 2 else 1.0
+            t = REAL_GAIN[(len(calls) - 1) // 2] if new else BUSY_OLD[(len(calls) - 1) // 2]
+            return sp.Sample(seconds=t, times=[t], wall_s=0.1, values={"k": [{"x": x}]})
+        return sample
+
+    root, old, new, after = _confirm_setup(tmp_path, None)
+    # a number that is not the same in a repeat of the new code (a result that depends on what ran before)
+    entry: dict[str, Any] = {}
+    assert not await sp.confirm(root, old, new, runner(second_x=2.0), entry, after, 1e6)
+    assert entry["outcome"] == "not kept" and "changed" in entry["reason"]
+    # the same repeats with the numbers equal are kept
+    entry = {}
+    assert await sp.confirm(root, old, new, runner(), entry, after, 1e6) and entry["repeats_new"] == REAL_GAIN
+    # a repeated run that changed a file FI judges the code by
+    entry = {}
+    assert not await sp.confirm(root, old, new, runner(), entry, after, 1e6, guards_touched=lambda: ["needs/FROZEN_PROTOCOL.json"])
+    assert entry["outcome"] == "aborted" and entry["touched"] == ["needs/FROZEN_PROTOCOL.json"]
+    # a run that raises leaves the code as the version that was kept
+    improve.restore(root, new)
+    with pytest.raises(OSError):
+        await sp.confirm(root, old, new, runner(boom=True), {}, after, 1e6)
+    assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == old["simulate.py"]
+
+
+def test_the_repeats_are_skipped_when_they_would_cost_more_than_the_change_saves() -> None:
+    # four runs of each version, 300 s each, against a saving of 1000 s on the study: judged on the first look, as before
+    assert not sp.can_afford_repeats(300.0, 300.0, 1000.0) and sp.can_afford_repeats(300.0, 300.0, 2400.0)
+    # the old version is slower, so its runs count too: 4 * (1 + 10) = 44 s against 20 s saved
+    assert not sp.can_afford_repeats(1.0, 10.0, 20.0) and sp.can_afford_repeats(0.5, 0.5, 10.0)
+
+
 def _row(name: str, value: float, met: bool, *, target: float = 0.0, tolerance: float = 1e-3, **more: Any) -> dict[str, Any]:
     return {"name": name, "value": value, "met": met, "direction": "lower", "target": target, "tolerance": tolerance,
             "counts": True, **more}

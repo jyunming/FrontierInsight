@@ -246,7 +246,7 @@ same PR that adds, splits or renames one.
   never ran, timed first so `bounded_sample` limits each by its own cost), `run_sample` (fixed-seed trials through the
   harness in an outside copy, the least time of two repeats; `why_not_run` says why a run gave too few trials),
   `disagreements` (a number not the same to 9 digits, or only in one run), `fast_enough` (at least `MIN_SAVING` and more
-  than the two unchanged samples differ), `profile_text` (the costliest sampled setting run once
+  than the two unchanged samples differ: the first look), `confirm` (the second look at a change that passes it: old and new code timed 4 times each, alternating, kept only when `clearly_faster`, every new timing under every old one and medians a tenth apart; skipped when the repeats would cost more than the change saves, `can_afford_repeats`), `profile_text` (the costliest sampled setting run once
   with the harness's `profile` spec key: Python's profiler during the calls only; the top functions go into the prompt). `RunChecksMixin._speed_up_if_long` (`core/run_checks.py`) is the
   one gate both paths call; `_speed_up` / `_speed_up_rounds` ask for one change per round (prompt
   `agents/improve_speed.md`), apply `improve.check_edit` with `improve.guards` over every check of the plan, keep a change
