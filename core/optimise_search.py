@@ -506,12 +506,13 @@ def _same(a, b):
     return a == b
 
 
-def scan_rows(summary, block):
-    """The coarse scan's results (a ``fi.trials/v1`` summary: one entry per setting) as evaluated designs."""
+def scan_rows(summary, block, skip=()):
+    """The coarse scan's results (a ``fi.trials/v1`` summary: one entry per setting) as evaluated designs. ``skip``: the
+    conditions whose cells at another value are kept too (:func:`scan_candidates`: the named alternatives of a comparison)."""
     names = [str(v["name"]) for v in block["design_variables"]]
     held = cell_of(block, {})
     compared = [str(k) for k in (block.get("grid") if isinstance(block.get("grid"), dict) else {})
-                if str(k) in held]
+                if str(k) in held and str(k) not in skip]
     out = []
     for cell in (summary or {}).get("cells") or []:
         if cell.get("level") is not None:
@@ -544,6 +545,43 @@ def scan_rows(summary, block):
                     values[quantity] = per_value
         out.append({"design": design, "values": values, "reason": "", "elapsed_s": cell.get("elapsed_s")})
     return out
+
+
+def scan_candidates(summary, block):
+    """The coarse scan's results that can start the search of ANY alternative a study compares: the cells at the
+    plan's held numerical conditions, at every value of the named conditions the study compares
+    (:func:`compared_levels`). A cell measured at one alternative is a design, not an answer for another: each search
+    evaluates it again under its own alternative (:func:`compare`)."""
+    levels = compared_levels(block)
+    return scan_rows(summary, block, skip=tuple(levels[0]) if levels else ())
+
+
+def shared_starts(block, rows):
+    """The designs every searched alternative starts from, from ``rows`` (:func:`scan_candidates`): the ones that worked,
+    best measured objective first (feasible ones before the others, as the search ranks), each design once. The caller
+    leaves out the baseline and keeps as many as the search has starting points."""
+    space = Space(block["design_variables"])
+    sign = _sign(block)
+    seen, ranked = {}, []
+    for row in rows or []:
+        if not isinstance(row, dict) or not isinstance(row.get("values"), dict):
+            continue
+        judged = judge(block, row["values"], str(row.get("reason") or ""))
+        if judged["status"] != "ok":
+            continue
+        try:
+            design = space.canonical(row["design"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        key = space.key(design)
+        if key in seen:  # one design measured at several alternatives is ranked by its best measurement
+            if _rank(judged, sign) < ranked[seen[key]][0]:
+                ranked[seen[key]] = (_rank(judged, sign), seen[key], design)
+            continue
+        seen[key] = len(ranked)
+        ranked.append((_rank(judged, sign), len(ranked), design))
+    ranked.sort(key=lambda item: item[:2])
+    return [d for _r, _n, d in ranked]
 
 
 def _per_value(summary, cell, quantity):
@@ -684,8 +722,17 @@ def _same_result(a, b):
 
 class _Search:
     def __init__(self, block, seed, method, rounds=None, results=None, batch=False, stop_flat=True,
-                 stop_stepped=True, stream=False, first_reply=None):
+                 stop_stepped=True, stream=False, first_reply=None, shared=None):
         self.block = block
+        #: In a comparison of alternatives (:func:`compare`): the starting designs every alternative's search is given
+        #: (:func:`shared_starts`; a list the comparison fills before any search starts), so every alternative starts
+        #: from the same designs and none runs a global stage of its own. ``None`` for a search of one alternative.
+        self.shared = shared
+        #: The designs the local search was started from, in order (the first is the baseline): what the comparison
+        #: of alternatives compares to say they were searched alike.
+        self.start_designs = []
+        #: What each Nelder-Mead start's first build showed (:meth:`_nelder_mead`).
+        self.build_log = []
         #: The baseline's answer when it was asked for already (:func:`_first_evaluation`): used, counted and recorded
         #: as the search's first evaluation, not asked for again.
         self.first_reply = first_reply
@@ -1130,10 +1177,18 @@ class _Search:
     def _starting_points(self):
         """The baseline, then the best points of the coarse scan, then a Latin hypercube sample: ``starts`` in all."""
         points = [self.space.unit(self.baseline)]
-        extra = self._best_designs(self.starts - 1, exclude=[self.space.key(self.baseline)], stages=("scan",))
+        if self.shared is not None:
+            # The same designs for every alternative of a comparison; each is evaluated under this alternative (a design
+            # the scan measured at this very alternative is already its own row, free as in any search).
+            base_key = self.space.key(self.baseline)
+            extra = [d for d in self.shared if self.space.key(d) != base_key][: self.starts - 1]
+        else:
+            extra = self._best_designs(self.starts - 1, exclude=[self.space.key(self.baseline)], stages=("scan",))
         points += [self.space.unit(d) for d in extra]
         points += self._lhs(self.starts - len(points))
-        return points[: self.starts]
+        points = points[: self.starts]
+        self.start_designs = [self.space.canonical(self.space.design(p)) for p in points]
+        return points
 
     # the methods
 
@@ -1144,7 +1199,7 @@ class _Search:
             if not library and self.method_used not in BUILT_IN:
                 self._fall_back(f"{self.method_used} is not a method FI knows")
             if (not library and self.method_used in ("bounded_local", "global_then_local") and self.space.dims + 1 > self.per_start
-                    and any(_shape(v) is not None for v in self.space.variables)):
+                    and any(_shape(v) is not None for v in self.space.variables) and not self._cma_fits()):
                 self.notes.append(
                     f"the design has {self.space.dims} numbers to change, so a local search needs {self.space.dims + 1} "
                     f"evaluations just to start; {self.per_start} are allowed from each starting point, so a search may stop "
@@ -1692,6 +1747,30 @@ class _Search:
             if sigma * float(d.max()) < 1e-4 or stale > 10 + int(30 * n / lam):
                 raise _StartDone("converged")
 
+    def _note_build(self, start, simplex):
+        """What a simplex's first build showed (the search itself is not changed by it): for each design variable, how many
+        of the one-step moves from the starting point (each vertex moves one number) gave exactly the starting point's
+        answer (objective, each limited quantity, feasibility), under the starting point's values of the choices. A move
+        that left the design as it was (a whole number that rounds back) or has no answer is not counted."""
+        space = self.space
+        judged = [self.cache.get(space.key(space.canonical(space.design(p)))) for p in simplex]
+        base = judged[0]
+        if base is None or base["status"] != "ok":
+            return
+        here = space.key(space.canonical(space.design(simplex[0])))
+        choice = {str(space.scalars[k]["name"]): space.value(i, simplex[0][i])
+                  for i, k in enumerate(space.free) if space.scalar_kinds[k] == "choice"}
+        numbers: dict[str, dict[str, int]] = {}
+        for i, (point, got) in enumerate(zip(simplex[1:], judged[1:])):
+            if got is None or got["status"] != "ok" or space.key(space.canonical(space.design(point))) == here:
+                continue
+            v = space.scalars[space.free[i]]
+            entry = numbers.setdefault(str(v.get("of") or v["name"]), {"tried": 0, "unchanged": 0})
+            entry["tried"] += 1
+            entry["unchanged"] += int(got["objective"] == base["objective"] and got["constraints"] == base["constraints"]
+                                      and got["feasible"] == base["feasible"])
+        self.build_log.append({"start": start, "choice": choice, "numbers": numbers})
+
     def _nelder_mead(self, u0, start, cap):
         """A Nelder-Mead simplex in the unit cube, every point clipped into it. It compares designs by their rank only
         (feasible by objective, then infeasible by how far past the limits, then failed)."""
@@ -1703,6 +1782,7 @@ class _Search:
             p[i] = p[i] + steps[i] if p[i] + steps[i] <= 1.0 else p[i] - steps[i]
             simplex.append(p)
         values = yield from self._fs(simplex, self.local_stage, start, cap)
+        self._note_build(start, simplex)
         proposals, most = 0, 20 * self.per_start + 50
         while True:
             order = sorted(range(d + 1), key=lambda k: values[k])
@@ -1751,6 +1831,11 @@ class _Search:
             values[1:] = yield from self._fs(simplex[1:], self.local_stage, start, cap)
 
     def _global_then_local(self):
+        if self.shared is not None:
+            # A comparison: every alternative starts from the same designs and none spends part of its budget on a global
+            # stage of its own that would give it other ones.
+            yield from self._local_starts(self._starting_points())
+            return
         if not any(r["stage"] == "scan" for r in self.rows):
             # At least the designs the watches of a flat objective need (the baseline and NO_EFFECT_DESIGNS others), so what
             # they can detect does not depend on how small a share of a small budget the global stage gets.
@@ -1910,6 +1995,7 @@ class _Search:
             "budget_ran_out": self.used >= self.total,
             "method_requested": self.method_requested, "method_used": self.method_used, "method_why": self.method_why,
             "notes": list(self.notes), "baseline": baseline, "start_log": self.start_log, "seed": self.seed,
+            "start_designs": [dict(d) for d in self.start_designs], "build": list(self.build_log),
             "failed": sum(1 for r in self.rows if r["status"] != "ok"),
             "infeasible": sum(1 for r in self.rows if r["status"] == "ok" and not r["feasible"]),
             "scan_failed": sum(1 for r in self.rows if not r["counted"] and r["status"] != "ok"),
@@ -1930,7 +2016,7 @@ class _Search:
 
 
 def search(block, *, seed, method=None, rounds=None, results=None, batch=False, stop_flat=True, stop_stepped=True,
-           stream=False, first_reply=None):
+           stream=False, first_reply=None, shared=None):
     """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
     a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``).
     ``results``: the names of the results the plan gives, watched for a design that changes none of them. ``batch``:
@@ -1940,7 +2026,8 @@ def search(block, *, seed, method=None, rounds=None, results=None, batch=False, 
     another, so the search and its record are the same. ``stop_flat``: whether a search whose objective never moves stops
     early (``flat_objective``); off, the fact is recorded and the search runs its budget."""
     return (yield from _Search(block, seed, method, rounds, results, batch=batch, stop_flat=stop_flat,
-                               stop_stepped=stop_stepped, stream=stream, first_reply=first_reply).run())
+                               stop_stepped=stop_stepped, stream=stream, first_reply=first_reply,
+                               shared=shared).run())
 
 
 # --- a comparison across named alternatives: one search for each -----------------------------------------------------
@@ -2037,6 +2124,11 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
     moving = {}  # the quantities that differ between two calls of the same design, once the first probe has shown them
     baseline_reply = None  # the answer a later alternative's first evaluation already got, handed to its search
     check_first = False  # an alternative before had no objective in any answer: each later one shows its own first
+    # The starting designs every searched alternative is given (:func:`shared_starts`), filled from the coarse scan before
+    # the first search starts; empty when the plan has no scan (every search then starts from the baseline and a Latin
+    # hypercube, the same one for each).
+    shared: list[dict[str, Any]] = []
+    spread_asked = False
     for number, level in enumerate(levels):
         sub = level_block(block, level)
         baseline_reply = None
@@ -2046,17 +2138,30 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
                 outcomes.append(lone)
                 continue
         if number > 0:
+            if not spread_asked:
+                # The first alternative's answers at the spread designs every alternative is also asked for (the ones the
+                # time estimate asked too, :func:`sizing_designs`): designs the first one's search did not evaluate.
+                spread_asked = True
+                if any(seen.values()):  # the first alternative gave no compared number: nothing to compare with
+                    yield from _ask_spread(level_block(block, levels[0]), levels[0], seen, names)
             same = yield from _probe_alternative(sub, level, outcomes[0], seen, names, moving,
-                                                 repeat=(level_block(block, levels[0]), levels[0]) if number == 1 else None)
+                                                 repeat=(level_block(block, levels[0]), levels[0]) if number == 1 else None,
+                                                 spread=sizing_designs(block)[1:],
+                                                 keep=sorted({str(r) for r in results or []} - set(names)))
             if same is not None:
                 outcomes.append(_same_outcome(outcomes[0], levels[0], same))
                 continue
         gen = search(sub, seed=seed, method=method, rounds=rounds, results=results, batch=batch, stop_flat=stop_flat,
-                     stop_stepped=stop_stepped, stream=stream, first_reply=baseline_reply)
+                     stop_stepped=stop_stepped, stream=stream, first_reply=baseline_reply,
+                     shared=shared if len(levels) > 1 else None)
         asked = {}  # a streamed design, by its id
         try:
             request = next(gen)
             while True:
+                if request["kind"] == "scan" and number == 0 and len(levels) > 1:
+                    # Asked once, before the first search reads its own scan: the scan's cells at every alternative.
+                    pool = yield dict(request, pool=True, level=dict(level), block=sub)
+                    shared[:] = shared_starts(sub, pool if isinstance(pool, list) else [])
                 request = dict(request, level=dict(level))
                 if request["kind"] in ("evaluate_many", "evaluate_stream"):
                     request["requests"] = [dict(r, level=dict(level)) for r in request["requests"]]
@@ -2080,6 +2185,19 @@ def compare(block, *, seed, method=None, rounds=None, results=None, batch=False,
             # for its baseline alone (:func:`_first_evaluation`): it is searched when that answer has the objective.
             check_first = True
     return merge_outcomes(outcomes, levels, block)
+
+
+def _ask_spread(sub, level, seen, names):
+    """The first alternative's answers at the spread designs (a generator): one request, outside every budget and row,
+    kept in ``seen`` for the probes of the alternatives after it."""
+    designs = [d for d in sizing_designs(sub)[1:] if _design_key(d) not in seen]
+    if not designs:
+        return
+    requests = [{"kind": "evaluate", "cell": cell_of(sub, d), "design": dict(d), "stage": "probe", "start": 0,
+                 "level": dict(level)} for d in designs]
+    replies = yield {"kind": "evaluate_many", "requests": requests, "level": dict(level)}
+    if isinstance(replies, list) and len(replies) == len(requests):
+        _remember(seen, {"kind": "evaluate_many", "requests": requests}, replies, {}, names)
 
 
 NOT_SEARCHED = "not_searched"
@@ -2120,11 +2238,13 @@ def _design_key(design):
     return json.dumps(design, sort_keys=True, default=str)
 
 
-def compared_names(block, results):
-    """The results two alternatives are compared on: the objective, every limited quantity and every result the plan names."""
+def compared_names(block, results=None):
+    """The results two alternatives are compared on: the objective and every limited quantity, the numbers the search
+    reads. A result the plan names besides them is not read by the search, so an alternative that differs only in one of
+    those is searched no differently (``results`` is accepted for the callers that pass it)."""
     names = {str(block["objective"]["quantity"])}
     names |= {str(c.get("quantity")) for c in block.get("constraints") or [] if isinstance(c, dict)}
-    return sorted(names | {str(r) for r in results or []})
+    return sorted(names)
 
 
 def varying_names(block, names, wanted, again):
@@ -2139,8 +2259,9 @@ def varying_names(block, names, wanted, again):
 
 def probe_answer(sub, values, names):
     """What an alternative gave for one design, for the comparison: the value of each of ``names`` it reported, or ``None``
-    when the design was not judged ``ok`` (a failed or missing answer cannot show two alternatives are the same)."""
-    if not isinstance(values, dict) or judge(sub, values)["status"] != "ok":
+    when the simulation gave no values (a failed or missing answer cannot show two alternatives are the same). A design
+    neither alternative can judge (a null objective) still counts as agreement when every value is the same."""
+    if not isinstance(values, dict):
         return None
     return {n: values[n] for n in names if n in values}
 
@@ -2171,6 +2292,11 @@ def _probe_designs(first, seen):
     if base.get("status") == "ok" and _design_key(base["design"]) in seen:
         chosen.append(dict(base["design"]))
         keys.add(_design_key(base["design"]))
+    best = first.get("best")
+    if best and _design_key(best["design"]) in seen and _design_key(best["design"]) not in keys:
+        # The first alternative's best design is always tried: it is where a difference matters most.
+        chosen.append(dict(best["design"]))
+        keys.add(_design_key(best["design"]))
     pool = []
     for row in first["rows"]:
         key = _design_key(row["design"])
@@ -2181,10 +2307,9 @@ def _probe_designs(first, seen):
     n = len(pool)
     if n <= room:
         return chosen + pool
-    order = []
-    if first["best"]:
-        order.append(next((i for i, d in enumerate(pool) if _design_key(d) == _design_key(first["best"]["design"])), 0))
-    order += [round(i * (n - 1) / (room - 2)) for i in range(room - 1)]  # from the first design to the last
+    if room <= 0:
+        return chosen
+    order = [round(i * (n - 1) / max(1, room - 1)) for i in range(room)]  # from the first design to the last
     order = list(dict.fromkeys(order))
     order += [i for i in range(n) if i not in order][:room - len(order)]  # where two of them fell on the same design
     return chosen + [pool[i] for i in order[:room]]
@@ -2215,6 +2340,10 @@ def alternatives_searched(block, levels, replies, repeat, names):
     mine = [probe_answer(level_block(block, levels[0]), v, stable) for v in first]
     if any(m is None for m in mine):
         return len(levels)
+    designs = sizing_designs(block)
+    if len({_design_key(d) for d, v in zip(designs, first)
+            if judge(level_block(block, levels[0]), v)["status"] == "ok"}) < 2:
+        return len(levels)
     searched = 1
     for number in range(1, len(levels)):
         theirs = replies[number]
@@ -2225,7 +2354,7 @@ def alternatives_searched(block, levels, replies, repeat, names):
     return searched
 
 
-def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None):
+def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None, spread=(), keep=()):
     """Before an alternative after the first is searched (a generator): ask the simulation for a few designs the first
     alternative evaluated, at this alternative (one ``evaluate_many`` request, answered in order). When every one gives
     exactly the first alternative's value of the objective, every limited quantity and every result the plan names (never
@@ -2238,6 +2367,11 @@ def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None)
     the rows, and a named result that is not the same in the two calls is left out of every comparison (kept in
     ``moving["names"]``; :func:`varying_names`)."""
     probes = _probe_designs(first, seen)
+    kept = {_design_key(d) for d in probes}
+    for d in spread:  # the spread designs (the ones the time estimate asked too) the first alternative answered
+        if _design_key(d) in seen and _design_key(d) not in kept:
+            kept.add(_design_key(d))
+            probes.append(dict(d))
     if len(probes) < 2:
         return None
     requests = [{"kind": "evaluate", "cell": cell_of(sub, d), "design": dict(d), "stage": "probe", "start": 0,
@@ -2265,28 +2399,30 @@ def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None)
             return None
         judged = judge(sub, values)
         if judged["status"] != "ok":
-            return None
+            continue  # exactly the first alternative's answer at a design neither can judge: it agrees, but is no row
         rows.append({"event": "evaluation", "n": len(rows) + 1, "stage": "probe", "start": 0, "design": dict(design),
                      "objective": judged["objective"], "constraints": dict(judged["constraints"]),
                      "feasible": judged["feasible"], "status": "ok", "method": first["method_used"], "counted": True,
                      "elapsed_s": reply.get("elapsed_s") if _number(reply.get("elapsed_s")) else None})
-        named = {n: values[n] for n in names if n in values and n != str(sub["objective"]["quantity"])
+        named = {n: values[n] for n in (*names, *keep) if n in values and n != str(sub["objective"]["quantity"])
                  and n not in judged["constraints"]}
         if named:
             rows[-1]["results"] = named
-    return rows
+    return rows if len(rows) >= 2 else None
 
 
 def _same_outcome(first, first_level, rows):
-    """The outcome of an alternative that was not searched because it gave the first one's answers (``same_as``): the
-    probe's rows as its own evaluations, the first alternative's best design and baseline. Its budget is the probe."""
+    """The outcome of an alternative that was not searched because it gave the first one's objective and limits at every
+    design tried at both (``same_as``): the probe's rows as its own evaluations and the first alternative's baseline (which
+    the probe showed it shares). It has no best design: a finite probe shows those designs agree, not that this alternative
+    has none better. Its budget is the probe."""
     out = {
         "rows": rows, "evaluations": len(rows), "scan_evaluations": 0, "budget": len(rows),
         "starts": first["starts"], "per_start": first["per_start"], "stopped_because": "same_as_first",
         "budget_ran_out": False, "method_requested": first["method_requested"], "method_used": first["method_used"],
         "method_why": first["method_why"], "notes": [], "baseline": first["baseline"], "start_log": [],
         "seed": first["seed"], "failed": 0, "infeasible": sum(1 for r in rows if not r["feasible"]),
-        "best": dict(first["best"]) if first["best"] else None, "rounds": [],
+        "best": None, "rounds": [], "start_designs": [], "build": [],
         "same_as": dict(first_level), "probes": len(rows),
     }
     for key in ("no_effect", "flat_objective", "stepped_objective"):
@@ -2328,8 +2464,7 @@ def merge_outcomes(outcomes, levels, block):
     per = []
     for outcome, level in zip(outcomes, levels):
         best = outcome["best"]
-        # An alternative that was not searched has the first one's best design, numbered as in the first one's rows.
-        shift = 0 if outcome.get("same_as") else offset
+        shift = offset
         per.append({"level": dict(level), "best": dict(best, evaluation=best["evaluation"] + shift) if best else None,
                     "baseline": outcome["baseline"], "evaluations": outcome["evaluations"],
                     "budget": outcome["budget"], "stopped_because": outcome["stopped_because"],
@@ -2340,6 +2475,7 @@ def merge_outcomes(outcomes, levels, block):
         offset += len(outcome["rows"])
     winners = [p for p in per if p["best"] is not None]
     win = min(winners, key=lambda p: sign * p["best"]["objective"]) if winners else per[0]
+    comparison = build_comparison(outcomes, per, block)
     best = dict(win["best"], level=dict(win["level"])) if win["best"] else None
     # The search's own end is that of the alternatives that were searched and gave results: one that failed every
     # evaluation, or was not searched, is reported by its own entry (``levels``) and does not name the search's end.
@@ -2365,6 +2501,8 @@ def merge_outcomes(outcomes, levels, block):
         "scan_infeasible": sum(o.get("scan_infeasible", 0) for o in outcomes),
         "rounds": [dict(r, level=dict(lv)) for o, lv in zip(outcomes, levels) for r in o["rounds"]],
         "fixed": dict(level_block(block, win["level"])["fixed"]),
+        "comparison": comparison,
+        "build": build_facts(outcomes, levels),
     }
     unused = [dict(d, level=dict(lv)) for o, lv in zip(outcomes, levels)
               for d in (o.get("run_not_used") or {}).get("designs", [])]
@@ -2378,6 +2516,176 @@ def merge_outcomes(outcomes, levels, block):
     return out
 
 
+#: The ways a search ends that mean it ran to its own end (or its whole budget): a comparison is earned only between
+#: searches that ended like this, not between ones cut by time, by failures, a load error or an early stop.
+COMPLETE_STOPS = ("converged", "share", "budget", "finished")
+
+
+def _tolerance(block, other):
+    """The plan's ``improvement_tolerance`` in the objective's unit for a gap against ``other``'s value (relative mode: of
+    the other value); ``None`` when the plan gives none."""
+    tolerance = block.get("improvement_tolerance")
+    value = tolerance.get("value") if isinstance(tolerance, dict) else tolerance
+    if not _number(value):
+        return None
+    mode = str(tolerance.get("mode") or "absolute") if isinstance(tolerance, dict) else "absolute"
+    return float(value) * abs(other) if mode == "relative" else float(value)
+
+
+def build_comparison(outcomes, per, block):
+    """What a comparison of alternatives knows about how it was made, and the first of the two statements it may make
+    ("ahead at the search's settings", written at the search's end; the second, "still ahead at finer settings", is the
+    check's, :func:`second_statement`). Per alternative: whether it was searched, the starting points it ran from, the
+    evaluations that answered and that failed, why it stopped, its best value. ``same_setup``: every searched alternative
+    had the same starting designs, budget and method (not the same effort: the counts are listed). The statement holds
+    only when every alternative was searched to its own end, with the same setup, and the leader beats each other one by
+    more than the plan's tolerance (no tolerance: any difference). Otherwise it names why not."""
+    if len(outcomes) < 2:
+        return None
+    sign = _sign(block)
+    objective = block["objective"]
+    alts = []
+    for outcome, entry in zip(outcomes, per):
+        kind = "agrees" if outcome.get("same_as") else "not_searched" if outcome.get("not_searched") else "searched"
+        counted = [r for r in outcome["rows"] if r.get("counted", True) and r.get("stage") != "scan"]
+        answered = sum(1 for r in counted if r.get("status") == "ok")
+        best = outcome.get("best") if kind == "searched" else None
+        alts.append({"level": dict(entry["level"]), "kind": kind, "starts": len(outcome.get("start_log") or []),
+                     "evaluations": outcome["evaluations"], "answered": answered, "failed": len(counted) - answered,
+                     "stopped_because": outcome["stopped_because"],
+                     "complete": kind == "searched" and outcome["stopped_because"] in COMPLETE_STOPS,
+                     "best": best["objective"] if best else None,
+                     **({"agrees_with": dict(outcome["same_as"]), "designs_tried": outcome.get("probes")}
+                        if kind == "agrees" else {})})
+    searched = [o for o, a in zip(outcomes, alts) if a["kind"] == "searched"]
+    setups = {json.dumps([o["method_used"], o["budget"], o["starts"], o["per_start"],
+                          [json.dumps(d, sort_keys=True, default=str) for d in o.get("start_designs") or []]])
+              for o in searched}
+    same_setup = len(setups) <= 1
+    out = {"alternatives": alts, "same_setup": same_setup, "unit": str(objective.get("unit") or ""),
+           "quantity": str(objective["quantity"]), "leader": None, "statement_1": False}
+    unit = f" {out['unit']}" if out["unit"] else ""
+    skipped = [a for a in alts if a["kind"] != "searched"]
+    cut = [a for a in alts if a["kind"] == "searched" and not a["complete"]]
+    ranked = sorted((a for a in alts if a["complete"] and a["best"] is not None), key=lambda a: sign * a["best"])
+    if skipped:
+        out["says_1"] = (f"{len(skipped)} of the {len(alts)} alternatives ("
+                         + ", ".join(level_says(a["level"]) for a in skipped[:4]) + (", ..." if len(skipped) > 4 else "")
+                         + ") were not searched on their own, so FI names no best alternative.")
+    elif cut:
+        out["says_1"] = (f"The search of {level_says(cut[0]['level'])} did not run to its own end ("
+                         f"{cut[0]['stopped_because']}), so FI names no best alternative.")
+    elif not same_setup:
+        out["says_1"] = ("The alternatives were not searched from the same starting designs with the same budget, so FI "
+                         "names no best alternative.")
+    elif not ranked:
+        out["says_1"] = "No alternative has a design that meets every limit."
+    else:
+        leader, rest = ranked[0], ranked[1:]
+        close = [a for a in rest if sign * (a["best"] - leader["best"]) <= (_tolerance(block, a["best"]) or 0.0)]
+        if len(ranked) < len(alts):
+            out["says_1"] = ("Only " + ", ".join(level_says(a["level"]) for a in ranked) + " reached a design that meets "
+                             "every limit; FI names no best alternative.")
+        elif not rest:
+            out["says_1"] = "FI names no best alternative."
+        elif close:
+            near = close[0]
+            tol = _tolerance(block, near["best"])
+            if sign * (near["best"] - leader["best"]) == 0:
+                out["says_1"] = (f"{level_says(leader['level'])} and {level_says(near['level'])} both reach "
+                                 f"{_fmt(leader['best'])}{unit}; no alternative is shown better.")
+            else:
+                out["says_1"] = (f"{level_says(leader['level'])} reaches {_fmt(leader['best'])}{unit} and "
+                                 f"{level_says(near['level'])} {_fmt(near['best'])}{unit}; the difference is not more than "
+                                 f"the plan's tolerance ({_fmt(tol)}{unit}), so no alternative is shown better.")
+        else:
+            next_best = rest[0]
+            out["leader"] = dict(leader["level"])
+            out["statement_1"] = True
+            out["says_1"] = (f"At the search's settings, {level_says(leader['level'])} is ahead of every other alternative"
+                             + (" by more than the plan's tolerance" if _tolerance(block, next_best["best"]) is not None
+                                else "")
+                             + f" ({level_says(leader['level'])} {_fmt(leader['best'])}{unit}, next "
+                             f"{level_says(next_best['level'])} {_fmt(next_best['best'])}{unit}).")
+    return out
+
+
+def second_statement(comparison, finer):
+    """The second statement, "still ahead at finer settings", from the comparison's first (:func:`build_comparison`) and
+    the check's record of every searched alternative's best design at the finer settings (``finer``: the check's
+    ``alternatives`` entry, :mod:`core.optimum_check`; ``None`` when the check did not run). Returns the sentence to add
+    after the first one, or ``""`` when the first statement is not made (nothing was claimed to hold)."""
+    if not isinstance(comparison, dict) or not comparison.get("statement_1"):
+        return ""
+    if not isinstance(finer, dict) or not finer.get("checked"):
+        why = (finer or {}).get("why") if isinstance(finer, dict) else None
+        return f"Not checked at finer settings ({why or 'the check at finer settings did not run'})."
+    lead = level_says(comparison["leader"])
+    unit = f" {comparison.get('unit')}" if comparison.get("unit") else ""
+    against = [x for x in finer.get("against") or [] if isinstance(x, dict)]
+    held = [x for x in against if x.get("ahead")]
+    if against and len(held) == len(against):
+        return "It is still ahead of every other alternative at finer settings."
+    parts = []
+    for x in against:
+        if x.get("ahead"):
+            continue
+        name = level_says(x["level"])
+        if x.get("better_at_finer"):
+            parts.append(f"{name} reaches {_fmt(x.get('value'))}{unit} there, better than {lead}")
+        else:
+            parts.append(f"it is not shown ahead of {name} ({x.get('why') or 'not checked'})")
+    ahead = ", ".join(level_says(x["level"]) for x in held)
+    lead_in = f"At finer settings it is ahead of {ahead}; " if ahead else "At finer settings: "
+    return lead_in + "; ".join(parts) + "."
+
+
+def build_facts(outcomes, levels):
+    """The plain sentences for what the starting points' first builds showed (:meth:`_Search._note_build`): for each design
+    variable that every one-step move of left the answer exactly as it was, under the same choices, how many starting
+    points and numbers. Said as what was measured (one step at a time from each starting point); a larger or joint change
+    was not tried as such. The search itself is not changed by it."""
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for outcome, level in zip(outcomes, levels):
+        for entry in outcome.get("build") or []:
+            choice = ", ".join(f"{k} = {v}" for k, v in sorted((entry.get("choice") or {}).items()))
+            where = ", ".join(x for x in (level_says(level) if level else "", choice) if x)
+            for name, n in (entry.get("numbers") or {}).items():
+                g = groups.setdefault((name, where), {"starts": 0, "tried": 0, "unchanged": 0, "numbers": 0})
+                g["starts"] += 1
+                g["tried"] += n["tried"]
+                g["unchanged"] += n["unchanged"]
+                g["numbers"] = max(g["numbers"], n["tried"])
+    out = []
+    for (name, where), g in sorted(groups.items()):
+        if not g["unchanged"]:
+            continue
+        at = f" at {where}" if where else ""
+        many = f"each of the {g['numbers']} numbers of `{name}`" if g["numbers"] > 1 else f"`{name}`"
+        if g["unchanged"] == g["tried"]:
+            out.append(f"In {g['starts']} starting point{'s' if g['starts'] != 1 else ''}, a one-step move of {many} "
+                       f"changed neither the objective nor any limited quantity{at}; a larger or joint change was not tried as such.")
+        else:
+            out.append(f"In {g['starts']} starting point{'s' if g['starts'] != 1 else ''}, {g['unchanged']} of "
+                       f"{g['tried']} one-step moves of `{name}` changed neither the objective nor any limited quantity{at}; a larger or "
+                       "joint change was not tried as such.")
+    return out
+
+
+def start_build(block, method=None):
+    """For the time estimate, before any evaluation: what each starting point of a Nelder-Mead local search spends first.
+    ``{"numbers": n, "evaluations": n + 1, "per_start": the plan's evaluations for each starting point}`` when the local
+    search of this plan is a simplex (it first moves each of the design's numbers once); ``None`` for a CMA-ES, an
+    exhaustive or a library method (they have no such build). The search's own record keeps the method it ran."""
+    try:
+        probe = _Search(block, 0, method)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if probe.method_used not in ("bounded_local", "global_then_local") or probe._cma_fits():
+        return None
+    return {"numbers": probe.space.dims, "evaluations": probe.space.dims + 1, "per_start": probe.per_start}
+
+
 def not_searched_says(entry):
     """The plain sentence for an alternative that was not searched (``status`` ``not_searched``) and why."""
     return f"{level_says(entry['level'])} was not searched: {entry.get('not_searched_because') or NOT_SEARCHED_BECAUSE}"
@@ -2386,8 +2694,8 @@ def not_searched_says(entry):
 def same_as_says(entry):
     """The plain sentence for an alternative that was not searched because it gave the results of another (no final stop)."""
     n = int(entry.get("probes") or 0)
-    return (f"{level_says(entry['level'])} gave the same results as {level_says(entry['same_as'])} for every one of the "
-            f"{n} designs tried at both, so the search was not run again for it")
+    return (f"{level_says(entry['level'])} was not searched on its own: at each of the {n} designs tried at both, it gave "
+            f"{level_says(entry['same_as'])}'s objective and limits (its other results at those designs are its own)")
 
 
 def rehearse(block, *, batch, seed=0):
@@ -2670,6 +2978,7 @@ def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=N
     gen = compare(block, seed=seed, method=method, rounds=rounds, results=results)
     done = 0
     names = [str(v["name"]) for v in block["design_variables"]]
+    scanned = {}
 
     def one(cell):
         started = time.monotonic()
@@ -2689,14 +2998,19 @@ def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=N
             if request["kind"] == "scan":
                 if scan_step is not None:
                     # An alternative's scan is read for its own block (the scan measures every alternative together).
-                    reply = (scan_step(request["grid"], block=request["block"]) if "block" in request
-                             else scan_step(request["grid"]))
+                    reply = (scan_step(request["grid"], block=request["block"], **({"pool": True} if request.get("pool") else {}))
+                             if "block" in request else scan_step(request["grid"]))
                 else:
-                    reply = []
-                    for cell in grid_cells(request["grid"]):
-                        answer = one(cell)
-                        reply.append({"design": {n: cell[n] for n in names}, "values": answer.get("values"),
-                                      "reason": answer.get("failed", ""), "elapsed_s": answer["elapsed_s"]})
+                    # the scan measures every alternative together: once for the grid, however often it is asked for
+                    grid_key = json.dumps({k: list(v) for k, v in request["grid"].items()}, sort_keys=True, default=str)
+                    if grid_key not in scanned:
+                        scanned[grid_key] = []
+                        for cell in grid_cells(request["grid"]):
+                            answer = one(cell)
+                            scanned[grid_key].append({"design": {n: cell[n] for n in names},
+                                                      "values": answer.get("values"), "reason": answer.get("failed", ""),
+                                                      "elapsed_s": answer["elapsed_s"]})
+                    reply = list(scanned[grid_key])
             elif request["kind"] in ("evaluate", "evaluate_many"):
                 # ``evaluate_many`` (the probe of an alternative, see :func:`compare`): one after another here.
                 replies = []
@@ -2778,14 +3092,17 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
             says += ")"
         says += "."
         if outcome.get("levels"):
-            shown = "; ".join(level_says(p["level"]) + (": " + _fmt(p["best"]["objective"]) + u if p["best"]
-                                                        else ": no design that meets every limit")
+            shown = "; ".join(level_says(p["level"]) + (
+                ": not searched on its own" if p.get("same_as") or p.get("status") == NOT_SEARCHED else
+                ": " + _fmt(p["best"]["objective"]) + u if p["best"] else ": no design that meets every limit")
                               for p in outcome["levels"])
             same = [p for p in outcome["levels"] if p.get("same_as")]
             skipped = [p for p in outcome["levels"] if p.get("status") == NOT_SEARCHED]
-            says += (f" It is the best of {len(outcome['levels'])} alternatives"
-                     f"{', each searched on its own' if not same and not skipped else ''} ({shown}); the winner is "
+            says += (f" It is the best design found over {len(outcome['levels'])} alternatives ({shown}), under "
                      f"{level_says(best['level'])}.")
+            comparison = outcome.get("comparison")
+            if isinstance(comparison, dict) and comparison.get("says_1"):
+                says += " " + comparison["says_1"]
             for p in same:
                 says += " " + same_as_says(p) + "."
             for p in skipped:
@@ -2821,7 +3138,11 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     }
     if outcome.get("levels"):
         record["compared"] = {"conditions": sorted({k for p in outcome["levels"] for k in p["level"]}),
-                              "levels": outcome["levels"]}
+                              "levels": outcome["levels"],
+                              **({"comparison": outcome["comparison"]} if outcome.get("comparison") else {})}
+    facts = list(outcome["build"]) if outcome.get("levels") else build_facts([outcome], [{}])
+    if facts:
+        record["first_round"] = facts
     asked = next((r for r in reversed(rounds) if _number(r.get("target"))), None)
     if asked is not None:
         # The person's latest target (a refine) is the one the result is held to.

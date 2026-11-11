@@ -31525,6 +31525,11 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
     if fit.get("search"):
         search = (" A search's evaluations count as settings too: each costs about as much as one setting, so its "
                   "evaluation_budget (starts times per_start) is part of the same total.")
+        build = fit.get("start_build")
+        if isinstance(build, dict) and build.get("numbers"):
+            search += (f" Each starting point of the search first moves each of the design's {int(build['numbers']):,} "
+                       f"numbers once ({int(build['evaluations']):,} of its {int(build.get('per_start') or 0):,} "
+                       "evaluations).")
         alternatives = int(fit.get("alternatives") or 0)
         if alternatives > 1:
             per_alt = int(fit.get("per_alternative") or 0)

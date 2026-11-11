@@ -281,6 +281,7 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     if not isinstance(search_record.get("best"), dict):
         return _nothing_to_check(block, search_record)
     best_level = search_record["best"].get("level")
+    whole_block = block  # the plan's block, before it is held at the best alternative's conditions
     if isinstance(best_level, dict) and best_level:
         # A study that compares named alternatives searched each one: the best design belongs to one of them, and so do
         # the baseline and the other designs the check recomputes (a design means something only under its alternative).
@@ -296,69 +297,81 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
     margin = float(block["constraint_margin"]) if _number(block.get("constraint_margin")) else 0.0
     sign = _search._sign(block)
     counts = {"designs": 0, "failed": 0}
-    cache: dict[tuple[str, int], dict[str, Any]] = {}
-    pending: dict[tuple[str, int], Any] = {}  # answers asked for together (evaluate_level), each used once by evaluate
+    # Everything the check asks, answers or remembers is keyed by alternative + design + finer level: the best design of
+    # another alternative (the empty key is the best alternative's own) is recomputed under its own conditions and two
+    # alternatives with the same design numbers never share an answer.
+    cache: dict[tuple[str, str, int], dict[str, Any]] = {}
+    pending: dict[tuple[str, str, int], Any] = {}  # answers asked for together (evaluate_level), each used once by evaluate
+    alt_blocks: dict[str, dict[str, Any]] = {}  # the plan's block held at each other alternative, by its key
 
-    def evaluate(design: dict[str, Any], level: int, role: str):
+    def block_of(alt: str) -> dict[str, Any]:
+        return alt_blocks[alt] if alt else block
+
+    def evaluate(design: dict[str, Any], level: int, role: str, alt: str = ""):
         design = space.canonical(design)
-        key = (space.key(design), level)
+        key = (alt, space.key(design), level)
         if key in cache:
             return cache[key]
         if key in pending:
             reply = pending.pop(key)
         else:
-            cell = {**_search.cell_of(block, design), **levels[level]}
-            reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role}
+            cell = {**_search.cell_of(block_of(alt), design), **levels[level]}
+            reply = yield {"kind": "evaluate", "cell": cell, "design": dict(design), "level": level, "role": role,
+                           **({"alternative": alt} if alt else {})}
         return judge(key, reply)
 
-    def ask_together(asks: list[tuple[dict[str, Any], int, str]]):
-        """Every ``(design, level, role)`` in ``asks`` asked for as ONE request: they do not depend on each other's
-        answers, so they run at the same time. The answers wait in ``pending`` and are judged, one by one in the
-        order of ``asks``, by :func:`evaluate`, as one after another would be (the caller clears ``pending``)."""
+    def ask_together(asks: list[tuple]):
+        """Every ``(design, level, role[, alternative])`` in ``asks`` asked for as ONE request: they do not depend on
+        each other's answers, so they run at the same time. The answers wait in ``pending`` and are judged, one by one in
+        the order of ``asks``, by :func:`evaluate`, as one after another would be (the caller clears ``pending``)."""
         todo, keys = [], []
-        for design, level, role in asks:
+        for design, level, role, *more in asks:
+            alt = more[0] if more else ""
             design = space.canonical(design)
-            key = (space.key(design), level)
+            key = (alt, space.key(design), level)
             if key in cache or key in keys:
                 continue
             keys.append(key)
-            todo.append({"kind": "evaluate", "cell": {**_search.cell_of(block, design), **levels[level]},
-                         "design": dict(design), "level": level, "role": role})
+            todo.append({"kind": "evaluate", "cell": {**_search.cell_of(block_of(alt), design), **levels[level]},
+                         "design": dict(design), "level": level, "role": role, **({"alternative": alt} if alt else {})})
         if len(todo) > 1:
             replies = yield {"kind": "evaluate_many", "requests": todo}
             replies = list(replies) if isinstance(replies, list) else []
             pending.update({key: replies[k] if k < len(replies) else None for k, key in enumerate(keys)})
 
-    def judge(key: tuple[str, int], reply: Any) -> dict[str, Any]:
+    def judge(key: tuple[str, str, int], reply: Any) -> dict[str, Any]:
         reply = reply if isinstance(reply, dict) else {"failed": "no answer for this design"}
         if reply.get("stop"):
             raise _Stop()
-        counts["designs"] += 1
+        part = "alternatives" if key[0] else "designs"
+        counts[part] = counts.get(part, 0) + 1
         judged = _search.judge(block, reply.get("values") if "values" in reply else None,
                                str(reply.get("failed") or ""))
         if judged["status"] != "ok":
-            counts["failed"] += 1
+            counts["failed_alternatives" if key[0] else "failed"] = counts.get(
+                "failed_alternatives" if key[0] else "failed", 0) + 1
         runs = [float(t[quantity]) for t in reply.get("trials") or [] if isinstance(t, dict) and _number(t.get(quantity))]
         judged = {**judged, "runs": runs}
         cache[key] = judged
         return judged
 
-    def has_answer(design: dict[str, Any], level: int) -> bool:
+    def has_answer(design: dict[str, Any], level: int, alt: str = "") -> bool:
         """An answer exists for this design at this level: it came with the batch, or an earlier request had it."""
-        key = (space.key(space.canonical(design)), level)
+        key = (alt, space.key(space.canonical(design)), level)
         return key in pending or key in cache
 
-    def judge_together(asks: list[tuple[dict[str, Any], int, str, Callable]]):
+    def judge_together(asks: list[tuple]):
         """Judge, in the order of ``asks``, the answers :func:`ask_together` left in ``pending``. Every run that finished
         is recorded, wherever it stands in the batch; a design that was not run (its answer is a stop) is left as not run;
         and only after all the finished answers are recorded does the check stop. (Run one after another, the answers
         before the first stop are the ones that exist, so with no stop the record is the same.)"""
         stopped = False
-        for design, level, role, store in asks:
-            if stopped and not has_answer(design, level):
+        for design, level, role, store, *more in asks:
+            alt = more[0] if more else ""
+            if stopped and not has_answer(design, level, alt):
                 continue  # no answer exists for this one and the time is up: not run
             try:
-                store((yield from evaluate(design, level, role)))
+                store((yield from evaluate(design, level, role, alt)))
             except _Stop:
                 stopped = True
         if stopped:
@@ -394,8 +407,36 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
                 pending.clear()
     except _Stop:
         finished = False
+    # Statement 2 of a comparison ("still ahead at finer settings"): when the search earned the first statement, the best
+    # design of EVERY other searched alternative is recomputed here too, at each finer level, under its own conditions.
+    # Cut short by the time limit, it leaves the check of the best design as it is and the second statement unmade.
+    others: list[dict[str, Any]] = []
+    others_done = True
+    comparison = (search_record.get("compared") or {}).get("comparison") if isinstance(search_record.get("compared"), dict) else None
+    if (isinstance(comparison, dict) and comparison.get("statement_1") and finished and info["named"]
+            and isinstance(best_level, dict) and best_level):
+        for entry in (search_record.get("compared") or {}).get("levels") or []:
+            if (isinstance(entry, dict) and isinstance(entry.get("best"), dict) and entry.get("level") != best_level
+                    and not entry.get("same_as") and entry.get("status") != "not_searched"):
+                alt = _search.level_key(entry["level"])
+                alt_blocks[alt] = _search.level_block(whole_block, entry["level"])
+                others.append({"design": space.canonical(entry["best"]["design"]), "role": "alternative",
+                               "search": entry["best"].get("objective"),
+                               "search_constraints": dict(entry["best"].get("constraints") or {}),
+                               "levels": [None] * len(levels), "alt": alt, "level": dict(entry["level"])})
+        try:
+            every_other = [(item, level) for level in range(len(levels)) for item in others]
+            try:
+                yield from ask_together([(item["design"], level, item["role"], item["alt"]) for item, level in every_other])
+                yield from judge_together([(item["design"], level, item["role"], _store(item["levels"], level), item["alt"])
+                                           for item, level in every_other])
+            finally:
+                pending.clear()
+        except _Stop:
+            others_done = False
     return _record(block, search_record, info, base, cands, probes, rows=rows, finished=finished, limits=limits,
-                   margin=margin, noisy=noisy, check_runs=check_runs, counts=counts)
+                   margin=margin, noisy=noisy, check_runs=check_runs, counts=counts,
+                   alternatives=(others, others_done, best_level if others else None))
 
 
 def _meets(judged: dict[str, Any] | None, limits: list[tuple[str, str, float, str]], margin: float) -> bool:
@@ -524,7 +565,7 @@ def _o(op: str) -> str:
 
 
 def _record(block, search_record, info, base, cands, probes, *, rows, finished, limits, margin, noisy, check_runs,
-            counts):  # noqa: ANN001,C901 -- one pass over what the check measured, check by check
+            counts, alternatives=None):  # noqa: ANN001,C901 -- one pass over what the check measured, check by check
     objective = block["objective"]
     unit = str(objective.get("unit") or "")
     u = f" {unit}" if unit else ""
@@ -931,6 +972,66 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     if best_view is not None:
         best_view["constraints"] = constraints_out
         best_view["replaces_search_best"] = first is not None and chosen is not first
+
+    # --- the other alternatives at the finer settings (statement 2 of a comparison)
+    finer_alternatives = None
+    compared_search = search_record.get("compared") if isinstance(search_record.get("compared"), dict) else {}
+    held = (compared_search.get("comparison") or {}) if isinstance(compared_search.get("comparison"), dict) else {}
+    if held.get("statement_1"):
+        others, others_done, leader_level = alternatives or ([], True, None)
+        if not named:
+            finer_alternatives = {"checked": False, "why": "the plan names no numerical setting, so there is no finer level"}
+        elif not finished or chosen is None or not measured_all or not base_ok:
+            finer_alternatives = {"checked": False, "why": "the best design itself was not checked at the finest settings"}
+        elif not others_done or any(any(j is None for j in x["levels"]) for x in others):
+            finer_alternatives = {"checked": False, "why": "the check's time limit (execution.timeout_s) ran out before "
+                                                           "every alternative's best design was evaluated"}
+        else:
+            lead = at(chosen)
+            against = []
+            for x in others:
+                final = at(x)
+                entry: dict[str, Any] = {"level": dict(x["level"]), "design": x["design"],
+                                         "objective": {"search": x.get("search"),
+                                                       "check": [(j or {}).get("objective") for j in x["levels"]]},
+                                         "ahead": False, "better_at_finer": False}
+                if not final or final.get("status") != "ok" or any((j or {}).get("status") != "ok" for j in x["levels"]):
+                    entry["why"] = "its best design could not be evaluated at every finer level"
+                elif not _meets(final, limits, margin):
+                    entry["value"] = final["objective"]
+                    entry["why"] = "its best design breaks a limit at the finest settings"
+                else:
+                    gap = sign * (final["objective"] - lead["objective"])  # positive: the best design is ahead
+                    e_l, e_x = err(chosen), err(x)
+                    threshold, _info = _threshold(block, final["objective"])
+                    entry.update({"value": final["objective"], "gap": gap})
+                    if e_l is None or e_x is None:
+                        entry["why"] = "the numerical error of the two designs could not be estimated"
+                    else:
+                        bar = (threshold or 0.0) + e_l + e_x
+                        tiny = floor * (1.0 + abs(final["objective"]))
+                        measure, why = gap, ""
+                        if noisy:
+                            diffs = [sign * (a - b) for a, b in zip(final.get("runs") or [], lead.get("runs") or [])]
+                            test = _stats.paired_permutation_test(diffs) if len(diffs) >= 2 else None
+                            if test is None:
+                                measure, why = None, ("a study with randomness needs at least two fresh runs of each "
+                                                      "design to tell a difference from chance (`check_runs` of at least 2)")
+                            else:
+                                measure = test["ci_lower"]
+                        if measure is not None and measure > bar + tiny:
+                            entry["ahead"] = True
+                        elif gap < -(bar + tiny):
+                            entry["better_at_finer"] = True
+                            entry["why"] = "it is better than the best design at the finest settings"
+                        else:
+                            entry["why"] = why or ("the difference is not more than the plan's tolerance and the numerical "
+                                                   "error of the two designs")
+                against.append(entry)
+            finer_alternatives = {"checked": True, "leader": dict(leader_level or {}), "against": against,
+                                  "still_ahead": bool(against) and all(a["ahead"] for a in against),
+                                  "evaluations": counts.get("alternatives", 0),
+                                  "failed": counts.get("failed_alternatives", 0)}
     return {
         "schema": SCHEMA,
         "objective": {k: objective.get(k) for k in ("quantity", "direction", "unit", "meaning") if objective.get(k)},
@@ -952,6 +1053,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         "finished": finished,
         "says": says,
         "blind_spots": list(BLIND_SPOTS),
+        **({"alternatives": finer_alternatives} if finer_alternatives is not None else {}),
     }
 
 
@@ -1233,6 +1335,10 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         if values:
             lines.append(f"[optimise] checked best design: {_describe(best.get('design') or {})}: "
                          f"{objective.get('quantity', 'the objective')} = {_fmt(values[-1])}{unit} at the finest settings")
+    finer = record.get("alternatives")
+    if isinstance(finer, dict):
+        lead = {"statement_1": True, "leader": finer.get("leader") or {}, "unit": (record.get("objective") or {}).get("unit")}
+        lines.append(f"[optimise] {_search.second_statement(lead, finer)}")
     for name, label in _LABELS.items():
         c = (record.get("checks") or {}).get(name)
         if isinstance(c, dict):

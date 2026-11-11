@@ -203,20 +203,21 @@ def search(study):
 
     scanned = {}
 
-    def scan(grid, block=block):
+    def scan(grid, block=block, pool=False):
         # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
         # The scan measures every alternative of a compared condition together: it runs once, and is read for the
         # alternative each search starts (``block``).
         key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
+        rows_of = fi_search.scan_candidates if pool else fi_search.scan_rows
         if key in scanned:
-            return fi_search.scan_rows(scanned[key], block)
+            return rows_of(scanned[key], block)
         summary = scanned[key] = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
                               "paired": True, "thresholds": study.get("thresholds") or {},
                               "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
                               "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
-        return fi_search.scan_rows(summary, block)
+        return rows_of(summary, block)
 
     def evaluate(cell):
         trials = [{"trial": t, "seed": None if entry == "run_cell" else trial_seed(base, "", t)} for t in range(runs)]

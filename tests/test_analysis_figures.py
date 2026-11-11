@@ -438,7 +438,7 @@ def test_an_alternative_that_was_not_searched_gives_no_false_fault_and_is_said(t
     _write(tmp_path / "q", rows, record)
     out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
     assert out[0]["status"] == "ok" and af.fi_faults(out) == []
-    assert "family = b gave the same results as family = a" in out[0]["note"]
+    assert "family = b was not searched on its own (it gave the objective and limits of family = a" in out[0]["note"]
 
 
 @pytest.mark.parametrize("where", ["handle", "folder"])

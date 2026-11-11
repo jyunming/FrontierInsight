@@ -2281,6 +2281,9 @@ class RunChecksMixin:
                 fits_in["check"] = int(_optimisation_plan.budget(block).get("check") or 0)
             except (KeyError, TypeError, ValueError):
                 pass
+            build = _optimise_search.start_build(block)
+            if build is not None:
+                fits_in["start_build"] = build
             if alternatives > 1:
                 # Where the search's evaluations come from, in FI's own numbers: the plan lowers them by comparing fewer
                 # alternatives or by giving each a smaller budget.
