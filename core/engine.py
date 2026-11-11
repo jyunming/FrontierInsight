@@ -73,6 +73,7 @@ from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
+from . import cite_labels as _cite_labels
 from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import audit_open_items as _audit_open
@@ -15653,7 +15654,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                           and 0 < target < 1e300 else None)
             # FI's own trial record has the trials of each setting: the target is held to each setting's own interval
             # (never one pooled over settings whose true values differ). Said in the record, never a route back to design.
-            per_setting = _trial_table.per_setting_precision(self.quest_root, on, float(target)) if not_judged and on else None
+            per_setting = (_trial_table.per_setting_precision(self.quest_root, on, float(target),
+                                                              _metric_spec.proportion_ids(self._protocol_block(state)))
+                           if not_judged and on else None)
             if per_setting:
                 not_judged = None
             replicates_for_specs = state.get("result_json_replicates") or []
@@ -15797,7 +15800,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # No pooled interval for the quantity the target is on: FI's trial record gives each setting's own.
             judged = any(isinstance(e, dict) and "target_half_width" in e for e in aggregate.values())
             if on_declared and not judged and isinstance(target, (int, float)) and not isinstance(target, bool) and 0 < target < 1e300:
-                per_setting = _trial_table.per_setting_precision(self.quest_root, on_declared, float(target))
+                per_setting = _trial_table.per_setting_precision(self.quest_root, on_declared, float(target),
+                                                                 _metric_spec.proportion_ids(protocol))
                 words = _evidence.precision_per_setting_words(per_setting) if per_setting else ""
                 if words:
                     return (f"{words[0].upper()}{words[1:]}. Say so in the limitations and do not claim a precision the "
@@ -24059,7 +24063,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if drafted_note := self._drafted_parts_note():
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         try:
-            trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)))
+            trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)),
+                                            _metric_spec.proportion_ids(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
                 by_setting = _results_by_setting.write(
                     self.quest_root, self._protocol_block(state), self._judged_checks(),
@@ -24620,6 +24625,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         markdown, literature, dropped = _finalize_paper_sources(
             markdown, state.get("literature") or [], self.config.output.audience,
         )
+        _cite_labels.write_removed(self.quest_root, [str(n) for n in dropped])  # listed in QUALITY.md
         if dropped:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
@@ -31597,7 +31603,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "labels": {"<each grid parameter and each other quantity a figure plots, named as the code names it>": "<the reader's name for it: words, its symbol in $...$ and its unit, for example Activation energy $E_a$ (kJ/mol)>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "exact": <true only when the number is a count or a share of counts, so every run gives the same value; false or left out for a measurement or a value worked out with decimal arithmetic>, "paired": <true when the settings are compared trial by trial, which needs shared_draws true at the protocol level; false otherwise, including two estimates made from the same trial's data (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold, of the `constants` entry or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>, "degrees_of_freedom": <only when the interval is the estimate plus and minus one multiplier of its standard error in every setting: the whole number of the t distribution whose quantile is the multiplier (the plan's own statement, for example 3), or "normal" for the normal quantile; when the study compares values of a factor that give the interval different multipliers, a mapping {"<factor>": {"<value>": <whole number or "normal">}} with one entry per value; leave it out when the multiplier changes between settings in any other way>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "label": "<the reader's name for the number, written the same way>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "exact": <true only when the number is a count or a share of counts, so every run gives the same value; false or left out for a measurement or a value worked out with decimal arithmetic>, "paired": <true when the settings are compared trial by trial, which needs shared_draws true at the protocol level; false otherwise, including two estimates made from the same trial's data (what one run compares on the same data goes in in_each_run)>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>", "known_value": {"true_value": <the true value the simulation generates the data with, on the estimate's own scale: a number, or the name of the threshold, of the `constants` entry or of the grid parameter that holds it>, "estimate": "<the name run_trial returns for the trial's estimate of it>", "standard_error": "<the name run_trial returns for that estimate's standard error>", "interval": ["<the name of the lower end of the trial's interval>", "<the name of its upper end>"], "level": <the interval's level, for example 0.95>, "degrees_of_freedom": <only when the interval is the estimate plus and minus one multiplier of its standard error in every setting: the whole number of the t distribution whose quantile is the multiplier (the plan's own statement, for example 3), or "normal" for the normal quantile; when the study compares values of a factor that give the interval different multipliers, a mapping {"<factor>": {"<value>": <whole number or "normal">}} with one entry per value; leave it out when the multiplier changes between settings in any other way>, "scale": <only "log", when the interval is symmetric on the log scale of the estimate (exp(ln(estimate) -/+ multiplier x s), the standard error above being the estimate's own); leave it out otherwise>}, "undefined_when": {"<grid parameter>": [<the values where this number truly has no value, so a trial returns none there>]}, @@REFERENCE_FIELD@@}],
   "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
@@ -32544,50 +32550,69 @@ def _number_list(numbers: list[int]) -> str:
     return ", ".join(parts)
 
 
-def _renumber_citations(body: str, n_papers: int) -> tuple[str, dict[int, int], list[int]]:
+def _renumber_citations(
+    body: str, n_papers: int, web_labels: set[str] | None = None,
+) -> tuple[str, dict[int, int], list[int | str]]:
     """Number the scholarly sources ``body`` cites 1, 2, 3… in the order it
     first cites them, and rewrite its citations to match. Web-page labels
-    ([W1]) stay as they are. A number no source has (above ``n_papers``) is
-    taken out of its citation, and a citation left empty goes.
+    ([W1]) stay as they are. A label no source has (above ``n_papers``, or a
+    web page not in ``web_labels``) is taken out of its citation, and a
+    citation left empty goes.
 
-    Not citations, so left alone: brackets in inline code or math, a bracket
+    A paper written with ``{{cite:N}}`` (core/cite_labels.py) cites by those
+    placeholders alone: FI renders them, and no bracket is read as a citation.
+    A paper with no placeholder was written before that, and its brackets are
+    read as follows (kept only so an old record can be rendered again). Not
+    citations, so left alone: brackets in inline code or math, a bracket
     followed by "(" (a link), one right after a name or another bracket (an
     index: "pixels[2,3]", "m[1][4]"), and one holding a 0 or a year-sized
     number ("[0, 1]", "[1990–2020]").
 
-    Returns the new text, the map from old number to new, and the numbers
+    Returns the new text, the map from old number to new, and the labels
     that were taken out."""
     spans = [(s.start(), s.end()) for s in _NOT_PROSE_RE.finditer(body)]
-    found: list[tuple[re.Match[str], list[str]]] = []
+    found: list[tuple[int, int, list[str], list[str]]] = []
+    placeholders = _cite_labels.has_placeholder(body, spans)
+    if placeholders:
+        for m in _cite_labels.CITE.finditer(body):
+            if not any(s <= m.start() < e for s, e in spans):
+                labels, bad = _cite_labels.split_labels(m.group(1), lambda part: _citation_labels(part))
+                found.append((m.start(), m.end(), labels, bad))
+    else:
+        for m in _CITATION_BRACKET_RE.finditer(body):
+            before = body[m.start() - 1:m.start()]
+            if (body[m.end():m.end() + 1] == "(" or (before.isalnum() or before in "_])" and before != "")
+                    or any(s <= m.start() < e for s, e in spans)):
+                continue
+            labels = _citation_labels(m.group(1))
+            if any(n == 0 or n >= _NOT_A_CITATION_NUMBER for n in (int(x) for x in labels if x.isdigit())):
+                continue
+            found.append((m.start(), m.end(), labels, []))
+    # A label with no source behind it is removed, never turned into a number.
     mapping: dict[int, int] = {}
-    for m in _CITATION_BRACKET_RE.finditer(body):
-        before = body[m.start() - 1:m.start()]
-        if (body[m.end():m.end() + 1] == "(" or (before.isalnum() or before in "_])" and before != "")
-                or any(s <= m.start() < e for s, e in spans)):
-            continue
-        labels = _citation_labels(m.group(1))
-        numbers = [int(label) for label in labels if label.isdigit()]
-        if any(n == 0 or n >= _NOT_A_CITATION_NUMBER for n in numbers):
-            continue
-        found.append((m, labels))
-        for n in numbers:
-            if n <= n_papers and n not in mapping:
+    for _s, _e, labels, _bad in found:
+        for n in (int(x) for x in labels if x.isdigit()):
+            if 0 < n <= n_papers and n not in mapping:
                 mapping[n] = len(mapping) + 1
-    dropped: list[int] = []
+    dropped: list[int | str] = []
     pieces: list[str] = []
     last = 0
-    for m, labels in found:
+    for start, end, labels, bad in found:
         numbers = [int(label) for label in labels if label.isdigit()]
+        unknown_web = [x for x in labels if x.startswith("W") and web_labels is not None and placeholders
+                       and x not in web_labels]
         dropped += [n for n in numbers if n not in mapping and n not in dropped]
+        dropped += [x for x in [*unknown_web, *bad] if x not in dropped]
         new = _number_list(sorted({mapping[n] for n in numbers if n in mapping}))
-        pages = list(dict.fromkeys(label for label in labels if not label.isdigit()))
+        pages = list(dict.fromkeys(label for label in labels if not label.isdigit() and label not in unknown_web))
         inside = ", ".join(([new] if new else []) + pages)
-        start = m.start()
         if not inside:
-            while start > last and body[start - 1] in " \t":
+            while start > last and body[start - 1] in " 	":
                 start -= 1
-        pieces += [body[last:start], f"[{inside}]" if inside else ""]
-        last = m.end()
+        # A rendered citation never touches the word before it, so no later pass reads it as an index.
+        lead = " " if inside and placeholders and start > last and body[start - 1].isalnum() else ""
+        pieces += [body[last:start], lead + (f"[{inside}]" if inside else "")]
+        last = end
     pieces.append(body[last:])
     return "".join(pieces), mapping, dropped
 
@@ -32629,8 +32654,10 @@ def _finalize_paper_sources(
     source the text cites is always under References); ``## Further reading``
     lists the web pages it does not cite. Returns the paper, the reordered
     literature and the citation numbers that named no source."""
-    n_papers = sum(1 for label, _m, _i in _labelled_sources(literature, audience) if not label.startswith("W"))
-    body, mapping, dropped = _renumber_citations(_strip_source_lists(markdown), n_papers)
+    labelled = _labelled_sources(literature, audience)
+    n_papers = sum(1 for label, _m, _i in labelled if not label.startswith("W"))
+    body, mapping, dropped = _renumber_citations(
+        _strip_source_lists(markdown), n_papers, {label for label, _m, _i in labelled if label.startswith("W")})
     ordered = _literature_in_citation_order(literature, mapping, audience)
     refs = build_references(ordered, audience=audience)[:len(mapping)]
     web = build_further_reading(ordered, audience=audience)

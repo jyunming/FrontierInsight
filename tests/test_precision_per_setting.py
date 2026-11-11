@@ -116,3 +116,31 @@ def test_the_quality_report_says_a_target_missed_in_some_settings(tmp_path: Path
     for bad in ({}, {"settings": "x"}, "not a record"):
         q.evidence = {"precision_per_setting": bad}
         assert qr._precision_per_setting(q) == []
+
+
+def _zero_one_cells(successes: list[int], n: int) -> list[dict[str, Any]]:
+    return [{"cell": {"k": i}, "key": f"k={i}",
+             "metrics": {"hit": {"values": [1.0] * s + [0.0] * (n - s)}}} for i, s in enumerate(successes)]
+
+
+def test_an_undeclared_zero_one_value_is_judged_by_wilson(tmp_path: Path) -> None:
+    """Old code: 39 of 39 got a t interval of width 0 and counted as meeting a 0.03 target."""
+    root = _record(tmp_path, _zero_one_cells([39, 30], 39))
+    got = trial_table.per_setting_precision(root, "hit", 0.03)
+    assert got is not None and got["met"] == 0 and got["widest"] > 0.04
+    # the results table keeps its t interval and says it is undeclared
+    row = trial_table.rows(root)[0]  # the setting with 39 of 39
+    assert row["method"].startswith(trial_table.T_INTERVAL) and "does not declare" in row["method"]
+
+
+def test_a_declared_proportion_is_unchanged(tmp_path: Path) -> None:
+    root = _record(tmp_path, _zero_one_cells([39], 39))
+    undeclared = trial_table.per_setting_precision(root, "hit", 0.03)
+    declared = trial_table.per_setting_precision(root, "hit", 0.03, ["hit"])
+    assert declared is not None and undeclared is not None and declared["widest"] == undeclared["widest"]
+
+
+def test_a_value_that_is_not_zero_one_is_unchanged(tmp_path: Path) -> None:
+    cells = [{"cell": {"k": 0}, "key": "k=0", "metrics": {"hit": {"values": [1.0] * 20 + [0.5] * 19}}}]
+    got = trial_table.per_setting_precision(_record(tmp_path, cells), "hit", 0.2)
+    assert got is not None and got["met"] == 1 and got["widest"] < 0.2

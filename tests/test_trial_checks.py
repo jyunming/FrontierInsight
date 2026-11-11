@@ -43,12 +43,14 @@ FIX = Path(__file__).parent / "fixtures" / "replay" / "trial_checks"
 
 
 def known(est: str, truth, *, se: str | None = None, var: str | None = None, interval: tuple[str, str] | None = None,
-          level: float = 0.95, ident: str | None = None, df: int | str | None = None) -> dict:
+          level: float = 0.95, ident: str | None = None, df: int | str | None = None, scale: str | None = None) -> dict:
     """A protocol metric that declares its known value (``df``: the degrees of freedom of the interval's multiplier, or
     ``"normal"``)."""
     kv = {"true_value": truth, "estimate": est, "level": level}
     if df is not None:
         kv["degrees_of_freedom"] = df
+    if scale:
+        kv["scale"] = scale
     if se:
         kv["standard_error"] = se
     if var:
@@ -555,7 +557,7 @@ def _log_interval_cells(mult: float, n_settings: int = 3, n: int = 60, seed: int
     return _cells(per)
 
 
-_DECL_NORMAL = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")
+_DECL_NORMAL = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal", scale="log")
 
 
 def test_an_interval_symmetric_on_the_log_scale_is_judged_there_not_on_the_estimates_own_scale():
@@ -580,14 +582,41 @@ def test_an_own_scale_interval_is_judged_as_before():
     assert q.fault and not q.on_log
 
 
-def test_trials_of_mixed_forms_in_a_setting_fail_closed_on_the_own_scale():
+def test_trials_of_mixed_forms_in_a_setting_are_a_miss_on_the_declared_scale():
     cells = _log_interval_cells(_Z, n_settings=1, spread=3.0)
     m = cells[0]["metrics"]
     for i in range(0, 60, 2):  # every second trial reports an own-scale interval
         e, se = m["x_hat"]["values"][i], m["x_se"]["values"][i]
         m["x_lo"]["values"][i], m["x_hi"]["values"][i] = e - _Z * se, e + _Z * se
     [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
-    assert q.fault and not q.on_log
+    assert q.fault and len(q.on_log) == 1  # judged on the declared log scale: the own-scale trials miss there
+
+
+def test_the_scale_is_the_plans_not_read_from_the_values():
+    # the same record: declared log it is no miss; with no declaration it is judged on the estimate's own scale (what
+    # `degrees_of_freedom` says), a miss, and the miss says the plan did not declare the scale
+    cells = _log_interval_cells(_Z, spread=4.0)
+    undeclared = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal")
+    [q] = _mult(tc.calibration(cells, _proto(undeclared)))
+    assert q.fault and not q.on_log and "does not say on which scale" in q.says() and "scale: log" in q.says()
+    [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
+    assert not q.fault and len(q.on_log) == 3 and "does not say" not in q.says()
+    # declared own, explicitly: judged on the own scale even where the values happen to be log-symmetric
+    own = known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal", scale="own")
+    [q] = _mult(tc.calibration(cells, _proto(own)))
+    assert q.fault and not q.on_log and "does not say" not in q.says()
+
+
+def test_a_scale_declaration_is_checked_for_its_shape():
+    clean, why = metric_spec.normalize([_DECL_NORMAL])
+    assert why is None and clean[0]["known_value"]["scale"] == "log"
+    for bad in ("ln", "LOG", 2, True):
+        clean, why = metric_spec.normalize([known("x_hat", 1.0, se="x_se", interval=("x_lo", "x_hi"), df="normal", scale=bad)])
+        assert clean is None and "scale" in why
+    clean, why = metric_spec.normalize([known("x_hat", 1.0, interval=("x_lo", "x_hi"), scale="log")])
+    assert clean is None and "standard_error" in why
+    clean, why = metric_spec.normalize([_DECL3])
+    assert "scale" not in clean[0]["known_value"]
 
 
 def _rounded_to(cells: list[dict], how) -> list[dict]:
@@ -604,7 +633,7 @@ def _f32(v: float) -> float:
 
 @pytest.mark.parametrize("how,spread", [(lambda v: round(v, 6), 1.5), (lambda v: round(v, 6), 0.06), (_f32, 0.02)],
                          ids=["6 decimals", "6 decimals, narrow", "float32, narrow"])
-def test_a_log_scale_interval_with_rounded_values_is_still_judged_on_the_log_scale(how, spread):
+def test_a_log_scale_interval_with_finely_rounded_values_is_judged_on_the_log_scale(how, spread):
     [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(_Z, spread=spread), how), _proto(_DECL_NORMAL)))
     assert not q.fault and q.gross == 0 and len(q.on_log) == 3
     [q] = _mult(tc.calibration(_rounded_to(_log_interval_cells(1.6449, spread=spread), how), _proto(_DECL_NORMAL)))
@@ -629,15 +658,15 @@ def test_a_standard_error_of_the_log_reported_directly_is_a_fault():
     assert q.fault
 
 
-def test_a_non_positive_estimate_or_bound_is_never_read_on_the_log_scale():
+def test_a_non_positive_estimate_or_bound_is_not_judged_on_the_declared_log_scale():
     cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
     cells[0]["metrics"]["x_lo"]["values"][3] = -0.5
     [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
-    assert q.fault and not q.on_log
+    assert not q.fault and q.settings[0].n == 59  # that trial cannot be read on the log scale: not judged, never a log value
     cells = _log_interval_cells(_Z, n_settings=1, spread=1.0)
     cells[0]["metrics"]["x_hat"]["values"][3] = -1.0
     [q] = _mult(tc.calibration(cells, _proto(_DECL_NORMAL)))
-    assert q.fault and not q.on_log
+    assert not q.fault and q.settings[0].n == 59
 
 
 def test_the_repair_message_names_the_log_scale_it_judged_on():
@@ -712,8 +741,8 @@ def _rounded(cells: list[dict], decimals: int) -> list[dict]:
     return cells
 
 
-@pytest.mark.parametrize("decimals", [6, 4, 3, 2])
-def test_a_right_multiplier_in_values_the_code_rounded_is_not_a_fault_the_rounding_is_read_from_the_values(decimals):
+@pytest.mark.parametrize("decimals", [6, 4, 3])
+def test_a_right_multiplier_in_finely_rounded_values_is_within_the_tolerance(decimals):
     from core import stats
     cells = _rounded(_interval_cells(stats.t_quantile(0.975, 3), seed=22), decimals)
     assert not any(q.fault for q in _mult(tc.calibration(cells, _proto(_DECL3))))
@@ -731,10 +760,24 @@ def test_a_quantile_typed_with_three_or_four_significant_digits_is_the_plans_but
     assert _mult(tc.calibration(_interval_cells(3.2), _proto(_DECL3)))[0].fault
 
 
-def test_the_unit_a_series_was_rounded_to_is_read_from_the_values():
-    assert tc._grain([1.25, 3.5, 0.75]) == 0.01 and tc._grain([1.0, 4.0]) == 1.0
-    assert tc._grain([0.1234, 0.5678]) == 1e-4
-    assert tc._grain([0.123456789012345, 0.5]) == 0.0
+def test_values_are_judged_as_recorded_no_rounding_unit_is_read_from_them():
+    # the original failure: integer estimates, errors and ends read as "rounded to 1", a half unit of allowance each, so a
+    # multiplier of 3 passed for the plan's 3.182 (t with 3 degrees of freedom)
+    rng = random.Random(31)
+    per = {}
+    for i in range(3):
+        e = [float(rng.randint(40, 60)) for _ in range(60)]
+        per[f"s{i}"] = {"x_hat": e, "x_se": [1.0] * 60, "x_lo": [a - 3.0 for a in e], "x_hi": [a + 3.0 for a in e]}
+    [q] = _mult(tc.calibration(_cells(per), _proto(_DECL3)))
+    assert q.fault and q.gross == 3 and all(abs(s.value - 3.0) < 1e-9 for s in q.settings)
+    assert not hasattr(tc, "_grain") and not hasattr(tc, "_slack") and not hasattr(tc, "_interval_form")
+
+
+def test_a_coarsely_rounded_record_is_judged_on_what_it_returned_and_the_code_is_told_to_return_it_unrounded():
+    from core import stats
+    cells = _rounded(_interval_cells(stats.t_quantile(0.975, 3), seed=22), 2)
+    v = tc.judge(cells, _proto(_DECL3), repairs_left=True)
+    assert v.action == tc.REPAIR and "unrounded" in v.directive
 
 
 def _split_record(shift: float) -> list[dict]:

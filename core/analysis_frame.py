@@ -1694,7 +1694,8 @@ def run(record_path, quest_root):
     earlier = _earlier_record(quest_root) if only else None
     first = Table(cells, readable)
     table = Table(cells, readable, {} if only else _references(first, base, notes),
-                  {name: first.at(**hold) for name, hold in PLAN.PARTS.items()}, getattr(PLAN, "KNOWN", {}))
+                  {name: first.at(**hold) for name, hold in PLAN.PARTS.items()}, getattr(PLAN, "KNOWN", {}),
+                  getattr(PLAN, "KINDS", {}))
     table._thresholds = _thresholds(record_path)  # read only by the figures: a threshold line is named by the plan's key
     compared = {k: list(v) for k, v in PLAN.COMPARED.items()}
     records = earlier["derived"] if only else _derived(table, base, compared)

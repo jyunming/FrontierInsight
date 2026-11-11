@@ -429,7 +429,7 @@ for name, hold in getattr(derive, "PARTS", {}).items():
         parts[name] = first.at(**hold)
     except Exception:
         parts[name] = []
-table = derive.Table(cells, ids, {}, parts, getattr(derive, "KNOWN", {}))
+table = derive.Table(cells, ids, {}, parts, getattr(derive, "KNOWN", {}), getattr(derive, "KINDS", {}))
 folder = tempfile.mkdtemp()
 done = []
 try:

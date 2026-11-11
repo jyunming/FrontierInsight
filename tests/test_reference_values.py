@@ -398,7 +398,7 @@ def test_the_trial_table_is_unchanged_by_reading_it_through_summaries(tmp_path: 
                                                               for k, vs in values.items()}} for m in (1, 2)]
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
-    rows = trial_table.rows(tmp_path)
+    rows = trial_table.rows(tmp_path, (), {"b"})  # the plan declares `b` a proportion
     assert {r["metric"] for r in rows} == {"a", "b"}
     a = next(r for r in rows if r["metric"] == "a" and r["setting"] == "m=2")
     from core import stats

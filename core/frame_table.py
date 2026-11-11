@@ -165,11 +165,19 @@ def quantile(values, q):
     return vals[lo] + (vals[hi] - vals[lo]) * (pos - lo)
 
 
-def summary(values):
-    """``{"n", "mean", "sd", "binary", "successes"}`` of one value's trials in one setting (``binary``: every trial gave 0 or 1)."""
+def summary(values, proportion=False):
+    """``{"n", "mean", "sd", "binary", "zero_one", "successes"}`` of one value's trials in one setting. ``proportion``: the plan declares
+    the result a proportion; only then is it ``binary`` (every trial gave 0 or 1) and given a binomial interval. The kind
+    of interval is the plan's to declare, never read from the values: ``zero_one`` only says every trial happened to give 0 or 1."""
     mean, sd, n = mean_std(values)
-    binary = bool(values) and all(v in (0.0, 1.0) for v in values)
-    return {"n": n, "mean": mean, "sd": sd, "binary": binary, "successes": sum(values) if binary else None}
+    zero_one = bool(values) and all(v in (0.0, 1.0) for v in values)
+    return {"n": n, "mean": mean, "sd": sd, "binary": bool(proportion) and zero_one, "zero_one": zero_one,
+            "successes": sum(values) if zero_one else None}
+
+
+#: The method a mean gets; a result that gave only 0 and 1 though the plan does not declare it a proportion gets this said too.
+T_INTERVAL = "t interval of the mean"
+UNDECLARED = " (the plan does not declare it a proportion)"
 
 
 def interval(s):
@@ -183,7 +191,7 @@ def interval(s):
     if n < 2:
         return None, None, ""
     half = _t95(n - 1) * (s["sd"] / math.sqrt(n))
-    return s["mean"] - half, s["mean"] + half, "t interval of the mean"
+    return s["mean"] - half, s["mean"] + half, T_INTERVAL + (UNDECLARED if s.get("zero_one") else "")
 
 
 #: The environment variable FI's harness gives the analysis, naming (relative to the quest folder) the record it is to read: FI's

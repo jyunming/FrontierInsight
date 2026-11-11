@@ -156,7 +156,8 @@ KNOWN_VALUE_HELP = (
     "standard error in every setting, `degrees_of_freedom` (the whole number of the t distribution whose quantile is the "
     "multiple, or \"normal\" for the normal quantile; when the study compares values of a factor that give the interval "
     "different multiples, give it per value, {<factor>: {<value>: <whole number or \"normal\">}}; leave it out when the "
-    "multiple changes between settings in any other way)")
+    "multiple changes between settings in any other way), and `scale` (\"log\" only when the interval is symmetric on the log "
+    "scale of the estimate, the interval of ln(estimate) with the standard error of the estimate itself; leave it out otherwise)")
 
 
 #: What the plan is told about declaring a known true value (spliced into the plan request by the engine, after the
@@ -176,7 +177,9 @@ PLAN_RULE = (
     "interval different multipliers, give `degrees_of_freedom` per value instead, {<factor>: {<value>: <whole number "
     "or \"normal\">}}, one entry for every value. "
     "FI recovers the multiplier the code used from the trials' own intervals and sends the code back when it differs "
-    "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. `true_value` is always a number the "
+    "from yours; a plan that leaves `degrees_of_freedom` out gets no such check. When the interval is symmetric on the log "
+    "scale of the estimate (exp(ln(estimate) -/+ multiplier x s), with the standard error of the estimate itself reported), "
+    "give `scale`: \"log\"; FI does not guess the scale from the values. `true_value` is always a number the "
     "study itself fixes (a constant, a threshold, a grid parameter, or a formula of them). Never put there a value you "
     "worked out for a quantity that comes out of the simulation (a rate you derived, a limit you recalled): that is a "
     "derivation, it belongs in `oracles` with a `derivation:` reference, and FI reports it as unverified without "
@@ -231,6 +234,14 @@ def _known_value(ident: str, raw: Any) -> tuple[dict[str, Any] | None, str]:
             return None, (where + "`known_value.degrees_of_freedom` says the interval is the estimate plus and minus a "
                           "multiple of the standard error, so it needs both `standard_error` and `interval`")
         out["degrees_of_freedom"] = df
+    if raw.get("scale") is not None:
+        if raw["scale"] not in ("own", "log"):
+            return None, (where + "`known_value.scale` is \"log\" when the interval is symmetric on the log scale of the "
+                          "estimate (the interval of ln(estimate), with the standard error of the estimate itself), or \"own\"; "
+                          "leave it out for the estimate plus and minus a multiple of its standard error")
+        if "standard_error" not in out or "interval" not in out:
+            return None, where + "`known_value.scale` describes the interval, so it needs both `standard_error` and `interval`"
+        out["scale"] = raw["scale"]
     return out, ""
 
 
@@ -361,6 +372,16 @@ def repair_parts(metrics: Any) -> tuple[list[dict[str, Any]], list[tuple[str, st
         else:
             kept = clean
     return kept, partial, dropped
+
+
+def proportion_ids(protocol: dict[str, Any] | None) -> frozenset[str]:
+    """The ids the protocol declares as metrics of kind ``proportion`` over every run (a 0/1 outcome of each trial): the one
+    list that says which results get a binomial (Wilson) interval. Nothing is read from the values a trial gave."""
+    metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+    if not metrics:
+        return frozenset()
+    kept, _dropped = repair(metrics)
+    return frozenset(str(m["id"]) for m in kept if m.get("kind") == "proportion" and not m.get("given"))
 
 
 def repair(metrics: Any) -> tuple[list[dict[str, Any]], list[str]]:

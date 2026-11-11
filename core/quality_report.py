@@ -192,6 +192,7 @@ class _Quest:
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
         self.record_taken_out = _list(_dict(_json(root / ".fi" / "record_claims_taken_out.json")).get("taken_out"))
+        self.citations_removed = _list(_dict(_json(root / ".fi" / "citations_removed.json")).get("removed"))
         self.unsupported_removed = _list(_dict(_json(root / ".fi" / "unsupported_claims.json")).get("removed"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
         self.receipts = {p.stem: _dict(_json(p)) for p in sorted((root / "needs" / "receipts").glob("*.json"))} \
@@ -843,6 +844,10 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "
                             f"this was taken out: {_one(r.get('text'), 200)} (why: {_one(r.get('why'), 300)})",
                             "FI's records", "left out", ".fi/record_claims_taken_out.json"))
+    for label in q.citations_removed:
+        out.append(_problem("paper", f"the writer cited [{_one(label, 40)}], which is no source of the prior-work block, "
+                            "so the citation was taken out of the paper (no number is invented for it)",
+                            "FI's citation rendering", "left out", ".fi/citations_removed.json"))
     for r in q.unsupported_removed:
         r = _dict(r)
         out.append(_problem("paper", f"a sentence that stated a number the claim check did not find in the run's results was "

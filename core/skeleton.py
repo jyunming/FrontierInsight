@@ -369,7 +369,8 @@ class Table:
     is named by ``keys()`` (FI's names, ``a=1,b=2``). The numbers come from ``fi_table`` (``core/frame_table.py``, carried
     beside this file)."""
 
-    def __init__(self, cells, declared, references=None, parts=None, known=None):
+    def __init__(self, cells, declared, references=None, parts=None, known=None, kinds=None):
+        self._kinds = dict(kinds or {})  # id -> "proportion" or "mean": a result gets a binomial interval only when the plan says proportion
         self._known = dict(known or {})  # id -> {"interval": [low id, high id], "truth": number or "axis": name}: a result with a known true value
         self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
         self.last_error = {}  # id -> "Type: message" of the last exception a read of that id raised, even if the caller caught it
@@ -526,7 +527,7 @@ class Table:
         import fi_table
 
         self._check(name)
-        return fi_table.summary(fi_table.values_of(self._metric(name, key)))
+        return fi_table.summary(fi_table.values_of(self._metric(name, key)), self._kinds.get(name) == "proportion")
 
     @_noting
     def n(self, name, key):
@@ -542,7 +543,7 @@ class Table:
 
     @_noting
     def interval(self, name, key):
-        """``(lower, upper)`` of the 95% interval of the mean (Wilson when every trial gave 0 or 1, else a t interval);
+        """``(lower, upper)`` of the 95% interval of the mean (Wilson for a result the plan declares a proportion, else a t interval);
         ``(None, None)`` when the trials give none."""
         import fi_table
 
