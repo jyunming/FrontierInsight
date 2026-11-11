@@ -1652,12 +1652,23 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
 
 def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]:
     """The names of the quantities the plan declares as results: its dependent variables and its metrics (FI's own
-    reading of the plan, :func:`requirements`). With ``derived`` (FI's record of the last run of its analysis,
+    reading of the plan, :func:`requirements`), and the id of each quantity the frozen protocol declares as worked out from
+    the results (``derived``) in a counting role: the name the analysis records it under, whatever words the design used
+    for it. With ``derived`` (FI's record of the last run of its analysis,
     ``data/results/derived.json``), only those that record lists as not worked out (``not_computed``: no trial gave a
     value for it, a function that failed): FI's own fact that the run holds no value for the quantity, never a guess from
     the names of the results."""
     reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
     names = [str(r["name"]) for r in reqs if r.get("kind") in QUANTITY_KINDS and str(r.get("name") or "").strip()]
+    from .numeric_warnings import COUNTING_ROLES
+
+    worked_out = protocol.get("derived") if isinstance(protocol, dict) and isinstance(protocol.get("derived"), list) else []
+    have = {_norm(n) for n in names}
+    for d in worked_out:
+        ident = str(d.get("id") or "").strip() if isinstance(d, dict) else ""
+        if ident and (d.get("role") or "result") in COUNTING_ROLES and _norm(ident) not in have:
+            names.append(ident)
+            have.add(_norm(ident))
     if derived is None:
         return names
     if isinstance(derived, dict) and derived.get("from_earlier_run"):

@@ -1117,3 +1117,22 @@ def test_the_frame_writer_writes_an_infinite_or_missing_number_as_python_can_rea
     got = eval(text, {"__builtins__": {"float": float}})
     assert got["a"] == float("inf") and got["b"][0] == float("-inf") and got["b"][1] != got["b"][1]
     assert got["c"] == "inf" and got["d"] == 1.5
+
+
+def test_a_counting_result_with_no_value_at_any_setting_is_listed_as_not_computed(planted: Any, tmp_path: Path) -> None:
+    """A body that ran and returned no number anywhere (a missing marker at every setting) leaves a result that was not
+    worked out: it is listed with the body's own reason, whatever status the body's return got."""
+    listed = {i["id"]: i for i in planted[2]["not_computed"]}
+    assert listed["good_none_reason"]["status"] == "missing" and "no trial reached it" in listed["good_none_reason"]["why"]
+    assert _status(planted, "good_none_reason")["status"] == "ok"  # the return itself is still a valid one
+    for held in ("good_number", "good_setting_map", "good_level_map_nan", "nan_diagnostic", "nan_timing"):
+        assert held not in listed
+    items = [("all_missing", "result", "return {k: table.missing('the scan never crossed') for k in table.keys()}"),
+             ("one_value", "result", "return {k: (1.0 if i == 0 else table.missing('no crossing')) for i, k in enumerate(table.keys())}"),
+             ("note_missing", "diagnostic", "return table.missing('not asked for')")]
+    design, bodies = _planted_design(items)
+    _code, _printed, record, err = _run(_quest(tmp_path, design, bodies))
+    got = {i["id"]: i for i in record["not_computed"]}
+    assert got["all_missing"]["status"] == "missing" and "the scan never crossed" in got["all_missing"]["why"]
+    assert "one_value" not in got and "note_missing" not in got and record["complete"] is False
+    assert "all_missing: the scan never crossed" in err

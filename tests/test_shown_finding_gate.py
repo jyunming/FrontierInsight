@@ -598,3 +598,27 @@ def test_an_earlier_runs_record_of_no_value_declares_nothing() -> None:
     stale = {**_derived("per_batch_spread"), "from_earlier_run": True}
     assert code_review.declared_names(_PLAN, _PLAN["protocol"], stale) == []
     assert code_review.declared_names(_PLAN, _PLAN["protocol"], _derived("per_batch_spread")) == ["per_batch_spread"]
+
+
+_WORKED_OUT_PLAN = {"variables": {"dependent": ["the yield", "the spread at the edge of the batch"]},
+                    "protocol": {"metrics": [{"id": "yield", "estimand": "total"}],
+                                 "derived": [{"id": "edge_spread", "inputs": ["yield"], "role": "result"},
+                                             {"id": "edge_note", "inputs": ["yield"], "role": "diagnostic"}]}}
+
+
+def test_a_result_the_plan_works_out_is_declared_by_its_own_id_whatever_the_design_calls_it(tmp_path: Path) -> None:
+    """The design names a result in its own words; the frozen protocol declares it by the id the analysis records it under.
+    A finding about that id is a part not done when FI's record of the run says no value was worked out for it."""
+    engine = _engine(tmp_path)
+    protocol = _WORKED_OUT_PLAN["protocol"]
+    names = code_review.declared_names(_WORKED_OUT_PLAN, protocol)
+    assert "edge_spread" in names and "edge_note" not in names  # a counting role only
+    declared = code_review.declared_names(_WORKED_OUT_PLAN, protocol, _derived("edge_spread"))
+    assert declared == ["edge_spread"]
+    result = {"yield": 3.2, "runtime": 1.0}
+    issue, record = _gate_record("edge_spread")
+    assert code_review.not_obtained(record, issue, result, declared) == ["edge_spread"]
+    assert _outcome(engine, "edge_spread", result, declared) is None
+    # known positive: when the record of the run holds a value for it, the finding still stops
+    stop = _outcome(engine, "edge_spread", result, code_review.declared_names(_WORKED_OUT_PLAN, protocol, _derived()))
+    assert stop and "cannot find which of the results it changes" in stop["rationale"]
