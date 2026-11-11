@@ -299,3 +299,20 @@ def test_the_simulation_kept_is_the_simulation_of_the_result() -> None:
     assert got is not None and got["simulate"] == "KEPT" and "figure_a" in got["derive"]
     assert split_run.parse_split_response("", fence, bodies=True) is None
     assert skeleton.RERUN_NOTE_ANALYSIS  # the sentence to the model stays for the functions that are written again
+
+
+@pytest.mark.asyncio
+async def test_a_change_in_the_raw_folder_beside_the_summary_or_a_write_under_code_gives_no_receipt(tmp_path: Path) -> None:
+    engine, state = await _first(tmp_path)
+    root = engine.quest_root
+    (root / "raw").mkdir(exist_ok=True)
+    (root / "raw" / "trials.json").write_text("{}", encoding="utf-8")
+    (root / "raw" / "ledger.jsonl").write_text("1\n", encoding="utf-8")
+    _ran(engine, {"derive_peak": "ok", "figure_over_rate": "ok", "figure_over_dose": "ok"})
+    before = kb.receipt_inputs(root, "raw/trials.json")
+    assert kb.write_receipt(root, before) and kb._receipt(root) == (True, True)
+    (root / "raw" / "ledger.jsonl").write_text("2\n", encoding="utf-8")  # the analysis reads the ledger too
+    assert kb._receipt(root) == (False, True)
+    (root / "raw" / "ledger.jsonl").write_text("1\n", encoding="utf-8")
+    assert not kb.write_receipt(root, before, ["code/helper.py"]), "the run wrote under code/ in its copy"
+    assert not (root / kb.RECEIPT).exists()

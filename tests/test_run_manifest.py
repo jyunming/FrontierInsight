@@ -1117,3 +1117,14 @@ async def test_an_analysis_that_prints_values_of_its_own_is_sent_back(
     assert artifacts.paper_md is not None and "ExecuteReflect" in calls
     assert any("never produced" in p for p in prompts), "the repair is told which values were not the trials'"
     assert _record(engine)["status"] == "ok"
+
+
+def test_a_cluster_task_is_given_the_file_for_the_files_it_opened(tmp_path: Path) -> None:
+    from core import trial_runner
+
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM_TRIAL, encoding="utf-8")
+    trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=1, base_seed=0, deterministic=False, key="k1")
+    task = json.loads((root / "job" / "fi" / "tasks.json").read_text(encoding="utf-8"))["tasks"][0]
+    assert task["argv"][-1] == task["argv"][-2] + trial_runner.OPENED_SUFFIX

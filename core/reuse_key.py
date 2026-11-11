@@ -297,7 +297,7 @@ def left_out(opened: list[str], key_files: dict[str, str]) -> list[str]:
 
 
 def rerun(quest_root: Path | str, finding: str, *, test: str = "", repairs: list[str] | tuple[str, ...] = (), strict: bool = False,
-          disputed: list[str] | tuple[str, ...] = ()) -> Inputs:
+          disputed: list[str] | tuple[str, ...] = (), extra: dict[str, Any] | None = None) -> Inputs:
     """What decides the answer of "run the study again with a repair of this finding": every file of the study, the finding's own
     test, the repairs kept for it (their text), how it was asked and FI's own code that judges the answer. A verdict is reused
     only when this key is the same (core/rerun_check.py)."""
@@ -314,7 +314,7 @@ def rerun(quest_root: Path | str, finding: str, *, test: str = "", repairs: list
             complete = False
             unreadable.append(test)
     settings = {"finding": str(finding), "test": test_sha, "repairs": [_sha(r.encode("utf-8", errors="surrogateescape")) for r in repairs],
-                "strict": bool(strict), "disputed": sorted(str(x) for x in disputed)}
+                "strict": bool(strict), "disputed": sorted(str(x) for x in disputed), "extra": extra or {}}
     return Inputs("rerun", RULES["rerun"], found.digests, settings, {"rerun": _sha(Path(_rerun.__file__).read_bytes())}, complete,
                   unreadable)
 

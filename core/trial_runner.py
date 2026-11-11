@@ -1456,10 +1456,10 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
-        "how": "Run task i as: <the cluster's python> " + harness + " <spec> <out>, from the quest folder; one task per "
+        "how": "Run task i as: <the cluster's python> " + harness + " <spec> <out> <out>" + OPENED_SUFFIX + ", from the quest folder; one task per "
                "setting, all of them independent. Each writes its results to <out>; FI reads them.",
         "tasks": [{"index": t["index"], "setting": t["key"], "trials": len(t["trials"]),
-                   "argv": [harness, t["spec"], t["out"]]} for t in plan],
+                   "argv": [harness, t["spec"], t["out"], t["out"] + OPENED_SUFFIX]} for t in plan],
     }
     (folder / TASKS_NAME).write_text(json.dumps(tasks, indent=1), encoding="utf-8")
     from core.attempt_records import script_hashes
@@ -2148,12 +2148,13 @@ class TrialsRunner:
         # What the analysis starts with, hashed here whether it runs in a copy or (a container) in the quest itself: the
         # receipt (core/kept_bodies.py) is written only if the same files are there when it returns.
         started_with = _kept_bodies.receipt_inputs(self.quest_root, summary_path.relative_to(self.quest_root).as_posix())
-        result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
-                                                log=self.log, replace=swap).execute(
-            cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        analysis_box = _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
+                                                log=self.log, replace=swap)
+        result = await analysis_box.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self._steps.mark(_step_writes.ANALYSIS)
         if result.returncode == 0:
-            if not _kept_bodies.write_receipt(self.quest_root, started_with) and self.log is not None:
+            dropped = list(getattr(getattr(analysis_box, "last", None), "left_out", None) or [])
+            if not _kept_bodies.write_receipt(self.quest_root, started_with, dropped) and self.log is not None:
                 self.log.info("[execute] the analysis changed its own code while it ran, or its record is missing, so FI does not "
                               "keep its functions as run")
         else:

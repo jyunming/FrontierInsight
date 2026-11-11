@@ -274,10 +274,15 @@ def test_a_kept_answer_follows_every_file_of_the_study_and_only_a_measured_one_i
     asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
     assert ran == ["unchanged", "unchanged"], "a changed inputs/ file asks again"
     (root / "inputs" / "table.csv").write_text("a\n2\n", encoding="utf-8")
+    (root / "data" / "results").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "results" / "derived.json").write_text("{}", encoding="utf-8")  # what the study delivered: the comparison's base
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged"] * 3, "a changed delivered record asks again"
+    (root / "data" / "results" / "derived.json").write_text('{"a": 1}', encoding="utf-8")
     status[0] = "could_not"
     asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
     asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
-    assert ran == ["unchanged", "unchanged", "could_not", "could_not"], "a could-not answer is never reused"
+    assert ran == ["unchanged"] * 3 + ["could_not", "could_not"], "a could-not answer is never reused"
 
 
 def test_without_records_every_changed_number_is_left_out_and_the_headline_still_stops(tmp_path, monkeypatch) -> None:

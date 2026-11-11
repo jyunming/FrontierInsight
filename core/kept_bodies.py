@@ -140,24 +140,30 @@ def receipt_inputs(root: Path, summary: str | None) -> dict[str, Any]:
     ana = _reuse_key.files(root, "analysis")
     trials = None
     if summary:
+        # every file of the folder the analysis is given as FI_RAW_DIR (the summary and the ledger beside it), not the summary alone
         try:
-            trials = _reuse_key.digest(Path(root) / summary)
+            folder = (Path(root) / summary).parent
+            found = {p.relative_to(root).as_posix(): _reuse_key.digest(p) for p in sorted(folder.rglob("*")) if p.is_file()}
+            trials = _reuse_key.digest_text(json.dumps(found, sort_keys=True)) if (Path(root) / summary).is_file() else None
         except OSError:
             trials = None
     return {"simulation": sim.digests, "analysis": ana.digests, "trials": trials, "summary": summary,
             "complete": sim.complete and ana.complete and (not summary or trials is not None)}
 
 
-def write_receipt(root: Path, before: dict[str, Any]) -> bool:
+def write_receipt(root: Path, before: dict[str, Any], dropped: list[str] | tuple[str, ...] = ()) -> bool:
     """After an analysis run that returned 0: the receipt, only when the files it started with are still what they are (the
     run changed none of its own code) and it wrote its record. Otherwise no receipt (the earlier one is removed), so no
-    function of that run is kept: it is written again, never a stop."""
+    function of that run is kept: it is written again, never a stop. ``dropped``: the paths the run wrote into FI's own folders
+    that the copy did not bring back (core/outside_run.py ``left_out``): a write under ``code/`` means the analysis changed its own
+    code while it ran, which the quest's files cannot show."""
     from . import reuse_key as _reuse_key
 
     root = Path(root)
     (root / RECEIPT).unlink(missing_ok=True)
     derived = root / _analysis.DERIVED_PATH
-    if not before.get("complete") or not derived.is_file() or receipt_inputs(root, before.get("summary")) != before:
+    if (not before.get("complete") or not derived.is_file() or any(str(d).startswith("code/") for d in dropped)
+            or receipt_inputs(root, before.get("summary")) != before):
         return False
     try:
         (root / RECEIPT).write_text(json.dumps({"schema": 1, "inputs": before, "derived_sha": _reuse_key.digest(derived)}),

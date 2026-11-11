@@ -23092,8 +23092,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # one, never the other way round. Only a measured answer is reused: "could not" is asked again.
             repairs = [p for _n, p in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log)]
             test_rel = str(issue.get("test") or "")
-            mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed)
-            plain = mine if not strict else _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs)
+            # also what the comparison is made against: the plan's protocol, the time allowed, the results the study delivered, and
+            # what the finding says
+            results = self.quest_root / "data" / "results"
+            extra = {"protocol": _reuse_key.digest_text(json.dumps(_frozen.protocol_of(self.quest_root) or {}, sort_keys=True, default=str)),
+                     "allowed": int(allowed or 0),
+                     "delivered": {p.name: _reuse_key.digest(p) for p in sorted(results.glob("*.json"))} if results.is_dir() else {},
+                     "finding": _reuse_key.digest_text(json.dumps({k: issue.get(k) for k in ("text", "test", "file", "line", "where", "note", "fix", "name")},
+                                                                  sort_keys=True, default=str))}
+            mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed, extra=extra)
+            plain = mine if not strict else _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, extra=extra)
             if (isinstance(kept, dict) and kept.get("status") in ("changed", "unchanged") and mine.complete
                     and (kept.get("key") == mine.key or (not strict and kept.get("stands_for") == plain.key))):
                 out[fid] = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
