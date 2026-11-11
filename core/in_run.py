@@ -653,7 +653,8 @@ def for_case(values, levels, named):
 def per_run_names(protocol):
     """The protocol's metrics that are one number per run whatever the values compared inside it: those it declares to
     depend on settings (``depends_on``) none of which is compared inside each run. Every other number a check reads may
-    differ from one compared value to the next."""
+    differ from one compared value to the next. What each run compares is read wherever the plan wrote it
+    (:func:`of_study`: a search holds its own ``in_each_run`` in its block)."""
     inside = set(of_study(protocol) or {})
     out = set()
     for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
