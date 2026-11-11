@@ -397,20 +397,9 @@ def code_version(quest_root: Path | str) -> str:
     computes, so the cached values of the old version are not reused; so does a note or a hidden file in ``code/``, which
     the run can read. The analysis script and the tests work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was repaired after every
     setting had run, the values its unchanged simulation had kept were moved aside and worked out again."""
-    from . import code_layout
+    from . import reuse_key
 
-    h = hashlib.sha256()
-    root = Path(quest_root)
-    code = root / CODE
-    with contextlib.suppress(OSError):
-        h.update(b"simulate.py\0" + (code / "simulate.py").read_bytes() + b"\0")
-    if code.is_dir():
-        for rel, body in sorted(code_layout.package_sources(code).items()):
-            h.update(rel.encode("utf-8") + b"\0" + body.encode("utf-8") + b"\0")
-    for path in code_layout.simulation_inputs(root):
-        with contextlib.suppress(OSError):
-            h.update(code_layout.input_label(path, root).encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
-    return h.hexdigest()
+    return reuse_key.simulation_sha(quest_root)
 
 
 #: How long a setting waits for another to finish preparing :data:`SHARED_CACHE`, and the age at which FI's own lock on it

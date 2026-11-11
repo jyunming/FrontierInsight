@@ -113,7 +113,8 @@ def _analysis_paths(root: Path) -> list[Path]:
     return out
 
 
-def files(quest_root: Path | str, part: str, *, by: str = "bytes", data: bool = True) -> Files:
+def files(quest_root: Path | str, part: str, *, by: str = "bytes", data: bool = True,
+          code: Path | None = None) -> Files:
     """The digests of one part of the quest's files.
 
     ``"simulation"``: :func:`core.code_layout.simulation_inputs` and ``data/`` (see the module text). ``"analysis"``: the
@@ -127,7 +128,7 @@ def files(quest_root: Path | str, part: str, *, by: str = "bytes", data: bool = 
     root = Path(quest_root)
     paths: list[Path] = []
     if part in ("simulation", "study"):
-        paths.extend(_layout.simulation_inputs(root))
+        paths.extend(_layout.simulation_inputs(root, code))
         if data:
             paths.extend(_under_data(root))
     if part in ("analysis", "study"):
@@ -266,6 +267,17 @@ def why_not(record: Any, inputs: Inputs) -> str:
 
 #: The line run.log ends a reuse decision with (what the key compared).
 COMPARED = "(FI compared the code, inputs/ and data/ files this run reads)"
+
+
+def simulation_sha(quest_root: Path | str, extra: str = "", code: Path | None = None) -> str:
+    """One hash of the simulation part (:func:`files`, ``"simulation"``) for the three small records keyed by it: the shared
+    cache's code version, the timing estimate's design key and the one-trial record. ``extra`` is text hashed in with it (a
+    candidate simulate.py not yet written). Unreadable files make a hash no other call can match."""
+    found = files(quest_root, "simulation", code=code)
+    text = json.dumps([extra, found.digests], sort_keys=True)
+    if not found.complete:
+        text += "|unreadable:" + ",".join(found.unreadable) + f"|{uuid.uuid4().hex}"
+    return _sha(text.encode("utf-8"))
 
 
 def _fi_code(kind: str) -> dict[str, str]:

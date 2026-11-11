@@ -1691,16 +1691,9 @@ def code_inputs_sha(quest_root: Path | str, source: str = "") -> str:
     """The code a measurement was made on: ``source`` (simulate.py's text) and every file the simulation may read
     (:func:`core.code_layout.simulation_inputs`: the model's package, a helper module, a parameter file, the quest's
     ``inputs/``), the same set the trials' own key hashes."""
-    from . import code_layout as _code_layout
+    from . import reuse_key as _reuse
 
-    root = Path(quest_root)
-    text = source.encode("utf-8")
-    for path in _code_layout.simulation_inputs(root, root / "code"):
-        try:
-            text += f"\n{_code_layout.input_label(path, root)}\n".encode("utf-8") + path.read_bytes()
-        except OSError:
-            continue
-    return hashlib.sha256(text).hexdigest()
+    return _reuse.simulation_sha(quest_root, source)
 
 
 def one_trial_measured(quest_root: Path | str, source: str) -> bool:

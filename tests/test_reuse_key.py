@@ -339,3 +339,17 @@ async def test_a_data_file_changed_after_the_freeze_does_not_stop_the_confirm_st
     (root / "data" / "readings.csv").write_text("t,v\n0,5\n", encoding="utf-8")
     kept = await _run(root, protocol, frozen=True)
     assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems
+
+
+def test_the_small_records_follow_the_same_list_including_data(tmp_path: Path) -> None:
+    from core import cost_model, outside_run
+
+    root = _toy(tmp_path)
+    sim = root / "code" / "simulate.py"
+    before = (outside_run.code_version(root), trial_runner.code_inputs_sha(root, SIM), cost_model.design_key({"g": 1}, sim))
+    (root / "data" / "readings.csv").write_text("t,v\n0,3\n", encoding="utf-8")
+    after = (outside_run.code_version(root), trial_runner.code_inputs_sha(root, SIM), cost_model.design_key({"g": 1}, sim))
+    assert all(a != b for a, b in zip(before, after))
+    (root / "data" / "results").mkdir()
+    (root / "data" / "results" / "x.bin").write_bytes(b"1")
+    assert (outside_run.code_version(root), trial_runner.code_inputs_sha(root, SIM), cost_model.design_key({"g": 1}, sim)) == after
