@@ -268,11 +268,12 @@ def _shrink(entry: dict[str, Any], n: int, failed: int = 0) -> dict[str, Any]:
     return e
 
 
-def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS) -> bool:
+def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS, raw_dir: Path | str | None = None) -> bool:
     """Write ``raw/trials.json`` (and FI's ledger, and a short copy of a search's ledger) under ``scratch`` from the
-    quest's own recorded raw: ``trials`` trials of every setting, in the record's own format. ``False`` when the quest
-    has no readable ``raw/trials.json``."""
-    src, dst = Path(quest_root) / "raw", Path(scratch) / "raw"
+    quest's own recorded raw (or from ``raw_dir``, a folder that holds a ``trials.json`` in the same format, such as FI's
+    small run's): ``trials`` trials of every setting, in the record's own format. ``False`` when there is no readable
+    ``trials.json``."""
+    src, dst = (Path(raw_dir) if raw_dir else Path(quest_root) / "raw"), Path(scratch) / "raw"
     try:
         data = json.loads((src / "trials.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -390,10 +391,11 @@ def _quest_python(quest_root: Path) -> str:
     return sys.executable
 
 
-def recorded_trials(quest_root: Path | str) -> int:
-    """The most trials any setting of the quest's ``raw/trials.json`` records (0 when unreadable)."""
+def recorded_trials(quest_root: Path | str, raw_dir: Path | str | None = None) -> int:
+    """The most trials any setting of the quest's ``raw/trials.json`` (or ``raw_dir``'s) records (0 when unreadable)."""
     try:
-        cells = json.loads((Path(quest_root) / "raw" / "trials.json").read_text(encoding="utf-8")).get("cells") or []
+        raw = Path(raw_dir) if raw_dir else Path(quest_root) / "raw"
+        cells = json.loads((raw / "trials.json").read_text(encoding="utf-8")).get("cells") or []
     except (OSError, ValueError, AttributeError):
         return 0
     best = 0
@@ -407,7 +409,7 @@ def recorded_trials(quest_root: Path | str) -> int:
 async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: dict[str, Any] | None = None, *,
                         python: Path | str | None = None, trials: int = TRIALS, timeout_s: int = 180,
                         search: bool | None = None, work_dir: Path | str | None = None, keep: bool = False,
-                        sandbox: str = "venv") -> GateResult:
+                        sandbox: str = "venv", raw_dir: Path | str | None = None) -> GateResult:
     """Run ``code_dir``'s ``experiment.py`` from start to end in a scratch copy of the quest on a small copy of its
     recorded raw (see the module docstring) and say how it went. ``quest_root`` is only read. ``search`` (default:
     the quest recorded a search) adds FI's "not checked" record of the search. The gate always runs the code with its
@@ -418,7 +420,9 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
     A ``TypeError`` or ``AttributeError`` can come from too little data, so it is run again on a larger copy of the
     record (up to :data:`CONFIRM_TRIALS` trials of every setting, at most :data:`CONFIRM_TIMEOUT_S` s) and is a
     ``fault`` only when the same exception type shows at the same place at both sizes; ``seconds["confirm"]`` is that
-    run's time. A record that holds no more trials than the small copy gives the same run, which counts as both."""
+    run's time. A record that holds no more trials than the small copy gives the same run, which counts as both.
+    ``raw_dir``: run on the ``trials.json`` in that folder instead of the quest's recorded raw (FI's small run, before the
+    study has recorded anything)."""
     quest_root, code_dir = Path(quest_root), Path(code_dir)
     seconds: dict[str, float] = {}
     if sandbox == "docker":
@@ -435,15 +439,15 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
                              "which runs first and needs it"), "NameError",
                           late=[f"{f}:{n}" for f, n, _ in late], seconds=seconds)
     py = str(python or _quest_python(quest_root))
-    got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds)
+    got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds, raw_dir)
     if not (got.stage == "derive" and got.kind == FAULT and got.exception in _MAYBE_FAULTS):
         return got
-    bigger = min(CONFIRM_TRIALS, recorded_trials(quest_root))
+    bigger = min(CONFIRM_TRIALS, recorded_trials(quest_root, raw_dir))
     if bigger <= trials:
         return got  # the record holds no more trials: the larger copy is the same run
     began = time.monotonic()
     again = await _run_gate(quest_root, code_dir, protocol, py, bigger, min(timeout_s, CONFIRM_TIMEOUT_S), search,
-                            None, False, {})
+                            None, False, {}, raw_dir)
     got.seconds["confirm"] = round(time.monotonic() - began, 2)
     if again.stage == "derive" and again.exception == got.exception and again.where == got.where:
         return got
@@ -454,7 +458,7 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
 
 async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] | None, python: str, trials: int,
                     timeout_s: int, search: bool | None, work_dir: Path | str | None, keep: bool,
-                    seconds: dict[str, float]) -> GateResult:
+                    seconds: dict[str, float], raw_dir: Path | str | None = None) -> GateResult:
     scratch = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="fi_gate_"))
     try:
         began = time.monotonic()
@@ -463,7 +467,7 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
         for name in ("figures", "results", "raw", "needs"):
             (scratch / name).mkdir(exist_ok=True)
         left_out = await asyncio.to_thread(_copy_quest_folders, quest_root, scratch)
-        if not await asyncio.to_thread(small_raw, quest_root, scratch, trials):
+        if not await asyncio.to_thread(small_raw, quest_root, scratch, trials, raw_dir):
             return GateResult(False, "static", SMALL_DATA, "", "the quest has no recorded raw/trials.json to copy",
                               seconds=seconds)
         env = dict(os.environ, FI_TRIALS="raw/trials.json", FI_RAW_DIR="raw", FI_REPLICATE_SEED="0",

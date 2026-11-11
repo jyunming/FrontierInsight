@@ -1519,8 +1519,9 @@ class RunChecksMixin:
                                   "setting is kept and run.")
         return None
 
-    def _note_unread_setting(self, line: str) -> None:
-        """One line about a setting the code does not use, in run.log and in plan.md (once)."""
+    def _note_unread_setting(self, line: str, why: str = "FI found no use of a setting; every setting is kept") -> None:
+        """One line about a setting the code does not use (or another fact of FI's small run: ``why`` names it in the
+        plan's history), in run.log and in plan.md (once)."""
         from . import engine as _e
 
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
@@ -1532,7 +1533,7 @@ class RunChecksMixin:
                 _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
                 path.write_text(edited, encoding="utf-8")
                 _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
-                                     note="FI found no use of a setting; every setting is kept")
+                                     note=why)
         except OSError as e:
             self._log.warning("[execute] FI could not add that line to plan.md: %r", e)  # type: ignore[attr-defined]
 
@@ -2676,7 +2677,7 @@ class RunChecksMixin:
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
 
-    async def _small_run(self, state: Any, py: Any, exec_env: Any) -> Any:
+    async def _small_run(self, state: Any, py: Any, exec_env: Any, *, baseline: bool = True) -> Any:
         """FI's small run of the simulation on the code as it is (core/small_run.py), or ``None`` when the simulation does
         not follow the trial contract (``run_trial`` / ``run_cell`` in simulate.py). A run of the same code and settings is
         not made again: its record (``.fi/small_run.json``) is read back."""
@@ -2708,16 +2709,32 @@ class RunChecksMixin:
         deterministic = "run_trial" not in set(getattr(self, "_trial_entries", set()) or ())
         inside = (_optimise_search.in_each_run(block) or None if search
                   else protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None)
-        key = _small.key_of(simulate, grid, deterministic, thresholds, inside)
+        key = _small.key_of(simulate, grid, deterministic, thresholds, inside,
+                            _optimise_search.cell_of(block, dict((block.get("baseline") or {}).get("values") or {}))
+                            if search and isinstance(block.get("baseline"), dict) else None)
         record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
+        module = simulate.relative_to(self.quest_root).as_posix()  # type: ignore[attr-defined]
         if record.get("key") == key:
             self._small_run_note = str(record.get("for_reader") or "")
+            if search and baseline and not record.get("crashed") and "baseline" not in record:
+                found = await _small.baseline_answer(
+                    self.executor, py, self.quest_root, module, block,  # type: ignore[attr-defined]
+                    timeout_s=_small.budget(self.config.execution.timeout_s), env=dict(exec_env or {}),  # type: ignore[attr-defined]
+                    thresholds=thresholds)
+                _small.update_record(self.quest_root, baseline=found)  # type: ignore[attr-defined]
+                record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
             return record
         paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
         got = await _small.run(
-            self.executor, py, self.quest_root, simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+            self.executor, py, self.quest_root, module, grid,  # type: ignore[attr-defined]
             deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
             env=dict(exec_env or {}), thresholds=thresholds, paired=paired, in_each_run=inside)
+        if search and baseline and not got.crashed:
+            # the search's own evaluation of its baseline design, judged as the search judges it (_small_run_checks)
+            got.baseline = await _small.baseline_answer(
+                self.executor, py, self.quest_root, module, block,  # type: ignore[attr-defined]
+                timeout_s=_small.budget(self.config.execution.timeout_s), env=dict(exec_env or {}),  # type: ignore[attr-defined]
+                thresholds=thresholds)
         _small.write_record(self.quest_root, key, got)  # type: ignore[attr-defined]
         self._small_run_note = got.for_reader()
         self._log.info("[execute] FI's small run before the code is read: %s", got.says())  # type: ignore[attr-defined]
@@ -2731,6 +2748,9 @@ class RunChecksMixin:
 
         record = await self._small_run(state, py, exec_env)
         if record and not record.get("crashed"):
+            checked = await self._small_run_checks(state, record)
+            if checked is not None:
+                return checked
             return self._unread_in_small_run(state, record, self.quest_root / "code" / _split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
         if not record or not record.get("crashed"):
             return None
@@ -2762,6 +2782,117 @@ class RunChecksMixin:
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
         return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+
+    async def _small_run_checks(self, state: Any, record: dict[str, Any]) -> dict[str, Any] | None:
+        """The small run against the frozen plan (core/small_run.py): the shape of each number the plan declares one per
+        run, for a search the search's own judgement of its baseline design (objective and each constraint), a result the
+        plan declares and no trial returned, and FI's analysis on the small run's trials (whatever ``engine.pipeline_gate``
+        says). An exact fault is sent back to the code once per quest (its kind and quantity), on a counter of its own in
+        ``.fi/small_run.json`` capped by ``engine.exec_reflect_max_iterations``; it never spends a crash repair, and a spent
+        crash counter never blocks it. After that, and for everything a small sample can explain, a line in plan.md and
+        run.log and a fact for the code's reader. Nothing here stops the quest. ``None`` to go on."""
+        from . import optimise as _optimise
+        from . import small_run as _small
+
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        if not isinstance(protocol, dict):
+            return None
+        block = _optimise.block_of(protocol)
+        faults = list(_small.judge_baseline(block, record)) if block is not None else []
+        named = {f.quantity for f in faults if f.send}
+        faults += [f for f in _small.shape_faults(protocol, record) if f.quantity not in named]
+        named |= {f.quantity for f in faults if f.send}
+        faults += [f for f in _small.missing_outputs(protocol, record) if f.quantity not in named]
+        faults += await self._small_run_analysis(state, protocol, record, search=block is not None)
+        if not faults:
+            return None
+        ledger = _small.sent(_small.read_record(self.quest_root))  # type: ignore[attr-defined]
+        cap = int(self.config.engine.exec_reflect_max_iterations)  # type: ignore[attr-defined]
+        new = [f for f in faults if f.send and f.key not in ledger["faults"]]
+        # the simulation first: an analysis that cannot read what the simulation does not return is not the analysis' fault
+        to_send = [f for f in new if f.script != "derive.py"] or [f for f in new if f.script == "derive.py"][:1]
+        if to_send and ledger["count"] < cap:
+            _small.update_record(self.quest_root, **{_small.SENT: {  # type: ignore[attr-defined]
+                "faults": ledger["faults"] + [f.key for f in to_send], "count": ledger["count"] + 1}})
+            for f in faults:
+                if f not in to_send and not (f.send and f.key not in ledger["faults"]):
+                    self._small_run_fact(f, after="sent" if f.send else "")
+            script = to_send[0].script
+            self._log.warning("[execute] %s Sending %s back to be repaired (%d of at most %d send-back(s) of the small "  # type: ignore[attr-defined]
+                              "run).", " ".join(f.why for f in to_send), script, ledger["count"] + 1, cap)
+            print(f"[FI] the small run gives something other than the plan declares; sending {script} back to be repaired")
+            message = ("FI ran the simulation on a small case before the study and compared what it gave with the frozen "
+                       "plan:\n" + "\n".join(f"- {f.why}" for f in to_send)
+                       + "\n\nRepair the code so that it gives what the plan declares, in the form the plan declares. Do "
+                       "not change the plan's quantities or the values it gives each run. Keep everything else as it is.")
+            failed = self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
+            if script == "derive.py":
+                failed["exec_result"]["failed_body"] = to_send[0].body
+            # its own counter (in .fi/small_run.json): ``execute_reflect`` spends no crash repair on it and needs none left
+            failed["exec_result"]["gate_repair"] = True
+            return failed
+        for f in faults:
+            self._small_run_fact(f, after="" if not f.send else "sent" if f.key in ledger["faults"] else "spent")
+        return None
+
+    def _small_run_fact(self, fault: Any, *, after: str = "") -> None:
+        """A fault of the small run that is not sent back (now): one line in plan.md and run.log, and a fact for the code's
+        reader. ``after``: ``"sent"`` for an exact fault sent back once already, ``"spent"`` when no send-back is left."""
+        line = fault.why + {"sent": " It was sent back to be repaired once and is still there; the study runs with it.",
+                            "spent": " No send-back of the small run is left (engine.exec_reflect_max_iterations); the "
+                                     "study runs with it."}.get(after, "")
+        note = getattr(self, "_small_run_note", "") or ""
+        if fault.why not in note:
+            self._small_run_note = (note + "\n" if note else "") + line
+        self._note_unread_setting(line, why="FI's small run before the code is read")
+
+    async def _small_run_analysis(self, state: Any, protocol: dict[str, Any], record: dict[str, Any], *,
+                                  search: bool) -> list[Any]:
+        """FI's analysis (derive.py) run on the small run's trials (core/pipeline_gate.py ``analysis_gate`` on
+        ``.fi/small_run/raw``), whatever ``engine.pipeline_gate`` says, and split by evidence (core/small_run.py
+        ``analysis_split``, ``no_value``): the :class:`core.small_run.Fault` s it gives. Only when FI writes the analysis
+        and the small run recorded its trials. The result is kept in the small run's record for the same code."""
+        import shutil
+
+        from . import analysis_frame as _analysis
+        from . import pipeline_gate as _gate
+        from . import small_run as _small
+
+        raw = self.quest_root / _small.TRIALS_PATH  # type: ignore[attr-defined]
+        code = self.quest_root / "code"  # type: ignore[attr-defined]
+        if state.get("no_simulation_resolved") or not self._analysis_on() or not raw.is_file() \
+                or not (code / "derive.py").is_file():
+            return []
+        docker = self.config.execution.sandbox == "docker"  # type: ignore[attr-defined]
+        h = hashlib.sha256(str(record.get("key") or "").encode())
+        for path in sorted(code.rglob("*.py")):
+            if not ({".git", "__pycache__", "tests"} & set(path.relative_to(code).parts)):
+                h.update(path.relative_to(code).as_posix().encode())
+                h.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        key = h.hexdigest()[:20]
+        kept = record.get("analysis") if isinstance(record.get("analysis"), dict) else {}
+        if kept.get("key") == key:
+            got = _gate.GateResult(**{k: v for k, v in kept.items() if k in _gate.GateResult.__dataclass_fields__})
+            missing = [m for m in kept.get("no_value") or [] if isinstance(m, dict)]
+        else:
+            work = self.quest_root / _small.DIR / "analysis"  # type: ignore[attr-defined]
+            shutil.rmtree(work, ignore_errors=True)
+            try:
+                got = await _gate.analysis_gate(self.quest_root, code, protocol, search=search,  # type: ignore[attr-defined]
+                                                sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
+                                                timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+                                                raw_dir=raw.parent, work_dir=work)
+                # the declared results FI's own record of that run holds no value of (core/analysis_frame.py)
+                missing = [m for m in _analysis.not_computed(_analysis.read_record(work)) if m["status"] == "missing"]
+            except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
+                self._log.warning("[execute] FI's analysis could not be run on the small run's trials: %s", exc)  # type: ignore[attr-defined]
+                return []
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing})  # type: ignore[attr-defined]
+            self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]
+        split = _small.analysis_split(got, docker=docker)
+        return [*([split] if split is not None else []), *_small.no_value(missing)]
 
     # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
     # The baseline of a change is the gate's result for the code that is KEPT (``_gate_kept``: the key of that code and its
@@ -2992,7 +3123,7 @@ class RunChecksMixin:
         ctx = getattr(self, "_small_run_ctx", None)
         if not ctx:
             return ""
-        record = await self._small_run(*ctx)
+        record = await self._small_run(*ctx, baseline=False)
         if record and record.get("crashed"):
             return str(record.get("says") or "it failed")
         # The repaired code must also still give the study's results from the function FI calls for the study.

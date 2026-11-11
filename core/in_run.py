@@ -653,13 +653,33 @@ def for_case(values, levels, named):
 def per_run_names(protocol):
     """The protocol's metrics that are one number per run whatever the values compared inside it: those it declares to
     depend on settings (``depends_on``) none of which is compared inside each run. Every other number a check reads may
-    differ from one compared value to the next."""
-    inside = set(of(protocol) or {})
+    differ from one compared value to the next. What each run compares is read wherever the plan wrote it
+    (:func:`of_study`: a search holds its own ``in_each_run`` in its block)."""
+    inside = set(of_study(protocol) or {})
     out = set()
     for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
         dep = m.get("depends_on") if isinstance(m, dict) else None
         if isinstance(dep, list) and dep and not inside & {str(d) for d in dep}:
             out.add(str(m.get("id")))
+    return out
+
+
+def shape_problem(protocol, values):
+    """``{name: why}`` for each number one run returned in another shape than the plan declares (``{}`` when none):
+    a number the plan declares one per run (:func:`per_run_names`) returned as a number per value of what the run
+    compares inside it (a mapping keyed by those values). ``values`` is what one run returned (as
+    :func:`read_returned` keeps it). The same rule for FI and for its trial harness, which carries this file."""
+    inside = of_study(protocol) or {}
+    if not inside or not isinstance(values, dict):
+        return {}
+    factors = ", ".join("`{}` ({})".format(k, ", ".join(str(x) for x in list(v)[:4])) for k, v in inside.items())
+    out = {}
+    for name in sorted(per_run_names(protocol)):
+        v = values.get(name)
+        if isinstance(v, dict) and v:
+            out[name] = ("`{}` came back as one number per value of {} ({} numbers), but the plan declares it one "
+                         "number per run: it depends on none of the values each run compares inside it"
+                         .format(name, factors, len(v)))
     return out
 
 
