@@ -3256,10 +3256,10 @@ class RunChecksMixin:
             if why:
                 log.info("[improve] %s; a speed-up is not tried on them.", why[0].upper() + why[1:])
 
-        async def sample() -> Any:
+        async def sample(repeats: int = _speed.REPEATS) -> Any:
             return await _speed.run_sample(self.executor, python, root, module, cells,  # type: ignore[attr-defined]
                                            deterministic=det, thresholds=thresholds, in_each_run=inside,
-                                           env=env, timeout_s=timeout_s, log=log, timeouts=timeouts)
+                                           env=env, timeout_s=timeout_s, log=log, timeouts=timeouts, repeats=repeats)
 
         async def time_study() -> list[Any] | None:
             probes, _why = await _estimate.measure(
@@ -3393,9 +3393,23 @@ class RunChecksMixin:
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                          f"{best['sample'].seconds:.3f} s: not faster by a tenth and by "
                                                          f"more than the {noise_s:.3f} s two runs of the same code differ")
+            elif not await _speed.confirm(root, best["files"], candidate, sample, entry, after,
+                                          (before_s - after.seconds) / max(before_s, 1e-9) * study_now, before_s=before_s,
+                                          ignore=noisy,
+                                          guards_touched=lambda: _improve.changed(before_guard, _improve.guard_hashes(root))):
+                if entry.get("outcome") == "aborted":
+                    _improve.put_back(root, saved)
+                    _improve.restore(root, best["files"])
+                    log.warning("[improve] Speed-up %d stopped: its repeated runs changed %s, which FI judges the code by; "
+                                "the earlier version is back.", used, ", ".join(entry.get("touched", [])[:4]))
+                    record["stopped"] = f"round {used}'s repeated runs changed files FI judges the code by"
+                    break
             else:
                 entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
-                                                    f"{best['sample'].seconds:.3f} s, with the same numbers")
+                                                    f"{best['sample'].seconds:.3f} s, with the same numbers"
+                                                    + (f"; timed again, old and new alternating: old {entry['repeats_old']} "
+                                                       f"s, new {entry['repeats_new']} s" if entry.get("repeats_old")
+                                                       else "; not timed again (it would cost more than it saves)"))
                 best = {"files": candidate, "sample": after}
                 record["kept"] = True
                 await asyncio.to_thread(
