@@ -1348,13 +1348,14 @@ def level_rule(protocol: Any, source: str) -> str:
     inside = _in_run.of_study(protocol) or {}
     if not inside:
         return ""
+    one = _in_run.one_number_rule(protocol)
     if not has_frame(source or ""):
-        return run_function_rule(inside)
+        return run_function_rule(inside) + (" " + one if one else "")
     names = ", ".join(f"`{k}`" for k in inside)
     return (f"The one exception: for a result the plan compares inside each run (over the values of {names}), a value where "
             "the result does not exist is NaN (or None) under that value's key, and EVERY compared value is present as a key "
             "(`out.each(\"name\", {value: number})`, keyed " + _in_run.key_forms(_in_run.level_cells(inside)) + "); a value left "
-            "out makes the trial fail.")
+            "out makes the trial fail." + (" " + one if one else ""))
 
 
 # The repairs of a simulate.py that has FI's frame: the function the model gives is `trial` and its helpers, whole; the

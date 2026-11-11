@@ -385,6 +385,15 @@ def _named_id(text: Any, ids: set[str]) -> str | None:
     return max(named, key=len) if named else None
 
 
+def search_in_each_run(p: dict[str, Any]) -> dict[str, Any]:
+    """What each evaluation of a search goes through together, where the plan wrote it: inside the search block
+    (``protocol.optimisation.in_each_run``), as :func:`core.in_run.of_study` reads it; ``{}`` when the protocol has no search
+    block or the block compares nothing inside its evaluations."""
+    block = p.get("optimisation")
+    inside = block.get("in_each_run") if isinstance(block, dict) else None
+    return inside if isinstance(inside, dict) else {}
+
+
 def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 left_out: dict[str, str] | None = None) -> StudyContract:
     """The contract a plan's design block gives, by fixed rules (no model, no guess); see the module docstring.
@@ -403,7 +412,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
     settings = _first_valid(Settings, {
         "compared": {k: _values(v) for k, v in _mapping(p.get("grid"), gaps, "the grid").items()},
         "sub_studies": _rows(p.get("sub_studies"), gaps, "the sub-studies"),
-        "in_each_run": {k: _values(v) for k, v in _mapping(p.get("in_each_run"), gaps, "in_each_run").items()},
+        "in_each_run": {k: _values(v) for k, v in _mapping(search_in_each_run(p) or p.get("in_each_run"), gaps,
+                                                            "in_each_run").items()},
         "numerical": _mapping(p.get("numerical_settings"), gaps, "the numerical settings"), "fixed": fixed},
         gaps, "the settings") or Settings()
 

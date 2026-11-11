@@ -1200,7 +1200,8 @@ class RunChecksMixin:
                      "result per value with `out.each(\"name\", {value: number})` (or a list in the order of the values when one "
                      "thing is compared), a number for EVERY value (NaN or None where the result does not exist for one). A "
                      "number the run gives once (fitted across all the values) is returned as a number. "
-                     + "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside_map)) + ".\n")
+                     + "Key a mapping " + _in_run.key_forms(_in_run.level_cells(inside_map)) + ". "
+                     + _in_run.one_number_rule(protocol) + "\n")
         if getattr(_optimise_search.study_grid(protocol), "sub_studies", None):
             more += ("- The study has sub-studies: a `cell` holds every setting; those the sub-study does not vary are at the value "
                      "it holds.\n")
@@ -1290,6 +1291,8 @@ class RunChecksMixin:
                       + ", ".join(f"`{k}`" for k in inside) + "). These are not settings of their own: every run goes through ALL "
                       "their values together, on the same random numbers.\n"
                       + _e._IN_EACH_RUN_PROTOCOL[_e._IN_EACH_RUN_PROTOCOL.index("In FI_TRIALS each setting is followed"):])
+            rule = _in_run.one_number_rule((state.get("design") or {}).get("protocol"))
+            block += f"\n{rule}\n" if rule else ""
         return block
 
     def _figure_calls_on(self) -> bool:
@@ -1336,6 +1339,8 @@ class RunChecksMixin:
             block += ("\n**What each run compares inside it** (`protocol.in_each_run`: "
                       + ", ".join(f"`{k}`" for k in inside) + "). These are not settings of their own: every run goes through ALL "
                       "their values together, on the same random numbers. " + _IN_EACH_RUN_BODIES + "\n")
+            rule = _in_run.one_number_rule((state.get("design") or {}).get("protocol"))
+            block += f"{rule}\n" if rule else ""
         return block
 
     def _frame_template(self, state: Any, tmpl: Any, bodies: Sequence[str] | None = None) -> Any:
