@@ -1430,6 +1430,12 @@ def _design(design: dict[str, Any]) -> str:
     return ", ".join(f"{k} = {_fmt(v)}" for k, v in design.items())
 
 
+def _osearch_budget(levels, say):
+    from . import optimise_search as _osearch
+
+    return _osearch.alternatives_budget_says(levels, say)
+
+
 def summary_lines(record: dict[str, Any]) -> list[str]:
     """Plain lines for run.log about a finished search."""
     if not record:
@@ -1458,24 +1464,9 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     if len(levels) > 1:
         # Each alternative is searched with the whole budget of its own, so the sum of the budgets is not one budget that
         # ran out: say, for each way the alternatives ended, how many evaluations of how many allowed they used.
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for p in levels:
-            groups.setdefault(str(p.get("stopped_because")), []).append(p)
-        parts = []
-        for reason, mine in groups.items():
-            used, allowed = sum(int(p.get("evaluations") or 0) for p in mine), sum(int(p.get("budget") or 0) for p in mine)
-            many = f"{len(mine)} alternative{'' if len(mine) == 1 else 's'}"
-            if reason in ("not_searched", "same_as_first"):
-                # Not searched: the evaluations are the few that showed it, not a part of a budget.
-                parts.append(f"{many} not searched ({used} evaluation(s) to tell): {_STOPPED.get(reason, reason)}")
-            elif reason == "failures" and len(groups) > 1:
-                # An alternative that failed every evaluation does not name the search's end: its own entry does.
-                parts.append(f"{many} used {used} of the {allowed} allowed and gave no result")
-            else:
-                parts.append(f"{many} used {used} of the {allowed} allowed and stopped because "
-                             f"{_STOPPED.get(reason, reason)}")
+        parts = _osearch_budget(levels, lambda reason: _STOPPED.get(reason, reason))
         head = (f"{ev.get('search', 0)} evaluation(s) in all over {len(levels)} alternatives, each with a budget "
-                f"of its own ({'; '.join(parts)})")
+                f"of its own ({parts})")
         lines = [f"[optimise] {head}{scan}, method {method.get('used')}; {failed} failed, {broke} broke a limit{counts_say}"]
     else:
         lines = [f"[optimise] {ev.get('search', 0)} evaluation(s) of the {ev.get('budget', 0)} allowed{scan}, method "

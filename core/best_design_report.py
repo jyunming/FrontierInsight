@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import optimise as _optimise
+from . import optimise_search as _search
 from . import optimum_check as _check
 
 BEGIN = "<!-- fi:best-design -->"
@@ -304,10 +305,14 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                       "): that one did not hold at the finest settings (see the check below).", ""]
     ev = best.get("evaluations") or {}
     method = best.get("method") or {}
+    compared_all = best.get("compared")
+    alts = [x for x in (compared_all.get("levels") or []) if isinstance(x, dict)] if isinstance(compared_all, dict) else []
     search = (f"**How the search ran.** Method: {method_name(method.get('used'))}"
               + (f" ({method_name(method.get('requested'))} was asked for, but {_plain(method.get('why'))})"
                  if method.get("why") else "")
-              + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
+              + (f"; {ev.get('search')} evaluations in all over {len(alts)} alternatives, each with a budget of its own ("
+                 + _search.alternatives_budget_says(alts, lambda r: _STOPPED.get(r, r)) + ")"
+                 if len(alts) > 1 else f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used"))
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
         if isinstance(best.get("compared"), dict) and best["compared"].get("levels"):
@@ -322,7 +327,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
         search += ")"
     if ev.get("scan"):
         search += f", after a coarse scan of {ev['scan']} design(s) not counted in the budget"
-    search += f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}."
+    search += ("." if len(alts) > 1 else
+               f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}.")
     if flat := flat_went_on(ev):
         search += f" {flat[0].upper()}{flat[1:]}."
     if stepped := stepped_went_on(ev):

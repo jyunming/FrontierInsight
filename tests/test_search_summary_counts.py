@@ -81,3 +81,56 @@ def test_an_alternative_that_was_not_searched_is_not_said_to_have_used_a_budget(
     assert "1 alternative used 180 of the 180 allowed and stopped because the evaluation budget ran out" in text
     assert "1 alternative not searched (1 evaluation(s) to tell)" in text and "used 1 of the 1" not in text
     assert "1 alternative not searched (3 evaluation(s) to tell)" in text and "used 3 of the 3" not in text
+
+
+# --- the same rule in the paper's section, in the check's verdict and in the merged end of the search -----------------
+
+
+def _section_of(monkeypatch, record: dict[str, Any]) -> str:
+    from pathlib import Path
+
+    from core import best_design_report as report
+    record = {**record, "objective": {"quantity": "f", "unit": "kg", "direction": "minimise"},
+              "baseline": {"design": {"a": 1.0}, "objective": 10.0}, "best": {"design": {"a": 1.5}, "objective": 9.0},
+              "improvement": {"value": 1.0}}
+    monkeypatch.setattr(report, "records", lambda _root: {"best_design": record, "optimum_check": None})
+    return report.section(Path("."))
+
+
+def test_the_papers_section_does_not_present_summed_budgets_as_one_budget(monkeypatch) -> None:
+    text = _section_of(monkeypatch, _record([(180, 180, "budget")] * 4 + [(10, 180, "failures")]))
+    assert "730 evaluations in all over 5 alternatives" in text
+    assert "4 alternatives used 720 of the 720 allowed and stopped because its evaluation budget ran out" in text
+    assert "730 of 900 evaluations allowed" not in text
+    shares = _section_of(monkeypatch, _record([(401, 1600, "share")] * 8 + [(1625, 1600, "budget")]))
+    assert "8 alternatives used 3208 of the 12800 allowed" in shares and "of 14400" not in shares
+
+
+def test_a_single_search_keeps_the_papers_sentence(monkeypatch) -> None:
+    record = _record([(60, 60, "budget")])
+    record["compared"] = None
+    assert "60 of 60 evaluations allowed were used" in _section_of(monkeypatch, record)
+
+
+def test_the_search_ends_on_its_shares_when_any_alternative_did_even_if_the_first_converged() -> None:
+    from tests.test_search_gives_up_early import _block as gblock, _drive, _first_lacks_objective, _stub
+    block = gblock()
+    outcome, _, _ = _drive(osearch.compare(block, seed=0, batch=True), _first_lacks_objective)
+    merged = osearch.merge_outcomes([_stub(osearch, outcome, "converged"), _stub(osearch, outcome, "share")],
+                                    [{"shape": "cup"}, {"shape": "mug"}], block)
+    assert merged["stopped_because"] == "share", "one alternative stopping on its shares is not a search that converged"
+
+
+def test_the_budget_check_names_each_alternative_and_does_not_pass_when_one_used_its_shares() -> None:
+    from core import optimum_check as oc
+    from tests.test_optimum_check import _block as cblock, _rows
+    block = cblock()
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 10.0, {}), (0, {"x": 1.0, "y": 0.0}, 6.0, {})])
+    levels = _record([(401, 1600, "share")] * 2 + [(1600, 1600, "budget")])["compared"]
+    record["compared"] = levels
+    record["evaluations"].update(search=2402, budget=4800, stopped_because="budget")
+    check = oc.check_sync(block, record, rows, lambda cell: {"f": (cell["x"] - 2) ** 2})
+    says = check["checks"]["budget"]["says"]
+    assert check["checks"]["budget"]["status"] == "failed"
+    assert "2 alternatives used 802 of the 3200 allowed" in says and "1 alternative used 1600 of the 1600 allowed" in says
+    assert "2402 of 4800" not in says

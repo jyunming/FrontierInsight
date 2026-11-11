@@ -2295,6 +2295,28 @@ def _same_outcome(first, first_level, rows):
     return out
 
 
+def alternatives_budget_says(levels, say):
+    """How a search over compared alternatives ended, from the entries of ``levels``, in the terms of its budget rule: each
+    alternative has a budget of its own (and each starting point a share of it), so the sums over alternatives are not one
+    budget. One clause for each way the alternatives ended: how many used how many evaluations of how many allowed, and
+    ``say(reason)`` for why they stopped. An alternative that failed every evaluation, while others gave results, names no
+    end (its own entry does); one that was not searched is not said to have used a budget."""
+    groups = {}
+    for p in levels:
+        groups.setdefault(str(p.get("stopped_because")), []).append(p)
+    parts = []
+    for reason, mine in groups.items():
+        used, allowed = sum(int(p.get("evaluations") or 0) for p in mine), sum(int(p.get("budget") or 0) for p in mine)
+        many = f"{len(mine)} alternative{'' if len(mine) == 1 else 's'}"
+        if reason in (NOT_SEARCHED, "same_as_first"):
+            parts.append(f"{many} not searched ({used} evaluation(s) to tell): {say(reason)}")
+        elif reason == "failures" and len(groups) > 1:
+            parts.append(f"{many} used {used} of the {allowed} allowed and gave no result")
+        else:
+            parts.append(f"{many} used {used} of the {allowed} allowed and stopped because {say(reason)}")
+    return "; ".join(parts)
+
+
 def merge_outcomes(outcomes, levels, block):
     """The outcome of a search over every alternative (see :func:`compare`)."""
     sign = _sign(block)
@@ -2324,7 +2346,7 @@ def merge_outcomes(outcomes, levels, block):
     stops = [o["stopped_because"] for o in outcomes if o["stopped_because"] not in ("failures", NOT_SEARCHED)]
     stops = stops or [o["stopped_because"] for o in outcomes]
     stopped = next((s for s in ("time", "the simulation could not be loaded", "failures", "scan_unchanged") if s in stops),
-                   "budget" if "budget" in stops else stops[0])
+                   "budget" if "budget" in stops else "share" if "share" in stops else stops[0])
     first = outcomes[0]
     out = {
         "rows": rows, "evaluations": sum(o["evaluations"] for o in outcomes),
