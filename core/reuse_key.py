@@ -18,9 +18,10 @@ What a key covers, and what it does not:
 * **An unreadable file** makes the inputs incomplete (:attr:`Inputs.complete`): the record is then not reusable, and a
   reader whose inputs are incomplete reuses nothing, so two unreadable reads never match.
 * **FI's own code** (its harness, and for a search its search code) is an input: a record made by a harness that no
-  longer exists is not reused. A frozen study's search is the one exception, by what decides its result: the confirm stage
-  may not search again, so it keeps a search whose files and plan are as recorded although FI's code changed since, and says
-  so (core/optimise.py ``_same_study``).
+  longer exists is not reused. A frozen study's search record of this rule (one that keeps ``study_token_inputs``) is the
+  one exception, by what decides its result: the confirm stage may not search again, so it keeps a search whose files and
+  plan are as recorded although FI's code changed since, and says so (core/optimise.py ``_same_study``). A frozen study's
+  record of an older FI (one combined key) is matched only while FI's code is still the text that key was made with.
 
 A record written under this rule carries ``reuse: {"schema": 2, ...}`` (:func:`stamp`). A record without it was written
 by an older FI and is read by the rule it was written with (:func:`is_current`).
