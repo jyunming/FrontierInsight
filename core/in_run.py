@@ -665,17 +665,23 @@ def per_run_names(protocol):
 
 def search_one_number_names(protocol):
     """The quantities a search's every evaluation returns as one plain number although the evaluation goes through several values
-    of a setting together (the search block's ``in_each_run``): the objective, when the plan declares that it does not depend on
-    any of those settings (:func:`per_run_names`), and with it every quantity the search limits (``constraints``), which are
-    read at the same design. Empty when the search compares nothing inside its evaluations, or its objective does depend on one
-    of those settings (a number per value is then allowed, as the plan says)."""
+    of a setting together (the search block's ``in_each_run``): the objective, unless the plan declares that it depends on one of
+    those settings, and with it every quantity the search limits (``constraints``), which are read at the same design. Empty
+    when the search compares nothing inside its evaluations, or its objective does depend on one of those settings (a number
+    per value is then allowed, as the plan says). An objective the plan does not declare among its metrics, or declares without
+    ``depends_on``, does not depend on them: a search judges one number per design."""
     block = protocol.get("optimisation") if isinstance(protocol, dict) else None
-    if not isinstance(block, dict) or not of_study(protocol):
+    inside = of_study(protocol)
+    if not isinstance(block, dict) or not inside:
         return []
     objective = block.get("objective") if isinstance(block.get("objective"), dict) else {}
     name = str(objective.get("quantity") or "").strip()
-    if not name or name not in per_run_names(protocol):
+    if not name:
         return []
+    for m in protocol.get("metrics") or []:
+        dep = m.get("depends_on") if isinstance(m, dict) and str(m.get("id")) == name else None
+        if isinstance(dep, list) and set(inside) & {str(d) for d in dep}:
+            return []
     limited = [str(c.get("quantity")).strip() for c in block.get("constraints") or []
                if isinstance(c, dict) and str(c.get("quantity") or "").strip()]
     return list(dict.fromkeys([name, *limited]))

@@ -74,7 +74,7 @@ def _short(text: Any, n: int = 1800) -> str:
 def _settings_lines(p: dict[str, Any]) -> str:
     lines = []
     for key in ("grid", "in_each_run"):
-        found = p.get(key) if p.get(key) or key != "in_each_run" else _contract.search_in_each_run(p)
+        found = (_contract.search_in_each_run(p) or p.get(key)) if key == "in_each_run" else p.get(key)
         for name, values in found.items() if isinstance(found, dict) else []:
             lines.append(f"- {name}: {json.dumps(values)}" + (" (every run goes through all of these together)" if key == "in_each_run" else ""))
     return "\n".join(lines) or "- (the study varies no setting)"

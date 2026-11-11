@@ -412,7 +412,7 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
     settings = _first_valid(Settings, {
         "compared": {k: _values(v) for k, v in _mapping(p.get("grid"), gaps, "the grid").items()},
         "sub_studies": _rows(p.get("sub_studies"), gaps, "the sub-studies"),
-        "in_each_run": {k: _values(v) for k, v in _mapping(p.get("in_each_run") or search_in_each_run(p), gaps,
+        "in_each_run": {k: _values(v) for k, v in _mapping(search_in_each_run(p) or p.get("in_each_run"), gaps,
                                                             "in_each_run").items()},
         "numerical": _mapping(p.get("numerical_settings"), gaps, "the numerical settings"), "fixed": fixed},
         gaps, "the settings") or Settings()

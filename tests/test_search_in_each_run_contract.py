@@ -30,10 +30,26 @@ def test_contract_reads_the_search_blocks_in_each_run():
     assert c.settings.in_each_run == {"mode": ("slow", "fast")}
 
 
-def test_top_level_in_each_run_still_wins():
+def test_search_blocks_own_wins_over_a_top_level_one_as_the_run_reads_it():
+    p = _protocol(["mode"])
+    p["in_each_run"] = {"other": [1, 2]}
+    assert set(_contract_of(p).settings.in_each_run) == {"mode"}
+    assert set(_in_run.of_study(p)) == {"mode"}
+
+
+def test_top_level_in_each_run_still_read_when_the_block_has_none():
     p = _protocol(["size"])
+    del p["optimisation"]["in_each_run"]
     p["in_each_run"] = {"other": [1, 2]}
     assert set(_contract_of(p).settings.in_each_run) == {"other"}
+
+
+def test_objective_not_declared_as_a_metric_still_gets_the_rule():
+    p = _protocol(["size"])
+    p["metrics"] = [m for m in p["metrics"] if m["id"] != "cost"]
+    assert _in_run.search_one_number_names(p) == ["cost", "strength"]
+    p["metrics"].append({"id": "cost", "estimand": "x", "depends_on": []})
+    assert _in_run.search_one_number_names(p) == ["cost", "strength"]
 
 
 def test_one_number_rule_names_objective_and_limits():
