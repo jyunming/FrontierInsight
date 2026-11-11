@@ -371,7 +371,7 @@ def test_a_measurement_that_is_not_a_number_counts_as_not_measured() -> None:
     assert got.evaluations is None and "coarse scan was not measured" in got.why
 
 
-def test_a_design_key_reads_the_helpers_beside_the_simulation_but_not_the_analysis_or_line_endings(tmp_path: Path) -> None:
+def test_a_design_key_reads_the_helpers_beside_the_simulation_but_not_the_analysis(tmp_path: Path) -> None:
     sim = tmp_path / "simulate.py"
     sim.write_bytes(b"a = 1\n")
     helper = tmp_path / "pkg" / "helper.py"
@@ -379,7 +379,6 @@ def test_a_design_key_reads_the_helpers_beside_the_simulation_but_not_the_analys
     helper.write_bytes(b"b = 1\n")
     (tmp_path / "experiment.py").write_bytes(b"c = 1\n")
     one = cm.design_key({"grid": {"x": [1, 2]}}, sim)
-    sim.write_bytes(b"a = 1\r\n")
     (tmp_path / "experiment.py").write_bytes(b"c = 2\n")
     assert cm.design_key({"grid": {"x": [1, 2]}}, sim) == one
     helper.write_bytes(b"b = 2\n")

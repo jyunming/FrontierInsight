@@ -954,19 +954,8 @@ def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[
     return out
 
 
-#: What a reading of one part of the code left behind, kept so a part nobody changed is not read again (:func:`request_key`).
+#: What a reading of one part of the code left behind, kept so a request whose text nobody changed is not asked again (:func:`core.reuse_key.answer_key`).
 READING_CACHE = Path(".fi") / "code_reading_cache.json"
-
-
-def part_dependencies(code_dir: Path, calls: list[dict[str, Any]]) -> list[str]:
-    """For each request of a reading (``calls``, :func:`reading_calls`), a hash of what the part of the code it shows
-    DEPENDS ON beyond its own text: the study's settings file (``study.json``), which the whole study reads. The reader is
-    shown only its part, so what a part calls in another part is not in the question and is not in the key."""
-    files = _code_files(Path(code_dir))
-    settings = [hashlib.sha256(t.encode("utf-8", errors="replace")).hexdigest()[:16]
-                for rel, t in sorted(files.items()) if rel.endswith(".json")]
-    digest = hashlib.sha256(json.dumps(settings).encode()).hexdigest()[:16]
-    return [digest for _ in calls]
 
 
 def part_label(call: dict[str, Any], count: int) -> str:
@@ -975,19 +964,6 @@ def part_label(call: dict[str, Any], count: int) -> str:
     for name, ranges in sorted((call.get("shown") or {}).items()):
         where.append(name + " lines " + ", ".join(f"{a}-{b}" for a, b in ranges))
     return f"part {int(call.get('code_index', 0)) + 1} of {count} ({'; '.join(where)})"
-
-
-def request_key(call: dict[str, Any], depends: str, *, asked: list[dict[str, Any]], reader: str, template: str,
-                small_run: str, shown_values: list[float] | None) -> str:
-    """What one request of a reading is a question about: the text of the part (with its line numbers),
-    the study's settings (:func:`part_dependencies`), the plan and the audit's open items it is given, the requirements it must judge (their
-    ids, kinds and words), the note of FI's own small run, the values a reply may not quote, the model that reads and the
-    prompt's text. The findings of the version before (``previous``) are not in it: they ask about places, and a part with
-    the same text holds the same places. The same key gives the same question, so the reading it
-    kept is reused instead of asked again."""
-    body = [call.get("code") or "", depends, call.get("plan") or "", call.get("open_items") or "",
-            [[r.get("id"), r.get("kind"), r.get("text")] for r in asked], small_run, list(shown_values or []), reader, template]
-    return hashlib.sha256(json.dumps(body, default=str, sort_keys=True).encode("utf-8", errors="replace")).hexdigest()
 
 
 def load_reading_cache(quest_root: Path) -> dict[str, Any]:

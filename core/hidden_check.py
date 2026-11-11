@@ -43,7 +43,6 @@ import random
 from pathlib import Path
 from typing import Any
 
-from . import code_project as _code_project
 from . import in_run as _in_run
 from . import mc_error as _mc
 from . import optimise as _optimise
@@ -153,43 +152,27 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
     return None, "its case has no step size and no setting the study's grid sweeps, so FI has no safe setting to move"
 
 
-#: What under ``code/`` does not compute the simulation's numbers: a change to it does not call for the check again.
-#: The same files ``Engine._simulation_sources`` does not read as the simulation, and FI's figure redraws (written
-#: after every run).
-_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
-                       "replot_layout.py", "run.py", "submit.py", "fi_search.py")
-_NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
-# The project files FI writes into code/ itself after the run (core/code_project.py): its own record of the study, not the
-# simulation, so writing them never makes a check of the simulation look as if it ran on other code.
-_FI_PROJECT_FILES = (_code_project.README, _code_project.REQUIREMENTS, _code_project.RUN, _code_project.STUDY,
-                     _code_project.SEARCH)
+_FI_WRITTEN = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json", "replot_layout.py",
+               "run.py", "submit.py", "fi_search.py", "README.md", "requirements.txt", "study.json")
 
 
 def code_sha(quest_root: Path) -> str:
     """One hash of the simulation's code as it is now: simulate.py and every other file under ``code/`` it may use
     (the model's package, a parameter file), not the analysis, the notes (``*.md``), git's own or the project files FI
     writes itself (``requirements.txt``, ``study.json``); ``""`` when there is
-    no simulate.py."""
-    code = Path(quest_root) / "code"
+    no simulate.py. The files are the simulation part of the quest (core/reuse_key.py), the list the trials and the search
+    use: the analysis does not count, ``inputs/`` and ``data/`` do. A file FI cannot read gives ``""`` (nothing is reused)."""
     if not (Path(quest_root) / _SIMULATE).is_file():
         return ""
-    digest = hashlib.sha256()
-    for path in sorted(p for p in code.rglob("*") if p.is_file()):
-        rel = path.relative_to(code)
-        # FI's own scripts are named only at the top of code/: a file of the model's package with such a name is code.
-        if ((len(rel.parts) == 1 and (path.name in _NOT_THE_SIMULATION or path.name in _FI_PROJECT_FILES))
-                or path.suffix.lower() == ".md"
-                or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
-            continue
-        try:
-            digest.update(rel.as_posix().encode("utf-8") + b"\0")
-            with path.open("rb") as handle:
-                for block in iter(lambda: handle.read(1 << 20), b""):
-                    digest.update(block)
-            digest.update(b"\0")
-        except OSError:
-            return ""
-    return digest.hexdigest()
+    from . import reuse_key as _reuse_key
+
+    found = _reuse_key.files(quest_root, "simulation")
+    if not found.complete:
+        return ""
+    # What FI itself writes into code/ after a run (its project files, its figure redraws) is not the simulation: a check made
+    # before it was written must not look as if it ran on other code.
+    own = {f"code/{name}" for name in _FI_WRITTEN}
+    return _reuse_key.digest_text("r2|" + json.dumps({k: v for k, v in found.digests.items() if k not in own}, sort_keys=True))
 
 
 def checks_key(protocol: dict[str, Any] | None) -> str:

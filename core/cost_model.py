@@ -121,22 +121,16 @@ _SEARCH_TERMS = ("per_evaluation", "check_unit", "finer_check_unit", "scan", "wa
 def design_key(block: Any, simulate: Path | str | None = None) -> str:
     """Which design a search timing belongs to: the plan's search block and every file the simulation may read
     (:func:`core.code_layout.simulation_inputs`: ``simulate`` and the files beside and below it, a parameter file or a
-    note among them, the analysis FI writes aside, line endings ignored). A redesign, or a change to one of them,
+    note among them, and ``data/``, by their bytes). A redesign, or a change to one of them,
     changes it."""
     try:
         h = hashlib.sha256(json.dumps(block, sort_keys=True, default=str).encode("utf-8"))
         if simulate:
-            from . import code_layout as _code_layout
+            from . import reuse_key as _reuse
 
             sim = Path(simulate)
             quest = sim.parent.parent if sim.parent.name == "code" else sim.parent
-            files = {f: _code_layout.input_label(f, sim.parent) if f.is_relative_to(sim.parent)
-                     else _code_layout.input_label(f, quest) for f in _code_layout.simulation_inputs(quest, sim.parent)}
-            if sim not in files:  # the simulation itself is always part of its design
-                files[sim] = sim.name
-            for f, label in sorted(files.items(), key=lambda kv: kv[1]):
-                h.update(label.encode("utf-8") + b"\0")
-                h.update(f.read_bytes().replace(b"\r\n", b"\n"))
+            h.update(_reuse.simulation_sha(quest, code=sim.parent).encode("ascii"))
         return h.hexdigest()[:16]
     except Exception:  # noqa: BLE001 -- a key that cannot be made leaves the terms unkeyed, never changes a run
         return ""

@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import math
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,7 @@ from . import metric_spec as _metric_spec
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import outside_run as _outside
+from . import reuse_key as _reuse
 from . import run_facts as _run_facts
 from . import step_writes as _step_writes
 from . import trial_runner as _trials
@@ -60,6 +62,9 @@ LEDGER_PATH = Path(_trials.RAW_DIRNAME) / "optimisation_ledger.jsonl"
 BEST_PATH = Path("results") / "best_design.json"
 WORK_DIR = Path(".fi") / "optimisation"
 RECORD = WORK_DIR / "run.json"
+#: The search's own copy of what its coarse scan wrote (``raw/trials.json`` and the ledger): ``raw/`` belongs to whichever
+#: run of the trials wrote it last, so the search reads its scan from here and never depends on a file others write.
+SCAN_DIR = WORK_DIR / "scan"
 #: Each evaluation the search has had answered, written as it is answered (the first line names the search's key), so a
 #: search stopped before its end (the quest killed or the machine restarted) is continued on resume, not run again from
 #: its start. Removed once the search's record is written.
@@ -182,7 +187,28 @@ def _simulation_modules(quest_root: Path, simulate: Path) -> list[Path]:
 def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
              rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
              stop_unchanged: bool = True) -> str:
-    """What decides a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
+    """What decides a search, as :func:`core.reuse_key.computed` builds it: every file the simulation may read (the
+    simulation and its modules, the model's package, the parameter files, the person's ``inputs/`` and ``data/``), the
+    optimisation block, the seed, the entry, the thresholds, the rounds of a continued search, the stops, and FI's own
+    harness and search code. (A package installed since is not in it: a search that got no result is never kept, so a
+    search that failed for a missing package runs again anyway.)"""
+    return _run_inputs(quest_root, block, base, entry, thresholds, rounds, stop_flat, stop_stepped, stop_unchanged).key
+
+
+def _run_inputs(quest_root: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
+                rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
+                stop_unchanged: bool = True) -> Any:
+    return _reuse.computed("search", quest_root, block, seed=int(base),
+                           config={"entry": entry, "thresholds": thresholds, "rounds": list(rounds or []),
+                                   "stops": {"stop_flat": stop_flat, "stop_stepped": stop_stepped,
+                                             "stop_unchanged": stop_unchanged}})
+
+
+def _legacy_run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
+             rounds: list[dict[str, Any]] | None = None, stop_flat: bool = True, stop_stepped: bool = True,
+             stop_unchanged: bool = True) -> str:
+    """The key an FI before :mod:`core.reuse_key` made of a search (it left out ``data/``), kept to read a frozen study's record
+    by the rule it was written with. What decided a search: the simulation and the modules beside it, the files below ``code/`` it may use (the
     model's package, a parameter file), the person's files in ``inputs/`` it may read
     (:func:`core.code_layout.simulation_inputs`), the optimisation block, the seed, the entry, the thresholds, and FI's
     own harness and search code. (A package installed since is not in it: a search that got no result is never kept, so a search
@@ -212,7 +238,7 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
             parts.append(rel + b"\0" + path.read_bytes())
         except OSError:
             parts.append(rel + b"\0")
-    parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
+    parts.append(_trials.LEGACY_HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     what: list[Any] = [block, base, entry, thresholds]
     if rounds:
@@ -238,8 +264,9 @@ def _below_code(code: Path) -> list[Path]:
                   if p.is_relative_to(code) and len(p.relative_to(code).parts) > 1)
 
 
-def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
-    """What a frozen study's search record must have been made from: :func:`_run_key` without the seed, each file read
+def _legacy_study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
+    """The study key an FI before :mod:`core.reuse_key` wrote (it left out ``data/``): what a frozen study's search record
+    of that FI must have been made from, read by the rule it was written with. :func:`_run_key` without the seed, each file read
     the way ``core/phased.py`` decides what is the same version (line endings and comments do not count), so a study
     the confirm stage takes for the same version always finds its search."""
     from . import phased as _phased
@@ -268,18 +295,75 @@ def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: s
                                          else path.read_bytes()))
         except OSError:
             parts.append(rel + b"\0")
-    parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
+    parts.append(_trials.LEGACY_HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
     return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())
+
+
+def _study_keys(quest_root: Path, block: dict[str, Any], entry: str, thresholds: Any) -> tuple[Any, Any]:
+    """``(by the study's version, by its bytes)``: what a frozen study's search record must have been made from, the
+    inputs of :func:`_run_key` without the seed, the rounds and the stops. The first reads each Python file the way
+    ``core/phased.py`` decides what is the same version (line endings and comments do not count), so a study the confirm
+    stage takes for the same version always finds its search; the second reads the bytes."""
+    config = {"entry": entry, "thresholds": thresholds}
+    return (_reuse.computed("search_study", quest_root, block, config=config),
+            _reuse.computed("search_study_bytes", quest_root, block, config=config))
 
 
 def _files(ledger_text: str, best_text: str, record_text: str) -> dict[str, str]:
     return {LEDGER_PATH.as_posix(): ledger_text, BEST_PATH.as_posix(): best_text, RECORD.as_posix(): record_text}
 
 
+def _scan_names() -> tuple[str, ...]:
+    return (_trials.SUMMARY_NAME, _trials.LEDGER_NAME)
+
+
+def keep_scan_copy(quest_root: Path) -> None:
+    """Take the search's own copy of the coarse scan the trial runner just wrote (``raw/``), in the same call that ran it."""
+    root = Path(quest_root)
+    for name in _scan_names():
+        source = root / _trials.RAW_DIRNAME / name
+        target = root / SCAN_DIR / name
+        try:
+            target.unlink(missing_ok=True)  # never a copy of an earlier search beside this one's record
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        except OSError:
+            pass
+
+
+def scan_hashes(quest_root: Path) -> dict[str, str]:
+    """``{name: sha256}`` of the files of the search's own scan copy that are there."""
+    out: dict[str, str] = {}
+    for name in _scan_names():
+        try:
+            out[(SCAN_DIR / name).as_posix()] = _reuse.digest(Path(quest_root) / SCAN_DIR / name)
+        except OSError:
+            continue
+    return out
+
+
+def _scan_there(quest_root: Path, record: dict[str, Any], frozen: bool = False) -> bool:
+    """Whether the coarse scan a kept search stands for is there: a record written by :mod:`core.reuse_key`'s rule needs
+    the search's own copy, byte for byte as it was taken (a later writer of ``raw/`` changes nothing); a record of an older
+    FI keeps its old condition, the scan file in ``raw/`` (and the copy is made from it when the record is adopted)."""
+    if not record.get("scan"):
+        return True
+    if _reuse.is_current(record, "search"):
+        wanted = {k: v for k, v in ((record.get("reuse") or {}).get("outputs") or {}).items() if k.startswith(SCAN_DIR.as_posix())}
+        if wanted and scan_hashes(quest_root) == wanted:
+            return True
+        if not frozen:
+            return False
+        # A frozen study's confirm stage may not search again: its search is kept on today's old condition (the scan file
+        # is there) even when the search's own copy is gone, so no new stop is added.
+    return (Path(quest_root) / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file()
+
+
 def _save(quest_root: Path, key: str, ledger_text: str, best_text: str, stderr: str, scan: bool,
-          study_key: str = "") -> str:
-    record = {"key": key, "study_key": study_key,
+          study_key: str = "", reuse: dict[str, Any] | None = None) -> str:
+    record = {"key": key, "study_key": study_key, **({"reuse": reuse} if reuse else {}),
               "ledger": {"sha256": _sha(ledger_text.encode("utf-8")), "text": ledger_text},
               "best": {"sha256": _sha(best_text.encode("utf-8")), "text": best_text},
               "stderr": stderr[-_STDERR_KEEP:], "scan": scan}
@@ -773,19 +857,11 @@ _STOP_REASONS = {"stop_flat": "flat_objective", "stop_stepped": "stepped_objecti
 
 def _keys(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
           rounds: list[dict[str, Any]], **stops: bool) -> dict[str, frozenset[str]]:
-    """``{key: the stops the record must not have stopped on}`` of the searches a record of which is this search: the
-    key with the stops as they are (nothing to rule out), and the key with a stop that is off now turned on, when the
-    search the record holds did not stop on it. An armed stop that never fired changed nothing the search did, so a
-    search that ran while a repair was still left is the same search once the repairs are spent."""
-    off = [name for name, on in stops.items() if not on]
-    out: dict[str, frozenset[str]] = {}
-    for bits in range(1 << len(off)):
-        armed = {name for i, name in enumerate(off) if bits >> i & 1}
-        flags = {name: (on or name in armed) for name, on in stops.items()}
-        k = _run_key(quest_root, simulate, block, base, entry, thresholds, rounds, flags["stop_flat"],
-                     flags["stop_stepped"], flags["stop_unchanged"])
-        out.setdefault(k, frozenset(_STOP_REASONS[name] for name in armed))
-    return out
+    """``{key: the stops the record must not have stopped on}`` of the searches a record of which is this search
+    (:meth:`core.reuse_key.Inputs.stop_variants`): the key with the stops as they are (nothing to rule out), and the key
+    with a stop that is off now turned on, when the search the record holds did not stop on it."""
+    return _run_inputs(quest_root, block, base, entry, thresholds, rounds, stops.get("stop_flat", True),
+                       stops.get("stop_stepped", True), stops.get("stop_unchanged", True)).stop_variants()
 
 
 def _kept(quest_root: Path, record: Any, record_text: str, key: str | dict[str, frozenset[str]], *, frozen: bool,
@@ -796,15 +872,16 @@ def _kept(quest_root: Path, record: Any, record_text: str, key: str | dict[str, 
     trials are on disk, and it did not stop for failures. A search the clock stopped stands for the same limit (an
     analysis repair), not a longer one (``timeout_s``; ``None``: not asked)."""
     keys = {key: frozenset()} if isinstance(key, str) else key
-    if not (isinstance(record, dict) and (record.get("key") in keys or frozen)):
-        return None
+    if not (isinstance(record, dict) and ((record.get("key") in keys and _reuse.is_current(record, "search")
+                                           and not (record.get("reuse") or {}).get("opened_left_out")) or frozen)):
+        return None  # a record an older FI wrote is read by its own rule only for a frozen study (run_search)
     files = _record_files(record, record_text)
     rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
     try:
         best = json.loads(files.get(BEST_PATH.as_posix(), ""))
     except ValueError:
         best = None
-    scan_there = not record.get("scan") or (Path(quest_root) / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file()
+    scan_there = _scan_there(quest_root, record, frozen)
     worked = any(r.get("event") == "evaluation" and r.get("status") == "ok" for r in rows)
     stopped = ((best or {}).get("evaluations") or {}).get("stopped_because")
     limit = ((best or {}).get("time") or {}).get("limit_seconds")
@@ -844,6 +921,54 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
         return None
     kept = _kept(quest_root, record, record_text, keys, frozen=False, timeout_s=None)
     return kept[0] if kept is not None else None
+
+
+def _same_study_but_unreadable(record: dict[str, Any], study: Any) -> bool:
+    """A file of a frozen study that could be read when its search was kept cannot be read now: the study key has one file
+    less, so it differs from the record's, although every file that can be read is as it was. The confirm stage may not
+    search again, so that is the same study (the files that can be read, the plan's block and FI's code all as recorded)."""
+    if study.complete:
+        return False
+    old = (record.get("reuse") or {}).get("study_token_inputs")
+    if not isinstance(old, dict) or not isinstance(old.get("files"), dict):
+        return False
+    now = study.as_json()
+    return (all(old["files"].get(name) == digest for name, digest in now["files"].items())
+            and old.get("settings") == now["settings"] and old.get("fi_code") == now["fi_code"])
+
+
+def _adopt(quest_root: Path, record: dict[str, Any], files: dict[str, str], log: Any) -> dict[str, str]:
+    """A frozen study's search record of an older FI is kept by the rule it was written with; from now on the search's own
+    copy of its scan file is bound into the record, so a later change to the scan file is seen. FI cannot show that the
+    scan file in ``raw/`` is the one that search wrote (the record never said), which run.log says."""
+    keep_scan_copy(quest_root)
+    if record.get("scan") and not scan_hashes(quest_root):
+        return files  # the copy could not be made: the record stays as it was, read by its own rule again next time
+    try:
+        saved = json.loads(files[RECORD.as_posix()])
+    except (KeyError, ValueError, TypeError):
+        return files
+    saved["reuse"] = {"schema": _reuse.SCHEMA, "kind": "search", "rule": 1, "adopted": True, "key": saved.get("key"),
+                      "complete": True, "inputs": {}, "outputs": scan_hashes(quest_root)}
+    text = json.dumps(saved)
+    (Path(quest_root) / RECORD).write_bytes(text.encode("utf-8"))
+    if log is not None:
+        log.info("[optimise] the search was kept by the rule of the FI that froze this study; FI cannot show that its "
+                 "scan file is the one that search wrote")
+    return {**files, RECORD.as_posix(): text}
+
+
+def _note_reuse(quest_root: Path, files: dict[str, str], note: str) -> None:
+    """Keep what a kept search of a frozen study says about its files in the search's record (the quality report reads it)."""
+    try:
+        saved = json.loads(files[RECORD.as_posix()])
+    except (KeyError, ValueError, TypeError):
+        return
+    block = saved.get("reuse") if isinstance(saved.get("reuse"), dict) else {}
+    saved["reuse"] = {**block, "note": note}
+    text = json.dumps(saved)
+    (Path(quest_root) / RECORD).write_bytes(text.encode("utf-8"))
+    files[RECORD.as_posix()] = text
 
 
 def keep_search_time(quest_root: Path, rows: list[Any], *, scan_ran: bool, scan_s: float, scan_replayed: bool) -> float:
@@ -898,23 +1023,46 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                "them for each design the search tries")
         return SearchRun(record={}, rows=[], load_error=why, problems=[why])
     rounds = read_rounds(quest_root, block)
-    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds, stop_flat, stop_stepped,
-                   stop_unchanged)
-    # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from.
-    study_key = _study_key(quest_root, simulate, block, entry, thresholds)
+    inputs = _run_inputs(quest_root, block, int(base_seed), entry, thresholds, rounds, stop_flat, stop_stepped,
+                         stop_unchanged)
+    key = inputs.key
+    # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from, by
+    # the study's version and by its bytes.
+    study_tokens, study_bytes = _study_keys(quest_root, block, entry, thresholds)
+    study_key = study_tokens.key
     try:
         record_text = (quest_root / RECORD).read_text(encoding="utf-8")
         record = json.loads(record_text)
     except (OSError, ValueError):
         record_text, record = "", None
-    if frozen and isinstance(record, dict) and not record.get("study_key"):
-        # A search record from before FI kept its study key: it is exploration's when its key is one exploration's
-        # seeds give (core/phased.py keeps them).
-        from . import phased as _phased
+    note = ""  # what a kept search of a frozen study says about its files (run.log and the quality report)
+    adopt = False  # a frozen study's search record of an older FI, read by the rule it was written with
+    if frozen and isinstance(record, dict):
+        legacy = not _reuse.is_current(record, "search") or bool((record.get("reuse") or {}).get("adopted"))
+        if legacy:
+            # Written before FI's keys were one function: read by the rule it was written with, under today's scan
+            # condition only (the confirm stage may not search again, so a record that did nothing wrong is not refused).
+            if not record.get("study_key"):
+                # A search record from before FI kept its study key: it is exploration's when its key is one exploration's
+                # seeds give (core/phased.py keeps them).
+                from . import phased as _phased
 
-        seeds = (_phased.load(quest_root) or {}).get("explore_seed_bases") or []
-        if record.get("key") in {_run_key(quest_root, simulate, block, int(s), entry, thresholds) for s in seeds}:
+                seeds = (_phased.load(quest_root) or {}).get("explore_seed_bases") or []
+                if record.get("key") in {_legacy_run_key(quest_root, simulate, block, int(s), entry, thresholds)
+                                         for s in seeds}:
+                    record = {**record, "study_key": study_key}
+                    adopt = True
+            elif record.get("study_key") == _legacy_study_key(quest_root, simulate, block, entry, thresholds):
+                record = {**record, "study_key": study_key}
+                adopt = not (record.get("reuse") or {}).get("adopted")
+        elif record.get("study_key") == study_key or _same_study_but_unreadable(record, study_tokens):
             record = {**record, "study_key": study_key}
+            moved = study_bytes.changed((record.get("reuse") or {}).get("study_inputs"))
+            if (record.get("reuse") or {}).get("study_bytes") not in (None, study_bytes.key) and moved:
+                note = ("the simulation's comments or line endings changed after its search (" + ", ".join(moved[:4])
+                        + "); the search was not repeated, because the confirm stage may not search on the confirm "
+                          "seeds. The confirm run's own trials and the check of the best design on new seeds ran on "
+                          "the code as it is now")
     if frozen and not (isinstance(record, dict) and record.get("study_key") == study_key):
         why = ("the study is frozen for its confirm run, and the search exploration ran for this simulation and plan is "
                "not kept, so its best design cannot be confirmed without searching again on the confirm seeds")
@@ -950,7 +1098,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                      "elapsed_s": row.get("elapsed_s")})
             else:
                 replay[_replay_key(space, row["design"], row.get("level"))] = answer
-        if scan_seen and (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file():
+        if scan_seen and _scan_there(quest_root, record):
             replay_scan = scan_seen
             # The scan is not run again, so what FI measured in it (settings that changed no result, numbers that differ
             # on a second call) is taken from the record of the search being continued: a continued search says it too.
@@ -971,14 +1119,20 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                  frozen=frozen, timeout_s=timeout_s)
     if kept is not None:
         best, rows, files = kept
+        if adopt:
+            files = _adopt(quest_root, record, files, log)
         restore(quest_root, files)
         if log is not None:
             log.info("[optimise] %s", "confirm run: the best design exploration's search found is kept and checked "
                      "once more on new seeds; the search is not run again (that would choose the design on the "
                      "confirm seeds)" if frozen else
-                     "the simulation and the plan are unchanged: the search FI already ran is used")
+                     "the simulation and the plan are unchanged: the search FI already ran is used " + _reuse.COMPARED)
+            if note:
+                log.warning("[optimise] %s", note)
             for line in summary_lines(best):
                 log.info("%s", line)
+        if note:
+            _note_reuse(quest_root, files, note)
         return SearchRun(record=best, rows=[r for r in rows if r.get("event") == "evaluation"],
                          stderr=str(record.get("stderr") or ""), reused=True, scan=bool(record.get("scan")),
                          files=files)
@@ -991,8 +1145,15 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                    f"({_trials.RAW_DIRNAME}/{_trials.SUMMARY_NAME}) is missing, so the kept search cannot be used as it "
                    "was and nothing can be confirmed without searching again on the confirm seeds")
         return SearchRun(record={}, rows=[], problems=[why])
+    if log is not None and not frozen:
+        said = _reuse.why_not(record, inputs)
+        if said:
+            log.info("[optimise] the search for the best design runs again: %s", said)
     work = quest_root / WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
+    if replay_scan is None:
+        # The earlier search's scan copy is that search's: a search that runs its own scan takes its own.
+        shutil.rmtree(quest_root / SCAN_DIR, ignore_errors=True)
     # An earlier search's record and files never stand beside this one's (a search cut short is not kept either).
     # The same goes for an earlier search's check at finer settings (core/optimum_check.py).
     for rel in (RECORD, LEDGER_PATH, BEST_PATH, Path("needs") / "OPTIMUM_CHECK.json", WORK_DIR / "check.json",
@@ -1048,6 +1209,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     scanned: dict[str, dict[str, Any]] = {}
     scan_runs: list[tuple[Any, float]] = []  # the coarse scans this call ran, with the wall seconds of each
+    scan_opened: set[str] = set()  # the files the scan's processes opened to read (core/reuse_key.py::left_out)
 
     async def scan(grid: dict[str, list[Any]], scan_block: dict[str, Any] | None = None,
                    level: dict[str, Any] | None = None, pool: bool = False) -> list[dict[str, Any]]:
@@ -1074,6 +1236,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None, at_once=at_once,
             run_id=run_id,
         )
+        scan_opened.update(trial_run.opened())
+        keep_scan_copy(quest_root)  # the search's own copy, taken in the same call that ran the scan
         stderr_parts.append(trial_run.stderr())
         # How long the scan took is kept in FI's run record, as for a measurement (core/run_facts.py).
         scan_runs.append((trial_run, trial_run.wall_s if trial_run.wall_s is not None else time.monotonic() - scan_began))
@@ -1316,7 +1480,11 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).parent.mkdir(parents=True, exist_ok=True)
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
-    record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key)
+    reuse = {**_reuse.stamp(inputs, outputs=scan_hashes(quest_root) if scan_rows else {}),
+             "opened_left_out": _reuse.left_out(sorted(scan_opened), inputs.files),
+             "study_bytes": study_bytes.key, "study_inputs": study_bytes.as_json(),
+             "study_token_inputs": study_tokens.as_json()}
+    record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key, reuse)
     journal.unlink(missing_ok=True)
     record = json.loads(best_text)
     return SearchRun(record=record, rows=outcome.get("rows") or [], stderr=stderr, scan=bool(scan_rows),

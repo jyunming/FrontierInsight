@@ -1620,8 +1620,11 @@ class RunChecksMixin:
                 **({"in_each_run": inside} if inside else {})}
         # How many settings run at once changes how long the run takes: a different number is timed again.
         at_once = int(getattr(runner, "at_once", 1) or 1)
+        from . import reuse_key as _reuse
+
+        # The rule version: a timing made before the rule that sizes a run changed is timed again.
         return (_trial_runner._run_key(runner.simulate, what, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
-                + (f"|{at_once}" if at_once > 1 else ""))
+                + f"|rule{_reuse.RULES['sizing']}" + (f"|{at_once}" if at_once > 1 else ""))
 
     async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
         """Before the protocol is frozen and the study starts: time a few real trials, add them up, and compare the total with

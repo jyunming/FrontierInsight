@@ -125,11 +125,71 @@ def put_back(text: str, name: str, source: str) -> str:
 
 
 # ---- the record -----------------------------------------------------------------------------------------------------------------
-def _newer(path: Path, than: Path) -> bool:
+#: FI's receipt of the last analysis run (written by :func:`write_receipt` from the run's own copy): the files the analysis and
+#: the simulation had when it started, the trial data it was given, and the record it wrote. It replaces the time a file was
+#: last written, which a checkout, a copy or a clock can move without the content changing (or the other way round).
+RECEIPT = Path(".fi") / "analysis_ran.json"
+
+
+def receipt_inputs(root: Path, summary: str | None) -> dict[str, Any]:
+    """The inputs of an analysis run as they are now (core/reuse_key.py): its part of the quest, the simulation part and the
+    trial summary it is given (``summary``, relative to the quest)."""
+    from . import reuse_key as _reuse_key
+
+    sim = _reuse_key.files(root, "simulation", data=False)
+    ana = _reuse_key.files(root, "analysis")
+    trials = None
+    if summary:
+        # every file of the folder the analysis is given as FI_RAW_DIR (the summary and the ledger beside it), not the summary alone
+        try:
+            folder = (Path(root) / summary).parent
+            found = {p.relative_to(root).as_posix(): _reuse_key.digest(p) for p in sorted(folder.rglob("*")) if p.is_file()}
+            trials = _reuse_key.digest_text(json.dumps(found, sort_keys=True)) if (Path(root) / summary).is_file() else None
+        except OSError:
+            trials = None
+    return {"simulation": sim.digests, "analysis": ana.digests, "trials": trials, "summary": summary,
+            "complete": sim.complete and ana.complete and (not summary or trials is not None)}
+
+
+def write_receipt(root: Path, before: dict[str, Any], dropped: list[str] | tuple[str, ...] = ()) -> bool:
+    """After an analysis run that returned 0: the receipt, only when the files it started with are still what they are (the
+    run changed none of its own code) and it wrote its record. Otherwise no receipt (the earlier one is removed), so no
+    function of that run is kept: it is written again, never a stop. ``dropped``: the paths the run wrote into FI's own folders
+    that the copy did not bring back (core/outside_run.py ``left_out``): a write under ``code/`` means the analysis changed its own
+    code while it ran, which the quest's files cannot show."""
+    from . import reuse_key as _reuse_key
+
+    root = Path(root)
+    (root / RECEIPT).unlink(missing_ok=True)
+    derived = root / _analysis.DERIVED_PATH
+    if (not before.get("complete") or not derived.is_file() or any(str(d).startswith("code/") for d in dropped)
+            or receipt_inputs(root, before.get("summary")) != before):
+        return False
     try:
-        return path.stat().st_mtime >= than.stat().st_mtime
+        (root / RECEIPT).write_text(json.dumps({"schema": 1, "inputs": before, "derived_sha": _reuse_key.digest(derived)}),
+                                    encoding="utf-8")
     except OSError:
         return False
+    return True
+
+
+def _receipt(root: Path) -> tuple[bool, bool]:
+    """``(the analysis and its trial data are as the last run had them, the simulation is)``: what a kept function and a kept
+    simulation each need. ``(False, False)`` with no receipt."""
+    from . import reuse_key as _reuse_key
+
+    try:
+        saved = json.loads((root / RECEIPT).read_text(encoding="utf-8"))
+        if saved.get("schema") != 1 or saved["derived_sha"] != _reuse_key.digest(root / _analysis.DERIVED_PATH):
+            return False, False
+        was = saved["inputs"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False, False
+    now = receipt_inputs(root, was.get("summary"))
+    if not now["complete"] or not was.get("complete"):
+        return False, False
+    return (now["analysis"] == was.get("analysis") and now["trials"] == was.get("trials"),
+            now["simulation"] == was.get("simulation"))
 
 
 def snapshot(root: Path, design: dict[str, Any]) -> list[str]:
@@ -158,8 +218,9 @@ def snapshot(root: Path, design: dict[str, Any]) -> list[str]:
     for name in list(bodies):
         if name != TRIAL and (name not in wanted or name not in have):
             bodies.pop(name)
+    analysis_as_run, simulation_as_run = _receipt(root)
     fresh = (run.get("schema") == _analysis.DERIVED_SCHEMA and not run.get("from_earlier_run") and not _analysis.stopping_faults(run)
-             and _newer(derived_path, derive_path))
+             and analysis_as_run)
     noted: list[str] = []
     if fresh:
         ran = run.get("bodies") if isinstance(run.get("bodies"), dict) else {}
@@ -171,7 +232,7 @@ def snapshot(root: Path, design: dict[str, Any]) -> list[str]:
                                 "seconds": r.get("seconds")}
                 noted.append(name)
         # the simulation: the analysis read the record of its trials, so they ran; the file is the one that ran
-        if written_for.get(TRIAL) and _newer(derived_path, simulate_path) and (root / ".fi" / "run_facts.json").is_file():
+        if written_for.get(TRIAL) and simulation_as_run and (root / ".fi" / "run_facts.json").is_file():
             try:
                 trials = (json.loads((root / ".fi" / "run_facts.json").read_text(encoding="utf-8")).get("trials_run") or {}).get("trials")
             except (OSError, ValueError):

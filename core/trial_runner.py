@@ -222,10 +222,42 @@ def _fi_capture(cfg):
 def main():
     import os
     clock0 = time.perf_counter()
+    #<audit-begin>
+    # Which files under this folder the study opens to read: Python's audit event for opening, nothing else is traced. FI
+    # compares what the study read with the files its reuse check compares (core/reuse_key.py); a record whose run read
+    # another file is not reused. The folders a run writes into are told apart afterwards, in FI.
+    _fi_opened = set()
+    try:
+        _fi_root = os.path.realpath(os.getcwd())
+        _fi_root_n = os.path.normcase(_fi_root) + os.sep
+
+        def _fi_audit(event, args):
+            if event != "open":
+                return
+            p = args[0]
+            mode = args[1] if len(args) > 1 else None
+            if not isinstance(p, str) or (mode is not None and not isinstance(mode, str)):
+                return
+            if mode and any(c in mode for c in "wax+"):
+                return
+            try:
+                rp = os.path.realpath(p)
+                if os.path.normcase(rp).startswith(_fi_root_n) and os.path.isfile(rp):
+                    _fi_opened.add(os.path.relpath(rp, _fi_root).replace(os.sep, "/"))
+            except Exception:
+                return
+
+        sys.addaudithook(_fi_audit)
+    except Exception:
+        pass
+    #<audit-end>
     spec_path = sys.argv[1]
     with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
         spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
+    #<audit-begin>
+    opened_to = sys.argv[3] if len(sys.argv) > 3 else None  # (the study is given no arguments below)
+    #<audit-end>
     nonce = spec.pop("nonce")
     # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
     # from a number of its own.
@@ -358,6 +390,14 @@ def main():
     out.close()
     if profiler is not None:
         profiler.dump_stats(profile_to)
+    #<audit-begin>
+    try:  # a file of its own (the third argument, when FI names one), never a row: what reads the rows is not told of another kind
+        if opened_to:
+            with open(opened_to, "w", encoding="utf-8") as seen:
+                seen.write(json.dumps({"opened": sorted(_fi_opened)}))
+    except Exception:
+        pass
+    #<audit-end>
     if captured is not None:
         try:
             with open(capture["path"], "w", encoding="utf-8") as fh:
@@ -369,6 +409,20 @@ def main():
 main()
 '''
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n" + HARNESS_BODY
+
+
+def _without_audit(text: str) -> str:
+    """``text`` without the blocks between the ``#<audit-begin>`` and ``#<audit-end>`` lines."""
+    import re
+
+    return re.sub(r"    #<audit-begin>\n.*?    #<audit-end>\n", "", text, flags=re.S)
+
+
+#: The harness as it was before it recorded the files a run opened. A frozen study's search record of an older FI was made with
+#: this text in its key, and is read by that rule (core/optimise.py ``_legacy_study_key``): the confirm stage may not search
+#: again, so a record that was a match must stay one.
+LEGACY_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n"
+                         + _without_audit(HARNESS_BODY))
 
 
 def _grouped_harness(body: str) -> str:
@@ -405,6 +459,8 @@ GROUP_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n
                         + _grouped_harness(HARNESS_BODY))
 #: Where FI writes it (only for a run that shares processes).
 GROUP_HARNESS_PATH = Path(".fi") / "trial_group_harness.py"
+#: Beside a results file, the files the process opened to read (written when the harness is given it as its third argument).
+OPENED_SUFFIX = ".opened"
 
 
 #: Written when the simulation was sent back once because settings of the study changed none of the plan's declared
@@ -521,6 +577,8 @@ class CellRun:
     levels: list[dict[str, Any]] = field(default_factory=list)
     #: Seconds from this setting's process start to its end, as FI's runner measured it (``None`` when it was not run).
     wall_s: float | None = None
+    #: The files under the folder the cell's process ran in that it opened to read (``code/simulate.py``, ``data/x.csv``).
+    opened: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -538,6 +596,10 @@ class TrialRun:
     #: Seconds the processes of this run took, when they ran earlier than this call (the shared-process check's first run
     #: used as the run: :class:`GroupedRun`); ``None``: the caller's own clock measured it.
     wall_s: float | None = None
+
+    def opened(self) -> list[str]:
+        """Every file any cell's process opened to read."""
+        return sorted({f for c in self.cells for f in c.opened})
 
     @property
     def failed_trials(self) -> int:
@@ -636,6 +698,7 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         spec_path = folder / f"cell{index}.json"
         out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
+        Path(str(out_path) + OPENED_SUFFIX).unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec = {"module": str(module).replace("\\", "/"), "entry": entry,
                 "cell": {**cell, **inside}, "kind": kind,
@@ -689,6 +752,12 @@ def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[i
             lines = out_path.read_text(encoding="utf-8").splitlines() if out_path.is_file() else []
         except OSError:
             lines = []
+        try:
+            seen = json.loads(Path(str(out_path) + OPENED_SUFFIX).read_text(encoding="utf-8"))
+            if isinstance(seen, dict) and isinstance(seen.get("opened"), list):
+                run.opened = sorted({str(x) for x in seen["opened"]})
+        except (OSError, ValueError):
+            pass
         for line in lines:
             try:
                 row = json.loads(line)
@@ -811,7 +880,8 @@ async def run_trials(
         running[1] = max(running[1], running[0])
         try:
             result = await executor.execute(
-                [str(python), (GROUP_HARNESS_PATH if task.get("members") else HARNESS_PATH).as_posix(), task["spec"], task["out"]],
+                [str(python), (GROUP_HARNESS_PATH if task.get("members") else HARNESS_PATH).as_posix(), task["spec"], task["out"],
+                 task["out"] + OPENED_SUFFIX],
                 cwd=quest_root, timeout_s=max(1, min(left, math.ceil(task["allowance_s"])) if task.get("allowance_s") else left),
                 env=env,
             )
@@ -959,6 +1029,7 @@ def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost:
         first, gid = specs[0], members[0]["index"]
         spec_path, out_path = folder / f"group{gid}.json", folder / f"group{gid}.out.jsonl"
         out_path.unlink(missing_ok=True)
+        Path(str(out_path) + OPENED_SUFFIX).unlink(missing_ok=True)
         spec_path.write_text(json.dumps({
             "module": first["module"], "entry": first["entry"], "kind": first.get("kind"),
             "thresholds": first.get("thresholds") or {}, "keep_spec": first.get("keep_spec", False), "nonce": "",
@@ -1405,10 +1476,10 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
-        "how": "Run task i as: <the cluster's python> " + harness + " <spec> <out>, from the quest folder; one task per "
+        "how": "Run task i as: <the cluster's python> " + harness + " <spec> <out> <out>" + OPENED_SUFFIX + ", from the quest folder; one task per "
                "setting, all of them independent. Each writes its results to <out>; FI reads them.",
         "tasks": [{"index": t["index"], "setting": t["key"], "trials": len(t["trials"]),
-                   "argv": [harness, t["spec"], t["out"]]} for t in plan],
+                   "argv": [harness, t["spec"], t["out"], t["out"] + OPENED_SUFFIX]} for t in plan],
     }
     (folder / TASKS_NAME).write_text(json.dumps(tasks, indent=1), encoding="utf-8")
     from core.attempt_records import script_hashes
@@ -1691,16 +1762,9 @@ def code_inputs_sha(quest_root: Path | str, source: str = "") -> str:
     """The code a measurement was made on: ``source`` (simulate.py's text) and every file the simulation may read
     (:func:`core.code_layout.simulation_inputs`: the model's package, a helper module, a parameter file, the quest's
     ``inputs/``), the same set the trials' own key hashes."""
-    from . import code_layout as _code_layout
+    from . import reuse_key as _reuse
 
-    root = Path(quest_root)
-    text = source.encode("utf-8")
-    for path in _code_layout.simulation_inputs(root, root / "code"):
-        try:
-            text += f"\n{_code_layout.input_label(path, root)}\n".encode("utf-8") + path.read_bytes()
-        except OSError:
-            continue
-    return hashlib.sha256(text).hexdigest()
+    return _reuse.simulation_sha(quest_root, source)
 
 
 def one_trial_measured(quest_root: Path | str, source: str) -> bool:
@@ -1919,14 +1983,20 @@ class TrialsRunner:
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = _search.study_grid(protocol)
         runs = int(protocol.get("runs_per_setting") or 1)
-        key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
+        inputs = _run_inputs(self.simulate, protocol, runs, base, self.deterministic)
+        key = inputs.key
         # Each trial number gets one seed across the settings only when the plan asks for common random numbers.
         paired = _mc.paired(protocol, self.quest_root)
         inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
-        run = _load_run(self.quest_root, key)
+        run = _load_run(self.quest_root, key, inputs)
+        if run is None and self.log is not None:
+            said = _why_not_reused(self.quest_root, inputs)
+            if said:
+                self.log.info("[execute] the trials run again: %s", said)
         if run is not None:
             if self.log is not None:
-                self.log.info("[execute] simulate.py and the protocol are unchanged: the trials FI already ran are used")
+                self.log.info("[execute] simulate.py and the protocol are unchanged: the trials FI already ran are used "
+                              "(FI compared the code, inputs/ and data/ files this run reads)")
         elif self.submit is not None:
             # A cluster: the tasks are FI's, the submission is the experiment's; a pending job returns as it is and
             # the quest waits for it (core/job_watch.py).
@@ -1966,7 +2036,7 @@ class TrialsRunner:
                 self.quest_root, record,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
             )
-            _save_run(self.quest_root, key, run)
+            _save_run(self.quest_root, key, run, inputs)
             _keep_run_time(self.quest_root, key, run, None)  # the queue's waiting time is not a run time FI measured
             if self.log is not None:
                 self.log.info("[execute] the cluster job is done: FI read every setting's results and wrote the ledger")
@@ -1998,7 +2068,7 @@ class TrialsRunner:
             )
             self.group_reuse = None  # used once: a later run of the trials runs them
             self._plan_seen = None
-            _save_run(self.quest_root, key, run)
+            _save_run(self.quest_root, key, run, inputs)
             # How long the experiment took is the time of THIS run of the trials; the analysis run again on stored trials
             # (the branch above) is not the experiment and leaves the record as it is (core/run_facts.py).
             _keep_run_time(self.quest_root, key, run, run.wall_s if run.wall_s is not None else time.monotonic() - ran_from)
@@ -2093,10 +2163,22 @@ class TrialsRunner:
         own = run.summary_path.relative_to(self.quest_root).as_posix()
         swap = {own: summary_path} if summary_path != run.summary_path else None
         self._steps.mark(_step_writes.SIMULATION)
-        result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
-                                                log=self.log, replace=swap).execute(
-            cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        from . import kept_bodies as _kept_bodies
+
+        # What the analysis starts with, hashed here whether it runs in a copy or (a container) in the quest itself: the
+        # receipt (core/kept_bodies.py) is written only if the same files are there when it returns.
+        started_with = _kept_bodies.receipt_inputs(self.quest_root, summary_path.relative_to(self.quest_root).as_posix())
+        analysis_box = _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
+                                                log=self.log, replace=swap)
+        result = await analysis_box.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self._steps.mark(_step_writes.ANALYSIS)
+        if result.returncode == 0:
+            dropped = list(getattr(getattr(analysis_box, "last", None), "left_out", None) or [])
+            if not _kept_bodies.write_receipt(self.quest_root, started_with, dropped) and self.log is not None:
+                self.log.info("[execute] the analysis changed its own code while it ran, or its record is missing, so FI does not "
+                              "keep its functions as run")
+        else:
+            (self.quest_root / _kept_bodies.RECEIPT).unlink(missing_ok=True)
         from . import analysis_frame as _analysis
 
         # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py
@@ -2292,29 +2374,31 @@ def _last_result_json(stdout: str) -> dict[str, Any] | None:
 RUN_RECORD = Path(".fi") / "trials" / "run.json"
 
 
-def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:
-    """What decides a set of trials: the simulation's text (with its model package), the protocol (``grid``: the whole of it is passed), the
-    count, the base seed and whether each setting runs once (``run_cell``)."""
-    try:
-        text = Path(simulate).read_bytes()
-    except OSError:
-        text = b""
-    # The model's package beside it (core/code_layout.py) is part of the simulation: other equations are other trials.
-    from . import code_layout as _code_layout
+def _run_inputs(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> Any:
+    """What decides a set of trials, as :class:`core.reuse_key.Inputs`: every file the simulation may read (the model's
+    package, a helper module, a parameter file, the quest's ``inputs/`` and ``data/``), FI's own harness, the protocol
+    (the whole of it is passed), the count, the base seed and whether each setting runs once (``run_cell``). The quest's
+    folder is the one that holds ``code/`` (the simulation's parent folder)."""
+    from . import reuse_key as _reuse
 
-    package = "".join(f"\n{rel}\n{body}" for rel, body in sorted(_code_layout.package_sources(Path(simulate).parent).items()))
-    text += package.encode("utf-8")
-    # Every other file the simulation may read (a helper module beside it, a parameter file in code/, a file in the
-    # quest's inputs/): changing one of them is another simulation, so its cached trials are not reused. The quest's
-    # folder is the one that holds code/ (the simulation's parent folder).
-    code = Path(simulate).parent
-    root = code.parent
-    for path in _code_layout.simulation_inputs(root, code):
-        try:
-            text += f"\n{_code_layout.input_label(path, root)}\n".encode("utf-8") + path.read_bytes()
-        except OSError:
-            continue
-    return hashlib.sha256(text + json.dumps([grid, runs, base, deterministic], sort_keys=True, default=str).encode()).hexdigest()
+    return _reuse.computed("trials", Path(simulate).parent.parent, grid, seed=base,
+                           config={"runs": runs, "deterministic": deterministic})
+
+
+def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:
+    """The key of :func:`_run_inputs` (what the sizing, the small run and the trials themselves compare)."""
+    return _run_inputs(simulate, grid, runs, base, deterministic).key
+
+
+def _why_not_reused(quest_root: Path, inputs: Any) -> str:
+    """One plain line saying why the trials of an earlier record are run again (empty: there is no earlier record)."""
+    from . import reuse_key as _reuse
+
+    try:
+        record = json.loads((Path(quest_root) / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return _reuse.why_not(record, inputs)
 
 
 def _file_hashes(quest_root: Path) -> dict[str, str]:
@@ -2327,8 +2411,13 @@ def _file_hashes(quest_root: Path) -> dict[str, str]:
     return out
 
 
-def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
-    record = {"key": key, "files": _file_hashes(quest_root), "cells": [
+def _save_run(quest_root: Path, key: str, run: TrialRun, inputs: Any = None) -> None:
+    from . import reuse_key as _reuse
+
+    record = {"key": key, "files": _file_hashes(quest_root),
+              **({"reuse": {**_reuse.stamp(inputs, outputs=_file_hashes(quest_root)),
+                            "opened_left_out": _reuse.left_out(run.opened(), inputs.files)}} if inputs is not None else {}),
+              "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
          "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": _in_run.levels_json(c.levels)}
         for c in run.cells]}
@@ -2338,9 +2427,11 @@ def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
         pass
 
 
-def _load_run(quest_root: Path, key: str) -> TrialRun | None:
+def _load_run(quest_root: Path, key: str, inputs: Any = None) -> TrialRun | None:
     """The trials already run for ``key``, when their record, FI's ledger and the summary are all still there: a rerun
-    of the analysis alone (a review's revision, a repaired experiment.py) does not run the simulation again."""
+    of the analysis alone (a review's revision, a repaired experiment.py) does not run the simulation again. With
+    ``inputs`` (:func:`_run_inputs`), the record must have been written under :mod:`core.reuse_key`'s rule and made from
+    exactly those inputs: a record of an older FI is not used, and one whose inputs cannot all be read is not either."""
     root = Path(quest_root)
     ledger, summary = root / RAW_DIRNAME / LEDGER_NAME, root / RAW_DIRNAME / SUMMARY_NAME
     try:
@@ -2349,6 +2440,11 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
         return None
     if record.get("key") != key or not ledger.is_file() or not summary.is_file():
         return None
+    if inputs is not None:
+        from . import reuse_key as _reuse
+
+        if not _reuse.matches(record, inputs, "trials"):
+            return None
     if record.get("files") != _file_hashes(root):
         return None  # the ledger or the summary was changed since FI wrote them: the trials are run again
     return TrialRun(cells=[CellRun(**{**c, "levels": _in_run.levels_of(c.get("levels"))}) for c in record.get("cells") or []],

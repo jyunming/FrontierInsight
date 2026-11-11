@@ -816,7 +816,7 @@ def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_p
     block = protocol["optimisation"]
     simulate = root / "code" / "simulate.py"
     keys = lambda: (optimise._run_key(root, simulate, block, 0, "run_cell", None),  # noqa: E731
-                    optimise._study_key(root, simulate, block, "run_cell", None))
+                    optimise._study_keys(root, block, "run_cell", None)[0].key)
     before = keys()
     (root / "code" / "tests").mkdir()
     (root / "code" / "tests" / "test_model.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
