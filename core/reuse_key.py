@@ -249,7 +249,7 @@ def matches(record: Any, inputs: Inputs, kind: str | None = None) -> bool:
     if not (is_current(record, kind or inputs.kind) and inputs.complete):
         return False
     block = record["reuse"]
-    return bool(block.get("complete", True)) and block.get("key") == inputs.key
+    return bool(block.get("complete", True)) and block.get("key") == inputs.key and not block.get("opened_left_out")
 
 
 def why_not(record: Any, inputs: Inputs) -> str:
@@ -260,6 +260,10 @@ def why_not(record: Any, inputs: Inputs) -> str:
         return "FI could not read " + ", ".join(inputs.unreadable[:3]) + ", so the earlier result is not used"
     if not is_current(record, inputs.kind):
         return "the earlier result was made by an older version of FI's reuse check, so it is made again"
+    left = (record.get("reuse") or {}).get("opened_left_out")
+    if left and not inputs.changed((record.get("reuse") or {}).get("inputs")):
+        return ("the earlier result is not used: the run read " + ", ".join(left[:3])
+                + ", which the reuse check does not compare")
     names = inputs.changed((record.get("reuse") or {}).get("inputs"))
     return ("the earlier result is not used: " + ", ".join(names[:4]) + (" and more" if len(names) > 4 else "")
             + " changed since it was made") if names else ""
@@ -267,6 +271,34 @@ def why_not(record: Any, inputs: Inputs) -> str:
 
 #: The line run.log ends a reuse decision with (what the key compared).
 COMPARED = "(FI compared the code, inputs/ and data/ files this run reads)"
+
+
+def left_out(opened: list[str], key_files: dict[str, str]) -> list[str]:
+    """The files a run opened to read that the key does not compare: under ``code/``, ``inputs/`` or ``data/`` (paths
+    relative to the folder the run ran in), not in the key's file list, and not in a folder the run itself writes into
+    (``data/results/``, ``cache``, ``results``, ``figures``, ``raw`` and tool caches under ``code/``). A run that read one
+    is not reused: the file may have changed without the key seeing it."""
+    from . import code_layout as _layout
+
+    known = {k.lower() for k in key_files}
+    out: list[str] = []
+    for rel in sorted(set(opened)):
+        parts = rel.split("/")
+        if len(parts) < 2 or parts[0].lower() not in ("code", "inputs", "data") or rel.lower() in known:
+            continue
+        if parts[0].lower() == "data" and parts[1].lower() == "results":
+            continue
+        if any(p in _layout.TOOL_CACHES for p in parts[:-1]) or rel.endswith(".pyc"):
+            continue
+        if parts[0].lower() == "code" and any(p in _layout.GENERATED_FOLDERS for p in parts[1:-1]) and not rel.endswith(".py"):
+            continue
+        out.append(rel)
+    return out
+
+
+def digest_text(text: str) -> str:
+    """The hash of a text (a record's own key built from :func:`files`)."""
+    return _sha(text.encode("utf-8"))
 
 
 def simulation_sha(quest_root: Path | str, extra: str = "", code: Path | None = None) -> str:

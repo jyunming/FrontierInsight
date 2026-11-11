@@ -110,8 +110,7 @@ def _ran(engine: Engine, status: dict[str, str]) -> None:
     (root / af.DERIVED_PATH).write_text(json.dumps(record), encoding="utf-8")
     (root / ".fi").mkdir(exist_ok=True)
     (root / ".fi" / "run_facts.json").write_text(json.dumps({"trials_run": {"trials": 12}}), encoding="utf-8")
-    _later(root / af.DERIVED_PATH, root / "code" / "simulate.py")
-    _later(root / af.DERIVED_PATH, root / "code" / "derive.py")
+    assert kb.write_receipt(root, kb.receipt_inputs(root, None))  # what the run's own copy leaves (core/trial_runner.py)
 
 
 async def _first(tmp_path: Path) -> tuple[Engine, dict[str, Any]]:
@@ -168,6 +167,30 @@ async def test_code_changed_after_the_last_run_is_not_recorded_as_having_passed(
     derive.write_text(derive.read_text(encoding="utf-8").replace("[1, 2], [2, 1]", "[1, 2], [9, 9]"), encoding="utf-8")
     t = (engine.quest_root / af.DERIVED_PATH).stat().st_mtime + 30
     os.utime(derive, (t, t))  # written after the run
+    assert kb.snapshot(engine.quest_root, DESIGN) == []
+
+
+@pytest.mark.asyncio
+async def test_what_was_kept_follows_the_content_of_the_files_and_not_the_time_they_were_written(tmp_path: Path) -> None:
+    engine, state = await _first(tmp_path)
+    _ran(engine, {"derive_peak": "ok", "figure_over_rate": "ok", "figure_over_dose": "ok"})
+    derive = engine.quest_root / "code" / "derive.py"
+    # a checkout or a copy moves the time forward and leaves the text: still what ran
+    t = (engine.quest_root / af.DERIVED_PATH).stat().st_mtime + 300
+    os.utime(derive, (t, t))
+    assert sorted(kb.snapshot(engine.quest_root, DESIGN)) == ["derive_peak", "figure_over_dose", "figure_over_rate"]
+    # a text that changed, with a time before the run's: not what ran
+    old = (engine.quest_root / af.DERIVED_PATH).stat().st_mtime - 300
+    derive.write_text(derive.read_text(encoding="utf-8").replace("[1, 2], [2, 1]", "[1, 2], [9, 9]"), encoding="utf-8")
+    os.utime(derive, (old, old))
+    assert kb.snapshot(engine.quest_root, DESIGN) == []
+
+
+@pytest.mark.asyncio
+async def test_no_receipt_keeps_nothing(tmp_path: Path) -> None:
+    engine, state = await _first(tmp_path)
+    _ran(engine, {"derive_peak": "ok", "figure_over_rate": "ok", "figure_over_dose": "ok"})
+    (engine.quest_root / kb.RECEIPT).unlink()
     assert kb.snapshot(engine.quest_root, DESIGN) == []
 
 

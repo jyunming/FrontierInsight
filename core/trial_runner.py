@@ -222,10 +222,38 @@ def _fi_capture(cfg):
 def main():
     import os
     clock0 = time.perf_counter()
+    # Which files under this folder the study opens to read: Python's audit event for opening, nothing else is traced. FI
+    # compares what the study read with the files its reuse check compares (core/reuse_key.py); a record whose run read
+    # another file is not reused. The folders a run writes into are told apart afterwards, in FI.
+    _fi_opened = set()
+    try:
+        _fi_root = os.path.realpath(os.getcwd())
+        _fi_root_n = os.path.normcase(_fi_root) + os.sep
+
+        def _fi_audit(event, args):
+            if event != "open":
+                return
+            p = args[0]
+            mode = args[1] if len(args) > 1 else None
+            if not isinstance(p, str) or (mode is not None and not isinstance(mode, str)):
+                return
+            if mode and any(c in mode for c in "wax+"):
+                return
+            try:
+                rp = os.path.realpath(p)
+                if os.path.normcase(rp).startswith(_fi_root_n) and os.path.isfile(rp):
+                    _fi_opened.add(os.path.relpath(rp, _fi_root).replace(os.sep, "/"))
+            except Exception:
+                return
+
+        sys.addaudithook(_fi_audit)
+    except Exception:
+        pass
     spec_path = sys.argv[1]
     with open(spec_path, encoding="utf-8") as f:  # closed before it is deleted: Windows refuses to delete an open file
         spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
+    opened_to = sys.argv[3] if len(sys.argv) > 3 else None  # (the study is given no arguments below)
     nonce = spec.pop("nonce")
     # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
     # from a number of its own.
@@ -358,6 +386,12 @@ def main():
     out.close()
     if profiler is not None:
         profiler.dump_stats(profile_to)
+    try:  # a file of its own (the third argument, when FI names one), never a row: what reads the rows is not told of another kind
+        if opened_to:
+            with open(opened_to, "w", encoding="utf-8") as seen:
+                seen.write(json.dumps({"opened": sorted(_fi_opened)}))
+    except Exception:
+        pass
     if captured is not None:
         try:
             with open(capture["path"], "w", encoding="utf-8") as fh:
@@ -405,6 +439,8 @@ GROUP_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n
                         + _grouped_harness(HARNESS_BODY))
 #: Where FI writes it (only for a run that shares processes).
 GROUP_HARNESS_PATH = Path(".fi") / "trial_group_harness.py"
+#: Beside a results file, the files the process opened to read (written when the harness is given it as its third argument).
+OPENED_SUFFIX = ".opened"
 
 
 #: Written when the simulation was sent back once because settings of the study changed none of the plan's declared
@@ -521,6 +557,8 @@ class CellRun:
     levels: list[dict[str, Any]] = field(default_factory=list)
     #: Seconds from this setting's process start to its end, as FI's runner measured it (``None`` when it was not run).
     wall_s: float | None = None
+    #: The files under the folder the cell's process ran in that it opened to read (``code/simulate.py``, ``data/x.csv``).
+    opened: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -538,6 +576,10 @@ class TrialRun:
     #: Seconds the processes of this run took, when they ran earlier than this call (the shared-process check's first run
     #: used as the run: :class:`GroupedRun`); ``None``: the caller's own clock measured it.
     wall_s: float | None = None
+
+    def opened(self) -> list[str]:
+        """Every file any cell's process opened to read."""
+        return sorted({f for c in self.cells for f in c.opened})
 
     @property
     def failed_trials(self) -> int:
@@ -636,6 +678,7 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         spec_path = folder / f"cell{index}.json"
         out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
+        Path(str(out_path) + OPENED_SUFFIX).unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec = {"module": str(module).replace("\\", "/"), "entry": entry,
                 "cell": {**cell, **inside}, "kind": kind,
@@ -689,6 +732,12 @@ def _collect_cells(quest_root: Path, plan: list[dict[str, Any]], results: dict[i
             lines = out_path.read_text(encoding="utf-8").splitlines() if out_path.is_file() else []
         except OSError:
             lines = []
+        try:
+            seen = json.loads(Path(str(out_path) + OPENED_SUFFIX).read_text(encoding="utf-8"))
+            if isinstance(seen, dict) and isinstance(seen.get("opened"), list):
+                run.opened = sorted({str(x) for x in seen["opened"]})
+        except (OSError, ValueError):
+            pass
         for line in lines:
             try:
                 row = json.loads(line)
@@ -811,7 +860,8 @@ async def run_trials(
         running[1] = max(running[1], running[0])
         try:
             result = await executor.execute(
-                [str(python), (GROUP_HARNESS_PATH if task.get("members") else HARNESS_PATH).as_posix(), task["spec"], task["out"]],
+                [str(python), (GROUP_HARNESS_PATH if task.get("members") else HARNESS_PATH).as_posix(), task["spec"], task["out"],
+                 task["out"] + OPENED_SUFFIX],
                 cwd=quest_root, timeout_s=max(1, min(left, math.ceil(task["allowance_s"])) if task.get("allowance_s") else left),
                 env=env,
             )
@@ -959,6 +1009,7 @@ def _units(quest_root: Path, part: list[dict[str, Any]], per_process: int, cost:
         first, gid = specs[0], members[0]["index"]
         spec_path, out_path = folder / f"group{gid}.json", folder / f"group{gid}.out.jsonl"
         out_path.unlink(missing_ok=True)
+        Path(str(out_path) + OPENED_SUFFIX).unlink(missing_ok=True)
         spec_path.write_text(json.dumps({
             "module": first["module"], "entry": first["entry"], "kind": first.get("kind"),
             "thresholds": first.get("thresholds") or {}, "keep_spec": first.get("keep_spec", False), "nonce": "",
@@ -2092,10 +2143,21 @@ class TrialsRunner:
         own = run.summary_path.relative_to(self.quest_root).as_posix()
         swap = {own: summary_path} if summary_path != run.summary_path else None
         self._steps.mark(_step_writes.SIMULATION)
+        from . import kept_bodies as _kept_bodies
+
+        # What the analysis starts with, hashed here whether it runs in a copy or (a container) in the quest itself: the
+        # receipt (core/kept_bodies.py) is written only if the same files are there when it returns.
+        started_with = _kept_bodies.receipt_inputs(self.quest_root, summary_path.relative_to(self.quest_root).as_posix())
         result = await _outside.OutsideExecutor(self.executor, self.quest_root, inputs=_outside.ANALYSIS_INPUTS, skip=(),
                                                 log=self.log, replace=swap).execute(
             cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self._steps.mark(_step_writes.ANALYSIS)
+        if result.returncode == 0:
+            if not _kept_bodies.write_receipt(self.quest_root, started_with) and self.log is not None:
+                self.log.info("[execute] the analysis changed its own code while it ran, or its record is missing, so FI does not "
+                              "keep its functions as run")
+        else:
+            (self.quest_root / _kept_bodies.RECEIPT).unlink(missing_ok=True)
         from . import analysis_frame as _analysis
 
         # the analysis FI writes: a function of the study's derive.py is what is repaired, never FI's experiment.py
@@ -2332,7 +2394,9 @@ def _save_run(quest_root: Path, key: str, run: TrialRun, inputs: Any = None) -> 
     from . import reuse_key as _reuse
 
     record = {"key": key, "files": _file_hashes(quest_root),
-              **({"reuse": _reuse.stamp(inputs, outputs=_file_hashes(quest_root))} if inputs is not None else {}), "cells": [
+              **({"reuse": {**_reuse.stamp(inputs, outputs=_file_hashes(quest_root)),
+                            "opened_left_out": _reuse.left_out(run.opened(), inputs.files)}} if inputs is not None else {}),
+              "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
          "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error, "levels": _in_run.levels_json(c.levels)}
         for c in run.cells]}

@@ -486,3 +486,31 @@ def test_the_confirm_run_of_a_frozen_search_checks_the_kept_design_again_on_its_
     asyncio.run(runner.execute(["python", str(root / "code" / "experiment.py")], cwd=root, timeout_s=5,
                                env={"FI_REPLICATE_SEED": "424242"}))
     assert seen.get("fresh") is True and seen.get("base_seed") == 424242, seen
+
+
+# ---- the person's files in inputs/ are part of the version (rule 2) --------------------------------------------------
+
+
+def test_a_changed_file_in_inputs_is_a_new_version_of_a_freeze_that_counts_inputs_and_not_of_an_older_one(tmp_path: Path) -> None:
+    _code(tmp_path)
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "table.csv").write_text("t,v\n0,1\n", encoding="utf-8")
+    first = _freeze_and_confirm(tmp_path, {"a": 2}, stride=10)
+    assert first["frozen_at_confirm"]["fingerprint_rule"] == 2 and first["frozen_at_confirm"]["inputs_sha256"]
+    (tmp_path / "inputs" / "table.csv").write_text("t,v\n0,2\n", encoding="utf-8")
+    lines = phased.new_candidate(tmp_path)
+    assert lines and "inputs" in lines[0], lines
+
+    # the same quest frozen by the first rule (no entry for inputs/): compared as it was written, so no new version
+    old = tmp_path.parent / (tmp_path.name + "_old")
+    old.mkdir()
+    _code(old)
+    (old / "inputs").mkdir()
+    (old / "inputs" / "table.csv").write_text("t,v\n0,1\n", encoding="utf-8")
+    _freeze_and_confirm(old, {"a": 2}, stride=10)
+    stored = phased.load(old)
+    for key in ("fingerprint_rule", "inputs_sha256"):
+        stored["frozen_at_confirm"].pop(key, None)
+    phased._save(old, stored)
+    (old / "inputs" / "table.csv").write_text("t,v\n0,2\n", encoding="utf-8")
+    assert phased.new_candidate(old) == []

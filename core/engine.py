@@ -15923,7 +15923,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         return not _assertion_violations(self._in_force(state), self._walk_memo())
 
-    def _scripts_sha(self) -> str:
+    def _scripts_sha(self, rule: int = 1) -> str:
+        if rule >= 2:
+            # Rule 2: every file of the study (core/reuse_key.py), so a repair in the package or a parameter file counts.
+            from . import reuse_key as _reuse_key
+
+            found = _reuse_key.files(self.quest_root, "study")
+            return _reuse_key.digest_text(json.dumps(found.digests, sort_keys=True) + ("" if found.complete else "|unreadable"))
         import hashlib
 
         digest = hashlib.sha256()
@@ -15940,11 +15946,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not marker.is_file():
             return None
         try:
-            was = json.loads(marker.read_text(encoding="utf-8")).get("scripts_sha")
+            noted = json.loads(marker.read_text(encoding="utf-8"))
+            was, rule = noted.get("scripts_sha"), int(noted.get("scripts_rule") or 1)  # a marker is read by its own rule
             marker.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            was = None
-        if was is not None and was != self._scripts_sha():
+        except (OSError, ValueError, TypeError, AttributeError):
+            was, rule = None, 1
+        if was is not None and was != self._scripts_sha(rule):
             code_path = self.quest_root / "code" / "experiment.py"
             self._log.info("[numeric] the script was changed while the quest was stopped; running it again")
             return {"code": code_path.read_text(encoding="utf-8"), "exec_patch_pending": True}

@@ -872,7 +872,8 @@ def _kept(quest_root: Path, record: Any, record_text: str, key: str | dict[str, 
     trials are on disk, and it did not stop for failures. A search the clock stopped stands for the same limit (an
     analysis repair), not a longer one (``timeout_s``; ``None``: not asked)."""
     keys = {key: frozenset()} if isinstance(key, str) else key
-    if not (isinstance(record, dict) and ((record.get("key") in keys and _reuse.is_current(record, "search")) or frozen)):
+    if not (isinstance(record, dict) and ((record.get("key") in keys and _reuse.is_current(record, "search")
+                                           and not (record.get("reuse") or {}).get("opened_left_out")) or frozen)):
         return None  # a record an older FI wrote is read by its own rule only for a frozen study (run_search)
     files = _record_files(record, record_text)
     rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
@@ -1208,6 +1209,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     scanned: dict[str, dict[str, Any]] = {}
     scan_runs: list[tuple[Any, float]] = []  # the coarse scans this call ran, with the wall seconds of each
+    scan_opened: set[str] = set()  # the files the scan's processes opened to read (core/reuse_key.py::left_out)
 
     async def scan(grid: dict[str, list[Any]], scan_block: dict[str, Any] | None = None,
                    level: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -1229,6 +1231,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             thresholds=thresholds, paired=True, in_each_run=_search.in_each_run(block) or None, at_once=at_once,
             run_id=run_id,
         )
+        scan_opened.update(trial_run.opened())
         keep_scan_copy(quest_root)  # the search's own copy, taken in the same call that ran the scan
         stderr_parts.append(trial_run.stderr())
         # How long the scan took is kept in FI's run record, as for a measurement (core/run_facts.py).
@@ -1472,6 +1475,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
     reuse = {**_reuse.stamp(inputs, outputs=scan_hashes(quest_root) if scan_rows else {}),
+             "opened_left_out": _reuse.left_out(sorted(scan_opened), inputs.files),
              "study_bytes": study_bytes.key, "study_inputs": study_bytes.as_json(),
              "study_token_inputs": study_tokens.as_json()}
     record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key, reuse)

@@ -353,3 +353,114 @@ def test_the_small_records_follow_the_same_list_including_data(tmp_path: Path) -
     (root / "data" / "results").mkdir()
     (root / "data" / "results" / "x.bin").write_bytes(b"1")
     assert (outside_run.code_version(root), trial_runner.code_inputs_sha(root, SIM), cost_model.design_key({"g": 1}, sim)) == after
+
+
+# --- what a run actually opened (the files the key leaves out) ---------------------------------------------------------
+
+READS_OTHER = '''
+import os
+
+def run_cell(cell):
+    base = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(base, "notes_for_run.txt"), encoding="utf-8") as fh:
+        return {"f": float(len(fh.read()))}
+'''
+
+READS_DATA = '''
+import os
+
+def run_cell(cell):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "data", "readings.csv"), encoding="utf-8") as fh:
+        n = len(fh.read())
+    os.makedirs(os.path.join(root, "data", "results", "cache"), exist_ok=True)
+    with open(os.path.join(root, "data", "results", "cache", "tmp.txt"), "w", encoding="utf-8") as fh:
+        fh.write("x")
+    return {"f": float(n)}
+'''
+
+
+def _opened_run(tmp_path: Path, source: str, extra: dict[str, str]) -> tuple[Path, Any]:
+    import asyncio
+
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(source, encoding="utf-8")
+    (root / "data").mkdir()
+    (root / "data" / "readings.csv").write_text("t,v\n0,1\n", encoding="utf-8")
+    for rel, text in extra.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    run = asyncio.run(trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root, "code/simulate.py", {"x": [1]},
+                                              runs_per_setting=1, base_seed=0, deterministic=True, timeout_s=120))
+    return root, run
+
+
+def test_the_files_a_run_opened_are_recorded_and_the_run_written_folders_are_left_out(tmp_path: Path) -> None:
+    root, run = _opened_run(tmp_path, READS_DATA, {})
+    opened = run.opened()
+    assert "data/readings.csv" in [o.lower() for o in opened] or any(o.endswith("data/readings.csv") for o in opened), opened
+    files = reuse_key.files(root, "simulation").digests
+    assert reuse_key.left_out(opened, files) == [], "the data file is in the key; the cache folder is written by the run"
+
+
+def test_a_run_that_read_a_file_the_key_leaves_out_is_not_reused_and_the_file_is_named(tmp_path: Path) -> None:
+    # a note beside the simulation: FI writes notes like README.md itself, so the key leaves them out
+    root, run = _opened_run(tmp_path, READS_OTHER.replace("notes_for_run.txt", "README.md"), {"code/README.md": "hello"})
+    inputs = trial_runner._run_inputs(root / "code" / "simulate.py", {"grid": {"x": [1]}}, 1, 0, True)
+    left = reuse_key.left_out(run.opened(), inputs.files)
+    assert left == ["code/README.md"], (left, run.opened())
+    (root / ".fi" / "trials").mkdir(parents=True, exist_ok=True)
+    (root / "raw").mkdir(exist_ok=True)
+    trial_runner._save_run(root, inputs.key, run, inputs)
+    assert trial_runner._load_run(root, inputs.key, inputs) is None
+    assert "code/README.md" in trial_runner._why_not_reused(root, inputs)
+
+
+# ---- slice 4: the checks and the numeric-warnings resume read the same files ------------------------------------------
+
+
+def test_the_hidden_check_version_follows_the_simulation_files_and_not_the_analysis(tmp_path: Path) -> None:
+    from core import hidden_check
+
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "inputs").mkdir()
+    (root / "code" / "simulate.py").write_text("def run_cell(c):\n    return 1\n", encoding="utf-8")
+    (root / "inputs" / "p.csv").write_text("a\n1\n", encoding="utf-8")
+    base = hidden_check.code_sha(root)
+    assert base
+    (root / "code" / "experiment.py").write_text("x = 1\n", encoding="utf-8")  # the analysis: no new check
+    assert hidden_check.code_sha(root) == base
+    (root / "inputs" / "p.csv").write_text("a\n2\n", encoding="utf-8")  # the person's file: the simulation may read it
+    assert hidden_check.code_sha(root) != base
+
+
+def test_a_repair_in_the_package_is_not_accepted_as_unchanged_after_a_numeric_stop(tmp_path: Path) -> None:
+    from core.engine import Engine
+    from tests.test_numeric_warnings import _cfg
+
+    engine = Engine(_cfg(tmp_path))
+    code = engine.quest_root / "code"
+    (code / "pkg").mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text("import pkg\n", encoding="utf-8")
+    (code / "experiment.py").write_text("print(1)\n", encoding="utf-8")
+    (code / "pkg" / "__init__.py").write_text("K = 1\n", encoding="utf-8")
+    marker = engine.fi_dir / "numeric_stop.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+
+    def stop(rule: int) -> None:
+        marker.write_text(json.dumps({"scripts_sha": engine._scripts_sha(rule), "scripts_rule": rule}), encoding="utf-8")
+
+    stop(2)
+    assert engine._resume_after_numeric_stop() == {"numeric_warnings_accepted": True}
+    stop(2)
+    (code / "pkg" / "__init__.py").write_text("K = 2\n", encoding="utf-8")
+    assert engine._resume_after_numeric_stop().get("exec_patch_pending") is True
+    # a marker written by the first rule (two scripts only) is read by it: the package is not looked at
+    marker.write_text(json.dumps({"scripts_sha": engine._scripts_sha(1)}), encoding="utf-8")
+    (code / "pkg" / "__init__.py").write_text("K = 3\n", encoding="utf-8")
+    assert engine._resume_after_numeric_stop() == {"numeric_warnings_accepted": True}
