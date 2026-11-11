@@ -2730,6 +2730,8 @@ class RunChecksMixin:
         from . import small_run as _small
 
         record = await self._small_run(state, py, exec_env)
+        from .design_moves import disclose as _disclose_moves  # each design variable moved once, said (core/design_moves.py)
+        await _disclose_moves(self, state, py, exec_env, record)
         if record and not record.get("crashed"):
             return self._unread_in_small_run(state, record, self.quest_root / "code" / _split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
         if not record or not record.get("crashed"):
