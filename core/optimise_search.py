@@ -1912,6 +1912,8 @@ class _Search:
             "notes": list(self.notes), "baseline": baseline, "start_log": self.start_log, "seed": self.seed,
             "failed": sum(1 for r in self.rows if r["status"] != "ok"),
             "infeasible": sum(1 for r in self.rows if r["status"] == "ok" and not r["feasible"]),
+            "scan_failed": sum(1 for r in self.rows if not r["counted"] and r["status"] != "ok"),
+            "scan_infeasible": sum(1 for r in self.rows if not r["counted"] and r["status"] == "ok" and not r["feasible"]),
             **({"every_failure": NO_OBJECTIVE}
                if self.stopped == "failures" and self.rows and all(r.get("failure") == NO_OBJECTIVE for r in self.rows)
                else {}),
@@ -2336,6 +2338,8 @@ def merge_outcomes(outcomes, levels, block):
         "start_log": [dict(s, level=dict(lv)) for o, lv in zip(outcomes, levels) for s in o["start_log"]],
         "seed": first["seed"], "failed": sum(o["failed"] for o in outcomes),
         "infeasible": sum(o["infeasible"] for o in outcomes), "best": best,
+        "scan_failed": sum(o.get("scan_failed", 0) for o in outcomes),
+        "scan_infeasible": sum(o.get("scan_infeasible", 0) for o in outcomes),
         "rounds": [dict(r, level=dict(lv)) for o, lv in zip(outcomes, levels) for r in o["rounds"]],
         "fixed": dict(level_block(block, win["level"])["fixed"]),
     }
@@ -2725,6 +2729,7 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     evaluations = {"search": outcome["evaluations"], "budget": outcome["budget"], "starts": outcome["starts"],
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
+                   "scan_failed": outcome.get("scan_failed", 0), "scan_infeasible": outcome.get("scan_infeasible", 0),
                    "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
                    **({"run_not_used": outcome["run_not_used"]["count"]} if outcome.get("run_not_used") else {}),
                    **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {}),

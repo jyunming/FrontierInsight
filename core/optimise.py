@@ -1402,6 +1402,8 @@ _STOPPED = {
     "time": "the time limit (execution.timeout_s) was reached",
     "failures": "the first evaluations all failed",
     "not_searched": "its first evaluation returned no objective, as the alternative searched before it did",
+    "same_as_first": "it gave the same compared results as the first alternative for every design tried at both, so it "
+                     "was not searched again",
     "library_error": "the library's method stopped with an error",
     "the simulation could not be loaded": "the simulation could not be loaded",
     "target": "a design reached the target asked for",
@@ -1438,10 +1440,43 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     unit = f" {objective['unit']}" if objective.get("unit") else ""
     quantity = objective.get("quantity", "the objective")
     stopped = _STOPPED.get(str(ev.get("stopped_because")), str(ev.get("stopped_because")))
-    scan = f", after a coarse scan of {ev['scan']} design(s)" if ev.get("scan") else ""
-    lines = [f"[optimise] {ev.get('search', 0)} evaluation(s) of the {ev.get('budget', 0)} allowed{scan}, method "
-             f"{method.get('used')}; stopped because {stopped}; {ev.get('failed', 0)} failed, {ev.get('infeasible', 0)} "
-             "broke a limit"]
+    compared = record.get("compared")
+    levels = [p for p in (compared.get("levels") or []) if isinstance(p, dict)] if isinstance(compared, dict) else []
+    failed, broke = ev.get("failed", 0), ev.get("infeasible", 0)
+    scan_note = ""
+    if ev.get("scan"):
+        if "scan_failed" in ev:
+            # ``failed`` and ``infeasible`` count the scan's designs too; the sentence counts the evaluations it names.
+            failed, broke = failed - ev["scan_failed"], broke - ev.get("scan_infeasible", 0)
+            bad = [f"{ev['scan_failed']} failed" if ev["scan_failed"] else "",
+                   f"{ev['scan_infeasible']} broke a limit" if ev.get("scan_infeasible") else ""]
+            scan_note = "; " + ", ".join(b for b in bad if b) if any(bad) else ""
+        scan = f", after a coarse scan of {ev['scan']} design(s) (not counted in the budget{scan_note})"
+        counts_say = ("" if "scan_failed" in ev else " (the coarse scan's designs included)")
+    else:
+        scan, counts_say = "", ""
+    if len(levels) > 1:
+        # Each alternative is searched with the whole budget of its own, so the sum of the budgets is not one budget that
+        # ran out: say, for each way the alternatives ended, how many evaluations of how many allowed they used.
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for p in levels:
+            groups.setdefault(str(p.get("stopped_because")), []).append(p)
+        parts = []
+        for reason, mine in groups.items():
+            used, allowed = sum(int(p.get("evaluations") or 0) for p in mine), sum(int(p.get("budget") or 0) for p in mine)
+            many = f"{len(mine)} alternative{'' if len(mine) == 1 else 's'}"
+            if reason == "failures" and len(groups) > 1:
+                # An alternative that failed every evaluation does not name the search's end: its own entry does.
+                parts.append(f"{many} used {used} of the {allowed} allowed and gave no result")
+            else:
+                parts.append(f"{many} used {used} of the {allowed} allowed and stopped because "
+                             f"{_STOPPED.get(reason, reason)}")
+        head = (f"{ev.get('search', 0)} evaluation(s) in all over {len(levels)} alternatives, each with a budget "
+                f"of its own ({'; '.join(parts)})")
+        lines = [f"[optimise] {head}{scan}, method {method.get('used')}; {failed} failed, {broke} broke a limit{counts_say}"]
+    else:
+        lines = [f"[optimise] {ev.get('search', 0)} evaluation(s) of the {ev.get('budget', 0)} allowed{scan}, method "
+                 f"{method.get('used')}; stopped because {stopped}; {failed} failed, {broke} broke a limit{counts_say}"]
     if method.get("why"):
         lines.append(f"[optimise] {method.get('requested')} was asked for, but {method['why']}")
     from . import best_design_report as _report
