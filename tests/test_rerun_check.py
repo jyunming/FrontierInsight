@@ -538,6 +538,32 @@ def test_a_small_run_that_fails_on_the_code_as_it_is_too_refuses_nothing_of_the_
     assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
 
 
+def test_no_small_run_is_started_when_the_time_of_the_check_is_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_checks
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    small: list[int] = []
+
+    async def refusal(*a: Any, **k: Any) -> str:
+        small.append(1)
+        return ""
+
+    async def ask(*a: Any, **k: Any) -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "# repaired" + chr(10)}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}, [5.0]))
+    assert got.status == "could_not" and "spent" in got.why and small == []
+
+
 def test_a_failed_call_for_a_rerun_repair_gives_its_request_back_and_no_answer_is_kept(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import finding_repair as fr

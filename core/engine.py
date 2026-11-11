@@ -23209,6 +23209,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
+                if budget is not None and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
+                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
