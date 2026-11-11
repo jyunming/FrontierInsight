@@ -21,7 +21,8 @@ What a key covers, and what it does not:
   longer exists is not reused. A frozen study's search record of this rule (one that keeps ``study_token_inputs``) is the
   one exception, by what decides its result: the confirm stage may not search again, so it keeps a search whose files and
   plan are as recorded although FI's code changed since, and says so (core/optimise.py ``_same_study``). A frozen study's
-  record of an older FI (one combined key) is matched only while FI's code is still the text that key was made with.
+  record of an older FI (one combined key) is read by its old rule, with the harness as it was before it recorded the files
+  a run opened and with today's search code: a record made with other texts does not match.
 
 A record written under this rule carries ``reuse: {"schema": 2, ...}`` (:func:`stamp`). A record without it was written
 by an older FI and is read by the rule it was written with (:func:`is_current`).
