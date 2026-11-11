@@ -469,9 +469,10 @@ def test_a_repair_in_the_package_is_not_accepted_as_unchanged_after_a_numeric_st
 def test_a_frozen_studys_old_search_key_is_made_with_the_harness_as_it_was_before_the_recording_of_opened_files() -> None:
     """The confirm stage may not search again: the old rule's key holds the harness text of the FI that wrote the record, so
     a change to the harness (the recording of opened files) must not make that record a stranger. The hash is that of the harness
-    text of the FI before the recording."""
+    text of the FI before the recording (on this line of work: the harness with core/in_run.py as the fixes before the recording
+    left it, since the old rule hashed the harness text whole)."""
     import hashlib
 
     assert "addaudithook" in trial_runner.HARNESS_SOURCE and "addaudithook" not in trial_runner.LEGACY_HARNESS_SOURCE
     assert hashlib.sha256(trial_runner.LEGACY_HARNESS_SOURCE.encode()).hexdigest() == (
-        "831539879b828b617986db62e3137e8d6026958d2463d008c5eea4fb53019f9c")
+        "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
