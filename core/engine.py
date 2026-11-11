@@ -23213,14 +23213,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
-                left = allowed if budget is None else min(allowed, budget[0])
-                if left < _rerun_check.FLOOR_S:
+                if budget is not None and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
                     return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 began = time.monotonic()
-                verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
-                                                   source=source, results_root=self.quest_root,
-                                                   disputed=list(issue.get("disputed") or []) if strict else None,
-                                                   finding=str(issue.get("id") or ""))
+                # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
+                # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
+                refused = await self._repair_small_run_refusal(copy_dir, protocol, env)
+                if budget is not None:
+                    budget[0] -= time.monotonic() - began  # the small run is part of the time of the check
+                    began = time.monotonic()
+                left = allowed if budget is None else min(allowed, budget[0])
+                if left < _rerun_check.FLOOR_S and not refused:
+                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
+                if refused:
+                    verdict = _rerun_check.Verdict("could_not", "the repaired simulation does not run: " + refused,
+                                                   source=source, files=sorted(_rerun_check.changed_files(self.quest_root, copy_dir)),
+                                                   crashed=True)
+                else:
+                    verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
+                                                       source=source, results_root=self.quest_root,
+                                                       disputed=list(issue.get("disputed") or []) if strict else None,
+                                                       finding=str(issue.get("id") or ""))
                 if budget is not None:
                     budget[0] -= time.monotonic() - began
                 if verdict.status == "could_not" and verdict.crashed and _round == 0:
@@ -23233,6 +23246,38 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return verdict
         finally:
             await asyncio.to_thread(shutil.rmtree, work, True)
+
+    async def _repair_small_run_refusal(self, copy_dir: Path, protocol: Any, env: dict[str, str]) -> str:
+        """Why FI's small run (:func:`core.code_checks.small_run_refusal`) refuses the repaired code in ``copy_dir``, or ``""``
+        when it runs, cannot be judged, or the repair changed only the analysis (which the simulation's contract does not read)."""
+        from . import code_checks as _code_checks
+
+        files = sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir))
+        if all(Path(f).name in _rerun_check.ANALYSIS_FILES and "/" not in f for f in files):
+            return ""
+        async def refusal(root: Path) -> str:
+            return await _code_checks.small_run_refusal(
+                root, protocol if isinstance(protocol, dict) else None, executor=self.executor,
+                python=self.executor.python_path(self.quest_root), env=dict(env),
+                timeout_s=int(self.config.execution.timeout_s))
+
+        try:
+            refused = await refusal(copy_dir.parent)
+            if not refused:
+                return ""
+            # The copy holds only ``code/``: a study that reads a file of the quest outside it fails there whatever the repair.
+            # A refusal counts only for what the repair changed: the code as it is must pass the same small run in the same place.
+            scratch = Path(tempfile.mkdtemp(prefix="fi_small_base_"))
+            try:
+                base = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, scratch)
+                if await refusal(base.parent):
+                    return ""
+            finally:
+                await asyncio.to_thread(shutil.rmtree, scratch, True)
+            return refused
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made refuses nothing: the study's own run decides
+            self._log.warning("[rerun] the small run of the repair could not be made (%r); the study's own run decides", exc)
+            return ""
 
     async def _ask_repair_on_copy(self, issue: dict[str, Any], rel: str, copy_dir: Path, protocol: Any,
                                   state: Any, problem: str = "") -> dict[str, str]:
