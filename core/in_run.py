@@ -654,13 +654,44 @@ def per_run_names(protocol):
     """The protocol's metrics that are one number per run whatever the values compared inside it: those it declares to
     depend on settings (``depends_on``) none of which is compared inside each run. Every other number a check reads may
     differ from one compared value to the next."""
-    inside = set(of(protocol) or {})
+    inside = set(of_study(protocol) or {})
     out = set()
     for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
         dep = m.get("depends_on") if isinstance(m, dict) else None
         if isinstance(dep, list) and dep and not inside & {str(d) for d in dep}:
             out.add(str(m.get("id")))
     return out
+
+
+def search_one_number_names(protocol):
+    """The quantities a search's every evaluation returns as one plain number although the evaluation goes through several values
+    of a setting together (the search block's ``in_each_run``): the objective, when the plan declares that it does not depend on
+    any of those settings (:func:`per_run_names`), and with it every quantity the search limits (``constraints``), which are
+    read at the same design. Empty when the search compares nothing inside its evaluations, or its objective does depend on one
+    of those settings (a number per value is then allowed, as the plan says)."""
+    block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+    if not isinstance(block, dict) or not of_study(protocol):
+        return []
+    objective = block.get("objective") if isinstance(block.get("objective"), dict) else {}
+    name = str(objective.get("quantity") or "").strip()
+    if not name or name not in per_run_names(protocol):
+        return []
+    limited = [str(c.get("quantity")).strip() for c in block.get("constraints") or []
+               if isinstance(c, dict) and str(c.get("quantity") or "").strip()]
+    return list(dict.fromkeys([name, *limited]))
+
+
+def one_number_rule(protocol):
+    """The sentence the code is told for :func:`search_one_number_names` (``""`` when there are none): they are one number per
+    call, never one per value of a setting the evaluation compares inside it."""
+    names = search_one_number_names(protocol)
+    inside = of_study(protocol) or {}
+    if not names:
+        return ""
+    return ("The plan declares " + ", ".join(f"`{n}`" for n in names) + " one number per call: return each as one plain "
+            "number for the design, not as a number per value of " + ", ".join(f"`{k}`" for k in inside) + " (do not use "
+            "`out.each` for them, and never take one value of the list for it). Only a result that the plan declares to depend "
+            "on " + ("one of those settings" if len(inside) == 1 else "those settings") + " is returned per value.")
 
 
 def unplaced(values, levels, named, names):
