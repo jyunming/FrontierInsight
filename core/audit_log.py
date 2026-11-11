@@ -63,6 +63,9 @@ KINDS = (
                           # run were answered by another model than the earlier ones (before, after, source), or the
                           # recorded model settings in config.yaml changed (changes: [{setting, label, from, to}]);
                           # before_any_step when nothing had been made on the old model
+    "answer_read",        # a model's answer read part by part and some part not taken (core/answer_reading.py): the
+                          # faults, each at its path, the paths asked about and the paths left out (best effort; the
+                          # caller's own record, such as needs/audit_readings.json, is the durable one)
     "phased_started",     # a start with explore-then-confirm on (core/phased.py): a quest that has one ran with it, so it
                           # is never taken for a research quest that began before research turned it on by default
 )

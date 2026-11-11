@@ -134,8 +134,19 @@ def offending_entry(protocol: Any, why: "str | _reading.Fault | None", limit: in
     if isinstance(why, _reading.Fault):
         # A fault says where it is: the entry is found by its path, not again in the words of its reason.
         steps = _reading.split(why.path)
-        found_at = _reading.value_at(protocol, why.path, "protocol") if len(steps) > 2 else None
-        if found_at is None and why.as_written is not None and len(steps) > 2:
+        # The entry is the list entry or the named setting the fault is in, not the leaf inside it (`...mesh.search`).
+        depth = 4 if len(steps) > 1 and steps[1] == "optimisation" else 3
+        for n, step in enumerate(steps):
+            if isinstance(step, int):
+                depth = min(depth, n + 1)
+                break
+        entry_path = why.path
+        if len(steps) > depth:
+            entry_path = steps[0]
+            for step in steps[1:depth]:
+                entry_path = _reading.join(entry_path, step)
+        found_at = _reading.value_at(protocol, entry_path, "protocol") if len(steps) > 2 else None
+        if found_at is None and why.as_written is not None and len(steps) > 2 and entry_path == why.path:
             found_at = why.as_written
         return "" if found_at is None else _reading.shown(found_at, limit)
     if not isinstance(protocol, dict) or not why:
@@ -1136,6 +1147,12 @@ def read_protocol(protocol: Any, base: Any = None) -> _reading.Reading:
     return _reading.read_answer(protocol, base, lambda answer, _base: _repair_protocol(answer)[0], root="protocol")
 
 
+def read_protocol_with_notes(protocol: Any) -> tuple[_reading.Reading, list[str]]:
+    """``(reading, notes)``: :func:`read_protocol` and, with it, the sentence :func:`repair_protocol` gives for each part left
+    out or moved (the plan says them to a person; the reading names each fault at its path)."""
+    return _repair_protocol(protocol)
+
+
 def _same(a: Any, b: Any) -> bool:
     """Whether two versions of a part are the same, as written."""
     try:
@@ -1898,30 +1915,6 @@ def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[
     return repaired, notes
 
 
-def put_back_unread_keys(before: Any, protocol: dict[str, Any], part: str) -> tuple[dict[str, Any], list[str]]:
-    """``(protocol, put_back)``: ``protocol`` (a protocol as read, after a rewrite of its mapping part ``part``) with each
-    key of ``before[part]`` (the plan's own, as it was) that the reading of the rewrite lacks put back as the plan had it,
-    one key at a time, each kept only when the protocol still reads with it and loses nothing it had. A rewrite of one key
-    of a block must not cost the block a key it had: a real audit rewrote a search's block with its evaluation budget in a
-    form that could not be read, the reader left the budget out, and the plan's own readable budget was lost with it, so
-    the search could not start. ``put_back``: the keys put back, in the plan's order."""
-    old = before.get(part) if isinstance(before, dict) else None
-    if not isinstance(old, dict) or not isinstance(protocol, dict) or not isinstance(protocol.get(part), dict):
-        return protocol, []
-    back: list[str] = []
-    for key, value in old.items():
-        now = protocol[part]
-        if key in now:
-            continue
-        trial, _why = normalize_protocol({**protocol, part: {**now, key: value}})
-        if (trial is None or not isinstance(trial.get(part), dict) or key not in trial[part]
-                or any(k not in trial for k in protocol) or any(k not in trial[part] for k in now)):
-            continue
-        protocol = trial
-        back.append(str(key))
-    return protocol, back
-
-
 def repair_design(text: str) -> tuple[str | None, list[str]]:
     """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
     cannot be repaired that way, or it was valid already)."""
@@ -1955,22 +1948,6 @@ def block_fix_request(block: str, why: str) -> str:
     parts.append("Return ONLY the corrected block, as one fenced ```yaml block, and nothing else. Fix only what makes it "
                  "unusable: keep every key and every value as they are, add nothing and leave nothing out.")
     return "\n\n".join(parts)
-
-
-def audit_repair_request(parts: list[tuple[str, Any, str]]) -> str:
-    """The one request to the methodology audit's model to correct parts of its change that FI could not read: for each
-    protocol key, the value as the audit wrote it and FI's exact reason. Only those keys are asked for, in one JSON object."""
-    fence = "`" * 3
-    lines = ["Your amended design could not be used in full. For each protocol key below, the value you wrote and why part "
-             "of it could not be read:"]
-    for key, value, reason in parts:
-        lines.append(f"`protocol.{key}` as you wrote it:\n{fence}json\n{json.dumps(value, indent=1, default=str)}\n{fence}\n"
-                     f"Why part of it was left out: {reason}")
-    names = ", ".join(f'"{k}"' for k, _v, _r in parts)
-    lines.append('Return ONLY one JSON object of the form {"protocol": {...}} holding, for each of the keys ' + names
-                 + ", its whole corrected value. Fix only what the reason names; keep every other part exactly as you wrote it "
-                 "and add nothing.")
-    return "\n\n".join(lines)
 
 
 def block_from_reply(reply: str) -> str | None:
