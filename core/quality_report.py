@@ -670,7 +670,7 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
     out += _precision_per_setting(q)
-    # A kept search of a frozen study whose simulation changed only in comments or line endings after it (core/optimise.py).
+    # A kept search of a frozen study whose simulation changed only in comments or line endings, or FI's own code, after it (core/optimise.py).
     reused = _dict(_dict(_json(q.root / ".fi" / "optimisation" / "run.json")).get("reuse")).get("note")
     if reused:
         out.append(_problem("run", _one(str(reused), 400), "FI's reuse check (recorded only)", "not fixed",

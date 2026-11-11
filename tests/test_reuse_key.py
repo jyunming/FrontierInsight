@@ -234,6 +234,26 @@ async def test_a_frozen_study_whose_comments_changed_after_its_search_keeps_it_a
     assert moved.reused is False and moved.problems
 
 
+@pytest.mark.asyncio
+async def test_a_frozen_study_keeps_its_search_after_fi_is_updated_and_says_so(tmp_path: Path,
+                                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI's own harness and search code are not what a frozen study's search was made from: after an update of FI the
+    confirm stage keeps the search (it may not search again) and says what changed; a change to the simulation still stops."""
+    root = _quest(tmp_path)
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6}, grid={"x": [-1.0, 1.0]})
+    await _run(root, protocol)
+    spent = _count(root)
+    monkeypatch.setattr(trial_runner, "HARNESS_SOURCE", trial_runner.HARNESS_SOURCE + "\n# an updated harness\n")
+    kept = await _run(root, protocol, frozen=True)
+    assert kept.reused is True and not kept.problems and _count(root) == spent, kept.problems
+    note = json.loads((root / optimise.RECORD).read_text(encoding="utf-8"))["reuse"]["note"]
+    assert "FI's own trial harness" in note and "was not repeated" in note
+    sim = root / "code" / "simulate.py"
+    sim.write_text(sim.read_text(encoding="utf-8").replace("** 2", "** 3"), encoding="utf-8")
+    moved = await _run(root, protocol, frozen=True)
+    assert moved.reused is False and moved.problems
+
+
 def test_the_quality_report_says_a_kept_search_met_changed_comments(tmp_path: Path) -> None:
     from core import quality_report
 

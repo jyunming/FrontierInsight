@@ -923,18 +923,28 @@ def kept_search(quest_root: Path, module: str, protocol: dict[str, Any], *, base
     return kept[0] if kept is not None else None
 
 
-def _same_study_but_unreadable(record: dict[str, Any], study: Any) -> bool:
-    """A file of a frozen study that could be read when its search was kept cannot be read now: the study key has one file
-    less, so it differs from the record's, although every file that can be read is as it was. The confirm stage may not
-    search again, so that is the same study (the files that can be read, the plan's block and FI's code all as recorded)."""
-    if study.complete:
-        return False
+def _same_study(record: dict[str, Any], study: Any) -> list[str] | None:
+    """Whether a frozen study's kept search was made from this study, judged by what decides the search's result and not by
+    FI's own code: ``None`` when it was not; else the plain names of FI's own code that changed since (empty when none). The
+    confirm stage may not search again, so a search record is not refused because FI was upgraded since it ran (its trials
+    and the check of the best design on new seeds run on FI's code as it is now, and run.log and the quality report say
+    so). Every file of the simulation, the plan's block, the entry and the thresholds must be as recorded; a file that could
+    be read when the search was kept and cannot be read now is skipped (the study key has one file less), every other file
+    must match."""
     old = (record.get("reuse") or {}).get("study_token_inputs")
     if not isinstance(old, dict) or not isinstance(old.get("files"), dict):
-        return False
+        return None
     now = study.as_json()
-    return (all(old["files"].get(name) == digest for name, digest in now["files"].items())
-            and old.get("settings") == now["settings"] and old.get("fi_code") == now["fi_code"])
+    if old.get("kind") != now["kind"] or old.get("rule") != now["rule"] or old.get("settings") != now["settings"]:
+        return None
+    if study.complete:
+        if old["files"] != now["files"]:
+            return None
+    elif not all(old["files"].get(name) == digest for name, digest in now["files"].items()):
+        return None
+    old_code = old.get("fi_code") if isinstance(old.get("fi_code"), dict) else {}
+    return [_reuse._FI_WORDS.get(name, f"FI's {name}") for name in sorted(set(old_code) | set(now["fi_code"]))
+            if old_code.get(name) != now["fi_code"].get(name)]
 
 
 def _adopt(quest_root: Path, record: dict[str, Any], files: dict[str, str], log: Any) -> dict[str, str]:
@@ -1055,14 +1065,21 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             elif record.get("study_key") == _legacy_study_key(quest_root, simulate, block, entry, thresholds):
                 record = {**record, "study_key": study_key}
                 adopt = not (record.get("reuse") or {}).get("adopted")
-        elif record.get("study_key") == study_key or _same_study_but_unreadable(record, study_tokens):
+        elif record.get("study_key") == study_key or (fi_moved := _same_study(record, study_tokens)) is not None:
+            fi_moved = [] if record.get("study_key") == study_key else fi_moved
             record = {**record, "study_key": study_key}
-            moved = study_bytes.changed((record.get("reuse") or {}).get("study_inputs"))
+            fi_words = set(_reuse._FI_WORDS.values())
+            moved = [m for m in study_bytes.changed((record.get("reuse") or {}).get("study_inputs")) if m not in fi_words]
+            notes = []
             if (record.get("reuse") or {}).get("study_bytes") not in (None, study_bytes.key) and moved:
-                note = ("the simulation's comments or line endings changed after its search (" + ", ".join(moved[:4])
-                        + "); the search was not repeated, because the confirm stage may not search on the confirm "
-                          "seeds. The confirm run's own trials and the check of the best design on new seeds ran on "
-                          "the code as it is now")
+                notes.append("the simulation's comments or line endings changed after its search (" + ", ".join(moved[:4])
+                             + ")")
+            if fi_moved:
+                notes.append(", ".join(fi_moved) + " changed after its search (FI was updated)")
+            if notes:
+                note = ("; ".join(notes) + "; the search was not repeated, because the confirm stage may not search on the "
+                        "confirm seeds. The confirm run's own trials and the check of the best design on new seeds ran on "
+                        "the code as it is now")
     if frozen and not (isinstance(record, dict) and record.get("study_key") == study_key):
         why = ("the study is frozen for its confirm run, and the search exploration ran for this simulation and plan is "
                "not kept, so its best design cannot be confirmed without searching again on the confirm seeds")
