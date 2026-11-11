@@ -351,7 +351,7 @@ def test_the_first_round_says_which_numbers_changed_nothing_and_the_search_is_th
     outcome = osearch.run_sync(block, _array_sim, seed=0)
     record = osearch.best_design(outcome, block, seed=0)
     said = " ".join(record["first_round"])
-    assert "each of the 3 numbers of `w` changed nothing the simulation returns" in said
+    assert "each of the 3 numbers of `w` changed neither the objective nor any limited quantity" in said
     assert "a larger or joint change was not tried as such" in said
     assert "`y`" not in said, "a number that changed the answer is not named"
     # the search itself is the one it was without the note: the same designs in the same order
@@ -377,3 +377,10 @@ def test_the_build_note_is_for_a_simplex_only() -> None:
     block = _array_block(per_start=3)  # 5 numbers, a simplex needs 6 evaluations to start
     outcome = osearch.run_sync(block, _array_sim, seed=0)
     assert any("evaluations just to start" in n for n in outcome["notes"])
+
+
+def test_a_design_measured_at_several_alternatives_is_ranked_by_its_best_measurement() -> None:
+    block = _block()
+    rows = [{"design": {"x": 1.0}, "values": {"f": 100.0}}, {"design": {"x": 1.0}, "values": {"f": 1.0}},
+            {"design": {"x": 2.0}, "values": {"f": 2.0}}]
+    assert [d["x"] for d in osearch.shared_starts(block, rows)] == [1.0, 2.0], "the worse first sighting is not kept"

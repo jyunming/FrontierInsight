@@ -562,7 +562,7 @@ def shared_starts(block, rows):
     leaves out the baseline and keeps as many as the search has starting points."""
     space = Space(block["design_variables"])
     sign = _sign(block)
-    seen, ranked = set(), []
+    seen, ranked = {}, []
     for row in rows or []:
         if not isinstance(row, dict) or not isinstance(row.get("values"), dict):
             continue
@@ -574,9 +574,11 @@ def shared_starts(block, rows):
         except (KeyError, TypeError, ValueError):
             continue
         key = space.key(design)
-        if key in seen:
+        if key in seen:  # one design measured at several alternatives is ranked by its best measurement
+            if _rank(judged, sign) < ranked[seen[key]][0]:
+                ranked[seen[key]] = (_rank(judged, sign), seen[key], design)
             continue
-        seen.add(key)
+        seen[key] = len(ranked)
         ranked.append((_rank(judged, sign), len(ranked), design))
     ranked.sort(key=lambda item: item[:2])
     return [d for _r, _n, d in ranked]
@@ -2257,8 +2259,9 @@ def varying_names(block, names, wanted, again):
 
 def probe_answer(sub, values, names):
     """What an alternative gave for one design, for the comparison: the value of each of ``names`` it reported, or ``None``
-    when the design was not judged ``ok`` (a failed or missing answer cannot show two alternatives are the same)."""
-    if not isinstance(values, dict) or judge(sub, values)["status"] != "ok":
+    when the simulation gave no values (a failed or missing answer cannot show two alternatives are the same). A design
+    neither alternative can judge (a null objective) still counts as agreement when every value is the same."""
+    if not isinstance(values, dict):
         return None
     return {n: values[n] for n in names if n in values}
 
@@ -2337,6 +2340,10 @@ def alternatives_searched(block, levels, replies, repeat, names):
     mine = [probe_answer(level_block(block, levels[0]), v, stable) for v in first]
     if any(m is None for m in mine):
         return len(levels)
+    designs = sizing_designs(block)
+    if len({_design_key(d) for d, v in zip(designs, first)
+            if judge(level_block(block, levels[0]), v)["status"] == "ok"}) < 2:
+        return len(levels)
     searched = 1
     for number in range(1, len(levels)):
         theirs = replies[number]
@@ -2392,7 +2399,7 @@ def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None,
             return None
         judged = judge(sub, values)
         if judged["status"] != "ok":
-            return None
+            continue  # exactly the first alternative's answer at a design neither can judge: it agrees, but is no row
         rows.append({"event": "evaluation", "n": len(rows) + 1, "stage": "probe", "start": 0, "design": dict(design),
                      "objective": judged["objective"], "constraints": dict(judged["constraints"]),
                      "feasible": judged["feasible"], "status": "ok", "method": first["method_used"], "counted": True,
@@ -2401,7 +2408,7 @@ def _probe_alternative(sub, level, first, seen, names, moving=None, repeat=None,
                  and n not in judged["constraints"]}
         if named:
             rows[-1]["results"] = named
-    return rows
+    return rows if len(rows) >= 2 else None
 
 
 def _same_outcome(first, first_level, rows):
@@ -2657,10 +2664,10 @@ def build_facts(outcomes, levels):
         many = f"each of the {g['numbers']} numbers of `{name}`" if g["numbers"] > 1 else f"`{name}`"
         if g["unchanged"] == g["tried"]:
             out.append(f"In {g['starts']} starting point{'s' if g['starts'] != 1 else ''}, a one-step move of {many} "
-                       f"changed nothing the simulation returns{at}; a larger or joint change was not tried as such.")
+                       f"changed neither the objective nor any limited quantity{at}; a larger or joint change was not tried as such.")
         else:
             out.append(f"In {g['starts']} starting point{'s' if g['starts'] != 1 else ''}, {g['unchanged']} of "
-                       f"{g['tried']} one-step moves of `{name}` changed nothing the simulation returns{at}; a larger or "
+                       f"{g['tried']} one-step moves of `{name}` changed neither the objective nor any limited quantity{at}; a larger or "
                        "joint change was not tried as such.")
     return out
 

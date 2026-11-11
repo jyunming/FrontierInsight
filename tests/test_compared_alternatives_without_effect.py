@@ -258,3 +258,30 @@ def test_the_answers_a_size_estimate_asks_for_give_the_count_the_run_would_searc
     same[1][2] = None  # type: ignore[assignment]
     _, again = asked(_Clocked("nothing"))
     assert osearch.alternatives_searched(block, levels, same, again, names) == 2
+
+
+class _Unprinted(Sim):
+    """The objective is null (nothing printed) for part of the range, the same for every shape."""
+
+    def __call__(self, cell: dict[str, Any]) -> dict[str, Any]:
+        out = super().__call__(cell)
+        if cell["x"] > 1.0:
+            out["f"] = None
+        return out
+
+
+def test_a_design_neither_alternative_can_judge_does_not_keep_two_alternatives_apart() -> None:
+    block = _block()
+    sim = _Unprinted("nothing")
+    outcome = _run(block, sim, ["mass"])
+    assert [bool(p.get("same_as")) for p in outcome["levels"]] == [False, True, True], "equal null answers agree"
+    levels = osearch.compared_levels(block)
+    designs = osearch.sizing_designs(block)
+    assert any(d["x"] > 1.0 for d in designs), "the spread reaches the part of the range with no objective"
+    names = osearch.compared_names(block, ["mass"])
+    replies = [[sim({**lv, **d}) for d in designs] for lv in levels]
+    assert osearch.alternatives_searched(block, levels, replies, sim({**levels[0], **designs[0]}), names) == 1
+    # a difference where the first gave no objective is still a difference
+    empty = next(i for i, v in enumerate(replies[0]) if v["f"] is None)
+    replies[1][empty] = {**replies[1][empty], "f": 5.0}
+    assert osearch.alternatives_searched(block, levels, replies, sim({**levels[0], **designs[0]}), names) == 2
