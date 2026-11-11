@@ -164,7 +164,8 @@ def test_the_same_part_beside_the_search_block_is_kept_once_without_a_fault():
     assert notes == []  # the old reader said the copy "was left out", and an audit's whole block was refused for it
     reading = plan.read_protocol(_beside(settings, settings))
     assert reading.faults == []
-    assert reading.moved == [ar.Moved("protocol.numerical_settings", "protocol.optimisation.numerical_settings")]
+    assert reading.moved == [ar.Moved("protocol.numerical_settings", "protocol.optimisation.numerical_settings",
+                                       into_empty=False)]
 
 
 def test_a_different_part_beside_the_search_block_is_a_conflict_with_both_versions():
@@ -298,3 +299,74 @@ def test_a_clean_block_reads_exactly_as_before():
     reading = optim.read_block(block)
     assert reading.clean and reading.kept == optim.normalize(block)[0]
     assert optim.repair(block) == (optim.normalize(block)[0], [])
+
+
+# --- review findings -------------------------------------------------------------------------------------------------
+
+
+def test_two_bad_limits_are_each_named_at_their_own_place():
+    block = _block()
+    block["constraints"] = [{"quantity": "mass"}, {"quantity": "heat", "limit": "<= 2"}, {"quantity": "noise"}]
+    reading = optim.read_block(block)
+    assert reading.paths() == ["protocol.optimisation.constraints[1]", "protocol.optimisation.constraints[3]"]
+    assert [f.as_written for f in reading.faults] == [{"quantity": "mass"}, {"quantity": "noise"}]
+
+
+def test_two_bad_variables_are_each_named_at_their_own_place():
+    block = _block()
+    block["design_variables"] = [{"name": "width_mm", "low": "a", "high": "b"}, {"name": "speed", "low": 0.5, "high": 2.0},
+                                 {"name": "depth_mm", "low": 1.0, "high": 2.0}, {"name": "load", "low": "x", "high": "y"}]
+    block["baseline"] = {"values": {"width_mm": 2.0, "speed": 1.0, "depth_mm": 1.5, "load": 3}, "source": "s"}
+    reading = optim.read_block(block)
+    assert reading.paths() == ["protocol.optimisation.design_variables[1]", "protocol.optimisation.design_variables[4]"]
+    assert reading.kept["fixed"] == {"width_mm": 2.0, "load": 3}
+
+
+def test_a_variable_named_twice_differently_is_a_conflict_and_alike_a_duplicate():
+    block = _block()
+    block["design_variables"].append({"name": "speed", "low": 0.5, "high": 9.0})
+    fault = optim.read_block(block).faults[0]
+    assert fault.kind == "conflict" and len(fault.as_written) == 2
+    alike = _block()
+    alike["design_variables"].append(dict(alike["design_variables"][1]))
+    assert optim.read_block(alike).faults[0].kind == "duplicate"
+
+
+def test_many_bad_entries_never_cost_the_whole_block():
+    block = _block()
+    block["constraints"] = [{"quantity": f"q{i}"} for i in range(70)] + [{"quantity": "mass", "limit": "<= 3"}]
+    fixed, notes = optim.repair(block)
+    assert fixed is not None and [c["quantity"] for c in fixed["constraints"]] == ["mass"]
+    assert len(optim.read_block(block).faults) == 70
+
+
+def test_the_same_part_twice_is_recorded_as_kept_once_not_as_a_move_into_an_empty_place():
+    settings = {"mesh_mm": {"search": 0.2}}
+    moved = plan.read_protocol(_beside(settings, settings)).moved
+    assert moved == [ar.Moved("protocol.numerical_settings", "protocol.optimisation.numerical_settings", into_empty=False)]
+    assert plan.read_protocol({"optimisation": _block(), "grid": {"width_mm": [1, 2]}}).moved[0].into_empty
+
+
+def test_a_variable_named_twice_keeps_both_versions_even_when_the_first_cannot_be_read():
+    block = _block()
+    block["design_variables"] = [{"name": "speed", "low": "slow", "high": 2.0}, {"name": "speed", "low": 0.5, "high": 2.0},
+                                 {"name": "width_mm", "low": 1.0, "high": 5.0}]
+    # (in the one-pass reading; the repair then holds the unreadable first one at its baseline)
+    conflict = next(f for f in optim.block_faults(block)[1] if f.kind == "conflict")
+    assert conflict.as_written == [block["design_variables"][0], block["design_variables"][1]]
+
+
+def test_a_scan_part_named_after_others_left_out_keeps_its_own_number():
+    block = _block(fixed={"load": 1})
+    block["grid"] = {"colour_mm": [1, 2], "load": [1, 2]}
+    block["sub_studies"] = [{"name": "only_colour", "vary": ["colour_mm"]},
+                            {"name": "loads", "vary": ["load"], "hold": {"unknown": 1}}]
+    paths = optim.read_block(block).paths()
+    assert "protocol.optimisation.sub_studies[2]" in paths and "protocol.optimisation.sub_studies[1]" not in paths
+
+
+def test_many_extra_baseline_values_never_cost_the_whole_block():
+    block = _block()
+    block["baseline"]["values"].update({f"extra_{i}": i for i in range(100)})
+    fixed, _notes = optim.repair(block)
+    assert fixed is not None and set(fixed["baseline"]["values"]) == {"width_mm", "speed"}

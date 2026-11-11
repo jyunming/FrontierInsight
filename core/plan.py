@@ -1178,7 +1178,7 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                 notes.append(f"`protocol.{key}` was moved into `protocol.optimisation.{key}`: a search for the best design "
                              "keeps it in its own block")
             elif _same(block[key], out[key]):
-                moved.append(_reading.Moved(f"protocol.{key}", to))  # the same part twice: nothing is lost
+                moved.append(_reading.Moved(f"protocol.{key}", to, into_empty=False))  # the same part twice: kept once
             else:
                 faults.append(_fault(f"protocol.{key}", (
                     f"`protocol.{key}` is written beside the search's block, which has its own `{key}`, and the two "
@@ -1197,7 +1197,7 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                 notes.append("the sweep in `protocol.grid` was moved into `protocol.optimisation.grid`: a search for "
                              "the best design runs it as a coarse scan first, then searches from its best point")
             elif _same(block["grid"], out["grid"]):
-                moved.append(_reading.Moved("protocol.grid", to))
+                moved.append(_reading.Moved("protocol.grid", to, into_empty=False))
             else:
                 faults.append(_fault("protocol.grid", (
                     "`protocol.grid` is written beside the search's block, whose coarse scan "

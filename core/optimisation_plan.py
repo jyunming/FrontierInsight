@@ -748,8 +748,11 @@ def block_faults(block: Any) -> tuple[dict[str, Any] | None, list[_reading.Fault
                     names_known = False
                 continue
             if variable["name"] in named:
+                first = next(x for x in items if isinstance(x, dict) and _text(x.get("name")) == variable["name"])
+                alike = json.dumps(first, sort_keys=True, default=str) == json.dumps(item, sort_keys=True, default=str)
                 problems.append(_f(_at("design_variables", index), f"{_P}.design_variables` names `{variable['name']}` twice",
-                                   "duplicate", item, required=False))
+                                   "duplicate" if alike else "conflict", item if alike else [first, item],
+                                   required=False))
                 continue
             variables[variable["name"]] = variable
             named.setdefault(variable["name"])
@@ -1114,6 +1117,15 @@ def _without_faults(block: dict[str, Any], faults: list[_reading.Fault]) -> dict
     return {k: ([e for e in v if e is not marked] if isinstance(v, list) else v) for k, v in out.items()}
 
 
+def _size(value: Any) -> int:
+    """How many entries ``value`` holds at any depth (each round of a repair leaves out at least one)."""
+    if isinstance(value, dict):
+        return 1 + sum(_size(v) for v in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_size(v) for v in value)
+    return 1
+
+
 def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
     """``(reading, notes, usable)``: the reading of :func:`read_block`, the sentences :func:`repair` gives, and whether
     what is kept can drive a search."""
@@ -1125,13 +1137,26 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
     out: dict[str, Any] = dict(block)
     notes: list[str] = []
     faults: list[_reading.Fault] = []
+    # Where each entry of a list now read was in the answer, so a fault found after others were left out still names
+    # the entry by the number it had as written.
+    order = {key: list(range(1, len(out[key]) + 1)) if isinstance(out.get(key), list) else [1]
+             for key in ("design_variables", "constraints", "sub_studies")}
+
+    def placed(fault: _reading.Fault) -> _reading.Fault:
+        steps = _reading.split(fault.path)
+        if len(steps) > 3 and isinstance(steps[3], int) and str(steps[2]) in order \
+                and 0 < steps[3] <= len(order[str(steps[2])]):
+            path = _at(steps[2], order[str(steps[2])][steps[3] - 1], *steps[4:])
+            return _reading.Fault(path, fault.kind, fault.reason, fault.allowed, fault.as_written, fault.required)
+        return fault
 
     def stop(found: list[_reading.Fault], note: str) -> tuple[_reading.Reading, list[str], bool]:
         # A part the search cannot do without: every fault of the block is said, the rest of it is kept as written.
-        said = faults + [f for f in found if f not in faults]
+        said = faults + [placed(f) for f in found if placed(f) not in faults]
         return _reading.Reading(kept=_without_faults(out, found), faults=said), notes + [note], False
 
-    for _ in range(64):
+    entries = _size(out)
+    for _ in range(64 + entries):  # each round leaves out one entry or part, so this many rounds always end it
         fixed, found = block_faults(out)
         if fixed is not None:
             return _reading.Reading(kept=fixed, faults=faults), notes, True
@@ -1160,18 +1185,23 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
                 return stop(found, cannot)
             gone = items[drop]
             name = _text(gone.get("name")) if isinstance(gone, dict) else ""
-            if fault.kind == "duplicate":
+            if fault.kind in ("duplicate", "conflict"):
                 out["design_variables"] = items[:drop] + items[drop + 1:]
-                faults.append(fault)
-                notes.append(f"the design variable {name} was listed twice; the second entry was left out")
+                faults.append(placed(fault))
+                order["design_variables"].pop(drop)
+                notes.append(f"the design variable {name} was listed twice; the second entry was left out"
+                             + ("" if fault.kind == "duplicate" else
+                                f" (the two differ: {_reading.shown(fault.as_written, 300)})"))
                 continue
             value = _held_at_baseline(out, name) if name else _reading._ABSENT
             if value is _reading._ABSENT:
                 # The search cannot hold it at the design to beat, so it cannot leave it out either: it stops, as for an
                 # objective that cannot be read.
-                faults.append(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True))
+                faults.append(placed(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True)))
                 return stop(found, cannot)
             out["design_variables"] = items[:drop] + items[drop + 1:]
+            faults.append(placed(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True)))
+            order["design_variables"].pop(drop)
             out["baseline"] = {**out["baseline"], "values": {k: v for k, v in out["baseline"]["values"].items()
                                                              if _text(k) != name}}
             held = out.get("fixed") if isinstance(out.get("fixed"), dict) else {}
@@ -1180,7 +1210,6 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
                 out["grid"] = {k: v for k, v in out["grid"].items() if str(k) != name} or None
                 if out["grid"] is None:
                     del out["grid"]
-            faults.append(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True))
             notes.append(f"a design variable ({name}) could not be read ({why}{shown}); the search holds it at its baseline "
                          f"value ({_reading.shown(value, 120)}, under `fixed`) and does not change it, and the best design "
                          f"is reported as found with {name} held there. Put it right in the plan if the search should "
@@ -1208,7 +1237,8 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
                 gone = out["constraints"][index]
                 label = _text(gone.get("quantity")) if isinstance(gone, dict) else ""
                 out["constraints"] = out["constraints"][:index] + out["constraints"][index + 1:]
-                faults.append(fault)
+                faults.append(placed(fault))
+                order["constraints"].pop(index)
                 notes.append(f"the limit on {label or f'entry {index + 1}'} was left out of the optimisation because it "
                              f"could not be read ({why}); write it in the plan, or the search will not respect it")
                 continue
@@ -1239,9 +1269,11 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
                 out["grid"] = {k: v for k, v in out["grid"].items() if str(k) != name}
                 if isinstance(out.get("sub_studies"), list):
                     kept_parts = []
-                    for sub in out["sub_studies"]:
+                    kept_order = []
+                    for place, sub in zip(order["sub_studies"], out["sub_studies"]):
                         if not isinstance(sub, dict):
                             kept_parts.append(sub)
+                            kept_order.append(place)
                             continue
                         part = dict(sub)
                         if isinstance(sub.get("vary"), list):
@@ -1251,7 +1283,9 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
                         if isinstance(sub.get("hold"), dict):
                             part["hold"] = {k: v for k, v in sub["hold"].items() if str(k) != name}
                         kept_parts.append(part)
+                        kept_order.append(place)
                     out["sub_studies"] = kept_parts
+                    order["sub_studies"] = kept_order
                 faults.append(fault)
                 notes.append(f"the setting `{name}` {SCAN_SETTING_LEFT_OUT} ({why}{shown}); the other settings of the "
                              "scan are kept. Put it back, with what it needs, if the study should be compared across it")
@@ -1264,14 +1298,18 @@ def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
 
             entries, entry_reasons = _plan_parts.readable_sub_studies(out["sub_studies"], out.get("grid"), out.get("in_each_run"))
             if entries and entry_reasons and len(entries) < len(out["sub_studies"]):
+                faults.extend(placed(f) for f in found if _reading.split(f.path)[2:3] == ["sub_studies"])
+                order["sub_studies"] = [n for n, e in zip(order["sub_studies"], out["sub_studies"]) if any(e is k for k in entries)]
                 out["sub_studies"] = entries
-                faults.extend(f for f in found if _reading.split(f.path)[2:3] == ["sub_studies"])
                 notes.extend(f"an entry of {_P}.sub_studies` {LEFT_OUT_UNREAD}: {reason.replace('`protocol.sub_studies`', _P + '.sub_studies`')}"
                              for reason in entry_reasons)
                 continue
         if key in out:
+            # each entry of the part that could not be read, at its own place; else the part itself
+            entry_faults = [placed(f) for f in found if _reading.split(f.path)[2:3] == [key] and len(_reading.split(f.path)) > 3]
             del out[key]
-            faults.append(_reading.Fault(_at(key), fault.kind, why, as_written=block.get(key), required=fault.required))
+            faults.extend(entry_faults or [_reading.Fault(_at(key), fault.kind, why, as_written=block.get(key),
+                                                          required=fault.required)])
             notes.append(f"`protocol.optimisation.{key}` {LEFT_OUT_UNREAD} ({why}); it is not used")
             continue
         return stop(found, f"the optimisation block was left out because it could not be repaired ({why})")

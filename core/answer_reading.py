@@ -56,10 +56,12 @@ class Fault:
 
 @dataclass(frozen=True)
 class Moved:
-    """A part moved, unchanged, from ``path`` to ``to``, a place that was empty."""
+    """A part moved, unchanged, from ``path`` to ``to``, a place that was empty (``into_empty``); or, with
+    ``into_empty`` false, a part written twice alike, kept once at ``to`` (nothing of it is lost either way)."""
 
     path: str
     to: str
+    into_empty: bool = True
 
 
 @dataclass
@@ -238,7 +240,8 @@ def record_entry(reading: Reading, *, step: str, asked: Iterable[str] = (), drop
         "nothing_read": reading.nothing_read,
         "faults": [{"path": f.path, "kind": f.kind, "reason": f.reason, **({"required": True} if f.required else {})}
                    for f in reading.faults],
-        "moved": [{"path": m.path, "to": m.to} for m in reading.moved],
+        "moved": [{"path": m.path, "to": m.to, **({} if m.into_empty else {"same_as_there": True})}
+                  for m in reading.moved],
         "asked": list(dict.fromkeys(asked)),
         "dropped": list(dict.fromkeys(dropped)),
     }
