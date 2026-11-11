@@ -6060,7 +6060,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
             # The protocol is the part a model writes freest. Keep the design, drop the keys that cannot be checked, and
             # say so in the plan, rather than losing the plan for one of them.
+            held_notes: list[str] = []
+            drafted = design.get("protocol")
+            if isinstance(drafted, dict) and isinstance(drafted.get("optimisation"), dict):
+                held_notes = self._hold_search_block_back(drafted["optimisation"])
+                if held_notes:  # a limit, objective or baseline that cannot be read: no search without it
+                    design = {**design, "study_type": "find_best_design",
+                              "protocol": {k: v for k, v in drafted.items() if k != "optimisation"}}
             reading, repaired_notes = _plan.read_protocol_with_notes(design.get("protocol"))
+            repaired_notes = [*repaired_notes, *held_notes]
             fixed_protocol = reading.kept
             self._keep_plan_reading(reading, "plan")
             trial = {k: v for k, v in design.items() if k != "protocol"}
@@ -6412,11 +6420,70 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # search the plan must fix, here, minutes after it was written; the run step still times one real evaluation.
         missing = _optim.missing_parts(design, self._scan_limit_s()) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        held = self._search_refused()
+        if held and held.get("faults") and not _optim.has_block(design):
+            missing.append("its optimisation block could not be read: " + "; ".join(
+                f"`{r['path']}` ({' '.join(str(r['reason']).split())[:200]})" for r in held["faults"][:4]))
         if block_why:
             entry = _entries_as_written(design.get("protocol"), _optim.block_faults(design["protocol"]["optimisation"])[1])
             missing.append(f"its optimisation block cannot be used ({block_why})"
                            + (f"; {entry}" if entry else ""))
         return True, missing, block_why
+
+    def _keep_search_refused(self, block: Any, faults: list[Any]) -> None:
+        """The search block a model wrote that could not be used, whole and as written, with each fault at its path
+        (``.fi/search_refused.json``): the next request names only those paths, and the plan and the stop say which part
+        could not be read. A record that cannot be written raises, as every caller's record does."""
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+        (self.fi_dir / _SEARCH_REFUSED).write_text(
+            json.dumps({"block": block, "faults": [_fault_record(f) for f in faults]}, ensure_ascii=False, default=str),
+            encoding="utf-8")
+
+    def _search_refused(self) -> dict[str, Any] | None:
+        """The record of :meth:`_keep_search_refused`, or ``None``."""
+        try:
+            record = json.loads((self.fi_dir / _SEARCH_REFUSED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def _clear_search_refused(self) -> None:
+        try:
+            (self.fi_dir / _SEARCH_REFUSED).unlink()
+        except OSError:
+            pass
+
+    def _path_only_search_request(self, refused: dict[str, Any]) -> str:
+        """The request about a search block that could not be used: only the faulted paths, each with FI's reason, the entry
+        as written and the values allowed; the rest of the block is kept as it was written."""
+        faults = [_fault_from_record(r) for r in refused.get("faults") or []]
+        return (_reading.ask_text(faults, "This study is a search for the best design. The block you wrote for it is kept "
+                                          "exactly as you wrote it; only these parts of it could not be read.")
+                + '\n\nAnswer with ONE JSON object of the form {"protocol": {"fixes": {"<path>": <the whole corrected part at '
+                  'that path>}}}, one entry for each path above, the path written exactly as named. Do not write the block again.')
+
+    def _hold_search_block_back(self, block: Any) -> list[str]:
+        """For a search block written in a plan or a draft: ``[]`` when it can be used (every unreadable optional part left
+        out alone, as :func:`_read_a_search_block` says); else one sentence naming each part that could not be read, after
+        the block was kept whole beside its faults (:meth:`_keep_search_refused`). A search must not run without a limit, an
+        objective or a baseline it declared, so the caller leaves the block out of the plan, the plan's model is asked for
+        those parts alone, and the search is not run if they still cannot be read."""
+        if not isinstance(block, dict):
+            return []
+        taken, _left_out, stopping = _read_a_search_block(block)
+        if taken is not None:
+            self._clear_search_refused()  # a block that reads replaces any held one: nothing stale is asked about
+            return []
+        faults = _optim.block_faults(block)[1] or stopping
+        self._keep_search_refused(block, faults)
+        named = "; ".join(f"`{f.path}` ({' '.join(str(f.reason).split())[:200]})" for f in faults[:4])
+        entry = _entries_as_written({"optimisation": block}, faults[:4])
+        sentence = (f"the search's block was not kept because a part of it could not be read: {named}"
+                    + (f"; {entry}" if entry else "")
+                    + "; the plan's model is asked for those parts alone, and if they still cannot be read the search is not run, "
+                      "and it is not run as a plain sweep instead")
+        self._log.warning("[plan] %s", sentence)
+        return [sentence]
 
     def _scan_limit_s(self) -> float:
         """The time one run may take (``execution.timeout_s``), which the coarse scan of a search must fit."""
@@ -6694,11 +6761,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not isinstance(protocol, dict):
                     return design
                 protocol = dict(protocol)
-                if "optimisation" in moved and isinstance(protocol.get("optimisation"), dict):
+                if isinstance(protocol.get("optimisation"), dict):
                     # The search block on its own first: a block that cannot be read is left out with the reason and the
                     # entry as written, and the plan's own `grid` stays (it is not merged into a block that is not kept).
-                    block, block_notes = _optim.repair(protocol["optimisation"])
+                    held_back = self._hold_search_block_back(protocol["optimisation"])
+                    block, block_notes = (None, held_back) if held_back else _optim.repair(protocol["optimisation"])
                     notes.extend(block_notes)
+                    if held_back:
+                        design = {**design, "study_type": "find_best_design"}
                     if block is None:
                         del protocol["optimisation"]
                     else:
@@ -6766,7 +6836,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._progress(f"Asking the model to complete {what} in the plan" if what.startswith("what ")
                            else f"Asking the model to complete the {what} in the plan")
             ask = request(design, text)
-            if last_problem:
+            refused = self._search_refused() if file == _SEARCH_ASKED else None
+            if refused and refused.get("faults") and isinstance(refused.get("block"), dict):
+                # Only the faulted paths are asked about: the block the model wrote is kept as it wrote it, whole, beside
+                # its faults, and what comes back is placed at those paths and read again.
+                ask = self._path_only_search_request(refused)
+            elif last_problem:
                 # The reader's exact reason for refusing the last answer goes back to the model, not only what is missing.
                 if last_block:
                     # The refused block is the base of this request: the model changes what the reason names and keeps the
@@ -8527,9 +8602,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         block = protocol.get("optimisation") if isinstance(protocol, dict) else None
         if not isinstance(old, dict):
             return None
-        if not isinstance(block, dict):
+        fixes = protocol.get("fixes") if isinstance(protocol, dict) and isinstance(protocol.get("fixes"), dict) else None
+        if not isinstance(block, dict) and fixes is None:
             raise ValueError("your answer has no `protocol.optimisation` block: write it as a mapping (`objective`, "
                              "`design_variables`, `baseline`, `evaluation_budget`) under `protocol` in the design block")
+        if fixes is not None:
+            # The answer to a request that named only the faulted paths: each value is placed at its path in the block the
+            # plan's model wrote last time (kept whole beside the faults), and the block is then read as any other answer.
+            refused = self._search_refused()
+            if refused is None or not isinstance(refused.get("block"), dict):
+                raise ValueError("there is no block with unreadable parts to correct; write the `protocol.optimisation` block")
+            held_block = dict(refused["block"])
+            if isinstance(held_block.get("constraints"), dict):  # one limit written as a mapping reads as a list of one
+                held_block["constraints"] = [held_block["constraints"]]
+            wrapped: Any = {"protocol": {"optimisation": held_block}}
+            asked = [str(f.get("path")) for f in refused.get("faults") or [] if isinstance(f, dict)]
+            placed = 0
+            for path, value in fixes.items():
+                # Only a path that was asked about (or a part inside one) is placed: nothing else of the block changes.
+                allowed = any(str(path) == a or str(path).startswith((a + ".", a + "[")) for a in asked)
+                at = _reading.put_at(wrapped, str(path), value) if allowed else None
+                if at is not None:
+                    wrapped, placed = at, placed + 1
+            if not placed:
+                raise ValueError("none of the asked paths was written: give each as `{\"fixes\": {\"<path>\": <the part>}}` "
+                                 "under `protocol`, with the path exactly as named")
+            block = wrapped["protocol"]["optimisation"]
         self._answer_block = block  # kept as written, so a refusal sends it back as the base of the next request
         old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
         old_block = old_protocol.get("optimisation")
@@ -8583,6 +8681,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         taken, left_out, stopping = _read_a_search_block(block)
         if taken is None:
             faults = _optim.block_faults(block)[1] or stopping  # every problem the block has, as the old reason did
+            self._keep_search_refused(block, faults)  # the next request names only these paths
             entry = _entries_as_written({"optimisation": block}, faults, you=True)
             raise ValueError("the block you wrote cannot be read: " + _optim.ALSO.join(f.reason for f in faults)
                              + (f" {entry[0].upper()}{entry[1:]}" if entry else ""))
@@ -8591,6 +8690,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # request if the plan still lacks anything; the rest of the answer is kept.
             self._log.warning("[plan] the search block was used in part; left out: %s", "; ".join(left_out)[:600])
             block = taken
+        self._clear_search_refused()
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
@@ -31854,6 +31954,7 @@ def _flat_request(fact: dict[str, Any], kept: list[str] | None = None) -> str:
 
 
 _SEARCH_ASKED = "search_block_asked.json"
+_SEARCH_REFUSED = "search_refused.json"  # the search block that could not be used, whole, with its faults by path
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).

@@ -206,3 +206,68 @@ def test_the_entries_as_written_are_found_by_the_faults_paths() -> None:
     assert _entries_as_written(protocol, faults) == 'the entry as written: "keep it small"'
     assert _entries_as_written(protocol, faults, you=True) == 'the entry as you wrote it: "keep it small"'
     assert _entries_as_written(protocol, []) == ""
+
+
+# -- a search block with a limit, objective or baseline that cannot be read: asked by path, never run without it ---------
+
+def _unreadable_limit_block() -> dict[str, Any]:
+    block = copy.deepcopy(BLOCK)
+    block["constraints"][0] = {**block["constraints"][0], "limit": "== 1"}
+    return block
+
+
+def test_a_search_block_with_an_unreadable_limit_is_held_back_whole_with_its_fault(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    assert eng._hold_search_block_back(copy.deepcopy(BLOCK)) == [], "a block that reads is not held back"
+    said = eng._hold_search_block_back(_unreadable_limit_block())
+    assert len(said) == 1 and "`protocol.optimisation.constraints[1]`" in said[0] and "== 1" in said[0]
+    assert "not run as a plain sweep" in said[0]
+    record = eng._search_refused()
+    assert record["block"]["objective"] == BLOCK["objective"], "the block is kept whole beside its faults"
+    assert [f["path"] for f in record["faults"]] == ["protocol.optimisation.constraints[1]"]
+    request = eng._path_only_search_request(record)
+    assert "`protocol.optimisation.constraints[1]`" in request and "{\"fixes\"" in request
+    assert "evaluation_budget" not in request, "only the faulted path is asked about"
+
+
+def test_a_fix_by_path_is_placed_in_the_kept_block_and_the_search_goes_on(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng._hold_search_block_back(_unreadable_limit_block())
+    answer = {"protocol": {"fixes": {"protocol.optimisation.constraints[1]": {"quantity": "mass_g", "limit": "<= 130"}}}}
+    text = eng._keep_only_the_search(_plan_text(), {"study_type": "find_best_design", **answer})
+    kept = plan.raw_design_block(text)["protocol"]["optimisation"]
+    assert kept["constraints"][0]["limit"] == "<= 130" and kept["evaluation_budget"] == BLOCK["evaluation_budget"]
+    assert eng._search_refused() is None, "used: nothing is held back any more"
+
+
+def test_known_positive_a_fix_that_still_cannot_be_read_keeps_the_search_from_running(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng._hold_search_block_back(_unreadable_limit_block())
+    answer = {"protocol": {"fixes": {"protocol.optimisation.constraints[1]": {"quantity": "mass_g", "limit": "== 2"}}}}
+    with pytest.raises(ValueError, match="cannot be read"):
+        eng._keep_only_the_search(_plan_text(), {"study_type": "find_best_design", **answer})
+    assert eng._search_refused() is not None
+    with pytest.raises(ValueError, match="none of the asked paths"):
+        eng._keep_only_the_search(_plan_text(), {"study_type": "find_best_design", "protocol": {"fixes": {"somewhere.else": 1}}})
+    design = _design()
+    design["protocol"].pop("optimisation")
+    wanted, missing, _why = eng._search_problems({"topic": TOPIC, "iteration": 0}, design)
+    assert wanted and any("could not be read" in m and "constraints[1]" in m for m in missing), "the stop names the part"
+
+
+def test_a_fix_for_a_path_not_asked_about_is_not_placed(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng._hold_search_block_back(_unreadable_limit_block())
+    answer = {"protocol": {"fixes": {"protocol.optimisation.constraints[1]": {"quantity": "mass_g", "limit": "<= 130"},
+                                     "protocol.optimisation.constraints": []}}}
+    text = eng._keep_only_the_search(_plan_text(), {"study_type": "find_best_design", **answer})
+    kept = plan.raw_design_block(text)["protocol"]["optimisation"]
+    assert len(kept["constraints"]) == len(BLOCK["constraints"]), "a limit the plan declared is not removed by a fix"
+
+
+def test_a_block_that_reads_clears_a_held_one(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    eng._hold_search_block_back(_unreadable_limit_block())
+    assert eng._search_refused() is not None
+    assert eng._hold_search_block_back(copy.deepcopy(BLOCK)) == []
+    assert eng._search_refused() is None

@@ -139,17 +139,17 @@ async def test_fi_moves_the_part_and_asks_with_the_exact_reason_and_ends_in_an_h
     assert any("beside `protocol`" in str(v.get("note")) for v in versions), versions
     # what the move left out is said in plan.md with the exact reason and the entry as written
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    assert "optimisation block was left out" in text and VAR in text and SHAPE in text
+    assert "the search's block was not kept" in text and VAR in text and SHAPE in text
 
     design, sha = await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
     assert record["count"] == 2 and record["calls"] <= 12, "bounded: the model repeats the same answer, so the same refusal twice ends the asking"
     assert len(asked) <= 12
-    first, second = asked[0], next(a for a in asked[1:] if "Your last answer was not used" in a)
-    assert "ONE number per design variable" in first, "the ask says plainly that the search takes scalar variables"
-    assert VAR in first and "array of values" in first, "the first ask quotes the reason the block was left out"
-    assert "not at the top level of the design block" in first
-    assert "Your last answer was not used. The reason, exactly:" in second
+    first = asked[0]
+    assert all("only these parts of it could not be read" in a for a in asked), "every ask names the faulted paths alone"
+    assert VAR in first and "array of values" in first, "the first ask quotes the reason the block was not kept"
+    assert SHAPE in first, "and the entry as written"
+    second = asked[1]
     assert f"`{VAR}`" in second and "array of values" in second and SHAPE in second
     assert not paused, "nobody is asked to change the model"
 

@@ -195,9 +195,9 @@ async def test_the_model_is_sent_every_problem_in_the_next_request(tmp_path: Pat
     eng, asked, _paused = _setup(tmp_path, [reply] * 6)
     design, sha = eng._design_from_plan()
     await eng._ask_plan_for_the_search(STATE, design, sha)
-    refused = [a for a in asked if "Your last answer was not used" in a]
-    assert refused, "the second request quotes the refusal"
-    tail = refused[0].split("Your last answer was not used. The reason, exactly:", 1)[1]
+    refused = [a for a in asked if "only these parts of it could not be read" in a]
+    assert len(refused) >= 2, "the second request names every faulted path of the block the first answer wrote"
+    tail = refused[1].split("only these parts of it could not be read", 1)[1]
     assert "constraints` entry 1" in tail and "numerical_settings` `m`" in tail and ".grid` scans `w`" in tail
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
     assert record["problem"].count("And also:") == 2, "all three problems are kept to be sent, none cut off"

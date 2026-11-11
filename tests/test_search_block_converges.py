@@ -140,13 +140,14 @@ async def test_each_request_carries_the_block_the_last_answer_wrote_and_the_refu
     await eng._ask_plan_for_the_search(STATE, design, sha)
     assert len(asked) >= 3
     assert "The block you wrote last time" not in asked[0] and "first_marker" not in asked[0]
-    # the second request: the first answer's block as written, the refusal, and to change only what it names
-    assert "The block you wrote last time, exactly as you wrote it (shown up to 12000 characters):" in asked[1]
-    assert '"quantity": "first_marker"' in asked[1] and '"max": 3' in asked[1]
-    assert "you wrote `max`" in asked[1] and "change only what the reason names" in asked[1]
-    # the third: the second answer's block, not the first's
-    assert '"quantity": "second_marker"' in asked[2] and "first_marker" not in asked[2].split("Your last answer was not used")[0].split(
-        "The block you wrote last time")[1]
+    # the second request names only the faulted path, with the entry as written; the block is not sent back whole
+    assert "`protocol.optimisation.constraints[1]`" in asked[1] and '"max": 3' in asked[1]
+    assert "you wrote `max`" in asked[1] and "only these parts of it could not be read" in asked[1]
+    assert "first_marker" not in asked[1].split("# What is asked")[1]
+    # the third: the second answer's entry, not the first's
+    assert "about three" in asked[2] and "first_marker" not in asked[2].split("# What is asked")[1]
+    assert "second_marker" not in asked[2].split("# What is asked")[1]
+    assert json.loads((eng.fi_dir / "search_refused.json").read_text(encoding="utf-8"))["block"]["objective"]["quantity"] == "second_marker"
     # kept on disk with the refusal, so a resume sees it too
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
     assert json.loads(record["refused_block"])["objective"]["quantity"] == "second_marker"
@@ -166,4 +167,5 @@ async def test_a_block_longer_than_the_bound_is_cut_and_the_ask_says_the_bound(t
     await eng._ask_plan_for_the_search(STATE, design, sha)
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
     assert len(record["refused_block"]) <= engine._REFUSED_BLOCK_CHARS
-    assert f"shown up to {engine._REFUSED_BLOCK_CHARS} characters" in asked[1]
+    assert "long_marker" not in asked[1].split("# What is asked")[1], "the block is not sent back, only the faulted path"
+    assert "`protocol.optimisation.constraints[1]`" in asked[1]
