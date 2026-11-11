@@ -271,3 +271,21 @@ def test_a_changed_number_no_result_owns_is_also_placed_by_what_the_finding_reac
     engine, record = _setup(tmp_path / "b", monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover"]), calls=calls2)
     assert _measure(engine, record, ["est_a"]) is None  # nothing unplaced: only what the changed number reaches
     assert "corr_ab" not in _rc(engine.quest_root)["removed_quantities"]
+
+
+def test_a_test_request_that_could_not_be_made_is_undecided_never_not_shown(tmp_path, monkeypatch) -> None:
+    from core import finding_repair
+
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=False, verdict=None, calls=calls)
+
+    async def not_asked(issue: Any, record: Any, state: Any) -> bool:
+        calls.append("demonstrate")
+        raise finding_repair.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._demonstrate_reader_finding = not_asked  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None
+    rc = _rc(engine.quest_root)
+    assert calls == ["demonstrate"]
+    assert rc["removed_quantities"] == ["cover"] and rc["checks"][0]["measured"]["status"] == "could_not"
+    assert rc["checks"][0]["measured"]["why"].startswith("not asked")

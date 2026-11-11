@@ -524,7 +524,7 @@ def test_a_docstring_that_runs_nothing_is_not_a_change_outside_the_functions() -
     assert fr.frame_changes(FRAMED, FRAMED + "\n42\n")
 
 
-def test_a_repair_of_a_method_that_changes_a_module_constant_or_a_class_attribute_is_rejected(tmp_path: Path) -> None:
+def test_a_module_level_change_beside_a_method_repair_is_put_back_and_a_class_attribute_change_refuses_it(tmp_path: Path) -> None:
     test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
     run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness"}], {})
     (run.code / "spring.py").write_text(FRAMED, encoding="utf-8")
@@ -533,15 +533,30 @@ def test_a_repair_of_a_method_that_changes_a_module_constant_or_a_class_attribut
            "# file: spring.py\n" + fixed.replace("LIMIT = 3", "LIMIT = 4"),
            "# file: spring.py\n" + fixed.replace("import math\n", "import cmath as math\n")]
     good = "# file: spring.py\n" + "import os\n" + fixed
-    run.replies = {"code:test": [_block(test)], "code:repair": [_block(b) for b in bad] + [_block(good)]}
-    run.env.other = "the-other"
-    run.replies["other:repair"] = [_block(good)]
-    assert run.go() == ["spring.py"]
+    # A change inside the method's own class cannot be told apart from the method (the class is one statement of the
+    # module): the reply is refused as a whole, as before.
+    run.replies = {"code:test": [_block(test)], "code:repair": [_block(bad[1])] * 3}
+    assert run.go() == []
     issue = run.record["issues"]["F-1"]
-    assert [r["outcome"] for r in issue["repairs"]] == ["rejected"] * 3 + ["accepted"]
-    assert all("which the finding is not about" in r["why"] for r in issue["repairs"][:3])
-    text = (run.code / "spring.py").read_text(encoding="utf-8")
-    assert "THRESHOLD = 0.5" in text and "LIMIT = 3" in text and "return k * 2" in text and "import os" in text
+    assert [r["outcome"] for r in issue["repairs"]] == ["rejected"] * 3
+    assert all("which the finding is not about" in r["why"] for r in issue["repairs"])
+    # Each change outside the class is put back as the file had it and named; the finding's test decides on the rest.
+    for n, reply in enumerate(bad[::2]):
+        run = Run(tmp_path / str(n), [{"id": "F-1", "function": "Spring.stiffness"}], {})
+        (run.code / "spring.py").write_text(FRAMED, encoding="utf-8")
+        run.replies = {"code:test": [_block(test)], "code:repair": [_block(reply)]}
+        assert run.go() == ["spring.py"]
+        issue = run.record["issues"]["F-1"]
+        assert [r["outcome"] for r in issue["repairs"]] == ["accepted"]
+        assert "which the finding is not about" in issue["repairs"][0]["outside_scope"][0]
+        text = (run.code / "spring.py").read_text(encoding="utf-8")
+        assert "THRESHOLD = 0.5" in text and "LIMIT = 3" in text and "import math\n" in text and "return k * 2" in text
+    run = Run(tmp_path / "good", [{"id": "F-1", "function": "Spring.stiffness"}], {})
+    (run.code / "spring.py").write_text(FRAMED, encoding="utf-8")
+    run.replies = {"code:test": [_block(test)], "code:repair": [_block(good)]}
+    assert run.go() == ["spring.py"]
+    assert "outside_scope" not in run.record["issues"]["F-1"]["repairs"][0]
+    assert "import os" in (run.code / "spring.py").read_text(encoding="utf-8")
 
 
 def test_a_reply_that_changes_a_module_constant_has_it_ignored_when_one_function_is_spliced() -> None:
@@ -568,11 +583,19 @@ def test_a_finding_that_names_no_function_may_change_one_function_and_only_the_v
                                    _block("# file: spring.py\n" + spoken)]}
     assert run.go() == ["spring.py"]
     repairs = run.record["issues"]["F-1"]["repairs"]
-    assert [r["outcome"] for r in repairs] == ["rejected", "rejected", "accepted"]
+    # two functions changed with none named: FI cannot tell which is the repair, so the reply is refused as a whole; a value
+    # the finding does not speak of is put back and named, and the test decides on the rest (here it passes)
+    assert [r["outcome"] for r in repairs] == ["rejected", "accepted"]
     assert "may change one existing function" in repairs[0]["why"]
-    assert "does not speak of" in repairs[1]["why"]
+    assert "does not speak of" in repairs[1]["outside_scope"][0]
     text = (run.code / "spring.py").read_text(encoding="utf-8")
-    assert "SCALE = 3.0" in text and "OFFSET = 1.0" in text and "return x\n" in text
+    assert "SCALE = 2.0" in text and "OFFSET = 1.0" in text and "return x\n" in text and "+ 0.5" in text
+    run = Run(tmp_path / "spoken", [{"id": "F-1", "function": "", "quantity": "SCALE"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    run.replies = {"code:test": [_block(FAILING)], "code:repair": [_block("# file: spring.py\n" + spoken)]}
+    assert run.go() == ["spring.py"]
+    assert "outside_scope" not in run.record["issues"]["F-1"]["repairs"][0]
+    assert "SCALE = 3.0" in (run.code / "spring.py").read_text(encoding="utf-8")
 
 
 def test_only_code_names_of_a_finding_count_never_the_plain_words_of_its_prose() -> None:
@@ -850,3 +873,173 @@ def test_a_repair_cannot_add_a_star_import_but_may_add_an_ordinary_import() -> N
     assert fr.frame_changes(old, old + "\ny = (z := 3)\n")
     new, _, why = fr.splice(old, "from numpy import *\nimport math\n\n\ndef f():\n    return math.sqrt(X)\n", scope={"f"})
     assert why == "" and "import math" in new and "import *" not in new
+
+
+
+# --- placing a reply: form faults, failed calls, changes outside the finding -------------------------------------------
+
+
+def test_a_function_only_reply_to_a_finding_that_names_no_function_is_spliced_and_judged_by_its_test(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1", "function": ""}], {"code:test": [_block(FAILING)], "code:repair": [_block(GOOD)]})
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert issue["outcome"] == "fixed" and [r["outcome"] for r in issue["repairs"]] == ["accepted"]
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert "m * w / c + 0.5" in text and "def damping" in text and "def helper" in text
+
+
+def test_a_whole_file_without_its_file_line_is_placed_by_its_functions(tmp_path: Path) -> None:
+    reply = "Here is the corrected file.\n\n" + _block(SOURCE.replace("return m * w / c", "return m * w / c + 0.5")) + "\nDone."
+    run = Run(tmp_path, [{"id": "F-1", "function": ""}], {"code:test": [_block(FAILING)], "code:repair": [reply]})
+    assert run.go() == ["spring.py"]
+    assert run.record["issues"]["F-1"]["outcome"] == "fixed"
+    assert run.record["repair_calls"] == 1, "functions sent back unchanged do not count toward the limit"
+
+
+def test_a_reply_that_cannot_be_placed_is_asked_once_more_inside_the_same_request(tmp_path: Path) -> None:
+    prose = "The factor should include the half; change the return line."
+    run = Run(tmp_path, [{"id": "F-1", "function": ""}],
+              {"code:test": [_block(FAILING)], "code:repair": [prose, _block(GOOD)]})
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert [(w, k) for w, k, _n in run.asked] == [("code", "test"), ("code", "repair"), ("code", "repair")]
+    assert run.record["finding_calls"] == 2 and run.record["repair_calls"] == 1 and issue["calls"]["repair"] == 1
+    assert [r["outcome"] for r in issue["repairs"]] == ["accepted"] and issue["repairs"][0]["form"]
+    assert "FI could not use your last reply" in run.prompts[2] and "# file: spring.py" in run.prompts[2]
+
+
+def test_a_second_reply_that_cannot_be_placed_is_the_answer_of_that_request(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1", "function": ""}],
+              {"code:test": [_block(FAILING)], "code:repair": ["no code"] * 2 + [_block(GOOD)]})
+    assert run.go() == ["spring.py"]
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert [r["outcome"] for r in repairs] == ["rejected", "accepted"]
+    assert repairs[0]["why"].startswith("twice the reply could not be placed")
+    assert run.record["repair_calls"] == 2 and len(run.asked) == 4
+
+
+def test_module_statements_in_a_reply_without_the_whole_file_are_never_spliced_silently(tmp_path: Path) -> None:
+    base = "SCALE = 2.0\n\n" + SOURCE
+    fixed = "def quality(m, w, c):\n    return m * w / c * SCALE / 4 + 0.5\n"
+    run = Run(tmp_path, [{"id": "F-1", "function": "", "quantity": "SCALE"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    whole = "# file: spring.py\n" + base.replace("SCALE = 2.0", "SCALE = 4.0").replace(
+        "return m * w / c", "return m * w / c * SCALE / 4 + 0.5")
+    run.replies = {"code:test": [_block(FAILING)], "code:repair": [_block("SCALE = 4.0\n\n" + fixed), _block(whole)]}
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert "statements outside functions" in issue["repairs"][0]["form"] and "SCALE = 4.0" in issue["repairs"][0]["form"]
+    assert "SCALE = 4.0" in (run.code / "spring.py").read_text(encoding="utf-8"), "the value it speaks of, judged in the whole file"
+    assert run.record["repair_calls"] == 1
+
+
+def test_a_failed_call_gives_its_request_back_and_leaves_the_finding_open(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1"}], {"code:test": [_block(FAILING)]})
+    calls = []
+
+    async def ask(prompt: str, who: str, kind: str) -> str:
+        calls.append(kind)
+        if kind == "repair":
+            raise RuntimeError("the provider gave no answer")
+        return _block(FAILING)
+
+    run.env.ask = ask
+    assert run.go() == []
+    issue = run.record["issues"]["F-1"]
+    assert issue["outcome"] == "open" and issue["not_asked"]["kind"] == "repair"
+    assert [r["outcome"] for r in issue["repairs"]] == ["not asked"]
+    assert calls == ["test", "repair"], "no more requests for this finding go to a model that does not answer"
+    assert run.record["finding_calls"] == 1 and run.record["repair_calls"] == 0 and issue["calls"]["repair"] == 0
+
+
+def test_a_failed_call_for_a_test_leaves_the_finding_open_and_spends_nothing(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1"}], {})
+
+    async def ask(prompt: str, who: str, kind: str) -> str:
+        raise RuntimeError("the provider gave no answer")
+
+    run.env.ask = ask
+    assert run.go() == []
+    issue = run.record["issues"]["F-1"]
+    assert issue["outcome"] == "open" and issue["demonstrated"] is None and issue["not_asked"]["kind"] == "test"
+    assert int(run.record.get("finding_calls") or 0) == 0 and issue["calls"]["test"] == 0
+    # a caller that asks for the test alone (the evidence gate) is told it was not asked, never "not demonstrated"
+    with pytest.raises(fr.NotAsked):
+        asyncio.run(fr.demonstrate(run.env, issue, "spring.py"))
+    assert issue["outcome"] == "open"
+
+
+def test_a_failed_call_in_the_second_ask_of_a_request_gives_the_request_back(tmp_path: Path) -> None:
+    run = Run(tmp_path, [{"id": "F-1", "function": ""}], {"code:test": [_block(FAILING)]})
+    seen = []
+
+    async def ask(prompt: str, who: str, kind: str) -> str:
+        seen.append(kind)
+        if kind == "test":
+            return _block(FAILING)
+        if seen.count("repair") == 1:
+            return "no code at all"
+        raise RuntimeError("the provider gave no answer")
+
+    run.env.ask = ask
+    run.go()
+    issue = run.record["issues"]["F-1"]
+    assert issue["outcome"] == "open" and [r["outcome"] for r in issue["repairs"]] == ["not asked"]
+    assert run.record["repair_calls"] == 0 and issue["calls"]["repair"] == 0
+
+
+def test_an_unrelated_function_in_a_reply_is_put_back_and_named(tmp_path: Path) -> None:
+    reply = _block(GOOD + "\n\ndef helper(x):\n    return x * 100\n")
+    run = Run(tmp_path, [{"id": "F-1"}], {"code:test": [_block(FAILING)], "code:repair": [reply]})
+    assert run.go() == ["spring.py"]
+    repair = run.record["issues"]["F-1"]["repairs"][0]
+    assert repair["outcome"] == "accepted" and repair["outside_scope"] == ["`helper`"]
+    assert "return x\n" in (run.code / "spring.py").read_text(encoding="utf-8")
+
+
+def test_a_repair_that_needed_what_was_put_back_fails_its_test_and_the_next_ask_names_it(tmp_path: Path) -> None:
+    base = "SCALE = 2.0\nOFFSET = 1.0\n\n" + SOURCE
+    test = "import spring\n\ndef test_q():\n    assert spring.quality(2, 3, 2) == 3.5, 'the offset is wrong'\n"
+    needs = base.replace("OFFSET = 1.0", "OFFSET = 1.5").replace("return m * w / c", "return m * w / c + OFFSET - 1.0")
+    run = Run(tmp_path, [{"id": "F-1", "function": "", "quantity": "SCALE"}], {})
+    (run.code / "spring.py").write_text(base, encoding="utf-8")
+    run.replies = {"code:test": [_block(test)], "code:repair": [_block("# file: spring.py\n" + needs)] * 4}
+    run.go()
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert repairs[0]["outcome"] == "rejected" and "own test still fails" in repairs[0]["why"]
+    assert "FI put back what the finding does not cover" in repairs[0]["why"] and "OFFSET" in repairs[0]["why"]
+    assert "FI put back what the finding does not cover" in run.prompts[2]
+    assert "OFFSET = 1.0" in (run.code / "spring.py").read_text(encoding="utf-8")
+
+
+def test_put_back_keeps_what_the_finding_covers_and_never_takes_a_statement_out() -> None:
+    base = "import math\n\nSCALE = 2.0\nOFFSET = 1.0\n\n" + SOURCE
+    issue = {"function": "", "quantity": "SCALE"}
+    new = base.replace("OFFSET = 1.0\n", "").replace("return m * w / c", "return m * w / c + 0.5") + "\nEXTRA = 3\n"
+    kept, why = fr.put_back_outside(base, new, issue)
+    assert kept is not None and "OFFSET = 1.0" in kept and "EXTRA" not in kept and "+ 0.5" in kept
+    assert why and "does not speak of" in why
+    assert fr.outside_scope(base, kept, issue) == ""
+    # nothing within the finding left: refused as a whole, with the reason of the whole
+    only_outside = base.replace("OFFSET = 1.0", "OFFSET = 9.0")
+    assert fr.put_back_outside(base, only_outside, issue) == (None, fr.outside_scope(base, only_outside, issue))
+    # a reply within the finding is kept as it is
+    within = base.replace("SCALE = 2.0", "SCALE = 3.0")
+    assert fr.put_back_outside(base, within, issue) == (within, "")
+
+
+def test_the_splice_reports_what_it_leaves_out_and_why_a_reply_cannot_be_placed() -> None:
+    source = "import math\n\nTHRESHOLD = 0.5\n\n\ndef quality(m, w, c):\n    return m * w / c\n"
+    left: list[str] = []
+    reply = _block("import math\nimport os\n\nTHRESHOLD = 0.5\nLIMIT = 3\n\n\ndef quality(m, w, c):\n    return 1\n")
+    new, _names, why = fr.splice(source, reply, {"quality"}, [], unspliced=left)
+    assert why == "" and new is not None and left == ["line 5: `LIMIT = 3`"], "a statement the file has as it is is no change"
+    form: list[str] = []
+    assert fr.splice(source, "change the return line", {"quality"}, form=form)[0] is None
+    assert form == ["the reply held no function"]
+    form = []
+    assert fr.splice(source, _block("def quality(m, w, c:\n    return 1\n"), {"quality"}, form=form)[0] is None
+    assert form and form[0].startswith("the reply is not valid Python")
+    form = []
+    assert fr.splice(source, _block("def damping(m, k, c):\n    return 0\n"), {"quality"}, form=form)[0] is None
+    assert form == []
