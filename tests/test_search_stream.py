@@ -296,9 +296,11 @@ def test_a_design_still_running_when_one_alternative_ends_is_not_taken_for_the_s
                         seen_second.append(first[2])
                 request = gen.send(reply)
             elif request["kind"] == "evaluate_many":
-                request = gen.send([{"values": {"f": _bowl(r["design"])}} for r in request["requests"]])
+                # (the first alternative's answers at the spread designs, then each later alternative's probe)
+                request = gen.send([{"values": {"f": 999.0 if r["level"]["shape"] == "cup" else _bowl(r["design"])}}
+                                    for r in request["requests"]])
             else:
-                request = gen.send({"values": {"f": _bowl(request["design"])}})
+                request = gen.send({"values": {"f": 999.0 if level == "cup" else _bowl(request["design"])}})
     except StopIteration as done:
         outcome = done.value
     assert stopped_first and stale_given > 0, "the first alternative ended with designs running"

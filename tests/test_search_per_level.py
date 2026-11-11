@@ -119,7 +119,7 @@ def test_the_record_names_the_alternatives_the_winner_and_the_conditions_it_won_
     record = osearch.best_design(outcome, block, seed=0)
     assert record["fixed"]["shape"] == "bowl"
     assert [p["level"]["shape"] for p in record["compared"]["levels"]] == ["cup", "mug", "bowl"]
-    assert "best of 3 alternatives" in record["says"] and "the winner is shape = bowl" in record["says"]
+    assert "best design found over 3 alternatives" in record["says"] and "under shape = bowl" in record["says"]
     head = json.loads(osearch.ledger_lines(outcome, block)[0])
     assert head["compared"] == [{"shape": "cup"}, {"shape": "mug"}, {"shape": "bowl"}]
 
@@ -145,19 +145,22 @@ def test_the_check_at_finer_settings_is_made_under_the_winning_alternative() -> 
     outcome = _drive(block, None)
     record = osearch.best_design(outcome, block, seed=0)
     asked: list[dict[str, Any]] = []
+    other: list[dict[str, Any]] = []
     gen = optimum_check.check(block, record, outcome["rows"])
     request = next(gen)
     try:
         while True:
             reqs = request["requests"] if request["kind"] == "evaluate_many" else [request]
             for one in reqs:
-                asked.append(one["cell"])
+                # the best design of every other searched alternative is recomputed too, each under its own conditions
+                (other if one.get("alternative") else asked).append(one["cell"])
             answer = ([{"values": _f(r["cell"])} for r in reqs] if request["kind"] == "evaluate_many"
                       else {"values": _f(request["cell"])})
             request = gen.send(answer)
     except StopIteration:
         pass
     assert asked and all(c["shape"] == "bowl" for c in asked), {c["shape"] for c in asked}
+    assert all(c["shape"] != "bowl" for c in other), "the others are asked under their own alternative, never the winner's"
 
 
 @pytest.mark.asyncio

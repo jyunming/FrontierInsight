@@ -1050,15 +1050,20 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     scan_runs: list[tuple[Any, float]] = []  # the coarse scans this call ran, with the wall seconds of each
 
     async def scan(grid: dict[str, list[Any]], scan_block: dict[str, Any] | None = None,
-                   level: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+                   level: dict[str, Any] | None = None, pool: bool = False) -> list[dict[str, Any]]:
         """The coarse scan, through the trial runner itself (``raw/trials.json``, which the analysis can plot). It
         measures every alternative of a compared condition together and runs once: each alternative's search is given
-        the designs of the scan at its own alternative (``scan_block``)."""
+        the designs of the scan at its own alternative (``scan_block``). With ``pool`` it returns the cells at every
+        alternative instead (:func:`core.optimise_search.scan_candidates`), the designs every alternative's search starts
+        from."""
         if replay_scan is not None:
+            if pool:
+                every = [row for rows in replay_scan.values() for row in rows]
+                return every
             return replay_scan.get(_search.level_key(level), [])
         grid_key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
         if grid_key in scanned:
-            return _search.scan_rows(scanned[grid_key], scan_block or block)
+            return (_search.scan_candidates if pool else _search.scan_rows)(scanned[grid_key], scan_block or block)
         left = deadline - time.monotonic()
         if left <= 0:
             return []
@@ -1108,7 +1113,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             else:
                 log.info("[optimise] the coarse scan ran %d design(s) after the baseline (%d worked); it is not counted "
                          "in the search's budget", len(rows), worked)
-        return rows
+        return _search.scan_candidates(summary, scan_block or block) if pool else rows
 
     results = watched_results(protocol, design)
     gen = _search.compare(block, seed=int(base_seed), method=method, rounds=rounds, results=results, batch=at_once > 1,
@@ -1145,7 +1150,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 pool = None
                 streamed.clear()
             if request["kind"] == "scan":
-                reply = await scan(request["grid"], request.get("block"), request.get("level"))  # type: ignore[assignment]
+                reply = await scan(request["grid"], request.get("block"), request.get("level"),  # type: ignore[assignment]
+                                   bool(request.get("pool")))
                 scan_rows = scan_rows or list(reply)
             elif request["kind"] == "evaluate_many":
                 # Designs the method chose before reading any of their answers: up to ``at_once`` at the same time.
@@ -1402,8 +1408,8 @@ _STOPPED = {
     "time": "the time limit (execution.timeout_s) was reached",
     "failures": "the first evaluations all failed",
     "not_searched": "its first evaluation returned no objective, as the alternative searched before it did",
-    "same_as_first": "it gave the same compared results as the first alternative for every design tried at both, so it "
-                     "was not searched again",
+    "same_as_first": "it gave the first alternative's objective and limits at every design tried at both, so it was not "
+                     "searched on its own",
     "library_error": "the library's method stopped with an error",
     "the simulation could not be loaded": "the simulation could not be loaded",
     "target": "a design reached the target asked for",
@@ -1434,6 +1440,33 @@ def _osearch_budget(levels, say):
     from . import optimise_search as _osearch
 
     return _osearch.alternatives_budget_says(levels, say)
+
+
+def comparison_lines(compared: dict[str, Any]) -> list[str]:
+    """Plain lines about how a comparison of alternatives was made and the statement it earned (the first of the two,
+    "ahead at the search's settings"): for each alternative that was searched, its starting points, the evaluations that
+    answered and that failed, and why it ended; whether the searched ones had the same setup; the statement itself."""
+    comparison = compared.get("comparison") if isinstance(compared, dict) else None
+    if not isinstance(comparison, dict):
+        return []
+    from . import optimise_search as _osearch
+
+    out = []
+    for a in comparison.get("alternatives") or []:
+        if a.get("kind") != "searched":
+            continue
+        ended = ("it gave no result" if a.get("stopped_because") == "failures" else
+                 f"stopped because {_STOPPED.get(str(a.get('stopped_because')), a.get('stopped_because'))}")
+        out.append(f"{_osearch.level_says(a['level'])} was searched: {a.get('starts')} starting point(s), "
+                   f"{a.get('evaluations')} evaluation(s) ({a.get('answered')} answered, {a.get('failed')} failed); {ended}")
+    searched = [a for a in comparison.get("alternatives") or [] if a.get("kind") == "searched"]
+    if len(searched) > 1:
+        out.append("The searched alternatives started from the same designs, with the same budget and method."
+                   if comparison.get("same_setup") else
+                   "The searched alternatives did not start from the same designs with the same budget and method.")
+    if comparison.get("says_1"):
+        out.append(str(comparison["says_1"]))
+    return out
 
 
 def summary_lines(record: dict[str, Any]) -> list[str]:
@@ -1501,16 +1534,22 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     skipped = [p for p in compared or [] if isinstance(p, dict) and p.get("status") == _osearch.NOT_SEARCHED]
     if compared and best is not None:
         same = [p for p in compared if p.get("same_as")]
-        lines.append(f"[optimise] {len(compared)} alternatives were "
-                     + ("compared" if same or skipped else "each searched on their own") + "; the best design is the "
-                     f"one of {_osearch.level_says(best.get('level') or {})}. Best of each: "
-                     + "; ".join(f"{_osearch.level_says(p['level'])}: "
-                                 + (f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit")
-                                 for p in compared))
+
+        def shown(p: dict[str, Any]) -> str:
+            if p.get("same_as") or p.get("status") == _osearch.NOT_SEARCHED:
+                return "not searched on its own"
+            return f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit"
+
+        lines.append(f"[optimise] {len(compared)} alternatives were compared; the best design found is under "
+                     f"{_osearch.level_says(best.get('level') or {})}. Best of each: "
+                     + "; ".join(f"{_osearch.level_says(p['level'])}: {shown(p)}" for p in compared))
+        lines += [f"[optimise] {x}" for x in comparison_lines(record.get("compared") or {})]
         for p in same:
             lines.append(f"[optimise] {_osearch.same_as_says(p)}")
     for p in skipped:  # named whether or not a best design was found
         lines.append(f"[optimise] {_osearch.not_searched_says(p)}")
+    lines += [f"[optimise] {x}" for x in record.get("first_round") or []]
+    lines += [f"[optimise] note: {x}" for x in record.get("notes") or []]
     for r in record.get("continued") or []:
         target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
         reached = ("; the target was reached at the search's settings" if r.get("target_reached") else

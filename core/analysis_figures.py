@@ -945,7 +945,7 @@ def _alternatives(data: dict[str, Any], sign: float) -> list[dict[str, Any]]:
     same: dict[str, str] = {}
     for entry in compared.get("levels") or []:
         if isinstance(entry, dict) and isinstance(entry.get("same_as"), dict):
-            same[level_key(entry.get("level"))] = level_says(entry["same_as"])  # only probes; its best is the first one's
+            same[level_key(entry.get("level"))] = level_says(entry["same_as"])  # only probes: it has no best design of its own
         elif isinstance(entry, dict):
             best = entry.get("best") if isinstance(entry.get("best"), dict) else {}
             recorded[level_key(entry.get("level"))] = best.get("objective") if _number(best.get("objective")) else None
@@ -1012,7 +1012,7 @@ def _progress_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
         fig.savefig(os.path.join(out_dir, file))
         out = _outcome(fid, file, "ok")
         none = [a["label"] for a in alternatives if not a["line"] and not a["same_as"]]
-        same = ["%s gave the same results as %s, so it is not drawn" % (a["label"], a["same_as"]) for a in alternatives if a["same_as"]]
+        same = ["%s was not searched on its own (it gave the objective and limits of %s at the designs tried at both), so it is not drawn" % (a["label"], a["same_as"]) for a in alternatives if a["same_as"]]
         notes = (["No design met every limit for: %s." % "; ".join(none)] if none else []) + [s + "." for s in same]
         if notes:
             out["note"] = " ".join(notes)
