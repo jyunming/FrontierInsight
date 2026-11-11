@@ -38,7 +38,7 @@ SCHEMA = 2
 #: What each kind's decision means: raised when FI changes the rule that decided it, so a record made under another
 #: rule is decided again (a ``fits`` timing written before the speed-up rule existed was reused, and the study was never
 #: sped up).
-RULES = {"trials": 2, "search": 2, "search_study": 2, "search_study_bytes": 2, "sizing": 2}
+RULES = {"trials": 2, "search": 2, "search_study": 2, "search_study_bytes": 2, "sizing": 2, "rerun": 2}
 
 #: The plain words :meth:`Inputs.changed` uses for what is not a file.
 _SETTING_WORDS = {
@@ -294,6 +294,35 @@ def left_out(opened: list[str], key_files: dict[str, str]) -> list[str]:
             continue
         out.append(rel)
     return out
+
+
+def rerun(quest_root: Path | str, finding: str, *, test: str = "", repairs: list[str] | tuple[str, ...] = (), strict: bool = False,
+          disputed: list[str] | tuple[str, ...] = ()) -> Inputs:
+    """What decides the answer of "run the study again with a repair of this finding": every file of the study, the finding's own
+    test, the repairs kept for it (their text), how it was asked and FI's own code that judges the answer. A verdict is reused
+    only when this key is the same (core/rerun_check.py)."""
+    from . import rerun_check as _rerun
+
+    root = Path(quest_root)
+    found = files(root, "study")
+    complete, unreadable = found.complete, list(found.unreadable)
+    test_sha: str | None = None
+    if test:
+        try:
+            test_sha = digest(root / test)
+        except OSError:
+            complete = False
+            unreadable.append(test)
+    settings = {"finding": str(finding), "test": test_sha, "repairs": [_sha(r.encode("utf-8", errors="surrogateescape")) for r in repairs],
+                "strict": bool(strict), "disputed": sorted(str(x) for x in disputed)}
+    return Inputs("rerun", RULES["rerun"], found.digests, settings, {"rerun": _sha(Path(_rerun.__file__).read_bytes())}, complete,
+                  unreadable)
+
+
+def answer_key(prompt: str, model: str) -> str:
+    """The key of one model request: the exact text sent and the model that answers it. A reply kept under it is the answer to
+    that request and no other; how the reply is read is done again with today's rules."""
+    return _sha(json.dumps([prompt, model], ensure_ascii=False).encode("utf-8", errors="replace"))
 
 
 def digest_text(text: str) -> str:

@@ -251,6 +251,35 @@ def test_a_kept_answer_is_reused_only_when_it_was_made_the_same_way(tmp_path) ->
     assert cr.version(root / "code")
 
 
+def test_a_kept_answer_follows_every_file_of_the_study_and_only_a_measured_one_is_kept(tmp_path) -> None:
+    from core.engine import Engine
+
+    engine = _engine(tmp_path)
+    root = _quest(engine)
+    ran: list[str] = []
+    status = ["unchanged"]
+
+    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False) -> Verdict:
+        ran.append(status[0])
+        return Verdict(status[0])
+
+    engine._rerun_one = one  # type: ignore[method-assign,assignment]
+    record = {"issues": {"F-9": dict(ISSUE)}}
+    plain = {**ISSUE, "id": "F-9"}
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged"], "the same files: reused"
+    (root / "inputs").mkdir(exist_ok=True)
+    (root / "inputs" / "table.csv").write_text("a\n1\n", encoding="utf-8")  # the person's file: the old key never saw it
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged", "unchanged"], "a changed inputs/ file asks again"
+    (root / "inputs" / "table.csv").write_text("a\n2\n", encoding="utf-8")
+    status[0] = "could_not"
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged", "unchanged", "could_not", "could_not"], "a could-not answer is never reused"
+
+
 def test_without_records_every_changed_number_is_left_out_and_the_headline_still_stops(tmp_path, monkeypatch) -> None:
     calls: list[Any] = []
     engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover", "corr_ab"]), calls=calls)

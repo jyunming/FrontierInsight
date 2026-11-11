@@ -13952,14 +13952,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         earlier = _code_review.earlier_block(previous)
         small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
                      or "(FI did not run the simulation before this reading)")
-        # A part of the code that was read before, with the same text, the same things it uses, the same plan and the same
-        # question, is not read again: its earlier reading is used (:func:`core.code_review.request_key`).
-        kept = _code_review.load_reading_cache(self.quest_root)
-        depends = _code_review.part_dependencies(code, calls)
-        asked_of = [[r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]] for c in calls]
-        keys = [_code_review.request_key(c, depends[i], asked=asked_of[i], reader=str(reader or ""),
-                                         template=self._prompts["code_review"].template, small_run=small_run,
-                                         shown_values=shown_values) for i, c in enumerate(calls)]
+        # A request whose text is the same as one made before, to the same model, is not asked again: the reply kept for it is
+        # read again with today's rules (core/reuse_key.py ``answer_key``; the reply is stored only when this request's own
+        # reply was usable).
+        from . import reuse_key as _reuse_key
+
+        kept = {k: v for k, v in _code_review.load_reading_cache(self.quest_root).items() if isinstance(v, dict) and "reply" in v}
+
+        def build_prompt(call: dict[str, Any], left: list[dict[str, Any]], again: str = "") -> str:
+            return self._prompts["code_review"].substitute(
+                topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
+                plan=call["plan"], open_items=call["open_items"] or "(none)",
+                code=_code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"], previous=earlier,
+                small_run=small_run) + again
+
+        keys = [_reuse_key.answer_key(build_prompt(c, [r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]]),
+                                      str(reader or "")) for c in calls]
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
@@ -13992,20 +14000,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                f"used; this reading needs {fresh} more")
             for p_index, call in enumerate(calls, start=1):
                 key = keys[p_index - 1]
-                if key in kept:
-                    hit = kept[key]
-                    p_verdicts = copy.deepcopy(hit.get("verdicts") or [])
-                    logic = _code_review.merge_logic(logic, copy.deepcopy(hit.get("logic") or []))
-                    outside.extend(copy.deepcopy(hit.get("outside") or []))
-                    listed = [*listed, *(c for c in hit.get("listed") or [] if c not in listed)]
-                    part_verdicts.append(p_verdicts)
-                    record["requests"][p_index - 1]["reused"] = True
-                    record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
-                    continue
-                part_found: list[dict[str, Any]] = []
-                part_listed: list[str] = []
-                outside_from = len(outside)
-                sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
                 # only the requirements this request was given the plan's definition of (:func:`core.code_review.asked_ids`)
@@ -14024,13 +14018,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
                                           "asking once more")
                         again, left, asked_again = _pairs.REASK, list(call_reqs), True
-                    prompt = self._prompts["code_review"].substitute(
-                        topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
-                                                             indent=2),
-                        plan=call["plan"], open_items=call["open_items"] or "(none)", code=sources, previous=earlier,
-                        small_run=small_run
-                    ) + again
-                    reply = await self._ask_reader(prompt, review_node, spend)
+                    prompt = build_prompt(call, left, again)
+                    answer_key = _reuse_key.answer_key(prompt, str(reader or ""))
+                    from_cache = answer_key in kept
+                    if from_cache:
+                        reply = kept[answer_key]["reply"]
+                        if _ask == 0:
+                            record["requests"][p_index - 1]["reused"] = True
+                            record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
+                    else:
+                        reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
                     got = _code_review.parse(parsed, left, shown_values)
                     # a verdict or a finding must cite a file and a line this request was shown (not a line that was cut)
@@ -14049,20 +14046,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                    for f in found if f not in seen)
                     found = seen
                     logic = _code_review.merge_logic(logic, found)
-                    part_found.extend(found)
                     said = _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
-                    part_listed.extend(said)
                     listed = [*listed, *(c for c in said if c not in listed)]
+                    # Kept only when this request's own reply was usable: every requirement it was asked judged, or (none asked)
+                    # a finding or a thing it checked of its own, never because an earlier part said something.
+                    usable = (not {r["id"] for r in left} - {v["id"] for v in got or []}) if left else bool(found or said)
+                    if usable and not from_cache and isinstance(reply, str):
+                        kept[answer_key] = {"reply": reply}
+                        _code_review.save_reading_cache(self.quest_root, kept)
                 if p_verdicts is None and many:
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
                     raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
-                # Only an answer that judged every requirement this part was asked is kept for the next reading of this same
-                # part: a part answered in part is asked again, so what it left unjudged is not left so for good.
-                if p_verdicts is not None and not {r["id"] for r in call_reqs} - {v["id"] for v in p_verdicts}:
-                    kept[key] = {"verdicts": p_verdicts, "logic": part_found, "outside": outside[outside_from:],
-                                 "listed": part_listed, "version": version}
-                    _code_review.save_reading_cache(self.quest_root, kept)
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = ("its answers cited no place in the code it was shown" if outside
@@ -23085,16 +23080,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         budget = [_rerun_check.TOTAL_FACTOR * (allowed or 0.0)]  # all the runs of one check together
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
+        from . import reuse_key as _reuse_key
+
         for issue, _how in verdicts:
             fid = str(issue.get("id"))
             saved = (record.get("issues") or {}).get(fid)
             kept = saved.get("rerun") if isinstance(saved, dict) else None
             disputed = sorted(str(x) for x in issue.get("disputed") or []) if strict else []
-            # an answer kept for this code is reused only when it was made in the same way: a strict answer (the disputed
-            # quantities compared key by key) also stands for an ordinary one, never the other way round
-            same_way = (bool(kept.get("strict")) and (not strict or kept.get("disputed") == disputed)) if isinstance(kept, dict) and (
-                strict or kept.get("strict")) else isinstance(kept, dict)
-            if isinstance(kept, dict) and same_way and kept.get("version") == version and kept.get("status") in ("changed", "unchanged", "could_not"):
+            # The key of the answer (core/reuse_key.py): every file of the study, the finding's own test, the repairs kept for it
+            # and how it was asked. A strict answer (the disputed quantities compared key by key) also stands for an ordinary
+            # one, never the other way round. Only a measured answer is reused: "could not" is asked again.
+            repairs = [p for _n, p in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log)]
+            test_rel = str(issue.get("test") or "")
+            mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed)
+            plain = mine if not strict else _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs)
+            if (isinstance(kept, dict) and kept.get("status") in ("changed", "unchanged") and mine.complete
+                    and (kept.get("key") == mine.key or (not strict and kept.get("stands_for") == plain.key))):
                 out[fid] = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
                 continue
             if runs >= self.MAX_RERUNS:
@@ -23109,7 +23110,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     out[fid] = _rerun_check.Verdict("could_not", f"{type(exc).__name__}: {exc}"[:200])
             if isinstance(saved, dict):
                 saved["rerun"] = {**out[fid].record(), "version": version, "strict": strict,
-                                  "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else []}
+                                  "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else [],
+                                  "key": mine.key, "stands_for": plain.key}
             self._log_rerun(fid, out[fid])
         _code_review.save(self.quest_root, record)
         return out

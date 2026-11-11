@@ -54,7 +54,7 @@ async def test_a_follow_up_ask_of_a_part_given_no_requirement_does_not_break_the
     record = cr.load(engine.quest_root)
     assert len(reader.prompts) == 2, "the reply that said nothing is asked once more"
     assert "the call failed" not in str(record.get("error") or ""), record.get("error")
-    assert len(cr.load_reading_cache(engine.quest_root)) == 1, "the part's answer is kept for the next reading"
+    assert cr.load_reading_cache(engine.quest_root) == {}, "a reply that named nothing of its own is not kept"
 
 
 @pytest.mark.asyncio
