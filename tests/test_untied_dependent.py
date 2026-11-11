@@ -163,3 +163,18 @@ def test_a_rerun_that_could_not_run_or_moved_nothing_does_not_undo_the_plan_text
     engine._rerun_shown = reruns  # type: ignore[method-assign,assignment]
     out, record = _gate(engine, PLAN_TEXT_TEST)
     assert _released(out, record)  # a failed or empty rerun adds no evidence that a number is wrong
+
+
+def test_a_rerun_that_moved_numbers_it_could_not_place_still_blocks_the_release(tmp_path: Path) -> None:
+    import types
+
+    engine = _engine(tmp_path)
+    verdict = types.SimpleNamespace(status="could_not", metrics=[], keys=["est_b"], unplaced=["est_b"], unwritten=[],
+                                    mode="", why="numbers moved that FI cannot place", redrawn=False, notes=[], carried=[])
+
+    async def reruns(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:
+        return {"F-1": verdict}
+
+    engine._rerun_shown = reruns  # type: ignore[method-assign,assignment]
+    out, record = _gate(engine, PLAN_TEXT_TEST)
+    assert not _released(out, record)
