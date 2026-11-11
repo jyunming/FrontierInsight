@@ -73,3 +73,11 @@ def test_alternatives_that_ended_on_their_starts_shares_are_not_reported_as_a_bu
     assert "8 alternatives used 3208 of the 12800 allowed and stopped because each starting point converged or used its share" in text
     assert "1 alternative used 1625 of the 1600 allowed and stopped because the evaluation budget ran out" in text
     assert "of the 14400 allowed" not in text
+
+
+def test_an_alternative_that_was_not_searched_is_not_said_to_have_used_a_budget() -> None:
+    record = _record([(180, 180, "budget"), (1, 1, "not_searched"), (3, 3, "same_as_first")])
+    text = optimise.summary_lines(record)[0]
+    assert "1 alternative used 180 of the 180 allowed and stopped because the evaluation budget ran out" in text
+    assert "1 alternative not searched (1 evaluation(s) to tell)" in text and "used 1 of the 1" not in text
+    assert "1 alternative not searched (3 evaluation(s) to tell)" in text and "used 3 of the 3" not in text

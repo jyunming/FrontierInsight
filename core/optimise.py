@@ -1465,7 +1465,10 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         for reason, mine in groups.items():
             used, allowed = sum(int(p.get("evaluations") or 0) for p in mine), sum(int(p.get("budget") or 0) for p in mine)
             many = f"{len(mine)} alternative{'' if len(mine) == 1 else 's'}"
-            if reason == "failures" and len(groups) > 1:
+            if reason in ("not_searched", "same_as_first"):
+                # Not searched: the evaluations are the few that showed it, not a part of a budget.
+                parts.append(f"{many} not searched ({used} evaluation(s) to tell): {_STOPPED.get(reason, reason)}")
+            elif reason == "failures" and len(groups) > 1:
                 # An alternative that failed every evaluation does not name the search's end: its own entry does.
                 parts.append(f"{many} used {used} of the {allowed} allowed and gave no result")
             else:
