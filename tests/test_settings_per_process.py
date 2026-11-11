@@ -494,8 +494,14 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # It moves again for `shape_problem` (a number the plan declares one per run that a run returned per value: one rule for
     # FI and its harness) and for `per_run_names` reading what each run compares wherever the plan wrote it (`of_study`).
     # It moves again for `search_one_number_names` and `one_number_rule` (a search's objective and limits are one number
-    # per call), added there and nothing else changed.
+    # per call), added there and nothing else changed (ce17183f...).
+    # It moves again for the recording of the files a run opened (the audit hook between the ``#<audit-begin>`` and
+    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines is still ce17183f...
+    # (``LEGACY_HARNESS_SOURCE``, pinned in test_reuse_key.py), which a frozen study's search record of an older FI is
+    # read with.
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
+        "ae98b6e471a6a04c9338787d60dbf1f43004f2f1e1b2a4b874a5bb75414649ef")
+    assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
         "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
