@@ -754,7 +754,8 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
 
     said = {"not_written": "the study's function for it was not written", "no_data": "no trial gave a value for it",
             "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned",
-            "blocked": "a quantity it is worked out from was not computed"}
+            "blocked": "a quantity it is worked out from was not computed",
+            "missing": "the study's function for it gave no value at any setting"}
     for item in _analysis.not_computed(_analysis.read_record(q.root)):
         out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
                             + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
