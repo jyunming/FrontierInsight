@@ -1912,6 +1912,8 @@ class _Search:
             "notes": list(self.notes), "baseline": baseline, "start_log": self.start_log, "seed": self.seed,
             "failed": sum(1 for r in self.rows if r["status"] != "ok"),
             "infeasible": sum(1 for r in self.rows if r["status"] == "ok" and not r["feasible"]),
+            "scan_failed": sum(1 for r in self.rows if not r["counted"] and r["status"] != "ok"),
+            "scan_infeasible": sum(1 for r in self.rows if not r["counted"] and r["status"] == "ok" and not r["feasible"]),
             **({"every_failure": NO_OBJECTIVE}
                if self.stopped == "failures" and self.rows and all(r.get("failure") == NO_OBJECTIVE for r in self.rows)
                else {}),
@@ -2293,6 +2295,28 @@ def _same_outcome(first, first_level, rows):
     return out
 
 
+def alternatives_budget_says(levels, say):
+    """How a search over compared alternatives ended, from the entries of ``levels``, in the terms of its budget rule: each
+    alternative has a budget of its own (and each starting point a share of it), so the sums over alternatives are not one
+    budget. One clause for each way the alternatives ended: how many used how many evaluations of how many allowed, and
+    ``say(reason)`` for why they stopped. An alternative that failed every evaluation, while others gave results, names no
+    end (its own entry does); one that was not searched is not said to have used a budget."""
+    groups = {}
+    for p in levels:
+        groups.setdefault(str(p.get("stopped_because")), []).append(p)
+    parts = []
+    for reason, mine in groups.items():
+        used, allowed = sum(int(p.get("evaluations") or 0) for p in mine), sum(int(p.get("budget") or 0) for p in mine)
+        many = f"{len(mine)} alternative{'' if len(mine) == 1 else 's'}"
+        if reason in (NOT_SEARCHED, "same_as_first"):
+            parts.append(f"{many} not searched ({used} evaluation(s) to tell): {say(reason)}")
+        elif reason == "failures" and len(groups) > 1:
+            parts.append(f"{many} used {used} of the {allowed} allowed and gave no result")
+        else:
+            parts.append(f"{many} used {used} of the {allowed} allowed and stopped because {say(reason)}")
+    return "; ".join(parts)
+
+
 def merge_outcomes(outcomes, levels, block):
     """The outcome of a search over every alternative (see :func:`compare`)."""
     sign = _sign(block)
@@ -2322,7 +2346,8 @@ def merge_outcomes(outcomes, levels, block):
     stops = [o["stopped_because"] for o in outcomes if o["stopped_because"] not in ("failures", NOT_SEARCHED)]
     stops = stops or [o["stopped_because"] for o in outcomes]
     stopped = next((s for s in ("time", "the simulation could not be loaded", "failures", "scan_unchanged") if s in stops),
-                   "budget" if "budget" in stops else stops[0])
+                   "budget" if "budget" in stops else
+                   "share" if "share" in stops and stops[0] == "converged" else stops[0])
     first = outcomes[0]
     out = {
         "rows": rows, "evaluations": sum(o["evaluations"] for o in outcomes),
@@ -2336,6 +2361,8 @@ def merge_outcomes(outcomes, levels, block):
         "start_log": [dict(s, level=dict(lv)) for o, lv in zip(outcomes, levels) for s in o["start_log"]],
         "seed": first["seed"], "failed": sum(o["failed"] for o in outcomes),
         "infeasible": sum(o["infeasible"] for o in outcomes), "best": best,
+        "scan_failed": sum(o.get("scan_failed", 0) for o in outcomes),
+        "scan_infeasible": sum(o.get("scan_infeasible", 0) for o in outcomes),
         "rounds": [dict(r, level=dict(lv)) for o, lv in zip(outcomes, levels) for r in o["rounds"]],
         "fixed": dict(level_block(block, win["level"])["fixed"]),
     }
@@ -2725,6 +2752,7 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
     evaluations = {"search": outcome["evaluations"], "budget": outcome["budget"], "starts": outcome["starts"],
                    "per_start": outcome["per_start"], "scan": outcome["scan_evaluations"],
                    "failed": outcome["failed"], "infeasible": outcome["infeasible"],
+                   "scan_failed": outcome.get("scan_failed", 0), "scan_infeasible": outcome.get("scan_infeasible", 0),
                    "budget_ran_out": outcome["budget_ran_out"], "stopped_because": outcome["stopped_because"],
                    **({"run_not_used": outcome["run_not_used"]["count"]} if outcome.get("run_not_used") else {}),
                    **({"no_effect": outcome["no_effect"]} if outcome.get("no_effect") else {}),
