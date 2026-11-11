@@ -78,6 +78,7 @@ from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import audit_open_items as _audit_open
 from . import confirmations as _confirmations
+from . import cross_check_items as _cross_check_items
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
@@ -2261,8 +2262,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 finding = str(entry.get("finding") or "")[:200]
                 candidates = entry.get("candidates") or []
                 verdicts = [b for b in ("supporting", "conflicting") if entry.get(b)]
+                # a result FI held no value of was not searched: the trace must not read that as a check that found nothing
                 self._claim(node, key, "literature_verdict", entry.get("summary"), finding=finding,
-                            decision=", ".join(verdicts) or "neutral")
+                            decision="not checked" if entry.get("status") == "not_checked"
+                            else ", ".join(verdicts) or "neutral")
                 for bucket in ("supporting", "conflicting"):
                     for item in entry.get(bucket) or []:
                         if not isinstance(item, dict):
@@ -2988,16 +2991,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         Both re-entry branches share the same ``engine.max_iterations``
         budget so the whole quest stays bounded.
 
-        Empty-cross_check guard: ``_node_cross_check`` returns
-        ``{"cross_check": []}`` early when ``analysis.key_findings`` is
-        empty OR when ``cross_check_per_finding_k <= 0`` — both BEFORE
-        the iteration-bump block runs. If analyze still emits
-        ``next_step: "broaden_lit"`` in that case, the loop literature →
-        design → implement → execute → analyze → cross_check → broaden_lit
-        never increments ``iteration`` and the cap never fires. Terminate
-        on empty cross_check: there are no findings to broaden literature
-        against, so writing the paper with what we have is the safe
-        choice (audit BLOCK #11).
+        ``_node_cross_check`` returns ``{"cross_check": []}`` early only when ``cross_check_per_finding_k <= 0`` (the draft
+        profile skips this step); that return also carries ``cross_check_route: "write"``. Every other pass bumps the
+        iteration itself on a route that is not ``write``, so a ``broaden_lit`` loop is bounded by
+        ``engine.max_iterations`` whatever the number of results looked up (a run with none routes by ``next_step``).
 
         The cross_check node decides the route (``cross_check_route``) before it spends a round, and this router reads
         it, as the evidence gate's router does: a router that decided again after the node raised ``iteration`` saw the
@@ -3007,14 +3004,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         route = state.get("cross_check_route")
         if route in ("write", "broaden_lit", "redesign"):
             return route
+        if not state.get("cross_check"):
+            return "write"  # a checkpoint the new node did not write: this router bumps no round, so it never loops
         return self._cross_check_route(state)
 
     def _cross_check_route(self, state: QuestState) -> str:
         """``write``, ``broaden_lit`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
         confirm stage of ``engine.phased`` and the rounds left (``iteration`` before this round is spent)."""
         if not self.config.engine.enable_analyze_reroute:
-            return "write"
-        if not state.get("cross_check"):
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
@@ -16883,20 +16880,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         figure_only = produced and result.get("returncode", 1) != 0
         return bool((state.get("exec_give_up_reason") and not figure_only) or not produced or not state.get("result_json"))
 
-    def _experiment_gave_no_result(self, state: QuestState) -> bool:
-        """A simulation ran (its record is there) and produced no result at all. A quest with no simulation, one that has
-        not run an experiment at all, or a run that failed after it wrote some results (a time limit part way through)
-        is not this case: what it wrote is checked as before. No number in the result is no result, as at the evidence
-        gate (:meth:`_no_results_verdict`)."""
-        exec_result = state.get("exec_result")
-        if not (isinstance(exec_result, dict) and exec_result):
-            return False
-        if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
-            return False
-        from . import numeric_oracle as _numeric_oracle
-
-        return not any(True for _ in _numeric_oracle.flatten_numbers(state.get("result_json"), keep_zero=True))
-
     def _improve_skip(self, state: QuestState) -> str | None:
         """Why the improve loop does not run after this run, or ``None`` when it may."""
         limit = int(self.config.engine.improve_rounds or 0)
@@ -21879,6 +21862,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # any via the pause-drop gate) into the same block so analyze
         # sees them alongside.
         replicates = state.get("result_json_replicates") or []
+        payload_notes: list[str] = []  # FI's notes on the aggregate (precision, coverage, omitted metrics): `fi_notes`
         if replicates and (len(replicates) > 1 or state.get("result_json_trials")):
             assertions = _replicate_assertions(state)
             agg = _aggregate_result_json_replicates(replicates, assertions=assertions, kinds=_replicate_metric_kinds(state))
@@ -21901,17 +21885,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "n_replicates": len(replicates),
             }
             if precision_note:
-                payload["precision_note"] = precision_note
+                payload_notes.append(str(precision_note))
             coverage = _run_manifest.strata_coverage(self._protocol_block(state), state.get("result_json"))
             if coverage:
-                payload["coverage_note"] = (
+                payload_notes.append(
                     "; ".join(coverage) + ". Say so in the limitations and in the summary: the result is for those "
                     "settings, not the whole design."
                 )
             if constant:
-                payload["aggregate_note"] = (
+                payload_notes.append(
                     f"{len(constant)} further metric(s) were identical across "
-                    f"all {len(replicates)} seeds and are omitted here; see "
+                    f"all {len(replicates)} seeds and are omitted from the result block; see "
                     f"result_json_seed_0 for their values."
                 )
             # Per-stratum CIs + pairwise effect sizes + multiple-comparison
@@ -21954,43 +21938,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "have the experiment emit summary statistics (not raw arrays) in "
                 "its RESULT_JSON.", _rj_orig, len(result_json_block),
             )
+        # The script's own stdout, alone: FI's notes about the run go in their own section of the prompt (``fi_notes``
+        # below), never in front of the stdout or inside the result payload, where the model read them as the script's
+        # output and gave them back as findings about the results.
         stdout_for_analyze = exec_result.get("stdout_tail", "")[:2000]
-        if degenerate:
-            stdout_for_analyze = (
-                "[FI NOTE] The experiment ran but every numeric metric is ~0 — "
-                "a degenerate/broken run, not a real result. Write this up as an "
-                "honest failure note: state plainly that no usable measurement was "
-                "produced, hypothesize the likely cause (sampling/grid, threshold, "
-                "or normalization bug), and do NOT report the zeros as findings.\n\n"
-                + stdout_for_analyze
-            )
-        elif not state.get("result_json") and not (
-            state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
-            or self.config.engine.analyze_local_first
-        ):
-            # The degenerate note above is for an all-zero result; a script that crashed printed none at all, and the
-            # analysis then read like a literature review of the question the experiment was meant to answer.
-            stdout_for_analyze = (
-                f"[FI NOTE] The experiment produced no results (exit code {exec_result.get('returncode')}). Nothing "
-                "was measured. Say so plainly: the key findings are what the failure shows, not what the literature "
-                "says about the question, and no number may be reported as a result of this run.\n\n"
-                + stdout_for_analyze
-            )
-        if once_note := self._ran_once_note():
-            stdout_for_analyze = f"[FI NOTE] {once_note}\n\n{stdout_for_analyze}"
-        if no_difference := self._no_difference_note():
-            stdout_for_analyze = f"[FI NOTE] {no_difference}\n\n{stdout_for_analyze}"
+        fi_notes: list[str] = []
+        # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
+        if oracle_note := _oracle.analysis_note(self._judged_checks()).strip():
+            fi_notes.append(oracle_note)
         if state.get("result_json_replicate_seed_ignored") and state.get("result_json_no_random_source"):
-            stdout_for_analyze = (
+            fi_notes.append(
                 "[FI NOTE] This study is deterministic: the script draws no random numbers, so one run is the whole "
                 "result and repeating it returns the same numbers. Report it as a single deterministic run and do NOT "
                 "report a mean over seeds, a standard error or a confidence interval. Do not list missing repeats as "
                 "a limitation. Say instead that its trust rests on convergence, conservation and analytic-limit "
-                "checks, and name which of those were and were not done.\n\n"
-                + stdout_for_analyze
+                "checks, and name which of those were and were not done."
             )
         elif state.get("result_json_replicate_seed_ignored"):
-            stdout_for_analyze = (
+            fi_notes.append(
                 "[FI NOTE] Replication was configured, but the experiment script "
                 "never reads FI_REPLICATE_SEED (or reads it without the value "
                 "reaching any random generator), so every replicate repeated the "
@@ -21999,11 +21964,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "mean over seeds, a standard error, a confidence interval, or any "
                 "spread across replicates, and say plainly in the limitations that "
                 "the experiment was not replicated because it does not vary with "
-                "the seed it is given.\n\n"
-                + stdout_for_analyze
+                "the seed it is given."
             )
-        # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
-        stdout_for_analyze = _oracle.analysis_note(self._judged_checks()) + stdout_for_analyze
+        if no_difference := self._no_difference_note():
+            fi_notes.append(f"[FI NOTE] {no_difference}")
+        if once_note := self._ran_once_note():
+            fi_notes.append(f"[FI NOTE] {once_note}")
+        if degenerate:
+            fi_notes.append(
+                "[FI NOTE] The experiment ran but every numeric metric is ~0 — "
+                "a degenerate/broken run, not a real result. Write this up as an "
+                "honest failure note: state plainly that no usable measurement was "
+                "produced, hypothesize the likely cause (sampling/grid, threshold, "
+                "or normalization bug), and do NOT report the zeros as findings."
+            )
+        elif not state.get("result_json") and not (
+            state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            # The degenerate note above is for an all-zero result; a script that crashed printed none at all, and the
+            # analysis then read like a literature review of the question the experiment was meant to answer.
+            fi_notes.append(
+                f"[FI NOTE] The experiment produced no results (exit code {exec_result.get('returncode')}). Nothing "
+                "was measured. Say so plainly: no number of this run is a result and what failed is said by FI, not "
+                "what the literature says about the question, and no number may be reported as a result of this run."
+            )
+        fi_notes.extend(f"[FI NOTE] {n}" for n in payload_notes)
+        fi_record_block = "\n\n".join(fi_notes) or "(FI has nothing to add about this run.)"
         # Read the ACTUAL contents of any user-dropped data (the pause-drop
         # gate writes to inputs/data/). Previously only the file PATHS were
         # surfaced, so analyze never saw the numbers — a dropped latency.csv
@@ -22044,6 +22031,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             returncode=str(exec_result.get("returncode")),
             duration_s=f"{exec_result.get('duration_s', 0):.1f}",
             timed_out=str(exec_result.get("timed_out", False)),
+            fi_record_block=fi_record_block,
             stdout_tail=stdout_for_analyze,
             stderr_tail=_function_steps.traceback_end(exec_result.get("stderr_tail", ""), 1000),
             result_json=result_json_block,
@@ -22117,42 +22105,49 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         return patch
 
     async def _node_cross_check(self, state: QuestState) -> QuestState:
-        """For each key finding, search literature with the
-        finding text as the query, then classify hits as supporting /
-        conflicting / neutral. Results land in ``state['cross_check']``
-        and are surfaced in the write prompt's ``$cross_check_block``."""
-        findings = list((state.get("analysis") or {}).get("key_findings") or [])
-        if not findings:
-            self._log.info("[cross_check] no key_findings; skipping")
-            return {"cross_check": [], "cross_check_route": "write"}
-
+        """For each result FI's own record holds a value of (:mod:`core.cross_check_items`), search the literature with the
+        result's name and the literature step's query, then classify the hits as supporting / conflicting / neutral
+        against the sentence FI wrote from the record. Nothing is read from the analysis's text, so no note of FI's can
+        become a query, a sentence to classify or a stored claim. A result with no value is entered as not checked, with
+        FI's reason, and not searched. Results land in ``state['cross_check']`` and are surfaced in the write prompt's
+        ``$cross_check_block``."""
         per_finding_k = self.config.engine.cross_check_per_finding_k
         if per_finding_k <= 0:
             self._log.info("[cross_check] disabled by config (per_finding_k=0)")
             return {"cross_check": [], "cross_check_route": "write"}
 
+        try:
+            what = _cross_check_items.items(
+                quest_root=self.quest_root, protocol=self._protocol_block(state),
+                requirements=self._topic_requirements_read(), covered=self._topic_covered_read(),
+                design=state.get("design"),
+                context=str(state.get("literature_query") or "").strip()
+                or _topic_req.topic_sentence(state.get("topic") or self.config.topic),
+                no_simulation=bool(state.get("no_simulation_resolved")), result_json=state.get("result_json"),
+                degenerate=bool(state.get("degenerate_result")))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is a literature check not made, never a stop
+            self._log.warning("[cross_check] FI's record of the results could not be read (%s: %s); nothing to look up",
+                              type(e).__name__, str(e)[:200])
+            what = []
+        if not what:
+            self._log.info("[cross_check] FI's record holds no result to look up; skipping")
+
         out: list[dict[str, Any]] = []
-        no_result = self._experiment_gave_no_result(state)
-        if no_result:
-            # The "findings" of a run with no results are its error text: no paper can support or refute that. The
-            # entries stay (the route after this step reads them), each saying plainly that nothing was checked.
-            self._log.info("[cross_check] the experiment produced no results, so there is nothing to check against "
-                           "the literature; no search made")
-        for finding in findings[:10]:  # cap to avoid runaway LLM cost
-            text = str(finding).strip()
-            if not text:
-                continue
-            if no_result:
+        for item in what:
+            text = item.sentence
+            if item.status != _cross_check_items.TO_CHECK:
+                self._log.info("[cross_check] not checked: %s (%s)", item.label[:60], item.why_not[:80])
                 out.append({
-                    "finding": text, "supporting": [], "conflicting": [], "neutral": [],
-                    "summary": "(not checked: the experiment produced no results)",
-                    "candidates": [],
+                    "finding": item.label, "result": item.result, "quantity": item.quantity, "status": "not_checked",
+                    "supporting": [], "conflicting": [], "neutral": [],
+                    "summary": f"(not checked: {item.why_not})", "why_not": item.why_not, "candidates": [],
                 })
                 continue
-            self._log.info("[cross_check] searching for: %s", text[:80])
+            base = {"result": item.result, "quantity": item.quantity, "query": item.query}
+            self._log.info("[cross_check] searching for: %s", item.query[:80])
             try:
                 hits = await self.knowledge.asearch(
-                    text, top_k=per_finding_k,
+                    item.query, top_k=per_finding_k,
                     chat_fn=functools.partial(self._chat_messages, node="source_router"),
                     work_scope=self._work_scope(state),
                 )
@@ -22161,7 +22156,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 hits = []
             if not hits:
                 out.append({
-                    "finding": text,
+                    "finding": text, **base, "status": "no_literature",
                     "supporting": [], "conflicting": [], "neutral": [],
                     "summary": "(no related literature surfaced)",
                     "candidates": [],
@@ -22318,7 +22313,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     )
 
             entry: dict[str, Any] = {
-                "finding": text,
+                "finding": text, **base, "status": "checked",
                 "supporting": parsed.get("supporting") or [],
                 "conflicting": parsed.get("conflicting") or [],
                 "neutral": parsed.get("neutral") or [],
@@ -22336,8 +22331,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if parsed.get("first_pass") is not None:
                 entry["first_pass"] = parsed.get("first_pass")
             out.append(entry)
-        if not no_result:
-            self._log.info("[cross_check] checked %d findings", len(out))
+        self._log.info("[cross_check] checked %d of %d results", sum(1 for e in out if e["status"] != "not_checked"),
+                       len(out))
         patch: QuestState = {"cross_check": out}
         # The route is decided here, once, before the round is spent (the router reads it): a re-route raises the
         # shared iteration counter so the design node sees the new iteration on its next visit, as `_node_review`
@@ -22466,10 +22461,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             n_findings = len(findings)
             cc = state.get("cross_check")
             cc = cc if isinstance(cc, list) else []
-            n_conflicting = 0
+            n_conflicting = n_not_checked = n_quantities_checked = 0
             for rec in cc:
                 if not isinstance(rec, dict):
                     continue
+                if rec.get("status") == "not_checked":
+                    n_not_checked += 1  # no value in FI's record: nothing was searched, so it is neither support nor conflict
+                    continue
+                if rec.get("quantity"):
+                    n_quantities_checked += 1  # the plan's map to the person's quantity stands; else a plan result only
                 # ``_node_cross_check`` writes per-finding records shaped
                 # ``{supporting: [...], conflicting: [...], neutral: [...]}``
                 # — read THOSE buckets. (The old code looked for
@@ -22497,6 +22497,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "n_key_findings": n_findings,
                 "n_findings_with_supporting_lit": n_supporting,
                 "n_findings_with_conflicting_lit": n_conflicting,
+                "n_results_checked": sum(1 for r in cc if isinstance(r, dict)) - n_not_checked,
+                "n_results_not_checked": n_not_checked,
+                "n_topic_quantities_checked": n_quantities_checked,
                 "has_results": bool(state.get("result_json") or {}),
                 "mode": (
                     "no_simulation"
@@ -29908,14 +29911,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         standing = ("accepted" if accepted and result_use in ("research", "decision")
                     and evidence_status == "publication_ready" else "preliminary")
 
-        analysis = state.get("analysis") or {}
         design = state.get("design") or {}
-        summary_parts: list[str] = []
-        if analysis.get("summary"):
-            summary_parts.append(str(analysis["summary"]))
-        for kf in analysis.get("key_findings", []) or []:
-            summary_parts.append(f"- {kf}")
-        summary = "\n".join(summary_parts)
+        # What memory holds as the study's claims is FI's own: the sentences it wrote from its record of each result it
+        # looked up (the cross-check's entries), and the paper's own abstract. The analysis's text (its summary and key
+        # findings, where FI's notes were restated as findings) is never stored.
+        record_claims = [str(e["finding"]) for e in (state.get("cross_check") or [])
+                         if isinstance(e, dict) and e.get("status") in ("checked", "no_literature") and e.get("finding")]
+        try:
+            summary = _paper_sections.abstract_of(artifacts.paper_md.read_text(encoding="utf-8"))
+        except OSError:
+            summary = ""
 
         # Distill the literature the agent actually saw into a curated
         # `external_refs` list. The Knowledge layer writes a spine doc
@@ -29977,7 +29982,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "iteration": state.get("iteration", 0),
             "hypothesis": design.get("hypothesis", ""),
             "method_summary": design.get("method", ""),
-            "key_findings": list(analysis.get("key_findings", []) or [])[:20],
+            "key_findings": record_claims[:20],
+            "claims_from": "record",
             # The idea this study pursued and the ones it chose it over, with how: what a later quest reads to know
             # the direction was one of several (the full record, pairwise verdicts included, is .fi/branch_ledger.jsonl).
             "chosen_idea": chosen_title,
@@ -30284,6 +30290,18 @@ _THIN_TEXT_CHARS = 100
 _THIN_MARKS = {"title": "title only", "blurb": "short blurb only"}
 
 
+#: The kinds a finished quest writes to Axon (accepted and preliminary standing).
+_QUEST_MEMORY_KINDS = frozenset({"fi_quest_summary", "fi_quest_paper", "fi_paper_spine", "fi_preliminary_summary",
+                                 "fi_preliminary_paper", "fi_preliminary_spine"})
+
+
+def _unchecked_quest_memory(meta: dict[str, Any]) -> bool:
+    """Whether ``meta`` is an entry a quest wrote before its findings were taken from FI's record: written by a quest
+    (it names one), of a kind a quest writes, and without ``claims_from == "record"``. Never a store write: read only."""
+    return (meta.get("kind") in _QUEST_MEMORY_KINDS and bool(meta.get("quest_id"))
+            and meta.get("claims_from") != "record")
+
+
 def _has_full_text(meta: dict[str, Any]) -> bool:
     """Whether a source's text is its full text: its ``content_quality`` when it has one (a fetch that returned only
     the abstract or a table of contents is not), else whether a fetch returned anything (an entry from before
@@ -30367,6 +30385,9 @@ def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) ->
         # The record holds no more than this says, and the writer is told so
         # where it reads the entry (see agents/write.md, "Citing sources").
         line1 += f" [{_THIN_MARKS[thin]}]"
+    if _unchecked_quest_memory(meta):
+        # An entry an earlier quest wrote from the model's own text: a precedent only as far as that text is.
+        line1 += " [findings taken from the model's text, not checked against FI's record]"
     if _retractions.is_retracted(meta):
         # Crossref lists a retraction of it (core/retractions.py): every block that names it says so.
         line1 += " [retracted]"
@@ -35391,10 +35412,14 @@ def _format_cross_check(state: QuestState) -> str:
     bulleted block for the write prompt's `$cross_check_block`."""
     checks = state.get("cross_check") or []
     if not checks:
-        return "(none — cross-check disabled or no key findings)"
+        return "(none — cross-check disabled or FI holds no result to look up)"
     lines: list[str] = []
     for c in checks:
         lines.append(f"### Finding: {c.get('finding', '(?)')}")
+        if c.get("status") == "not_checked":
+            lines.append(f"  not checked: {c.get('why_not') or 'FI holds no value of it'}")
+            lines.append("")
+            continue
         for bucket in ("supporting", "conflicting"):
             items = c.get(bucket) or []
             if not items:

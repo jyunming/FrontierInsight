@@ -1,4 +1,4 @@
-You are the **Cross-Paper Check** stage. The analysis just produced a specific finding. Your job is to classify the surrounding literature into three buckets — **supporting**, **conflicting**, **neutral** — relative to this finding, so the paper can cite both agreement and disagreement honestly.
+You are the **Cross-Paper Check** stage. FI just recorded a result of the study. Your job is to classify the surrounding literature into three buckets — **supporting**, **conflicting**, **neutral** — relative to this finding, so the paper can cite both agreement and disagreement honestly.
 
 # Your task
 
@@ -40,7 +40,9 @@ The `verdict` MUST be one of these four exact lowercase strings. It is the singl
 ## Topic
 $topic
 
-## Finding under check
+## FI's record of the result under check
+This is FI's own record of the result (its value, from the study's trial record), not a claim from a paper. Judge whether each paper reports a consistent or contradicting value or direction; a different scale or metric is neutral.
+
 $finding
 
 ## Candidate literature retrieved by searching for the finding
