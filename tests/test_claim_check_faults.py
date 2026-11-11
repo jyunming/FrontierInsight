@@ -335,3 +335,26 @@ def test_a_shorter_claim_on_a_title_only_source_is_placed_by_the_papers_sentence
              "fault": "wording", "citation_index": 1, "quote": "", "evidence": "x"}
     out, _n = _apply_title_only_rule(f"# T\n\n## Introduction\n\n{SPECIFIC}\n", SOURCES, [short])
     assert out[0]["fault"] == "no_source" and out[0]["where"] == [{"passage": SPECIFIC}]
+
+
+def test_a_sentence_citing_a_retracted_source_is_taken_out(tmp_path: Path) -> None:
+    """The retracted-source rule adds the citing sentence as a claim; FI's fault no_source takes it out of the paper."""
+    from core import retractions
+    from core.engine import _citing_sentences, _same_statement
+    from tests.test_plan_optimisation import _engine as plan_engine
+
+    cited = "Arrivals at the booth were counted every minute for a full year of operation [2]."
+    paper = f"# T\n\n## Introduction\n\nQueues form at booths. {cited} They clear later.\n\n## Limitations\nFew loads.\n\n## References\n1. A.\n2. B.\n"
+    added, n = retractions.apply_to_claims([], SOURCES, _citing_sentences(paper), _same_statement)
+    assert n == 1
+    claims = _claim_faults_from_sources(added, SOURCES, lambda _p: False)
+    assert [c["fault"] for c in claims] == ["no_source"]
+    eng = plan_engine(tmp_path, [])
+    (eng.quest_root / ".fi").mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "paper").mkdir(parents=True, exist_ok=True)
+    path = eng.quest_root / "paper.md"
+    path.write_text(paper, encoding="utf-8")
+    g = {"claims": claims, "total": 1, "status": "ok", "unsupported": [c["claim"] for c in claims]}
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
+    body = path.read_text(encoding="utf-8").split("## Limitations")[0]
+    assert "counted every minute" not in body and "Queues form at booths." in body
