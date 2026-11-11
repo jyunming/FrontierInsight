@@ -1540,12 +1540,14 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
                 return "not searched on its own"
             return f"{_fmt(p['best']['objective'])}{unit}" if p.get("best") else "no design that meets every limit"
 
+        searched = [p for p in compared if not (p.get("same_as") or p.get("status") == _osearch.NOT_SEARCHED)]
         lines.append(f"[optimise] {len(compared)} alternatives were compared; the best design found is under "
                      f"{_osearch.level_says(best.get('level') or {})}. Best of each: "
-                     + "; ".join(f"{_osearch.level_says(p['level'])}: {shown(p)}" for p in compared))
+                     + "; ".join(f"{_osearch.level_says(p['level'])}: {shown(p)}" for p in searched)
+                     + (f"{'; ' if searched else ''}the others were not searched on their own, named below"
+                        if len(searched) < len(compared) else ""))
         lines += [f"[optimise] {x}" for x in comparison_lines(record.get("compared") or {})]
-        for p in same:
-            lines.append(f"[optimise] {_osearch.same_as_says(p)}")
+        lines += [f"[optimise] {x}" for x in _osearch.same_as_group_says(same)]
     for p in skipped:  # named whether or not a best design was found
         lines.append(f"[optimise] {_osearch.not_searched_says(p)}")
     lines += [f"[optimise] {x}" for x in record.get("first_round") or []]
