@@ -191,3 +191,73 @@ async def test_the_replicate_seeds_raw_files_reach_data_results_and_a_crash_save
     bad = await crashed._node_execute({"deps": []})
     assert bad["exec_result"]["returncode"] != 0
     assert not (crashed.quest_root / "data" / "results").exists()
+
+
+def _earlier_run_left(engine: Engine) -> Path:
+    """data/results/ as an earlier run left it, 20 minutes ago: summary.json (to be written again by the next run with
+    the same content), grid.csv (to be rewritten with new content) and stale_table.csv (not written by the next run)."""
+    import os
+    import time
+
+    results = engine.quest_root / "data" / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    for name, text in (("summary.json", '{"v": 1}'), ("grid.csv", "x\n1\n"), ("stale_table.csv", "a\n1\n")):
+        (results / name).write_text(text, encoding="utf-8")
+        os.utime(results / name, (time.time() - 1200, time.time() - 1200))
+    return results
+
+
+@pytest.mark.asyncio
+async def test_a_result_file_the_last_run_wrote_again_with_the_same_content_stays_and_an_earlier_runs_file_goes(tmp_path: Path) -> None:
+    """The run is the real one: an analysis run from a copy by OutsideExecutor (the same content is not copied back), then
+    the real _save_run_data. Before the fix summary.json was removed, its old modification time being taken for an earlier
+    run's; stale_table.csv (not written by the run) is the known positive that the cleaning still removes."""
+    import sys
+    import time
+
+    from core import outside_run
+    from tests.test_outside_run import _Real
+
+    engine = Engine(_config(tmp_path))
+    results = _earlier_run_left(engine)
+    (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    mark = outside_run.write_mark(engine.quest_root)
+    since = time.time()
+    script = ("import pathlib, time; r = pathlib.Path('data/results')\n"
+              "(r / 'summary.json').write_text('{\"v\": 1}')\n"
+              "(r / 'grid.csv').write_text('x\\n%s\\n' % time.time())\n")
+    box = outside_run.OutsideExecutor(_Real(), engine.quest_root, base=tmp_path / "s",
+                                      inputs=outside_run.ANALYSIS_INPUTS, skip=())
+    ran = await box.execute([sys.executable, "-B", "-c", script], cwd=engine.quest_root, timeout_s=60)
+    assert ran.returncode == 0, ran.stderr
+    engine._save_run_data(since, False, wrote=outside_run.written_since(engine.quest_root, mark))
+    assert sorted(p.name for p in results.iterdir()) == ["grid.csv", "summary.json"]
+    assert (results / "summary.json").read_text(encoding="utf-8") == '{"v": 1}'
+
+
+def test_a_file_this_run_did_not_write_is_removed_and_one_in_its_record_is_kept(tmp_path: Path) -> None:
+    import time
+
+    engine = Engine(_config(tmp_path))
+    results = _earlier_run_left(engine)
+    since = time.time()
+    engine._save_run_data(since, False)  # no record of the run (the code ran in the quest folder itself): by time, as before
+    assert list(results.iterdir()) == []
+    results = _earlier_run_left(engine)
+    engine._save_run_data(since, False, wrote={"data/results/summary.json"})
+    assert [p.name for p in results.iterdir()] == ["summary.json"]
+
+
+def test_a_quest_folder_table_the_run_wrote_again_with_the_same_content_is_copied_to_data(tmp_path: Path) -> None:
+    import os
+    import time
+
+    engine = Engine(_config(tmp_path))
+    root = engine.quest_root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "results.csv").write_text("x\n1\n", encoding="utf-8")
+    (root / "older.csv").write_text("y\n1\n", encoding="utf-8")
+    for name in ("results.csv", "older.csv"):
+        os.utime(root / name, (time.time() - 1200, time.time() - 1200))
+    engine._save_run_data(time.time(), False, wrote={"results.csv"})
+    assert (root / "data" / "results" / "results.csv").is_file() and not (root / "data" / "results" / "older.csv").exists()

@@ -125,3 +125,54 @@ def test_an_environment_value_naming_a_path_no_one_may_look_at_is_passed_over(tm
     monkeypatch.setattr(Path, "stat", stat)
     got = named_paths(root, [denied, os.pathsep.join(["raw", "/usr/bin"]), str(root / "raw" / "old.txt")])
     assert got == ["raw", "raw/old.txt"]
+
+
+_SAME_SUMMARY = "import pathlib; pathlib.Path('data/results/summary.json').write_text('{\"v\": 1}')\n"
+
+
+def _quest_with_results(tmp_path: Path) -> Path:
+    """A quest whose data/results/ holds what an earlier run wrote, 20 minutes ago."""
+    import time
+
+    root = _quest(tmp_path)
+    results = root / "data" / "results"
+    results.mkdir(parents=True)
+    (results / "summary.json").write_text('{"v": 1}', encoding="utf-8")
+    (results / "other.json").write_text('{"v": 2}', encoding="utf-8")
+    long_ago = time.time() - 1200
+    for p in results.iterdir():
+        os.utime(p, (long_ago, long_ago))
+    return root
+
+
+async def test_a_file_written_again_with_the_same_content_is_in_the_runs_record_but_not_copied_back(tmp_path: Path) -> None:
+    """The quest's file keeps its old modification time (nothing is copied back), so only FI's own record of the run's
+    writes can say the run wrote it. A file the run only read (other.json) is not in it."""
+    from core.outside_run import note_written, write_mark, written_since
+
+    root = _quest_with_results(tmp_path)
+    before = (root / "data" / "results" / "summary.json").stat().st_mtime_ns
+    mark = write_mark(root)
+    box = OutsideExecutor(_Real(), root, base=tmp_path / "s", inputs=ANALYSIS_INPUTS, skip=())
+    script = _SAME_SUMMARY + "print(open('data/results/other.json').read())\n"
+    ran = await box.execute([sys.executable, "-B", "-c", script], cwd=root, timeout_s=60)
+    assert ran.returncode == 0, ran.stderr
+    assert box.last is not None and box.last.brought_back == [] and box.last.rewritten == ["data/results/summary.json"]
+    assert (root / "data" / "results" / "summary.json").stat().st_mtime_ns == before  # not copied back
+    assert written_since(root, mark) == {"data/results/summary.json"}
+    # the count only moves forward: a later mark sees nothing of this run
+    assert written_since(root, write_mark(root)) == set()
+    note_written(root, ["x.csv"])
+    assert written_since(root, mark) == {"data/results/summary.json", "x.csv"}
+
+
+async def test_the_step_record_names_the_step_that_wrote_a_result_file_again_with_the_same_content(tmp_path: Path) -> None:
+    from core import step_writes
+
+    root = _quest_with_results(tmp_path)
+    box = OutsideExecutor(_Real(), root, base=tmp_path / "s", inputs=ANALYSIS_INPUTS, skip=())
+    with step_writes.watching(root) as watch:
+        ran = await box.execute([sys.executable, "-B", "-c", _SAME_SUMMARY], cwd=root, timeout_s=60)
+        assert ran.returncode == 0, ran.stderr
+        watch.mark(step_writes.ANALYSIS)
+    assert step_writes.read(root) == {"summary.json": "analysis"}

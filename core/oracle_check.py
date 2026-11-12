@@ -1008,6 +1008,30 @@ def _same_setting(a: Any, b: Any) -> bool:
     return True
 
 
+def case_names_cell(protocol: dict[str, Any] | None, case: Any, cell: Any) -> bool:
+    """Whether a check's case names this setting of the delivered run. Every key of the cell has the same value in the
+    case (numbers compared as numbers), and every other key the case names is one of the protocol's ``constants`` or
+    ``thresholds`` at the protocol's own value: FI hands those to the code in every run, so the delivered cells (which
+    hold only the grid's settings) and a case that spells them out describe the same trials. A case naming a constant or
+    threshold at another value, or a key that is neither, is another setting."""
+    if not isinstance(case, dict) or not isinstance(cell, dict) or not cell:
+        return False
+    protocol = protocol if isinstance(protocol, dict) else {}
+    fixed: dict[str, Any] = {}
+    for part in ("constants", "thresholds"):
+        if isinstance(protocol.get(part), dict):
+            fixed.update(protocol[part])
+    rest: dict[str, Any] = {}
+    for k, v in case.items():
+        if k in cell:
+            rest[k] = v
+        elif k in fixed and _same_setting({k: v}, {k: fixed[k]}):
+            continue  # the protocol's own value, which FI hands the code in every run
+        else:
+            return False
+    return _same_setting(cell, rest)
+
+
 def _delivered_rows(cell: dict[str, Any], names: list[str]) -> list[dict[str, float]]:
     """The delivered run's trials of one setting as rows of ``names`` (a trial joined across the metrics by FI's own trial
     number, never by position); a trial missing any of the names, or with a number that is not finite, is left out."""
@@ -1026,18 +1050,22 @@ def _delivered_rows(cell: dict[str, Any], names: list[str]) -> list[dict[str, fl
 
 
 def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | None, version: str,
-                         ) -> tuple[dict[str, Any] | None, list[str]]:
-    """``(record, names)``: ``needs/ORACLE_CHECK.json`` with each check that the trials of the gate could not decide for lack
-    of time (``mc.why == "time"``) judged again on the delivered run's own trials (``trials``: ``raw/trials.json``), and the
-    names of the checks changed; ``(None, [])`` when nothing changes. The record given is not changed.
+                         ) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+    """``(record, decided, reworded)``: ``needs/ORACLE_CHECK.json`` with each check that the trials of the gate could not
+    decide for lack of time (``mc.why == "time"``), or that an earlier delivered run could not decide either
+    (``mc.why == "delivered"``), judged again on the delivered run's own trials (``trials``: ``raw/trials.json``); the
+    names of the checks now decided; and the names of the checks those trials still leave not decided, whose record now
+    says so on the delivered run's trials. ``(None, [], [])`` when nothing changes. The record given is not changed.
 
     A check is judged again only when FI can read everything from its own record: the code that measured it is the code
-    that ran now (``version`` is the entry's ``script_version``), the check is as it was (its fingerprint), its case is
-    exactly one setting of the delivered run, whose trials are more than the gate had and none failed, and its measure
-    is a mean of metrics the protocol declares as means. The verdict is the one the gate would have given on those trials
-    (:func:`core.mc_error.statistic`, :func:`core.mc_error.mean_verdict`). A check still not decided stays as it was; a
-    check that was undecided for another reason is not touched. A pass leaves the list of checks the quest went on with;
-    a fail stays in it as a failure; the quest's status becomes ``ok`` when nothing is left in it.
+    that ran now (``version`` is the entry's ``script_version``), the check is as it was (its fingerprint), its case names
+    exactly one setting of the delivered run (:func:`case_names_cell`), whose trials are more than the check was last
+    judged on and none failed, and its measure is a mean of metrics the protocol declares as means. The verdict is the one
+    the gate would have given on those trials (:func:`core.mc_error.statistic`, :func:`core.mc_error.mean_verdict`). A
+    check still not decided stays not decided, recorded on the delivered trials with why ``delivered`` (its count and its
+    words replace the side run's everywhere they are kept); a check that was undecided for another reason is not touched.
+    A pass leaves the list of checks the quest went on with; a fail stays in it as a failure; the quest's status becomes
+    ``ok`` when nothing is left in it.
 
     The trials must be the same trials: the entry's ``trial_basis`` (kept by the gate, :func:`trial_basis`) must equal the
     delivered run's. An entry with none (a record written before the gate kept it) is never judged again. A fail on the
@@ -1047,15 +1075,16 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
 
     from . import accepted_checks as _accepted
     from . import mc_error as _mc
+    from . import oracle_triage as _triage  # a late import: core.oracle_triage imports this module
     from .optimise import complete_case  # a late import: core.optimise imports this module
 
     if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON or not isinstance(trials, dict):
-        return None, []
+        return None, [], []
     attempts = record.get("attempts")
     last = attempts[-1] if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else None
     cells = [c for c in trials.get("cells") or [] if isinstance(c, dict) and isinstance(c.get("cell"), dict)]
     if last is None or not cells:
-        return None, []
+        return None, [], []
     named = {str(o["name"]).strip().lower(): o for o in declared(protocol)}
     means, proportions = _mc.mean_names(protocol), _mc.proportion_names(protocol)
     repeated = _mc.repeats_trials(protocol)
@@ -1063,11 +1092,13 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
     out_last = out["attempts"][-1]
     entries = {str(e.get("name") or "").strip().lower(): e for e in out.get("went_on") or [] if isinstance(e, dict)}
     done: list[str] = []
+    reworded: list[str] = []
     for j in out_last.get("judged") or []:
         mc = mc_of(j)
         name = str(j.get("name") or "").strip()
         oracle, entry = named.get(name.lower()), entries.get(name.lower())
-        if (not j.get("undecided") or mc is None or mc.get("verdict") != "undecided" or mc.get("why") != "time"
+        if (not j.get("undecided") or mc is None or mc.get("verdict") != "undecided"
+                or mc.get("why") not in ("time", "delivered")
                 or mc.get("read_as") != "mean" or oracle is None or entry is None or not entry.get("undecided")):
             continue
         if entry.get("script_version") != version or entry.get("fingerprint") != _accepted.fingerprint(oracle):
@@ -1082,34 +1113,60 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
         names = _mc.measure_names(measure)
         if not names or not all(n in means for n in names):
             continue
-        here = [c for c in cells if _same_setting(c["cell"], complete_case(protocol, case))]
+        full = complete_case(protocol, case)
+        here = [c for c in cells if case_names_cell(protocol, full, c["cell"])]
         if len(here) != 1 or int(here[0].get("failed") or 0) or int(here[0].get("ok") or 0) <= int(mc.get("trials") or 0):
             continue
         rows = _delivered_rows(here[0], names)
         if len(rows) != int(here[0].get("ok") or 0):
             continue
         stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated)
-        said = _mc.mean_verdict(stat, expected, limit) if stat is not None else None
-        if said is None or stat.get("value") is None:
+        if stat is None or stat.get("value") is None:
             continue
+        said = _mc.mean_verdict(stat, expected, limit)
         value = float(stat["value"])
-        new = _mc.record(stat, read_as="mean", verdict=said, why="", failed=0,
-                         started=int(here[0].get("planned") or len(rows)), judged_on=DELIVERED_RUN)
+        started = int(here[0].get("planned") or len(rows))
+        new = _mc.record(stat, read_as="mean", verdict=said or "undecided", why="" if said else "delivered", failed=0,
+                         started=started, judged_on=DELIVERED_RUN)
+        # Only the delivered measurement stays: what the gate's side run returned is replaced, not mixed in. Every metric
+        # is averaged over the same joined trials the check is judged on.
+        every = _delivered_rows(here[0], sorted(k for k in (here[0].get("metrics") or {}) if isinstance(k, str)))
+        if every and len(every) == len(rows):
+            returned = {k: math.fsum(r[k] for r in every) / len(every) for k in every[0]}
+        else:  # a metric FI cannot join by trial number: each metric averaged over its own values, as before
+            returned = {}
+            for k, m in (here[0].get("metrics") or {}).items():
+                vals = [float(v) for v in (m.get("values") if isinstance(m, dict) else None) or []
+                        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+                if vals:
+                    returned[k] = math.fsum(vals) / len(vals)
+        returned["n_trials"] = float(len(rows))
+        for c in out_last.get("checks") or []:
+            if isinstance(c, dict) and str(c.get("name") or "").strip().lower() == name.lower():
+                c.update(value=value, mc=new, returned=returned)
+        stale = f"the oracle {name!r} "
+        if said is None:
+            # Still not decided on the delivered trials: the check stays not decided and set aside, and every copy of
+            # its words now names the delivered run's trials, never the side run's count or its "time" reason.
+            j.update(value=value, mc=new, judged_on=DELIVERED_RUN)
+            how, why_not = _mc.words(new), _mc.undecided_words(new, limit)
+            for holder in (out, out_last):
+                holder["problems"] = [p for p in holder.get("problems") or [] if not str(p).startswith(stale)]
+                holder["problems"].append(
+                    f"the oracle {name!r} was not decided: FI measured {_fmt(value)} ({how}), the protocol expects "
+                    f"{_fmt(expected)} within {_fmt(limit)}; {why_not}, so the result is not validated against it")
+            entry.update(measured=value, mc_words=how, undecided=True, undecided_words=why_not)
+            # The look of the trials and the reason it is set aside, as the gate words them (oracle_triage.trials_entry).
+            row = _triage.trials_entry(oracle, j)
+            out_last["triage"] = [row if isinstance(t, dict) and t.get("check") == name and t.get("kind") == "trials"
+                                  else t for t in out_last.get("triage") or []]
+            if isinstance(out.get("set_aside"), dict) and name in out["set_aside"]:
+                out["set_aside"][name] = row["cause"]["text"]
+            reworded.append(name)
+            continue
         passed = said == "pass" and abs(value - expected) <= limit
         j.update(value=value, mc=new, passed_by_engine=passed, judged_on=DELIVERED_RUN)
         j.pop("undecided", None)
-        for c in out_last.get("checks") or []:
-            if isinstance(c, dict) and str(c.get("name") or "").strip().lower() == name.lower():
-                # Only the delivered measurement stays: what the gate's side run returned is replaced, not mixed in.
-                returned = {}
-                for k, m in (here[0].get("metrics") or {}).items():
-                    vals = [float(v) for v in (m.get("values") if isinstance(m, dict) else None) or []
-                            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
-                    if vals:
-                        returned[k] = math.fsum(vals) / len(vals)
-                returned["n_trials"] = float(len(rows))
-                c.update(value=value, mc=new, returned=returned)
-        stale = f"the oracle {name!r} "
         for holder in (out, out_last):
             holder["problems"] = [p for p in holder.get("problems") or [] if not str(p).startswith(stale)]
             if not passed:
@@ -1127,8 +1184,8 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
                 entry.pop(k, None)
             entry.update(measured=value, mc_words=_mc.words(new))
         done.append(name)
-    if not done:
-        return None, []
+    if not done and not reworded:
+        return None, [], []
     if not out.get("set_aside"):
         out.pop("set_aside", None)
     if out.get("went_on"):
@@ -1137,7 +1194,7 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
         for k in ("went_on", "summary", "explained", "set_aside"):
             out.pop(k, None)
         out["status"] = "ok"
-    return out, done
+    return out, done, reworded
 
 
 def duplicate_names(oracles: list[dict[str, Any]], reported: dict[str, Any] | None = None) -> list[str]:
@@ -1274,8 +1331,9 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         "[FI NOTE] Before the main run the engine checked the protocol's oracles against the expected values and "
         "tolerances the protocol fixes:\n" + "\n".join(lines) + "\n"
         "These verdicts are the ones that count. If the results below also judge these oracles (a pass/fail flag, or the "
-        "script's own copy of an expected value or tolerance), that copy can be out of date: report the engine's verdicts "
-        "and numbers above, and do not report an oracle as failed or passed on the script's word.\n\n"
+        "script's own copy of an expected value or tolerance), that copy can be out of date: use the engine's verdicts "
+        "above and do not report the script's own (FI states them in the paper), and do not report an oracle as failed "
+        "or passed on the script's word.\n\n"
     )
 
 

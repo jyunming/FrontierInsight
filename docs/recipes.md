@@ -57,9 +57,12 @@ Then change `provider.name` to `openai` or `gemini`.
 
 > **Why `claude_cli` is NOT in this list:** `claude_cli` is the
 > Option-B path that shells out to the Claude Code CLI and reuses
-> its OAuth — it does NOT read `ANTHROPIC_API_KEY`. For
-> Anthropic API-key usage, use Option B (`claude auth login` + then set
-> `provider.name: claude_cli`).
+> its OAuth (`claude auth login` + then set `provider.name: claude_cli`),
+> so it bills your Claude subscription. FI sets no key for it, but
+> the CLI itself reads `ANTHROPIC_API_KEY` from the environment: when that
+> variable is set (a `.env` file loaded at launch counts), the CLI bills that
+> API account instead. FI says which account at the start of the quest;
+> remove the variable to use the subscription.
 
 #### What each provider charges you in — read this before picking
 

@@ -56,6 +56,7 @@ class Watch:
         self.root = Path(quest_root)
         self._start = snapshot(self.root)
         self._last = dict(self._start)
+        self._mark = _outside.write_mark(self.root)
         self.wrote: dict[str, str] = {}
         self.done = False
 
@@ -71,6 +72,12 @@ class Watch:
         for name, state in now.items():
             if self._last.get(name) != state:
                 self.wrote[name] = step
+        # A file a run from a copy wrote again with the content it had is not changed on disk, but the run wrote it.
+        for rel in _outside.written_since(self.root, self._mark):
+            folder, _, name = rel.rpartition("/")
+            if folder == RESULTS_DIR and name.endswith(".json") and name in now:
+                self.wrote[name] = step
+        self._mark = _outside.write_mark(self.root)
         self._last = now
         if step == ANALYSIS:
             self.done = True

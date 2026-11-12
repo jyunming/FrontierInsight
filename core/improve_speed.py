@@ -6,7 +6,8 @@ before the study is sized (a study that does not fit is sped up before it is cut
 the study itself, before and after each edit of the simulation: the same settings, the same trials, the same seeds. An
 edit is kept only when every number the sample returns is the same (to nine digits; a speed-up must not change what the
 study measures) and the sample is faster by at least :data:`MIN_SAVING` and by more than the timing's own noise
-(:func:`fast_enough`). Nothing the code prints and no time the code reports is read: the harness times the calls.
+(:func:`fast_enough`), and then again in repeated timings of both versions, taken alternately, that do not overlap
+(:func:`clearly_faster`). Nothing the code prints and no time the code reports is read: the harness times the calls.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import statistics
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +32,10 @@ SAMPLE_TRIALS = 12
 REPEATS = 2
 #: An edit is kept only when it saves at least this share of the sample's time (and more than the timing's noise).
 MIN_SAVING = 0.10
+#: A change that passes that first look is timed again, this many times each, old and new alternating (old, new, old,
+#: new, ...) so a machine that gets busier or quieter hits both. At most ``2 * CONFIRM_PAIRS`` more runs of the sample,
+#: and only for a change that already looks faster; a round's own time is set against its saving by the rounds' stop.
+CONFIRM_PAIRS = 4
 RTOL, ATOL = 1e-9, 1e-12
 #: A study that fits the time allowed and that FI expects to take less than this (padded, the whole study) is not sped
 #: up: the step would cost about as much time as it could save. A study that does not fit is always sped up first.
@@ -58,6 +64,8 @@ class Sample:
     failed: str = ""
     #: The wall time the sample took in all (its processes included), for what a round of the step costs.
     wall_s: float = 0.0
+    #: The time of each run of the sample (``seconds`` is the least of them), for judging a speed-up on repeats.
+    times: list[float] = field(default_factory=list)
 
 
 def sample_cells(grid: dict[str, list[Any]], oracles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -156,8 +164,8 @@ def why_not_run(rows: list[dict[str, Any]], result: Any, timeout_s: float, quest
 async def run_sample(executor: Any, python: Path | str, quest_root: Path, module: str, cells: list[dict[str, Any]], *,
                      deterministic: bool, thresholds: dict[str, Any] | None, in_each_run: dict[str, list[Any]] | None,
                      env: dict[str, str] | None, timeout_s: int, log: Any = None,
-                     timeouts: dict[str, int] | None = None) -> Sample:
-    """Run ``SAMPLE_TRIALS`` fixed-seed trials of each cell (``REPEATS`` times) and return the values of the first run and
+                     timeouts: dict[str, int] | None = None, repeats: int = REPEATS) -> Sample:
+    """Run ``SAMPLE_TRIALS`` fixed-seed trials of each cell (``repeats`` times, ``REPEATS`` unless said) and return the values of the first run and
     the least time any run took (the calls only, the first trial of each cell left out). A run that does not give every
     trial ends the sample, and ``failed`` says at which setting and why (:func:`why_not_run`)."""
     quest_root = Path(quest_root)
@@ -169,7 +177,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
     out_sample = Sample()
     started = time.monotonic()
     best: float | None = None
-    for rep in range(REPEATS):
+    for rep in range(max(1, int(repeats))):
         total = 0.0
         values: dict[str, list[dict[str, Any]]] = {}
         for cell in cells:
@@ -204,6 +212,7 @@ async def run_sample(executor: Any, python: Path | str, quest_root: Path, module
             total += sum(float(r.get("duration_s") or 0.0) for r in done[1:] or done)
         if rep == 0:
             out_sample.values = values
+        out_sample.times.append(total)
         best = total if best is None else min(best, total)
     out_sample.seconds = float(best or 0.0)
     out_sample.wall_s = time.monotonic() - started
@@ -269,6 +278,94 @@ def fast_enough(before_s: float, after_s: float, noise_s: float = 0.0) -> bool:
     samples of the unchanged code (``before_s - after_s > noise_s``)."""
     saved = before_s - after_s
     return before_s > 0 and saved >= MIN_SAVING * before_s and saved > max(0.0, noise_s)
+
+
+def clearly_faster(old_times: list[float], new_times: list[float]) -> bool:
+    """Whether repeated timings show the new version faster: EVERY timing of the new version is below EVERY timing of the old
+    one (the gain is larger than the spread of the repeats, so a change that does nothing, whose timings overlap the
+    old ones, is not kept), AND the medians differ by at least :data:`MIN_SAVING` of the old median. A busy machine slows
+    some runs, but the two versions alternate (:func:`alternate`), so it hits both. Needs at least two timings of each."""
+    if len(old_times) < 2 or len(new_times) < 2:
+        return False
+    old_med, new_med = statistics.median(old_times), statistics.median(new_times)
+    return old_med > 0 and max(new_times) < min(old_times) and old_med - new_med >= MIN_SAVING * old_med
+
+
+async def alternate(time_old: Any, time_new: Any, pairs: int = CONFIRM_PAIRS) -> tuple[list[float], list[float], str]:
+    """Time the old and the new version ``pairs`` times each, alternating old, new, old, new... ``time_old`` and ``time_new``
+    are async callables that put that version's code in place, run the sample once and return a :class:`Sample`. Returns
+    ``(old times, new times, why)``; ``why`` is not empty when a run of the sample did not run (the timings so far are
+    then not enough to judge)."""
+    old_times: list[float] = []
+    new_times: list[float] = []
+    for _ in range(max(1, int(pairs))):
+        for call, into in ((time_old, old_times), (time_new, new_times)):
+            sample = await call()
+            if sample.failed or sample.seconds <= 0:
+                return old_times, new_times, sample.failed or "no time measured"
+            into.append(sample.seconds)
+    return old_times, new_times, ""
+
+
+def can_afford_repeats(new_run_s: float, old_run_s: float, saves_on_study_s: float) -> bool:
+    """Whether the repeats of :func:`confirm` cost no more than the change claims to save on the study: ``CONFIRM_PAIRS``
+    runs of the sample of each version, taking ``new_run_s`` and ``old_run_s`` of wall time. A long sample is timed once,
+    as before, since the repeats would cost more than the change could give back."""
+    return CONFIRM_PAIRS * (max(0.0, new_run_s) + max(0.0, old_run_s)) <= max(0.0, saves_on_study_s)
+
+
+async def confirm(root: Path, old_files: Any, new_files: Any, sample: Any, entry: dict[str, Any], after: Sample,
+                  saves_on_study_s: float, *, before_s: float = 0.0, ignore: Any = frozenset(),
+                  guards_touched: Any = None) -> bool:
+    """The second look at a change that looked faster at first (one timing of each version is not a measurement of speed):
+    the old and the new code are timed alternately (:func:`alternate`; ``sample(1)`` runs the sample once) and the change
+    stays only when the timings do not overlap (:func:`clearly_faster`) and every run of the new code returns the same
+    numbers as its first run, ``after`` (``ignore``: the numbers that differ between runs of the same code, see
+    :func:`varying`). Skipped (returns True) when the repeats would cost more than the change saves
+    (:func:`can_afford_repeats`, on the wall time of a run of each version). ``guards_touched()`` lists the files FI judges the code by that
+    the runs changed (``outcome`` is then ``aborted``). Sets ``outcome`` and ``reason`` of ``entry`` when the change is not
+    kept, and ``repeats_old`` / ``repeats_new`` when it was timed again. Leaves the new code in place."""
+    from . import improve as _improve
+
+    per_run_s = max(after.seconds, after.wall_s / max(1, len(after.times) or REPEATS))
+    # the old code is slower by as much as the first look showed (``before_s``: its sample time, ``after.seconds`` the new one's)
+    old_run_s = per_run_s * max(1.0, before_s / max(after.seconds, 1e-9))
+    if not can_afford_repeats(per_run_s, old_run_s, saves_on_study_s):
+        return True
+
+    async def run_old() -> Any:
+        _improve.restore(root, old_files)
+        return await sample(1)
+
+    async def run_new() -> Any:
+        _improve.restore(root, new_files)
+        out = await sample(1)
+        if not out.failed and (bad := disagreements(after, out, ignore=ignore)):
+            out.failed = f"{len(bad)} number(s) of the sample changed, first: {bad[0]}"
+        return out
+
+    try:
+        old_t, new_t, why = await alternate(run_old, run_new)
+    except BaseException:
+        _improve.restore(root, old_files)  # whatever went wrong, the code is back to the version that was kept
+        raise
+    _improve.restore(root, new_files)
+    entry["repeats_old"] = [round(t, 3) for t in old_t]
+    entry["repeats_new"] = [round(t, 3) for t in new_t]
+    touched = list(guards_touched() or []) if guards_touched else []
+    if touched:
+        entry.update(outcome="aborted", reason="its repeated runs changed " + ", ".join(touched[:4]), touched=touched)
+        return False
+    if why:
+        entry.update(outcome="not kept", reason=f"the repeated timings did not run ({why})")
+        return False
+    if not clearly_faster(old_t, new_t):
+        entry.update(outcome="not kept",
+                     reason=f"not faster: timed again, old and new alternating, the old version took {min(old_t):.3f} to "
+                            f"{max(old_t):.3f} s and the new one {min(new_t):.3f} to {max(new_t):.3f} s (the first look, "
+                            f"{after.seconds:.3f} s, was one timing); they overlap or differ by less than a tenth")
+        return False
+    return True
 
 
 #: How many functions of the measured breakdown the model is shown.

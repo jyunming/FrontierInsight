@@ -104,7 +104,7 @@ def test_the_report_and_the_log_say_plainly_which_alternative_was_not_searched_a
     path.write_text(json.dumps(record), encoding="utf-8")
     text = best_design_report.section(tmp_path, block)
     assert "bowl" in text and "not searched, because its first evaluation also returned no objective" in text
-    assert "Each of the searched ones of the 3 alternatives" in text
+    assert "3 alternatives were compared" in text
     assert "Each of the 3 alternatives was searched on its own" not in text
     assert "bowl was not searched: its first evaluation also returned no objective" in json.dumps(record)
     assert "bowl was not searched" in osearch.not_searched_says(by_level["bowl"])

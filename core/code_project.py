@@ -203,20 +203,21 @@ def search(study):
 
     scanned = {}
 
-    def scan(grid, block=block):
+    def scan(grid, block=block, pool=False):
         # The scan's parts and what every evaluation goes through, as FI ran them (a part is not kept by JSON).
         # The scan measures every alternative of a compared condition together: it runs once, and is read for the
         # alternative each search starts (``block``).
         key = json.dumps({k: list(v) for k, v in grid.items()}, sort_keys=True, default=str)
+        rows_of = fi_search.scan_candidates if pool else fi_search.scan_rows
         if key in scanned:
-            return fi_search.scan_rows(scanned[key], block)
+            return rows_of(scanned[key], block)
         summary = scanned[key] = run_trials({"entry": entry, "grid": dict(grid), "runs_per_setting": runs, "base_seed": base,
                               "paired": True, "thresholds": study.get("thresholds") or {},
                               "sub_studies": getattr(grid, "sub_studies", None) or block.get("sub_studies"),
                               "in_each_run": block.get("in_each_run") or {}})
         (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         os.environ["FI_TRIALS"] = "raw/trials.json"
-        return fi_search.scan_rows(summary, block)
+        return rows_of(summary, block)
 
     def evaluate(cell):
         trials = [{"trial": t, "seed": None if entry == "run_cell" else trial_seed(base, "", t)} for t in range(runs)]
@@ -465,6 +466,18 @@ def record_installed(quest_root: Path, deps: list[str]) -> None:
         pass
 
 
+def fi_module_names() -> frozenset[str]:
+    """The import names of the modules FI itself writes beside a study's code (the frame's runtime, its reader of the record, its
+    drawing calls, its figure module, its formula calculator, its search). They come from the file names FI writes them under,
+    so a module FI adds to that list is never taken for a package to install: a copy of ``code/`` that lacks one (a study whose
+    analysis is the model's own never gets the reader of the record) imports it only where it is used, and it is not on PyPI."""
+    from . import skeleton as _skeleton
+    from . import analysis_frame as _analysis
+
+    files = (_skeleton.RUNTIME_FILE, _skeleton.TABLE_FILE, _skeleton.FIGURE_CALLS_FILE, SEARCH, f"{_analysis.FIGURES_MODULE}.py")
+    return frozenset({Path(f).stem for f in files} | {_analysis.CORE_DIR})
+
+
 def requirements_for(code_dir: Path, deps: list[str], *, installed: bool = False) -> list[str]:
     """What the scripts need: ``deps`` (the list FI actually installed, when ``installed``) plus each package the
     scripts import (outside an optional ``try/except ImportError``) that the list lacks. A quest environment can see
@@ -481,7 +494,7 @@ def requirements_for(code_dir: Path, deps: list[str], *, installed: bool = False
         full |= deps_mod.imported_modules(script, optional=False) or set()
     # A well-known module under a shared namespace (google.protobuf is protobuf) before the namespace is dropped.
     wanted = [m for m in sorted(deps_mod.IMPORT_TO_PIP) if "." in m and any(n == m or n.startswith(m + ".") for n in full)]
-    wanted += sorted(deps_mod.third_party_of(scripts, local, optional=False) - deps_mod.NOT_A_PACKAGE)
+    wanted += sorted(deps_mod.third_party_of(scripts, local, optional=False) - deps_mod.NOT_A_PACKAGE - fi_module_names())
     for name in wanted:
         pip = deps_mod.pip_name(name) or name
         if name in provided or deps_mod.normalize(pip) in have or deps_mod.normalize(name) in have:
@@ -916,6 +929,7 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
 
 
 REFUSED_KEPT = 200  # the newest refused tries kept under refs/fi/refused/; older ones are dropped
+RERUN_KEPT = 200  # the newest reruns' code kept under refs/fi/rerun/; older ones are dropped
 
 
 def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
@@ -928,6 +942,22 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
     the refused try returned) under ``.fi_refused/``. The branch, the index and the working folder are not touched;
     only the newest :data:`REFUSED_KEPT` refused tries stay. Best effort: ``False`` (and a log line) when git cannot do
     it."""
+    return _keep_side(quest_root, "refused", ref, files, message, extras=extras, log=log, kept=REFUSED_KEPT)
+
+
+def keep_rerun(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
+               extras: dict[str, str] | None = None, log: Any = None) -> bool:
+    """Keep the code a rerun of the study with a repair ran (:func:`core.rerun_check.judge`) in ``code/``'s own git
+    repository, on ``refs/fi/rerun/<ref>`` (``ref``: the finding's id), as :func:`keep_refused` keeps a refused try: one
+    commit on HEAD with ``files`` set, ``.fi_rerun/reason.txt`` and ``extras`` (the verdict, the result record the rerun
+    wrote) under ``.fi_rerun/``, a second rerun of the same finding beside it (``<ref>-2``, ...), the branch, the index and
+    the working folder untouched, and only the newest :data:`RERUN_KEPT` kept. Best effort: ``False`` when git cannot."""
+    return _keep_side(quest_root, "rerun", ref, files, message, extras=extras, log=log, kept=RERUN_KEPT)
+
+
+def _keep_side(quest_root: Path, space: str, ref: str | None, files: dict[str, str], message: str, *,
+               extras: dict[str, str] | None, log: Any, kept: int) -> bool:
+    """One commit on a side reference ``refs/fi/<space>/<ref>`` of ``code/``'s own repository (git plumbing only)."""
     import os
     import re
     import subprocess
@@ -939,7 +969,7 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
     import tempfile
 
     # one index file per call: two refusals at the same time never share a tree
-    fd, index_name = tempfile.mkstemp(prefix="fi_refused_", suffix=".index", dir=git_dir)
+    fd, index_name = tempfile.mkstemp(prefix=f"fi_{space}_", suffix=".index", dir=git_dir)
     os.close(fd)
     index = Path(index_name)
     # a name git takes: no "..", no ".lock" ending, no part starting with "."
@@ -953,8 +983,8 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
         parent = head.stdout.strip() if head.returncode == 0 else ""
         if _git(code_dir, "read-tree", *([parent] if parent else ["--empty"]), env_extra=extra).returncode != 0:
             return False
-        notes = {f".fi_refused/{k}": v for k, v in (extras or {}).items() if k != "reason.txt"}
-        for rel, text in {**files, **notes, ".fi_refused/reason.txt": message}.items():
+        notes = {f".fi_{space}/{k}": v for k, v in (extras or {}).items() if k != "reason.txt"}
+        for rel, text in {**files, **notes, f".fi_{space}/reason.txt": message}.items():
             blob = _git(code_dir, "hash-object", "-w", "--stdin", stdin=text)
             if blob.returncode != 0:
                 return False
@@ -967,28 +997,29 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
         made = _git(code_dir, "commit-tree", tree.stdout.strip(), *(["-p", parent] if parent else []), "-m", message)
         if made.returncode != 0:
             return False
+        side = f"refs/fi/{space}/"
         for n in range(1, 100):
             if name:
-                target = f"refs/fi/refused/{name}" + ("" if n == 1 else f"-{n}")
+                target = f"{side}{name}" + ("" if n == 1 else f"-{n}")
             else:  # the next number, asked again each time: another refusal may have taken it
-                have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
-                target = f"refs/fi/refused/{max([int(r) for r in have if r.isdigit()] or [0]) + 1:03d}"
+                have = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", side).stdout.split()
+                target = f"{side}{max([int(r) for r in have if r.isdigit()] or [0]) + 1:03d}"
             # an empty old value: made only when no reference of that name is there yet
             if _git(code_dir, "update-ref", target, made.stdout.strip(), "").returncode == 0:
-                every = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", "refs/fi/refused/").stdout.split()
+                every = _git(code_dir, "for-each-ref", "--format=%(refname:lstrip=3)", side).stdout.split()
                 numbered = sorted((r for r in every if r.isdigit()), key=int, reverse=True)
-                for stale in numbered[REFUSED_KEPT:]:  # exactly the newest REFUSED_KEPT numbered tries stay
-                    _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                for stale in numbered[kept:]:  # exactly the newest `kept` numbered tries stay
+                    _git(code_dir, "update-ref", "-d", f"{side}{stale}")
                 named = _git(code_dir, "for-each-ref", "--sort=-committerdate", "--format=%(refname:lstrip=3)",
-                             "refs/fi/refused/").stdout.split()
-                for stale in [r for r in named if not r.isdigit()][REFUSED_KEPT:]:
-                    if f"refs/fi/refused/{stale}" != target:
-                        _git(code_dir, "update-ref", "-d", f"refs/fi/refused/{stale}")
+                             side).stdout.split()
+                for stale in [r for r in named if not r.isdigit()][kept:]:
+                    if f"{side}{stale}" != target:
+                        _git(code_dir, "update-ref", "-d", f"{side}{stale}")
                 return True
         return False
     except (OSError, subprocess.SubprocessError) as exc:
         if log is not None:
-            log.warning("[code] could not keep a refused version in code/'s history: %s", exc)
+            log.warning("[code] could not keep a %s version in code/'s history: %s", space, exc)
         return False
     finally:
         try:
@@ -1296,6 +1327,14 @@ def _figures_only_failed(quest_root: Path, returncode: int, stdout: str) -> str:
     return ("figure " if len(names) == 1 else "figures ") + ", ".join(names) + " not drawn" if names else ""
 
 
+def pip_error(stderr: str | None, *, limit: int = 1000) -> str:
+    """What pip said was wrong: its ``ERROR`` lines (all of them when it printed any, else every line), never its ``[notice]``
+    lines about a newer pip, which come last and would push the real error out of a fixed-length tail."""
+    lines = [ln.rstrip() for ln in (stderr or "").splitlines() if ln.strip() and not ln.lstrip().startswith("[notice]")]
+    errors = [ln for ln in lines if ln.lstrip().startswith("ERROR")]
+    return "\n".join(errors or lines)[:limit].strip()
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
     ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "ran_figures_failed" | "failed" |
@@ -1328,7 +1367,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                                       capture_output=True, text=True, encoding="utf-8", errors="replace",
                                       timeout=install_timeout_s, env=scrub_secrets())
                 if done.returncode != 0:
-                    result["reason"] = f"installing requirements.txt failed: {(done.stderr or '').strip()[-300:]}"
+                    result["reason"] = f"installing requirements.txt failed: {pip_error(done.stderr)}"
             if not result["reason"]:
                 step = "running run.py"
                 # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.

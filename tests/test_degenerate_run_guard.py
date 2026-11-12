@@ -144,10 +144,32 @@ async def test_analyze_no_flag_on_real_result(tmp_path: Path) -> None:
 
     eng._chat = fake_chat  # type: ignore[assignment]
     state = {
-        "result_json": {"contrast": 0.45, "NILS": 1.42},
+        "result_json": {"rate": 0.45, "gain": 1.42},
         "exec_result": {"returncode": 0},
         "figures": [],
         "design": {},
     }
     patch = await eng._node_analyze(state)  # type: ignore[arg-type]
-    assert "degenerate_result" not in patch
+    # written on every pass: a later real run clears what an earlier all-zero run set
+    assert patch.get("degenerate_result") is False
+
+
+@pytest.mark.asyncio
+async def test_a_real_run_after_an_all_zero_one_is_checked_against_the_literature(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An all-zero run set the flag; a later real run (a broaden, a redesign, a person's refine) is a result: the literature
+    check reads the run it is given, never a flag an earlier pass left (a checkpoint from before this was written too)."""
+    eng = _engine(tmp_path, guard=True)
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    seen: list[bool] = []
+
+    def items(**kw: object) -> list[object]:
+        seen.append(bool(kw.get("degenerate")))
+        return []
+
+    monkeypatch.setattr("core.engine._cross_check_items.items", items)
+    stale = {"degenerate_result": True, "analysis": {"key_findings": []}}
+    await eng._node_cross_check({**stale, "result_json": {"rate": 0.45, "gain": 1.42}})  # type: ignore[arg-type]
+    # known positive: a run that is still all zero is still held as a broken run
+    await eng._node_cross_check({**stale, "result_json": {"rate": 0.0, "gain": 0.0}})  # type: ignore[arg-type]
+    assert seen == [False, True]

@@ -815,3 +815,145 @@ def test_a_plans_per_trial_flag_beats_the_kind_default() -> None:
     assert trial_runner.oracle_entry(both, said_false, cell_runs_trials=True) == "run_cell"
     assert trial_runner.oracle_entry(both, inv, cell_runs_trials=True) == "run_trial"
     assert mc_error.reads_a_mean(said_false) and trial_runner.is_per_trial(said_false) is False
+
+
+CLUSTER_SIM = 'import random\n\ndef run_trial(cell, trial_id, seed):\n    return {"y": cell["x"] + random.Random(seed).random()}\n'
+CLUSTER_SUBMIT = '''import json, os, pathlib
+cluster = pathlib.Path(os.environ["FAKE_CLUSTER_DIR"])
+job = pathlib.Path("job"); job.mkdir(exist_ok=True)
+state = job / "state.json"
+if not state.exists():
+    n = int((cluster / "submissions").read_text()) if (cluster / "submissions").exists() else 0
+    (cluster / "submissions").write_text(str(n + 1))
+    state.write_text(json.dumps({"id": "J%d" % (n + 1)}))
+print("RESULT_JSON: " + json.dumps({"fi_job": {"status": "pending", "id": json.loads(state.read_text())["id"]}}))
+'''
+CLUSTER_PROTOCOL = {"grid": {"x": [1.0, 2.0]}, "runs_per_setting": 2}
+#: The key main's FI stored in .fi/trials/cluster.json for the job of the quest :func:`_cluster_quest` lays down (main's
+#: ``_run_key`` over these exact files and this protocol, computed with main's code).
+MAIN_CLUSTER_KEY = "dc347af49b200c6b1fa7b7862d6f50ff9f14f35acb0334eba062188b9a06138b"
+
+
+class _Shell:
+    async def execute(self, cmd, *, cwd, timeout_s, env=None):
+        import subprocess
+        import time
+
+        from core.execution import ExecutionResult
+
+        started = time.monotonic()
+        res = subprocess.run(cmd, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True, timeout=timeout_s)
+        return ExecutionResult(returncode=res.returncode, stdout=res.stdout, stderr=res.stderr,
+                               duration_s=time.monotonic() - started)
+
+
+def _cluster_quest(tmp_path: Path, monkeypatch, protocol: dict | None = None):
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "inputs").mkdir()
+    (root / ".fi").mkdir()
+    (root / "code" / "simulate.py").write_bytes(CLUSTER_SIM.encode())
+    (root / "code" / "experiment.py").write_bytes(b"print('RESULT_JSON: {}')\n")
+    (root / "code" / "submit.py").write_bytes(CLUSTER_SUBMIT.encode())
+    (root / "inputs" / "params.csv").write_bytes(b"a,b\n1,2\n")
+    cluster = tmp_path / "cluster"
+    cluster.mkdir()
+    monkeypatch.setenv("FAKE_CLUSTER_DIR", str(cluster))
+    plan = {"protocol": dict(protocol or CLUSTER_PROTOCOL)}
+    runner = trial_runner.TrialsRunner(_Shell(), quest_root=root, protocol=lambda: plan["protocol"], deterministic=False,
+                                       simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+                                       submit=root / "code" / "submit.py")
+
+    def poll() -> None:
+        asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=120))
+
+    def submissions() -> int:
+        return int((cluster / "submissions").read_text())
+
+    return root, poll, submissions, plan
+
+
+def _results_written(root: Path) -> Path:
+    """A task of the queued job wrote its results (the first task's results file)."""
+    record = json.loads((root / trial_runner.CLUSTER_RECORD).read_text(encoding="utf-8"))
+    out = root / record["plan"][0]["out"]
+    out.write_text("{}\n", encoding="utf-8")
+    return out
+
+
+def test_a_queued_cluster_job_is_kept_when_only_something_else_moved(tmp_path: Path, monkeypatch) -> None:
+    """A job is identified by what was submitted (the simulation's files and the plan), not by the trials' reuse key: a
+    task writing under data/, a file that stays unreadable, or another FI harness never wipes the job and submits it
+    again (each poll of a resumed quest would, and the job would never be collected)."""
+    # A task of the job writes a file under data/ (a log, a checkpoint): the job's tasks, its results and its state stay.
+    root, poll, submissions, _ = _cluster_quest(tmp_path / "data", monkeypatch)
+    poll()
+    out = _results_written(root)
+    (root / "data").mkdir()
+    (root / "data" / "task_log.txt").write_text("step 1\n", encoding="utf-8")
+    poll()
+    assert submissions() == 1 and out.is_file(), "a task's file under data/ is not another job"
+    assert json.loads((root / "job" / "state.json").read_text(encoding="utf-8"))["id"] == "J1"
+
+    # FI's harness changed since the job was submitted (an update of FI): the job runs the copy it was given.
+    root, poll, submissions, _ = _cluster_quest(tmp_path / "harness", monkeypatch)
+    poll()
+    out = _results_written(root)
+    monkeypatch.setattr(trial_runner, "HARNESS_SOURCE", trial_runner.HARNESS_SOURCE + "\n# a later FI\n")
+    poll()
+    assert submissions() == 1 and out.is_file(), "the submitted job runs its own harness copy"
+    monkeypatch.undo()
+
+    # A file the simulation may read stays unreadable at every poll: the same job each time, not a new one per poll.
+    root, poll, submissions, _ = _cluster_quest(tmp_path / "unreadable", monkeypatch)
+    real = Path.read_bytes
+
+    def read_bytes(self):
+        if self.name == "params.csv":
+            raise PermissionError(13, "locked")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    poll()
+    out = _results_written(root)
+    poll()
+    poll()
+    assert submissions() == 1 and out.is_file(), "an unreadable file is identified the same way at every poll"
+    monkeypatch.undo()
+
+
+def test_a_cluster_job_main_submitted_is_kept_on_resume(tmp_path: Path, monkeypatch) -> None:
+    """A quest main started and left waiting on its cluster job is resumed on this FI: the record main wrote (its key,
+    its plan, the code at submission) names the same job, so the job is collected, not submitted again."""
+    root, poll, submissions, _ = _cluster_quest(tmp_path, monkeypatch)
+    sim = root / "code" / "simulate.py"
+    trial_runner.prepare_cluster(root, "code/simulate.py", CLUSTER_PROTOCOL["grid"], runs_per_setting=2, base_seed=0,
+                                 deterministic=False, key=MAIN_CLUSTER_KEY)
+    path = root / trial_runner.CLUSTER_RECORD
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({k: record[k] for k in ("key", "plan", "code_at_submit")}), encoding="utf-8")  # main's fields
+    import subprocess
+
+    env = {**os.environ, trial_runner.TASKS_ENV: (trial_runner.CLUSTER_DIR / trial_runner.TASKS_NAME).as_posix()}
+    subprocess.run([sys.executable, str(root / "code" / "submit.py")], cwd=root, env=env, check=True)  # main submitted it
+    out = _results_written(root)
+    poll()  # the quest is resumed on this FI while main's job is queued
+    assert submissions() == 1 and out.is_file() and json.loads(path.read_text(encoding="utf-8"))["key"] == MAIN_CLUSTER_KEY
+    assert trial_runner._job_key(sim, CLUSTER_PROTOCOL, 2, 0, False) == MAIN_CLUSTER_KEY, "one rule: the key main stored"
+
+
+def test_a_cluster_job_is_submitted_again_when_what_it_runs_changed(tmp_path: Path, monkeypatch) -> None:
+    """The other side: a repaired simulation, a changed input file or another plan is another job. The old one's results
+    go, its state is kept aside, and submit.py submits again."""
+    for name, change in (
+        ("simulate", lambda root, plan: (root / "code" / "simulate.py").write_bytes(CLUSTER_SIM.replace("+", "*").encode())),
+        ("inputs", lambda root, plan: (root / "inputs" / "params.csv").write_bytes(b"a,b\n3,4\n")),
+        ("runs", lambda root, plan: plan.update(protocol={**CLUSTER_PROTOCOL, "runs_per_setting": 3})),
+    ):
+        root, poll, submissions, plan = _cluster_quest(tmp_path / name, monkeypatch)
+        poll()
+        out = _results_written(root)
+        change(root, plan)
+        poll()
+        assert submissions() == 2 and not out.exists(), name
+        assert json.loads((root / "job" / "state.previous.json").read_text(encoding="utf-8"))["id"] == "J1", name

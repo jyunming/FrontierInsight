@@ -17,6 +17,12 @@ from tests.test_plan_optimisation import BLOCK, EXTRA, HEAT_SINK, Paused, _engin
 
 TOPIC = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
 MARK = "the plan has no `protocol.optimisation` block FI can search with yet"
+# The request about a block the model wrote that could not be read names only the faulted paths (the block is kept whole
+# beside them), and is answered with `{"protocol": {"fixes": {<path>: <part>}}}`; a request with no block at all is
+# answered with a whole block.
+PATH_MARK = "only these parts of it could not be read"
+OBJECTIVE = {"protocol.optimisation.objective.quantity": "max_base_temperature",
+             "protocol.optimisation.objective.direction": "minimise"}
 
 
 def _broken_draft() -> dict[str, Any]:
@@ -37,7 +43,8 @@ def _with_block(text: str, block: dict[str, Any]) -> str:
 
 
 class Model:
-    """A fake model: the plan draft first, an answer to each request for the search block, no objections otherwise."""
+    """A fake model: the plan draft first, an answer to each request for the search block, no objections otherwise. An
+    answer is a function of the plan text (a whole block), or a dict of fixes by path (the answer to a path-only request)."""
 
     def __init__(self, eng: Any, answers: list[Any], draft: dict[str, Any]) -> None:
         self.eng, self.answers, self.draft = eng, list(answers), draft
@@ -47,11 +54,13 @@ class Model:
 
     async def chat(self, messages: list[dict[str, str]], **kw: Any) -> str:
         prompt = messages[-1]["content"]
-        if MARK in prompt:
+        if MARK in prompt or PATH_MARK in prompt:
             self.asked.append(prompt)
             answer = self.answers.pop(0) if self.answers else None
             if answer is None:
                 raise RuntimeError("no answer")
+            if isinstance(answer, dict):
+                return json.dumps({"protocol": {"fixes": answer}})
             text = plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8")
             return as_parts(answer(text) if callable(answer) else answer)
         if not self.drafted:
@@ -69,10 +78,8 @@ def _complete(text: str) -> str:
     return _with_block(text, copy.deepcopy(BLOCK))
 
 
-def _no_budget(text: str) -> str:
-    block = copy.deepcopy(BLOCK)
-    del block["evaluation_budget"]
-    return _with_block(text, block)
+# An answer to the path-only request that still cannot be read: the direction is neither minimise nor maximise.
+NO_DIRECTION = {**OBJECTIVE, "protocol.optimisation.objective.direction": "sideways"}
 
 
 def _record(eng: Any) -> dict[str, Any]:
@@ -82,7 +89,7 @@ def _record(eng: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_a_block_that_could_not_be_read_is_written_by_the_plans_model_and_the_search_goes_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_complete], _broken_draft())
+    model = Model(eng, [OBJECTIVE], _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})  # the plan a person reads is already complete
     seen: list[dict[str, Any]] = []
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
@@ -90,10 +97,12 @@ async def test_a_block_that_could_not_be_read_is_written_by_the_plans_model_and_
     assert seen == [], "no stop: the search can start"
     assert patch["design"]["protocol"]["optimisation"]["objective"]["quantity"] == "max_base_temperature"
     assert model.requests == 1 and _record(eng)["count"] == 1
-    # The request quotes what was missing and says what each part means, and takes the goal from the topic.
+    # The request names only the two parts that could not be read (each with FI's reason and the entry as written); the
+    # rest of the block the model wrote is kept, so it is not asked for again.
     request = model.asked[0]
-    assert "no `optimisation` block" in request and "`direction`" in request and "`evaluation_budget`" in request
-    assert "left out because" in request and TOPIC in request
+    assert PATH_MARK in request and "`protocol.optimisation.objective.quantity`" in request
+    assert "`protocol.optimisation.objective.direction`" in request and "As written" in request
+    assert "evaluation_budget" not in request.split("# What is asked")[1].split("# How to answer")[0]
     # plan.md shows the block it now has (not the old "no block" note), and the change is a recorded version by the engine.
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     assert "max_base_temperature" in text and "does not yet say" not in text
@@ -101,11 +110,26 @@ async def test_a_block_that_could_not_be_read_is_written_by_the_plans_model_and_
 
 
 @pytest.mark.asyncio
+async def test_a_plan_with_no_block_at_all_is_asked_for_the_whole_block(tmp_path: Path) -> None:
+    """No block was written (nothing was kept beside faults): the request describes every part and takes the goal from the topic."""
+    eng = _engine(tmp_path, [])
+    draft = copy.deepcopy(HEAT_SINK)
+    del draft["protocol"]["optimisation"]
+    model = Model(eng, [_complete], draft)
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    design = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
+    assert model.requests == 1 and design["protocol"]["optimisation"]["objective"]["direction"] == "minimise"
+    request = model.asked[0]
+    assert MARK in request and PATH_MARK not in request
+    assert "`direction`" in request and "`evaluation_budget`" in request and TOPIC in request
+
+
+@pytest.mark.asyncio
 async def test_a_block_still_incomplete_after_two_requests_stops_with_plain_choices_and_a_resume_asks_no_more(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     eng = _engine(tmp_path, [])
-    model = Model(eng, [_no_budget, _no_budget, _no_budget], _broken_draft())
+    model = Model(eng, [NO_DIRECTION, NO_DIRECTION, NO_DIRECTION], _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
 
     def interrupted(payload: Any) -> Any:
@@ -122,6 +146,7 @@ async def test_a_block_still_incomplete_after_two_requests_stops_with_plain_choi
     for word in ("optimisation block", "plan.md", "YAML", "`optimisation`"):
         assert word not in stop["exec_result"]["no_search"], word
     assert "asked the plan's model 2 time(s)" in shown and "how many designs the search may try" in shown
+    assert "`protocol.optimisation.objective.direction`" in shown and "you wrote 'sideways'" in shown, "the stop names the part"
     assert "another model" not in shown.lower()
     # A resume checks again and ends the same way, and does not ask a third time.
     patch = await eng._node_design(state)
@@ -138,9 +163,8 @@ async def test_a_block_still_incomplete_after_two_requests_stops_with_plain_choi
 async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_plan_as_it_was(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
 
-    def unusable(text: str) -> str:
-        return _with_block(text, {"objective": {"quantity": "x"}})  # no direction, no variables
-
+    # An answer that writes nothing that was asked for (the path it fixes was not named): it cannot be placed.
+    unusable = {"protocol.optimisation.evaluation_budget": {"starts": 1, "per_start": 1}}
     model = Model(eng, [unusable] * 6, _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
@@ -154,9 +178,12 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
     stop = eng._search_cannot_start_stop(state, patch["design"])["exec_result"]
     steps = stop["no_search"] + " " + " ".join(stop["no_search_tried"])
     assert "what the search should make as low or as high as possible" in steps and "asked the plan's model 2 time(s)" in steps
-    # the second request quotes why the first answer was not used
-    assert "Your last answer was not used" not in model.asked[0]
-    assert any("Your last answer was not used" in a and "direction" in a for a in model.asked[1:])
+    # the second request names the same parts again, with FI's reason for each: the first answer wrote none of them
+    for request in model.asked:
+        asked = request.split("# What is asked")[1].split("# How to answer")[0]
+        assert "`protocol.optimisation.objective.quantity`" in asked and "`protocol.optimisation.objective.direction`" in asked
+        assert "evaluation_budget" not in asked
+    assert "none of the asked paths was written" in _record(eng)["problem"]
 
 
 @pytest.mark.asyncio

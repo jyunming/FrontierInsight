@@ -136,13 +136,15 @@ def test_a_sentence_the_check_never_listed_is_added_as_unsupported() -> None:
     assert "[2] is held as its title only" in added[0]["evidence"]
 
 
-def test_an_unsupported_claim_and_one_the_run_grounds_are_left_alone() -> None:
+def test_an_unsupported_claim_keeps_its_basis_and_one_the_run_grounds_is_left_alone() -> None:
+    """A sentence the check found unsupported keeps its basis and evidence; the title-only source behind it backs nothing,
+    so its fault is FI's ``no_source`` (its sentence is taken out). A claim the run grounds is not touched."""
     claims = [
         _claim(SPECIFIC, "unsupported", 2, "no text was provided for that source"),
         _claim(TWO_TITLES, "experiment", None, "the simulation's extinction probabilities"),
     ]
     out, changed = _apply_title_only_rule(PAPER, SOURCES, claims)
-    assert changed == 0 and out == claims
+    assert changed == 1 and out == [{**claims[0], "fault": "no_source", "where": [{"passage": SPECIFIC}]}, claims[1]]
 
 
 def test_nothing_changes_without_a_title_only_record() -> None:

@@ -8,9 +8,10 @@
   "sample"
  ],
  "x": "wavelength",
+ "series": "sample",
  "series_ids": [
-  "sample_a",
-  "sample_b"
+  "signal@sample:a",
+  "signal@sample:b"
  ],
  "references": {
   "baseline": {
@@ -24,8 +25,7 @@
    "scale": "linear"
   },
   "wavelength": "Wavelength (nm)",
-  "sample_a": "Sample A",
-  "sample_b": "Sample B"
+  "sample": "Sample"
  },
  "figure": {
   "id": "spectra",
@@ -34,9 +34,9 @@
  },
  "plan": {
   "series": [
-   "sample_a",
-   "sample_b",
-   "sample_c"
+   "signal@sample:a",
+   "signal@sample:b",
+   "signal@sample:c"
   ],
   "grid": [
    400,
@@ -51,25 +51,25 @@
   {
    "claim": "drawn",
    "args": {
-    "series": "sample_a"
+    "series": "signal@sample:a"
    }
   },
   {
    "claim": "drawn",
    "args": {
-    "series": "sample_b"
+    "series": "signal@sample:b"
    }
   },
   {
    "claim": "errorbars",
    "args": {
-    "series": "sample_a"
+    "series": "signal@sample:a"
    }
   },
   {
    "claim": "band",
    "args": {
-    "series": "sample_b"
+    "series": "signal@sample:b"
    }
   },
   {
@@ -87,15 +87,15 @@
   {
    "claim": "value_at",
    "args": {
-    "series": "sample_a",
+    "series": "signal@sample:a",
     "x": "500"
    }
   },
   {
    "claim": "crossing",
    "args": {
-    "a": "sample_a",
-    "b": "sample_b"
+    "a": "signal@sample:a",
+    "b": "signal@sample:b"
    }
   },
   {
@@ -107,7 +107,7 @@
   {
    "claim": "not_drawn",
    "args": {
-    "series": "sample_c"
+    "series": "signal@sample:c"
    }
   }
  ]

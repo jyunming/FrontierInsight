@@ -344,3 +344,142 @@ def test_object_dropped_reads_the_word_before_a_bracket_that_goes_whole() -> Non
     assert not cs.object_dropped("A contradiction of [3], because x.", {"4"})
     assert not cs.object_dropped("A contradiction of [3, 4], because x.", {"3"})
     assert not cs.object_dropped("The result holds [3].", {"3"})
+
+
+# --- a citation is read against its own part of the sentence ---------------------------------------------------------
+
+_SNIPPET = ("Queue Waits in Small Shops | Request PDF  A survey of shop counters. Waits grow quickly with the arrival "
+            "rate of customers, which ...")
+_NO_RESULTS = cs.OwnNumbers()
+
+
+def _snippet() -> cs.Source:
+    src = _src("1", "Queue Waits in Small Shops", _SNIPPET)
+    assert src.kind() == "snippet or contents list"
+    return src
+
+
+def _full(label: str, text: str) -> cs.Source:
+    return _src(label, "Batching", FULL + text, full=True)
+
+
+def _site(sentence: str) -> cs.Site:
+    return cs.Site(0, len(sentence), sentence, cs.labels_in_text(sentence), "prose")
+
+
+TWO_PARTS = ("Waits grow with the arrival rate [1], and batching orders lowers staffing cost considerably overall "
+             "by 37% [2].")
+
+
+def test_each_source_is_read_against_the_part_of_the_sentence_its_bracket_closes() -> None:
+    site = _site(TWO_PARTS)
+    src2 = _full("2", "batching orders lowers staffing cost considerably overall by 37%")
+    # the words and the number of the second part are [2]'s claim, not [1]'s
+    assert cs.pre_problem(site, "1", _snippet(), _NO_RESULTS) == ""
+    assert cs.pre_problem(site, "2", src2, _NO_RESULTS) == ""
+    # read against the whole sentence, as before, [1] is refused for them
+    assert "37" in cs.pre_problem(site, "1", _snippet(), _NO_RESULTS, whole_sentence=True)
+    # a number planted in a part is still read against the source that closes it, and only that source
+    planted = _site("Waits grow with the arrival rate by 0.81 [1], and batching orders lowers staffing cost "
+                    "considerably overall by 37% [2].")
+    assert "0.81" in cs.pre_problem(planted, "1", _snippet(), _NO_RESULTS)
+    assert cs.pre_problem(planted, "2", src2, _NO_RESULTS) == ""
+    planted2 = _site("Waits grow with the arrival rate [1], and batching orders lowers staffing cost by 0.81 [2].")
+    assert cs.pre_problem(planted2, "1", _snippet(), _NO_RESULTS) == ""
+    assert "0.81" in cs.pre_problem(planted2, "2", src2, _NO_RESULTS)
+    # a finding planted in the snippet source's own part is still refused
+    finding = _site("Staffing models fail badly whenever weekend demand doubles sharply [1], and batching helps [2].")
+    assert "only a snippet" in cs.pre_problem(finding, "1", _snippet(), _NO_RESULTS)
+
+
+def test_a_bracket_in_a_list_of_citations_shares_the_claim_before_it_and_the_tail_goes_to_every_source() -> None:
+    src2 = _snippet()
+    src2.label = "2"
+    src2.text = "Unrelated Title | Request PDF  Something else entirely about a different matter, which ..."
+    src2.title = "Unrelated Title"
+    # ", [2]" names no claim of its own: the claim before it is read against [2] too
+    listed = _site("Waits grow with the arrival rate across busy counters [1], [2].")
+    assert "says more than it shows" in cs.pre_problem(listed, "2", src2, _NO_RESULTS)
+    # a claim written after the last bracket is read against each source
+    tail = _site("Earlier work [1], [2] showed staffing models fail badly whenever weekend demand doubles sharply.")
+    assert "only a snippet" in cs.pre_problem(tail, "1", _snippet(), _NO_RESULTS)
+    # a label cited in two brackets is read against both of its parts
+    twice = _site("Waits grow with the arrival rate [1], and staffing models fail badly whenever weekend demand "
+                  "doubles sharply [1, 3].")
+    assert "only a snippet" in cs.pre_problem(twice, "1", _snippet(), _NO_RESULTS)
+
+
+def test_a_bracket_that_is_not_a_citation_does_not_split_the_sentence() -> None:
+    for sentence in (
+            "Batching lowers staffing cost within load share [0, 1] for shops [1].",
+            "Batching lowers staffing cost within load share $x_{[2]}$ for shops [1].",
+            "Batching lowers staffing cost within load share [2](http://x.org) for shops [1].",
+            "Batching lowers staffing cost within load share [1995] for shops [1]."):
+        site = _site(sentence)
+        assert cs.pre_problem(site, "1", _snippet(), _NO_RESULTS) == cs.pre_problem(
+            site, "1", _snippet(), _NO_RESULTS, whole_sentence=True) != "", sentence
+
+
+def test_a_sentence_with_one_bracket_is_read_exactly_as_before() -> None:
+    src2 = _full("2", "a passage with 12.5 in it")
+    for sentence in ("Waits grow with the arrival rate [1].",
+                     "Staffing models fail badly whenever weekend demand doubles sharply [1].",
+                     "Earlier work [1] showed staffing models fail badly whenever weekend demand doubles sharply.",
+                     "It rose by 12.5 and then by 44 overall [1, 2]."):
+        site = _site(sentence)
+        for lb, src in (("1", _snippet()), ("2", src2)):
+            assert cs.pre_problem(site, lb, src, _NO_RESULTS) == cs.pre_problem(
+                site, lb, src, _NO_RESULTS, whole_sentence=True), (sentence, lb)
+
+
+def test_a_reword_that_keeps_each_source_on_its_own_part_can_stand() -> None:
+    sources = {"1": _snippet(), "2": _full("2", "batching orders lowers staffing cost considerably overall by 37%")}
+    site = _site(TWO_PARTS)
+    fix = {"action": "reword", "source": "1", "quote": "Waits grow quickly with the arrival rate",
+           "text": "Waits grow quickly with the arrival rate [1], and batching orders lowers staffing cost "
+                   "considerably overall by 37% [2]."}
+    plan = cs._validate_fix(site, {"labels": ["1"], "kept": ["2"]}, fix, sources, _NO_RESULTS, lambda q, t: q in t)
+    assert plan and plan["action"] == "reword"
+
+
+def _two_part_check(judge) -> cs.Result:
+    paper = "# Title\n\n" + TWO_PARTS + " Next point.\n\n## References\n"
+    sources = {"1": _snippet(), "2": _full("2", "batching orders lowers staffing cost considerably overall by 37%")}
+
+    async def repair(prompt: str) -> str:
+        return "{}"
+
+    return _check(paper, sources, judge, repair, cs.new_record(paper, None), [])
+
+
+def test_a_freed_citation_goes_to_the_reader_and_stays_when_it_names_a_passage() -> None:
+    asked: list[str] = []
+
+    async def judge(prompt: str) -> str:
+        asked.append(prompt)
+        quotes = {"1": "Waits grow quickly with the arrival rate", "2": "batching orders lowers staffing cost"}
+        return json.dumps({"verdicts": [{"id": line.split(" | ")[0], "supported": True,
+                                         "quote": quotes[line.split(" | ")[0][-1]]} for line in prompt.splitlines()]})
+
+    out = _two_part_check(judge)
+    assert any(":1 |" in p for p in asked), "the freed pair was asked"
+    assert "[1]" in out.paper and "[2]" in out.paper
+    assert {r.label: r.status for r in out.rows} == {"1": "supported", "2": "supported"}
+
+
+def test_a_freed_citation_the_reader_does_not_answer_is_settled_by_the_whole_sentence() -> None:
+    async def answers_only_two(prompt: str) -> str:
+        return json.dumps({"verdicts": [{"id": line.split(" | ")[0], "supported": True,
+                                         "quote": "batching orders lowers staffing cost"}
+                                        for line in prompt.splitlines() if line.split(" | ")[0].endswith(":2")]})
+
+    async def down(prompt: str) -> str:
+        raise RuntimeError("down")
+
+    for judge in (answers_only_two, down):
+        out = _two_part_check(judge)
+        rows = {r.label: r for r in out.rows}
+        assert rows["1"].status in ("citation_dropped", "sentence_dropped") and "37" in rows["1"].problem, judge.__name__
+        assert "[1]" not in out.paper
+    # a pair the whole-sentence rule also passes is left unchecked, as before
+    assert {r.label: r.status for r in _two_part_check(down).rows}["2"] == "unchecked"

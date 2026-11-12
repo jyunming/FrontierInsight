@@ -78,6 +78,7 @@ from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import audit_open_items as _audit_open
 from . import confirmations as _confirmations
+from . import cross_check_items as _cross_check_items
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
@@ -116,6 +117,7 @@ from . import paper_patch
 from . import paper_sections as _paper_sections
 from . import paper_scope as _paper_scope
 from . import paper_trim
+from . import answer_reading as _reading
 from . import plan as _plan
 from . import criteria as _criteria
 from . import improve as _improve
@@ -210,6 +212,8 @@ from .provider import (
     PROXY_PROVIDERS,
     ProxySupervisor,
     append_cost_row,
+    billing_stop,
+    claude_cli_account_line,
     missing_step_api_keys,
     model_for_node,
     node_provider_for,
@@ -2261,8 +2265,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 finding = str(entry.get("finding") or "")[:200]
                 candidates = entry.get("candidates") or []
                 verdicts = [b for b in ("supporting", "conflicting") if entry.get(b)]
+                # a result FI held no value of was not searched: the trace must not read that as a check that found nothing
                 self._claim(node, key, "literature_verdict", entry.get("summary"), finding=finding,
-                            decision=", ".join(verdicts) or "neutral")
+                            decision="not checked" if entry.get("status") == "not_checked"
+                            else ", ".join(verdicts) or "neutral")
                 for bucket in ("supporting", "conflicting"):
                     for item in entry.get(bucket) or []:
                         if not isinstance(item, dict):
@@ -2338,6 +2344,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         who = ", ".join(x for x in (name, model) if x)
         when = limit_resumes_at(str(limit) if limit is not None else "") or limit_resumes_at(gone)
         resume = f"python launch.py --config {(self.quest_root / 'config.yaml').as_posix()} --resume {self.quest_id}"
+        empty = billing_stop(limit, name) if limit is not None else None
+        if empty:  # an empty balance is not a usage limit: no wait brings it back
+            return f"{empty[0]}. Nothing the current step decided was kept. {empty[1]}, then resume with: {resume}"
         return (f"The model provider's usage limit was reached{f' ({who})' if who else ''}. Nothing the current step decided "
                 f"was kept. " + (f"Resume after {when} with: {resume}" if when else
                                  f"Resume with: {resume} once the limit has reset"))
@@ -2988,16 +2997,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         Both re-entry branches share the same ``engine.max_iterations``
         budget so the whole quest stays bounded.
 
-        Empty-cross_check guard: ``_node_cross_check`` returns
-        ``{"cross_check": []}`` early when ``analysis.key_findings`` is
-        empty OR when ``cross_check_per_finding_k <= 0`` — both BEFORE
-        the iteration-bump block runs. If analyze still emits
-        ``next_step: "broaden_lit"`` in that case, the loop literature →
-        design → implement → execute → analyze → cross_check → broaden_lit
-        never increments ``iteration`` and the cap never fires. Terminate
-        on empty cross_check: there are no findings to broaden literature
-        against, so writing the paper with what we have is the safe
-        choice (audit BLOCK #11).
+        ``_node_cross_check`` returns ``{"cross_check": []}`` early only when ``cross_check_per_finding_k <= 0`` (the draft
+        profile skips this step); that return also carries ``cross_check_route: "write"``. Every other pass bumps the
+        iteration itself on a route that is not ``write``, so a ``broaden_lit`` loop is bounded by
+        ``engine.max_iterations`` whatever the number of results looked up (a run with none routes by ``next_step``).
 
         The cross_check node decides the route (``cross_check_route``) before it spends a round, and this router reads
         it, as the evidence gate's router does: a router that decided again after the node raised ``iteration`` saw the
@@ -3007,14 +3010,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         route = state.get("cross_check_route")
         if route in ("write", "broaden_lit", "redesign"):
             return route
+        if not state.get("cross_check"):
+            return "write"  # a checkpoint the new node did not write: this router bumps no round, so it never loops
         return self._cross_check_route(state)
 
     def _cross_check_route(self, state: QuestState) -> str:
         """``write``, ``broaden_lit`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
         confirm stage of ``engine.phased`` and the rounds left (``iteration`` before this round is spent)."""
         if not self.config.engine.enable_analyze_reroute:
-            return "write"
-        if not state.get("cross_check"):
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
@@ -5505,57 +5508,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     new_p = kept_division
                 else:
                     new_p["optimisation"] = kept_division
-                not_applied.extend({"key": f"{where}.{part}", "reason": why_not} for part in refused)
-            kept_p = dict(new_p)
-            base_fixed, base_notes = _plan.repair_protocol(old_p)
-            # Every key the audit changed, added or left out, each tried alone on the protocol as it was; the settings to
-            # compare (`grid`) and the parts of the study (`sub_studies`) are tried together when the audit changed both.
-            changed_keys = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
-            tried: set[str] = set()
-            for key in changed_keys:
-                if key in tried:
-                    continue
-                unit = [key]
-                if key in ("grid", "sub_studies"):
-                    unit = [k for k in ("grid", "sub_studies") if k in changed_keys]
-                tried.update(unit)
-                rest = {k: v for k, v in old_p.items() if k not in unit}
-                trial_fixed, trial_notes = _plan.repair_protocol({**rest, **{k: new_p[k] for k in unit if k in new_p}})
-                gone = sorted(set(base_fixed or {}) - set(trial_fixed or {}) - {k for k in unit if k not in new_p})
-                fresh = [n for n in trial_notes if n not in base_notes]
-                dropped = any(k in old_p and k not in new_p for k in unit)
-                if not gone and not fresh and not dropped:
-                    continue
-                reason = (fresh[0] if fresh else f"`protocol.{', '.join(gone)}` could not be read with it" if gone
-                          else f"the audit left `protocol.{key}` out")
-                item = {"key": f"protocol.{key}", "reason": " ".join("; ".join(fresh[:3]) .split())[:300] if fresh and not gone
-                        and not dropped else " ".join(reason.split())[:300]}
-                if fresh and not gone and not dropped:
-                    item["part"] = "yes"  # only a part of it cannot be read: the audit is asked to correct that part
-                if (len(unit) == 1 and fresh and not gone and not dropped and key in (trial_fixed or {})
-                        and (trial_fixed or {})[key] != (base_fixed or {}).get(key)):
-                    # Only a part of it cannot be read: the rest of the change is made, that part alone is left out, and
-                    # a key of the block the plan had readable stays as the plan had it (the audit's version of it could
-                    # not be read; its loss would cost the block what it had, e.g. a search its evaluation budget).
-                    trial_fixed, back = _plan.put_back_unread_keys(old_p, trial_fixed, key)
-                    wrote = new_p.get(key) if isinstance(new_p.get(key), dict) else {}
-                    for b in back:
-                        self._log.warning("[design_self_critique] the audit's `protocol.%s.%s` %s, so that change was not "
-                                          "applied: the plan's own is kept as it was", key, b,
-                                          "could not be read" if b in wrote else "was left out of its rewrite")
-                    kept_p[key] = trial_fixed[key]
-                    item["applied"] = "all of it except the part named"
-                    # what each left-out part of the block was refused for, by the part's own path
-                    item["parts"] = {m.group(1): " ".join(n.split())[:300] for n in fresh
-                                     if (m := re.search(r"`(protocol\.%s\.\w+)`" % re.escape(key), n))}
-                else:
-                    for k in unit:
-                        if k in old_p:
-                            kept_p[k] = old_p[k]
-                        else:
-                            kept_p.pop(k, None)
-                not_applied.append(item)
-                not_applied.extend({**item, "key": f"protocol.{k}"} for k in unit[1:])
+                not_applied.extend({"key": f"{where}.{part}", "reason": why_not, "part": "yes", "faults": [_fault_record(
+                    _reading.Fault(f"{where}.{part}", "together", why_not, as_written=theirs.get(part), required=True))]}
+                    for part in refused)
+            kept_p, held = self._read_the_audits_protocol(old_p, new_p)
+            not_applied.extend(held)
             out["protocol"] = kept_p
 
         def readable(d: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -5580,40 +5537,261 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               "applied except one part" if item.get("applied") else "not applied", item["reason"])
         return out, not_applied
 
+    def _read_the_audits_protocol(
+        self, old_p: dict[str, Any], new_p: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """``(protocol, items)``: the protocol the audit rewrote, read once, entry by entry (:func:`core.plan.read_protocol`),
+        against the plan's own. Only a fault the plan's own reading did not have counts, and only at the path it is at: a
+        part the audit changed that cannot be read is left out alone (its path named), and a key of the plan's own block
+        that the rewrite lacks is put back as the plan had it. A fault in a part the study cannot do without (a scan's
+        parts, a search's objective, baseline or limit) keeps the plan's own of that key whole. ``items``: one ``{"key",
+        "reason", "part", "faults"}`` per key the audit changed that was not made in full (the faults, each at its path, are
+        what the audit is asked to correct once, :meth:`_ask_the_audit_to_correct_parts`)."""
+        base_faults = _plan.read_protocol(old_p).faults
+        known = {(f.path, f.reason) for f in base_faults}
+
+        def new_in(faults: list[Any], current: dict[str, Any]) -> list[Any]:
+            """The faults the plan's own reading did not have: at a path it had no fault at, or with another reason at the
+            same path (a different unreadable value is the audit's own; a change to another field of the same entry is not)."""
+            return [f for f in faults if (f.path, f.reason) not in known]
+        changed = sorted(k for k in {*old_p, *new_p} if (k in old_p) != (k in new_p) or new_p.get(k) != old_p.get(k))
+        kept_p = dict(new_p)
+        items: list[dict[str, Any]] = []
+
+        def key_of(fault: Any) -> str:
+            steps = _reading.split(fault.path)
+            return str(steps[1]) if len(steps) > 1 else ""
+
+        def say(key: str, faults: list[Any], parts: dict[str, str] | None = None) -> dict[str, Any]:
+            """The item of a key not made in full: its faults, each at its path (the audit is asked about them once). It says
+            the change was made in part (``parts``: each part left out, by its path) only when something of it was made."""
+            why = "; ".join(" ".join(str(f.reason).split()) for f in faults[:3])
+            item: dict[str, Any] = {"key": f"protocol.{key}", "reason": why[:300], "part": "yes",
+                                    "faults": [_fault_record(f) for f in faults]}
+            if parts is not None and kept_p.get(key) != old_p.get(key):
+                item.update(applied="all of it except the part named", parts=parts)
+            return item
+
+        def left_out(faults: list[Any]) -> dict[str, str]:
+            """Each part left out, by the part's own path (the part of the block, not the place inside it)."""
+            parts: dict[str, str] = {}
+            for f in faults:
+                at = "protocol"
+                for step in _reading.split(f.path)[1:3]:
+                    at = _reading.join(at, step)
+                parts.setdefault(at, " ".join(f"could not be read: {f.reason}".split())[:300])
+            return parts
+
+        def stops(fault: Any, key: str, kept_now: dict[str, Any]) -> bool:
+            """A fault in a part the study cannot do without (a part of a list of limits or of scan parts, a search
+            block that can no longer drive a search): the plan's own of that key stays whole."""
+            steps = _reading.split(fault.path)
+            return bool(fault.required and fault.kind != "conflict"
+                        and (len(steps) <= 2 or any(isinstance(x, int) for x in steps) or key not in kept_now))
+
+        for key in changed:
+            if key in old_p and key not in new_p:
+                kept_p[key] = old_p[key]
+                items.append({"key": f"protocol.{key}", "reason": f"the audit left `protocol.{key}` out"})
+        refused: set[str] = set()
+        # The keys with a fault that stops them are put back first, one read after another: a conflict between two keys
+        # (a scan written beside a block that has its own) may be the other key's fault alone.
+        for _round in range(len(changed) + 1):
+            reading = _plan.read_protocol(kept_p)
+            kept_now = reading.kept if isinstance(reading.kept, dict) else {}
+            fresh = new_in(reading.faults, kept_p)
+            stopping = [k for k in changed if k not in refused and k in kept_p and any(
+                key_of(f) == k and stops(f, k, kept_now) for f in fresh)]
+            if not stopping:
+                break
+            for key in stopping:
+                faults = [f for f in fresh if key_of(f) == key]
+                trial = self._plans_own_at(old_p, kept_p, key, [f for f in faults if stops(f, key, kept_now)])
+                if trial is not None and not any(
+                        stops(f, key, {key: 1}) for f in new_in(_plan.read_protocol(trial).faults, trial)
+                        if key_of(f) == key):
+                    # Only the part that cannot be read goes back as the plan had it; the rest of the change is made.
+                    kept_p = trial
+                    items.append(say(key, faults, left_out(faults)))
+                    refused.add(key)
+                    continue
+                if key in old_p:
+                    kept_p[key] = old_p[key]
+                else:
+                    kept_p.pop(key, None)
+                refused.add(key)
+                items.append(say(key, faults))
+        reading = _plan.read_protocol(kept_p)
+        kept_now = reading.kept if isinstance(reading.kept, dict) else {}
+        fresh = new_in(reading.faults, kept_p)
+        for key in changed:
+            faults = [f for f in fresh if key_of(f) == key]
+            if key in refused or key not in kept_p or kept_p.get(key) == old_p.get(key) or not faults:
+                continue
+            if key not in kept_now:  # the whole key cannot be read: the plan's own stays
+                if key in old_p:
+                    kept_p[key] = old_p[key]
+                else:
+                    kept_p.pop(key, None)
+                items.append(say(key, faults))
+                continue
+            kept_p[key] = kept_now[key]
+            for name, cause in self._put_back_the_plans_keys(old_p, kept_p, key, new_p.get(key)):
+                self._log.warning("[design_self_critique] the audit's `protocol.%s.%s` %s, so that change was not applied: "
+                                  "the plan's own is kept as it was", key, name, cause)
+            items.append(say(key, faults, left_out(faults)))
+        # A fault the plan's own reading did not have, left in the protocol as it is now, is the audit's change somewhere
+        # else (a part it left as it was can no longer be read beside it): that change is put back, one key at a time.
+        for _round in range(len(changed) + 1):
+            stray = new_in(_plan.read_protocol(kept_p).faults, kept_p)
+            if not stray:
+                break
+            for key in changed:
+                if kept_p.get(key) == old_p.get(key):
+                    continue
+                trial = {k: v for k, v in kept_p.items() if k != key}
+                if key in old_p:
+                    trial[key] = old_p[key]
+                if len(new_in(_plan.read_protocol(trial).faults, trial)) < len(stray):
+                    kept_p = trial
+                    items.append(say(key, stray))
+                    break
+            else:
+                break
+        return kept_p, items
+
+    @staticmethod
+    def _plans_own_at(old_p: dict[str, Any], kept_p: dict[str, Any], key: str, faults: list[Any]) -> dict[str, Any] | None:
+        """``kept_p`` with the plan's own value put back at the path of each of ``faults`` (a part the study cannot do without
+        that the audit's version of cannot be read), or ``None`` when the plan has no readable one there to put back. An
+        entry of a list goes back at its own number only when the audit's list is as long as the plan's (a change made in
+        place); a longer or shorter list is not matched entry by entry."""
+        seen = set(_plan.read_protocol(old_p).paths())
+        out = kept_p
+        for fault in faults:
+            steps = _reading.split(fault.path)
+            if fault.path in seen or len(steps) < 3:
+                return None
+            at = steps[0]
+            for step in steps[1:]:  # every list on the way to the fault must be as long as the plan's
+                if isinstance(step, int):
+                    theirs, mine = _reading.value_at(old_p, at, "protocol"), _reading.value_at(out, at, "protocol")
+                    if not (isinstance(theirs, list) and isinstance(mine, list) and len(theirs) == len(mine)):
+                        return None
+                at = _reading.join(at, step)
+            own = _reading.value_at(old_p, fault.path, "protocol")
+            put = None if own is None else _reading.put_at({"protocol": out}, fault.path, own)
+            if put is None:
+                return None
+            out = put["protocol"]
+        return out
+
+    def _put_back_the_plans_keys(self, old_p: dict[str, Any], kept_p: dict[str, Any], key: str,
+                                 written: Any) -> list[tuple[str, str]]:
+        """Each key of the plan's own ``old_p[key]`` (a mapping) that the rewrite's reading ``kept_p[key]`` lacks, put back as
+        the plan had it into ``kept_p`` when the protocol reads with it no worse than without. A rewrite of one key of a
+        block must not cost the block a key it had (a real audit rewrote a search's block with an evaluation budget that
+        could not be read, and the plan's own readable budget went with it, so the search could not start). Returns
+        ``(key, cause)`` for each one put back."""
+        old = old_p.get(key)
+        if not isinstance(old, dict) or not isinstance(kept_p.get(key), dict):
+            return []
+        wrote = written if isinstance(written, dict) else {}
+        back: list[tuple[str, str]] = []
+        for name, value in old.items():
+            if name in kept_p[key]:
+                continue
+            worse = {f.path for f in _plan.read_protocol(kept_p).faults}
+            trial = {**kept_p, key: {**kept_p[key], name: value}}
+            reading = _plan.read_protocol(trial)
+            held = reading.kept.get(key) if isinstance(reading.kept, dict) else None
+            if not isinstance(held, dict) or name not in held or any(f.path not in worse for f in reading.faults):
+                continue
+            kept_p[key] = trial[key]
+            back.append((str(name), "could not be read" if name in wrote else "was left out of its rewrite"))
+        return back
+
     async def _ask_the_audit_to_correct_parts(
-        self, before: dict[str, Any], amended: dict[str, Any], design: dict[str, Any], not_applied: list[dict[str, str]],
+        self, before: dict[str, Any], amended: dict[str, Any], design: dict[str, Any], not_applied: list[dict[str, Any]],
         node: str,
-    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """``(design, not_applied)`` after the audit's model has been asked ONCE to correct the parts of its change that FI
-        could not read, each with FI's exact reason (as a plan part is asked for again with the reader's reason). What it
-        sends back is held to the same reading; whatever is still unreadable stays left out and is named in ``not_applied``.
-        A failed call or an unreadable answer leaves the first reading as it was."""
-        asked = [n for n in not_applied if n.get("part")]
-        keys = [n["key"].split(".", 1)[1] for n in asked]
+        could not read: one request that names only the faulted paths, each with FI's reason, the entry as the audit wrote
+        it and the values allowed. What comes back is placed at those paths in the audit's change and read again; whatever
+        is still unreadable stays left out (the plan's own of a part the study cannot do without) and is named in
+        ``not_applied``. A failed call or an unreadable answer leaves the first reading as it was. The faults, what was
+        asked and what was left out are kept in ``needs/audit_readings.json``."""
+        asked = [_fault_from_record(r) for n in not_applied for r in n.get("faults") or []]
+        paths = list(dict.fromkeys(f.path for f in asked))
+        asked_keys = {str(_reading.split(p)[1]) for p in paths if len(_reading.split(p)) > 1}
         new_p = amended.get("protocol") if isinstance(amended.get("protocol"), dict) else {}
         self._log.warning("[design_self_critique] asking the audit once to correct %s, with FI's reason for each",
-                          ", ".join(f"`protocol.{k}`" for k in keys))
+                          ", ".join(f"`{p}`" for p in paths))
+        request = _reading.ask_text(asked, "Your amended design could not be used in full.") + (
+            '\n\nReturn ONLY one JSON object of the form {"fixes": {"<path>": <the whole corrected part at that path>}} '
+            "with one entry for each path above, written exactly as named. Fix only what the reason names; keep every other "
+            "part exactly as you wrote it and add nothing. If the fix also needs another part of the same protocol key (for "
+            "example the settings a part of the study varies), give that part too, by its path.")
         try:
             raw_correction, reply = await self._chat_json(
-                _plan.audit_repair_request([(k, new_p.get(k), n["reason"]) for k, n in zip(keys, asked)]),
-                node=node, want=("protocol",), usable=lambda p: isinstance(p.get("protocol"), dict),
-            )
+                request, node=node, want=("fixes",), usable=lambda p: isinstance(p.get("fixes"), dict))
         except Exception as e:  # noqa: BLE001 — the audit is advisory: the first reading stands
             self._log.warning("[design_self_critique] the correction could not be asked for (%r); the first reading stands", e)
+            self._keep_audit_reading(asked, paths, not_applied, answered=False)
             return design, not_applied
         self._keep_plan_answer(raw_correction)
-        given = reply.get("protocol") if isinstance(reply, dict) else None
-        corrected = {k: v for k, v in (given or {}).items() if k in keys}
-        if not corrected:
+        given = reply.get("fixes") if isinstance(reply, dict) else None
+        placed = dict(new_p)
+        used = 0
+        for path, value in (given or {}).items():
+            steps = _reading.split(path) if isinstance(path, str) else []
+            if not steps:
+                # A path read only in part names no place: nothing of it is written (never over the part around it).
+                self._log.warning("[design_self_critique] the correction for `%s` was not used: FI cannot read that path "
+                                  "in full", path)
+                continue
+            if not (path in paths or (len(steps) > 1 and str(steps[1]) in asked_keys)):
+                self._log.warning("[design_self_critique] the correction for `%s` was not used: it was not asked about", path)
+                continue
+            at = _reading.put_at(placed, path, value, "protocol")
+            if at is None:
+                self._log.warning("[design_self_critique] the correction for `%s` was not used: the design has no such "
+                                  "place", path)
+                continue
+            placed, used = at, used + 1
+        if not used:
             self._log.warning("[design_self_critique] the correction named none of the asked parts; the first reading stands")
+            self._keep_audit_reading(asked, paths, not_applied, answered=False)
             return design, not_applied
-        again = {**amended, "protocol": {**new_p, **corrected}}
-        design2, not_applied2 = self._hold_audit_repairs_to_the_schema(before, again)
-        left = {n["key"] for n in not_applied2}
-        for n in asked:
-            self._log.info("[design_self_critique] `%s` after the correction: %s", n["key"],
-                           "still not fully readable" if n["key"] in left else "read in full")
+        design2, not_applied2 = self._hold_audit_repairs_to_the_schema(before, {**amended, "protocol": placed})
+        left = {f["path"] for n in not_applied2 for f in n.get("faults") or []}
+        for path in paths:
+            self._log.info("[design_self_critique] `%s` after the correction: %s", path,
+                           "still not fully readable" if path in left else "read in full")
+        self._keep_audit_reading(asked, paths, not_applied2, answered=True, dropped=[p for p in paths if p in left])
         return design2, not_applied2
+
+    def _keep_plan_reading(self, reading: Any, step: str) -> None:
+        """What a plan answer's reading left out (each fault at its path) and moved, kept in ``needs/plan_readings.json``:
+        every part ends kept, asked or left out, on record. A record that cannot be written raises, as for the audit's."""
+        if not (reading.faults or reading.moved):
+            return
+        entry = _reading.record_entry(reading, step=step, dropped=[f.path for f in reading.faults])
+        _reading.write_record(self.quest_root / "needs" / "plan_readings.json", entry)
+
+    def _keep_audit_reading(self, faults: list[Any], asked: list[str], refused: list[dict[str, Any]], *, answered: bool,
+                            dropped: list[str] | None = None) -> None:
+        """The audit's reading kept (``needs/audit_readings.json``, and best-effort in the trace): the faults, the paths
+        asked about and the paths left out. A record that cannot be written raises: the step stops as on any disk fault and
+        a resume repeats it, so no part goes missing without a word."""
+        left = list(dropped if answered else asked)
+        entry = _reading.record_entry(_reading.Reading(kept=None, faults=list(faults)), step="design_self_critique",
+                                      asked=asked, dropped=left)
+        entry["refused_keys"] = list(dict.fromkeys(str(n.get("key")) for n in refused))
+        entry["answered"] = answered
+        _reading.write_record(self.quest_root / "needs" / "audit_readings.json", entry)
+        self._audit("answer_read", topic="design_self_critique", faults=entry["faults"], asked=entry["asked"],
+                    dropped=entry["dropped"])
 
     @staticmethod
     def _audit_reasons(not_applied: list[dict[str, Any]]) -> dict[str, str]:
@@ -5885,6 +6063,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # A draft's study_type that cannot be read, or that contradicts its own block, is put right with a note.
         moved_parts: list[str] = []
         if isinstance(design, dict):
+            for fault in _plan.read_hoist(design).faults:  # a part written beside `protocol` AND in it, the two different
+                self._log.warning("[plan] %s (both versions: %s)", fault.reason, _reading.shown(fault.as_written, 600))
             design, moved_parts = _plan.hoist_protocol_parts(design)  # a part written beside `protocol` belongs under it
             if moved_parts:
                 self._log.warning("[plan] the draft wrote %s beside `protocol`; FI moved %s under it",
@@ -5895,7 +6075,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
             # The protocol is the part a model writes freest. Keep the design, drop the keys that cannot be checked, and
             # say so in the plan, rather than losing the plan for one of them.
-            fixed_protocol, repaired_notes = _plan.repair_protocol(design.get("protocol"))
+            held_notes: list[str] = []
+            drafted = design.get("protocol")
+            if isinstance(drafted, dict) and isinstance(drafted.get("optimisation"), dict):
+                held_notes = self._hold_search_block_back(drafted["optimisation"])
+                if held_notes:  # a limit, objective or baseline that cannot be read: no search without it
+                    design = {**design, "study_type": "find_best_design",
+                              "protocol": {k: v for k, v in drafted.items() if k != "optimisation"}}
+            reading, repaired_notes = _plan.read_protocol_with_notes(design.get("protocol"))
+            repaired_notes = [*repaired_notes, *held_notes]
+            fixed_protocol = reading.kept
+            self._keep_plan_reading(reading, "plan")
             trial = {k: v for k, v in design.items() if k != "protocol"}
             if fixed_protocol:
                 trial["protocol"] = fixed_protocol
@@ -6245,11 +6435,85 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # search the plan must fix, here, minutes after it was written; the run step still times one real evaluation.
         missing = _optim.missing_parts(design, self._scan_limit_s()) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        held = self._search_refused()
+        if held and held.get("faults") and not _optim.has_block(design):
+            missing.append("its optimisation block could not be read: " + "; ".join(
+                f"`{r['path']}` ({' '.join(str(r['reason']).split())[:200]})" for r in held["faults"][:4]))
         if block_why:
-            entry = _entries_as_written(design.get("protocol"), block_why)
+            entry = _entries_as_written(design.get("protocol"), _optim.block_faults(design["protocol"]["optimisation"])[1])
             missing.append(f"its optimisation block cannot be used ({block_why})"
                            + (f"; {entry}" if entry else ""))
         return True, missing, block_why
+
+    def _keep_search_refused(self, block: Any, faults: list[Any], plan_text: str | None = None) -> None:
+        """The search block a model wrote that could not be used, whole and as written, with each fault at its path
+        (``.fi/search_refused.json``): the next request names only those paths, and the plan and the stop say which part
+        could not be read. The record is tied to the plan's own search block it stands beside (``plan_text``'s; none for a
+        block held back, which leaves the plan without one) and to the plan's model, as the records of what the plan's
+        model was asked are. A record that cannot be written raises, as every caller's record does."""
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+        (self.fi_dir / _SEARCH_REFUSED).write_text(
+            json.dumps({"block": block, "faults": [_fault_record(f) for f in faults],
+                        "plan_block": _plan_search_mark(plan_text), "model": self._plan_model_name()},
+                       ensure_ascii=False, default=str),
+            encoding="utf-8")
+
+    def _search_refused(self, plan_text: str | None = None) -> dict[str, Any] | None:
+        """The record of :meth:`_keep_search_refused`, or ``None`` when it does not stand beside this plan: the plan's own
+        search block (``plan_text``, else plan.md as it is now) is no longer the one it was kept beside (a person wrote one,
+        or another request did), or another model asks now. Its block is then an old draft, never asked about or rebuilt
+        into the plan. A record tied to no plan (kept before records were tied) cannot be told from such a one and counts
+        as none. The whole plan's hash is not the tie: FI's own notes change plan.md between the record and its use."""
+        try:
+            record = json.loads((self.fi_dir / _SEARCH_REFUSED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or "plan_block" not in record or record.get("model") != self._plan_model_name():
+            return None
+        if plan_text is None:
+            try:
+                plan_text = _plan.plan_path(self.quest_root).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return record  # no plan written yet: nothing has changed beside the record
+        return record if _plan_search_mark(plan_text) == record["plan_block"] else None
+
+    def _clear_search_refused(self) -> None:
+        try:
+            (self.fi_dir / _SEARCH_REFUSED).unlink()
+        except OSError:
+            pass
+
+    def _path_only_search_request(self, refused: dict[str, Any]) -> str:
+        """The request about a search block that could not be used: only the faulted paths, each with FI's reason, the entry
+        as written and the values allowed; the rest of the block is kept as it was written."""
+        faults = [_fault_from_record(r) for r in refused.get("faults") or []]
+        return (_reading.ask_text(faults, "This study is a search for the best design. The block you wrote for it is kept "
+                                          "exactly as you wrote it; only these parts of it could not be read.")
+                + '\n\nAnswer with ONE JSON object of the form {"protocol": {"fixes": {"<path>": <the whole corrected part at '
+                  'that path>}}}, one entry for each path above, the path written exactly as named. Do not write the block again.')
+
+    def _hold_search_block_back(self, block: Any) -> list[str]:
+        """For a search block written in a plan or a draft: ``[]`` when it can be used (every unreadable optional part left
+        out alone, as :func:`_read_a_search_block` says); else one sentence naming each part that could not be read, after
+        the block was kept whole beside its faults (:meth:`_keep_search_refused`). A search must not run without a limit, an
+        objective or a baseline it declared, so the caller leaves the block out of the plan, the plan's model is asked for
+        those parts alone, and the search is not run if they still cannot be read."""
+        if not isinstance(block, dict):
+            return []
+        taken, _left_out, stopping = _read_a_search_block(block)
+        if taken is not None:
+            self._clear_search_refused()  # a block that reads replaces any held one: nothing stale is asked about
+            return []
+        faults = _optim.block_faults(block)[1] or stopping
+        self._keep_search_refused(block, faults)
+        named = "; ".join(f"`{f.path}` ({' '.join(str(f.reason).split())[:200]})" for f in faults[:4])
+        entry = _entries_as_written({"optimisation": block}, faults[:4])
+        sentence = (f"the search's block was not kept because a part of it could not be read: {named}"
+                    + (f"; {entry}" if entry else "")
+                    + "; the plan's model is asked for those parts alone, and if they still cannot be read the search is not run, "
+                      "and it is not run as a plain sweep instead")
+        self._log.warning("[plan] %s", sentence)
+        return [sentence]
 
     def _scan_limit_s(self) -> float:
         """The time one run may take (``execution.timeout_s``), which the coarse scan of a search must fit."""
@@ -6527,17 +6791,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not isinstance(protocol, dict):
                     return design
                 protocol = dict(protocol)
-                if "optimisation" in moved and isinstance(protocol.get("optimisation"), dict):
+                if isinstance(protocol.get("optimisation"), dict):
                     # The search block on its own first: a block that cannot be read is left out with the reason and the
                     # entry as written, and the plan's own `grid` stays (it is not merged into a block that is not kept).
-                    block, block_notes = _optim.repair(protocol["optimisation"])
+                    held_back = self._hold_search_block_back(protocol["optimisation"])
+                    block, block_notes = (None, held_back) if held_back else _optim.repair(protocol["optimisation"])
                     notes.extend(block_notes)
+                    if held_back:
+                        design = {**design, "study_type": "find_best_design"}
                     if block is None:
                         del protocol["optimisation"]
                     else:
                         protocol["optimisation"] = block
                 if _plan.normalize_protocol(protocol)[0] is None:
-                    fixed, notes_made = _plan.repair_protocol(protocol)
+                    reading, notes_made = _plan.read_protocol_with_notes(protocol)
+                    fixed = reading.kept
+                    self._keep_plan_reading(reading, "plan.md, a part written beside `protocol`")
                     notes.extend(notes_made)
                     protocol = fixed or {k: v for k, v in protocol.items() if k not in moved}
                 return {**design, "protocol": protocol}
@@ -6597,7 +6866,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             self._progress(f"Asking the model to complete {what} in the plan" if what.startswith("what ")
                            else f"Asking the model to complete the {what} in the plan")
             ask = request(design, text)
-            if last_problem:
+            refused = self._search_refused(text) if file == _SEARCH_ASKED else None
+            if refused and refused.get("faults") and isinstance(refused.get("block"), dict):
+                # Only the faulted paths are asked about: the block the model wrote is kept as it wrote it, whole, beside
+                # its faults, and what comes back is placed at those paths and read again.
+                ask = self._path_only_search_request(refused)
+            elif last_problem:
                 # The reader's exact reason for refusing the last answer goes back to the model, not only what is missing.
                 if last_block:
                     # The refused block is the base of this request: the model changes what the reason names and keeps the
@@ -7662,7 +7936,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 candidate = {**{k: v for k, v in merged.items() if k != "sub_studies"}, part: new_protocol[part]}
             else:
                 candidate = {**merged, part: new_protocol[part]}
-            fixed, why = _plan.normalize_protocol(candidate)
+            fixed, fault = _plan.protocol_fault(candidate)
+            why = fault.reason if fault is not None else None
             if (fixed is None or part not in fixed) and part == "sub_studies" and isinstance(new_protocol[part], list):
                 # One entry that cannot be read does not cost the other parts of the study their answer: the entries that
                 # read are tried together (the rule that every value of the grid is run is still asked), and the reason
@@ -7679,7 +7954,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                           "was" if len(entry_reasons) == 1 else "were", "; ".join(entry_reasons)[:600])
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
-                entry = _plan.offending_entry({part: new_protocol[part]}, why)
+                entry = _plan.offending_entry({part: new_protocol[part]}, fault) if fault is not None else ""
                 reasons.append(f"`protocol.{part}` as you wrote it cannot be read: {why}"
                                + (f" The entry as you wrote it: {entry}" if entry else ""))
                 continue
@@ -8357,17 +8632,48 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         block = protocol.get("optimisation") if isinstance(protocol, dict) else None
         if not isinstance(old, dict):
             return None
-        if not isinstance(block, dict):
+        fixes = protocol.get("fixes") if isinstance(protocol, dict) and isinstance(protocol.get("fixes"), dict) else None
+        if not isinstance(block, dict) and fixes is None:
             raise ValueError("your answer has no `protocol.optimisation` block: write it as a mapping (`objective`, "
                              "`design_variables`, `baseline`, `evaluation_budget`) under `protocol` in the design block")
+        if fixes is not None:
+            # The answer to a request that named only the faulted paths: each value is placed at its path in the block the
+            # plan's model wrote last time (kept whole beside the faults), and the block is then read as any other answer.
+            refused = self._search_refused(before_text)
+            if refused is None or not isinstance(refused.get("block"), dict):
+                raise ValueError("there is no block with unreadable parts to correct; write the `protocol.optimisation` block")
+            held_block = dict(refused["block"])
+            if isinstance(held_block.get("constraints"), dict):  # one limit written as a mapping reads as a list of one
+                held_block["constraints"] = [held_block["constraints"]]
+            wrapped: Any = {"protocol": {"optimisation": held_block}}
+            asked = [str(f.get("path")) for f in refused.get("faults") or [] if isinstance(f, dict)]
+            placed = 0
+            for path, value in fixes.items():
+                # Only a path that was asked about (or a part inside one) is placed: nothing else of the block changes. A
+                # path read only in part names no place, so nothing of it is written (never over the part around it).
+                if not _reading.split(str(path)):
+                    self._log.warning("[plan] the fix for `%s` was not used: FI cannot read that path in full", path)
+                    continue
+                if not any(str(path) == a or str(path).startswith((a + ".", a + "[")) for a in asked):
+                    self._log.warning("[plan] the fix for `%s` was not used: it was not asked about", path)
+                    continue
+                at = _reading.put_at(wrapped, str(path), value)
+                if at is None:
+                    self._log.warning("[plan] the fix for `%s` was not used: the search block has no such place", path)
+                    continue
+                wrapped, placed = at, placed + 1
+            if not placed:
+                raise ValueError("none of the asked paths was written: give each as `{\"fixes\": {\"<path>\": <the part>}}` "
+                                 "under `protocol`, with the path exactly as named")
+            block = wrapped["protocol"]["optimisation"]
         self._answer_block = block  # kept as written, so a refusal sends it back as the base of the next request
         old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
         old_block = old_protocol.get("optimisation")
         if isinstance(old_block, dict):
             _fixed, why = _optim.normalize(old_block)
             # Every part the reader names, not only the first: the model was asked for all of them at once.
-            unreadable = {m.group(1) for m in (re.match(r"`protocol\.optimisation\.?(\w*)", one)
-                                              for one in _optim.split_problems(why)) if m}
+            unreadable = {(str(_reading.split(f.path)[2]) if len(_reading.split(f.path)) > 2 else "")
+                          for f in _optim.block_faults(old_block)[1]}
             if not isinstance(old_block.get("evaluation_budget"), dict):
                 unreadable.add("evaluation_budget")
             if _optim.scan_problem(old, self._scan_limit_s()):
@@ -8410,11 +8716,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
             block = merged
-        fixed_block, why_block = _optim.normalize(block)
-        if fixed_block is None:
-            entry = _entries_as_written({"optimisation": block}, why_block, you=True)
-            raise ValueError(f"the block you wrote cannot be read: {why_block}"
+        taken, left_out, stopping = _read_a_search_block(block)
+        if taken is None:
+            faults = _optim.block_faults(block)[1] or stopping  # every problem the block has, as the old reason did
+            # the next request names only these paths; the plan, not written, keeps its own block (or none)
+            self._keep_search_refused(block, faults, before_text)
+            entry = _entries_as_written({"optimisation": block}, faults, you=True)
+            raise ValueError("the block you wrote cannot be read: " + _optim.ALSO.join(f.reason for f in faults)
                              + (f" {entry[0].upper()}{entry[1:]}" if entry else ""))
+        if left_out:
+            # Taken in part: the entries that cannot be read are left out alone, said in the plan and sent back with the next
+            # request if the plan still lacks anything; the rest of the answer is kept.
+            self._log.warning("[plan] the search block was used in part; left out: %s", "; ".join(left_out)[:600])
+            block = taken
+        self._clear_search_refused()
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
@@ -8435,6 +8750,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
             raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
+        if left_out:
+            merged_text = _plan.add_to_section(merged_text, _PART_HEADING, ["", *[f"- {n}" for n in left_out]])
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
@@ -8544,11 +8861,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self._log.warning("[design] the design step could not be asked to complete the search: %s", e)
                 continue
             block = obj.get("optimisation") if isinstance(obj, dict) and isinstance(obj.get("optimisation"), dict) else obj
-            if not isinstance(block, dict) or _optim.normalize(block)[0] is None:
+            taken, left_out, stopping = _read_a_search_block(block) if isinstance(block, dict) else (None, [], [])
+            if taken is None:
                 self._log.warning("[design] the design step's answer to complete the search could not be used: %s",
-                                  _optim.normalize(block)[1] if isinstance(block, dict) else "not a JSON object")
+                                  _optim.ALSO.join(f.reason for f in _optim.block_faults(block)[1] or stopping)
+                                  if isinstance(block, dict) else "not a JSON object")
                 continue
-            design = with_block(block)
+            if left_out:
+                self._log.warning("[design] the design step's search block was used in part; left out: %s",
+                                  "; ".join(left_out)[:600])
+                self._keep_plan_reading(_optim.read_block(block), "design step: the search block it was asked for")
+            design = with_block(taken)
             wanted, missing, why = self._search_problems(state, design)
             if not missing:
                 self._log.info("[design] the redesign's search block is complete now (asked %d time(s))", count)
@@ -8602,6 +8925,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but FI could not make the search "
               f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
         return self._stop_before_run(text, "no_search", tried=tried)
+
+    def _stop_for_unusable_search(self, runner: Any) -> QuestState | None:
+        """The honest stop (no paper, no repair) for a study in its second stage whose kept search cannot be used
+        (``core/optimise.py::run_search``): the runner's own words say what happened and what a person can do, and are what the
+        quest reports. Nothing in any script can change that, so the run never goes to the repair step (which would spend model
+        calls, or blame FI's analysis, on a run that did not start). ``None`` when the run stopped for no such reason."""
+        plain = runner.plain_stop if isinstance(runner, _optimise.OptimisationRunner) else None
+        if not (isinstance(plain, str) and plain.strip()):
+            return None
+        return self._stop_before_run(
+            plain, "no_search", advice=plain,
+            tried=["looked for the saved result of the search that chose this study's best design, to check that design on "
+                   "new data"])
 
     def _grid_too_large_stop(self, state: QuestState) -> QuestState | None:
         """A protocol whose ``grid`` holds more settings than FI lists is no longer a stop (reached before any code is written
@@ -9061,6 +9397,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         )
         self._say_model_change()
         self._say_step_providers()
+        self._say_claude_account()
         # A connection that names the model that answered each call (an HTTP API, the claude CLI): a call on it whose
         # model went unnamed is a gap in the quest's record of its calls (core/attempt_records.py::model_call_gaps).
         self._reports_model = (getattr(endpoint, "transport", "") == "http"
@@ -9081,6 +9418,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 self.config.provider.name,
                 " -> ".join(self.config.provider.fallback),
             )
+
+    def _say_claude_account(self) -> None:
+        """When the Claude CLI serves any step (the main provider, a fallback, or a step's own provider), say once in run.log
+        and on the console which account it will bill: an ``ANTHROPIC_API_KEY`` in the environment makes it the API account
+        and not the subscription. FI does not change which account is used; the key itself is never printed."""
+        provider = self.config.provider
+        steps = list((getattr(provider, "node_providers", None) or {}).values())
+        names = {provider.name, *provider.fallback, *(s.name for s in steps), *(f for s in steps for f in s.fallback)}
+        if "claude_cli" not in names or self.__dict__.get("_claude_account_said"):
+            return
+        self.__dict__["_claude_account_said"] = True
+        self._progress(f"[provider] {claude_cli_account_line()}")
 
     def _say_step_providers(self) -> None:
         """``provider.node_providers``: before anything is spent, a step whose provider's key is not set stops the quest
@@ -13953,14 +14302,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         earlier = _code_review.earlier_block(previous)
         small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
                      or "(FI did not run the simulation before this reading)")
-        # A part of the code that was read before, with the same text, the same things it uses, the same plan and the same
-        # question, is not read again: its earlier reading is used (:func:`core.code_review.request_key`).
-        kept = _code_review.load_reading_cache(self.quest_root)
-        depends = _code_review.part_dependencies(code, calls)
-        asked_of = [[r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]] for c in calls]
-        keys = [_code_review.request_key(c, depends[i], asked=asked_of[i], reader=str(reader or ""),
-                                         template=self._prompts["code_review"].template, small_run=small_run,
-                                         shown_values=shown_values) for i, c in enumerate(calls)]
+        # A request whose text is the same as one made before, to the same model, is not asked again: the reply kept for it is
+        # read again with today's rules (core/reuse_key.py ``answer_key``; the reply is stored only when this request's own
+        # reply was usable).
+        from . import reuse_key as _reuse_key
+
+        kept = {k: v for k, v in _code_review.load_reading_cache(self.quest_root).items() if isinstance(v, dict) and "reply" in v}
+
+        def build_prompt(call: dict[str, Any], left: list[dict[str, Any]], again: str = "") -> str:
+            return self._prompts["code_review"].substitute(
+                topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
+                plan=call["plan"], open_items=call["open_items"] or "(none)",
+                code=_code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"], previous=earlier,
+                small_run=small_run) + again
+
+        keys = [_reuse_key.answer_key(build_prompt(c, [r for r in reqs if c.get("asked") is None or r["id"] in c["asked"]]),
+                                      str(reader or "")) for c in calls]
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
@@ -13993,20 +14350,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                                f"used; this reading needs {fresh} more")
             for p_index, call in enumerate(calls, start=1):
                 key = keys[p_index - 1]
-                if key in kept:
-                    hit = kept[key]
-                    p_verdicts = copy.deepcopy(hit.get("verdicts") or [])
-                    logic = _code_review.merge_logic(logic, copy.deepcopy(hit.get("logic") or []))
-                    outside.extend(copy.deepcopy(hit.get("outside") or []))
-                    listed = [*listed, *(c for c in hit.get("listed") or [] if c not in listed)]
-                    part_verdicts.append(p_verdicts)
-                    record["requests"][p_index - 1]["reused"] = True
-                    record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
-                    continue
-                part_found: list[dict[str, Any]] = []
-                part_listed: list[str] = []
-                outside_from = len(outside)
-                sources = _code_review.part_note(call["code_index"] + 1, record["code_parts"]) + call["code"]
                 p_verdicts = None
                 asked_again = False
                 # only the requirements this request was given the plan's definition of (:func:`core.code_review.asked_ids`)
@@ -14025,13 +14368,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                         self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
                                           "asking once more")
                         again, left, asked_again = _pairs.REASK, list(call_reqs), True
-                    prompt = self._prompts["code_review"].substitute(
-                        topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left],
-                                                             indent=2),
-                        plan=call["plan"], open_items=call["open_items"] or "(none)", code=sources, previous=earlier,
-                        small_run=small_run
-                    ) + again
-                    reply = await self._ask_reader(prompt, review_node, spend)
+                    prompt = build_prompt(call, left, again)
+                    answer_key = _reuse_key.answer_key(prompt, str(reader or ""))
+                    from_cache = answer_key in kept
+                    if from_cache:
+                        reply = kept[answer_key]["reply"]
+                        if _ask == 0:
+                            record["requests"][p_index - 1]["reused"] = True
+                            record["parts_reused"] = int(record.get("parts_reused") or 0) + 1
+                    else:
+                        reply = await self._ask_reader(prompt, review_node, spend)
                     parsed = _parse_json_lenient(reply, node=review_node)
                     got = _code_review.parse(parsed, left, shown_values)
                     # a verdict or a finding must cite a file and a line this request was shown (not a line that was cut)
@@ -14050,20 +14396,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                                    for f in found if f not in seen)
                     found = seen
                     logic = _code_review.merge_logic(logic, found)
-                    part_found.extend(found)
                     said = _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
-                    part_listed.extend(said)
                     listed = [*listed, *(c for c in said if c not in listed)]
+                    # Kept only when this request's own reply was usable: every requirement it was asked judged, or (none asked)
+                    # a finding or a thing it checked of its own, never because an earlier part said something.
+                    usable = (not {r["id"] for r in left} - {v["id"] for v in got or []}) if left else bool(found or said)
+                    if usable and not from_cache and isinstance(reply, str):
+                        kept[answer_key] = {"reply": reply}
+                        _code_review.save_reading_cache(self.quest_root, kept)
                 if p_verdicts is None and many:
                     # A part that was not read could hold what the others call missing: no verdict is made from the rest.
                     raise RuntimeError(f"part {p_index} of {len(calls)} of the code got no usable answer")
                 part_verdicts.append(p_verdicts or [])
-                # Only an answer that judged every requirement this part was asked is kept for the next reading of this same
-                # part: a part answered in part is asked again, so what it left unjudged is not left so for good.
-                if p_verdicts is not None and not {r["id"] for r in call_reqs} - {v["id"] for v in p_verdicts}:
-                    kept[key] = {"verdicts": p_verdicts, "logic": part_found, "outside": outside[outside_from:],
-                                 "listed": part_listed, "version": version}
-                    _code_review.save_reading_cache(self.quest_root, kept)
             verdicts = _code_review.merge_parts(part_verdicts) or None
             if verdicts is None:
                 record["error"] = ("its answers cited no place in the code it was shown" if outside
@@ -15927,7 +16271,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return False
         return not _assertion_violations(self._in_force(state), self._walk_memo())
 
-    def _scripts_sha(self) -> str:
+    def _scripts_sha(self, rule: int = 1) -> str:
+        if rule >= 2:
+            # Rule 2: every file of the study (core/reuse_key.py), so a repair in the package or a parameter file counts.
+            from . import reuse_key as _reuse_key
+
+            found = _reuse_key.files(self.quest_root, "study")
+            return _reuse_key.digest_text(json.dumps(found.digests, sort_keys=True) + ("" if found.complete else "|unreadable"))
         import hashlib
 
         digest = hashlib.sha256()
@@ -15944,11 +16294,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not marker.is_file():
             return None
         try:
-            was = json.loads(marker.read_text(encoding="utf-8")).get("scripts_sha")
+            noted = json.loads(marker.read_text(encoding="utf-8"))
+            was, rule = noted.get("scripts_sha"), int(noted.get("scripts_rule") or 1)  # a marker is read by its own rule
             marker.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            was = None
-        if was is not None and was != self._scripts_sha():
+        except (OSError, ValueError, TypeError, AttributeError):
+            was, rule = None, 1
+        if was is not None and was != self._scripts_sha(rule):
             code_path = self.quest_root / "code" / "experiment.py"
             self._log.info("[numeric] the script was changed while the quest was stopped; running it again")
             return {"code": code_path.read_text(encoding="utf-8"), "exec_patch_pending": True}
@@ -16883,20 +17234,6 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         figure_only = produced and result.get("returncode", 1) != 0
         return bool((state.get("exec_give_up_reason") and not figure_only) or not produced or not state.get("result_json"))
 
-    def _experiment_gave_no_result(self, state: QuestState) -> bool:
-        """A simulation ran (its record is there) and produced no result at all. A quest with no simulation, one that has
-        not run an experiment at all, or a run that failed after it wrote some results (a time limit part way through)
-        is not this case: what it wrote is checked as before. No number in the result is no result, as at the evidence
-        gate (:meth:`_no_results_verdict`)."""
-        exec_result = state.get("exec_result")
-        if not (isinstance(exec_result, dict) and exec_result):
-            return False
-        if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
-            return False
-        from . import numeric_oracle as _numeric_oracle
-
-        return not any(True for _ in _numeric_oracle.flatten_numbers(state.get("result_json"), keep_zero=True))
-
     def _improve_skip(self, state: QuestState) -> str | None:
         """Why the improve loop does not run after this run, or ``None`` when it may."""
         limit = int(self.config.engine.improve_rounds or 0)
@@ -17506,7 +17843,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         """After the main run: each known-answer check the gate's short side run could not decide for lack of time is judged
         again on the delivered run's own trials (``raw/trials.json``), when its case is a setting of that run and the code
         is the code that measured it (core/oracle_check.py::rejudge_on_delivered). The names judged again; the record is
-        rewritten only when one is."""
+        rewritten when one is, or when one is still not decided on those trials (its words then name them)."""
         record = self._oracle_record_read()
         if not record or record.get("status") != _accepted.WENT_ON:
             return []
@@ -17522,14 +17859,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return None
 
         trials = await asyncio.to_thread(read)
-        new, names = _oracle.rejudge_on_delivered(record, trials, protocol, self._measuring_code_version(seed_path))
+        new, names, reworded = _oracle.rejudge_on_delivered(record, trials, protocol,
+                                                            self._measuring_code_version(seed_path))
         if new is None:
             return []
         self._oracle_record(new)
         for n in names:  # no longer set aside: the delivered run decided it
             self._oracle_undecided.discard(n)
             self._oracle_set_aside.pop(n, None)
-        self._log.info("[oracle] judged again on the delivered run's own trials: %s", ", ".join(names))
+        if names:
+            self._log.info("[oracle] judged again on the delivered run's own trials: %s", ", ".join(names))
+        aside = new.get("set_aside") if isinstance(new.get("set_aside"), dict) else {}
+        for n in reworded:  # still not decided: it stays set aside, and its reason now names the delivered trials
+            if n in self._oracle_set_aside and n in aside:
+                self._oracle_set_aside[n] = aside[n]
+        if reworded:
+            self._log.info("[oracle] still not decided on the delivered run's own trials: %s", ", ".join(reworded))
         return names
 
     def _judged_checks(self) -> list[dict[str, Any]]:
@@ -18335,7 +18680,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         if not _refine.settings(protocol):
             return
         record = _refine.read(self.quest_root)
-        if record and record.get("code_sha256") == _hidden.code_sha(self.quest_root) \
+        if record and _hidden.same_code(record.get("code_sha256"), self.quest_root) \
                 and record.get("key") == _refine.key(protocol):
             return  # already run on this code and these settings (a resume)
         timeout = max(60, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
@@ -19750,6 +20095,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                            if _phased.stage(self.quest_root) == _phased.EXPLORE else
                            "confirm stage: running the frozen design on data or seeds exploration never saw")
         run_started = time.time()
+        run_mark = _outside_run.write_mark(self.quest_root)  # FI's own count of what the run writes (core/outside_run.py)
         # An earlier pass's results check is not this run's: the analysis this run makes must not read what that pass left out.
         from . import result_checks as _result_checks
 
@@ -19769,6 +20115,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             # A plan that names more settings than FI lists, and no earlier size check met it (a frozen or resumed run): the
             # plain stop with its count, never a crash and never a smaller study than the plan's.
             return self._stop_too_long(str(exc))
+        if (unusable := self._stop_for_unusable_search(runner)) is not None:
+            # The search this study keeps cannot be used: no script can change that, so no repair and no second try.
+            return unusable
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
         # "import <deps>"` — sometimes exits with rc != 0 and duration <
@@ -19917,7 +20266,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # nor a job still pending (its raw files are half written).
         run_accepted = produced and not provisional and manifest_status not in ("stopped", "pending", "repairing")
         if run_accepted:
-            await asyncio.to_thread(self._save_run_data, run_started, split)
+            await asyncio.to_thread(self._save_run_data, run_started, split,
+                                    wrote=_outside_run.written_since(self.quest_root, run_mark))
             if split and self.config.rigor_profile == "research":
                 await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
             if split:
@@ -21879,6 +22229,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # any via the pause-drop gate) into the same block so analyze
         # sees them alongside.
         replicates = state.get("result_json_replicates") or []
+        payload_notes: list[str] = []  # FI's notes on the aggregate (precision, coverage, omitted metrics): `fi_notes`
         if replicates and (len(replicates) > 1 or state.get("result_json_trials")):
             assertions = _replicate_assertions(state)
             agg = _aggregate_result_json_replicates(replicates, assertions=assertions, kinds=_replicate_metric_kinds(state))
@@ -21901,17 +22252,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "n_replicates": len(replicates),
             }
             if precision_note:
-                payload["precision_note"] = precision_note
+                payload_notes.append(str(precision_note))
             coverage = _run_manifest.strata_coverage(self._protocol_block(state), state.get("result_json"))
             if coverage:
-                payload["coverage_note"] = (
+                payload_notes.append(
                     "; ".join(coverage) + ". Say so in the limitations and in the summary: the result is for those "
                     "settings, not the whole design."
                 )
             if constant:
-                payload["aggregate_note"] = (
+                payload_notes.append(
                     f"{len(constant)} further metric(s) were identical across "
-                    f"all {len(replicates)} seeds and are omitted here; see "
+                    f"all {len(replicates)} seeds and are omitted from the result block; see "
                     f"result_json_seed_0 for their values."
                 )
             # Per-stratum CIs + pairwise effect sizes + multiple-comparison
@@ -21954,43 +22305,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "have the experiment emit summary statistics (not raw arrays) in "
                 "its RESULT_JSON.", _rj_orig, len(result_json_block),
             )
+        # The script's own stdout, alone: FI's notes about the run go in their own section of the prompt (``fi_notes``
+        # below), never in front of the stdout or inside the result payload, where the model read them as the script's
+        # output and gave them back as findings about the results.
         stdout_for_analyze = exec_result.get("stdout_tail", "")[:2000]
-        if degenerate:
-            stdout_for_analyze = (
-                "[FI NOTE] The experiment ran but every numeric metric is ~0 — "
-                "a degenerate/broken run, not a real result. Write this up as an "
-                "honest failure note: state plainly that no usable measurement was "
-                "produced, hypothesize the likely cause (sampling/grid, threshold, "
-                "or normalization bug), and do NOT report the zeros as findings.\n\n"
-                + stdout_for_analyze
-            )
-        elif not state.get("result_json") and not (
-            state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
-            or self.config.engine.analyze_local_first
-        ):
-            # The degenerate note above is for an all-zero result; a script that crashed printed none at all, and the
-            # analysis then read like a literature review of the question the experiment was meant to answer.
-            stdout_for_analyze = (
-                f"[FI NOTE] The experiment produced no results (exit code {exec_result.get('returncode')}). Nothing "
-                "was measured. Say so plainly: the key findings are what the failure shows, not what the literature "
-                "says about the question, and no number may be reported as a result of this run.\n\n"
-                + stdout_for_analyze
-            )
-        if once_note := self._ran_once_note():
-            stdout_for_analyze = f"[FI NOTE] {once_note}\n\n{stdout_for_analyze}"
-        if no_difference := self._no_difference_note():
-            stdout_for_analyze = f"[FI NOTE] {no_difference}\n\n{stdout_for_analyze}"
+        fi_notes: list[str] = []
+        # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
+        if oracle_note := _oracle.analysis_note(self._judged_checks()).strip():
+            fi_notes.append(oracle_note)
         if state.get("result_json_replicate_seed_ignored") and state.get("result_json_no_random_source"):
-            stdout_for_analyze = (
+            fi_notes.append(
                 "[FI NOTE] This study is deterministic: the script draws no random numbers, so one run is the whole "
                 "result and repeating it returns the same numbers. Report it as a single deterministic run and do NOT "
                 "report a mean over seeds, a standard error or a confidence interval. Do not list missing repeats as "
                 "a limitation. Say instead that its trust rests on convergence, conservation and analytic-limit "
-                "checks, and name which of those were and were not done.\n\n"
-                + stdout_for_analyze
+                "checks, and name which of those were and were not done."
             )
         elif state.get("result_json_replicate_seed_ignored"):
-            stdout_for_analyze = (
+            fi_notes.append(
                 "[FI NOTE] Replication was configured, but the experiment script "
                 "never reads FI_REPLICATE_SEED (or reads it without the value "
                 "reaching any random generator), so every replicate repeated the "
@@ -21999,11 +22331,33 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "mean over seeds, a standard error, a confidence interval, or any "
                 "spread across replicates, and say plainly in the limitations that "
                 "the experiment was not replicated because it does not vary with "
-                "the seed it is given.\n\n"
-                + stdout_for_analyze
+                "the seed it is given."
             )
-        # The engine's own oracle verdicts: the script's results may re-judge the same oracles with a stale tolerance.
-        stdout_for_analyze = _oracle.analysis_note(self._judged_checks()) + stdout_for_analyze
+        if no_difference := self._no_difference_note():
+            fi_notes.append(f"[FI NOTE] {no_difference}")
+        if once_note := self._ran_once_note():
+            fi_notes.append(f"[FI NOTE] {once_note}")
+        if degenerate:
+            fi_notes.append(
+                "[FI NOTE] The experiment ran but every numeric metric is ~0 — "
+                "a degenerate/broken run, not a real result. Write this up as an "
+                "honest failure note: state plainly that no usable measurement was "
+                "produced, hypothesize the likely cause (sampling/grid, threshold, "
+                "or normalization bug), and do NOT report the zeros as findings."
+            )
+        elif not state.get("result_json") and not (
+            state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
+            or self.config.engine.analyze_local_first
+        ):
+            # The degenerate note above is for an all-zero result; a script that crashed printed none at all, and the
+            # analysis then read like a literature review of the question the experiment was meant to answer.
+            fi_notes.append(
+                f"[FI NOTE] The experiment produced no results (exit code {exec_result.get('returncode')}). Nothing "
+                "was measured. Say so plainly: no number of this run is a result and what failed is said by FI, not "
+                "what the literature says about the question, and no number may be reported as a result of this run."
+            )
+        fi_notes.extend(f"[FI NOTE] {n}" for n in payload_notes)
+        fi_record_block = "\n\n".join(fi_notes) or "(FI has nothing to add about this run.)"
         # Read the ACTUAL contents of any user-dropped data (the pause-drop
         # gate writes to inputs/data/). Previously only the file PATHS were
         # surfaced, so analyze never saw the numbers — a dropped latency.csv
@@ -22044,6 +22398,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             returncode=str(exec_result.get("returncode")),
             duration_s=f"{exec_result.get('duration_s', 0):.1f}",
             timed_out=str(exec_result.get("timed_out", False)),
+            fi_record_block=fi_record_block,
             stdout_tail=stdout_for_analyze,
             stderr_tail=_function_steps.traceback_end(exec_result.get("stderr_tail", ""), 1000),
             result_json=result_json_block,
@@ -22109,50 +22464,59 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
-        patch: QuestState = {"analysis": analysis}
-        if degenerate:
-            patch["degenerate_result"] = True
+        # Written on every pass, true or false: a later real run clears what an earlier all-zero run set.
+        patch: QuestState = {"analysis": analysis, "degenerate_result": degenerate}
         if all_ds:
             patch["user_supplied_datasets"] = all_ds
         return patch
 
     async def _node_cross_check(self, state: QuestState) -> QuestState:
-        """For each key finding, search literature with the
-        finding text as the query, then classify hits as supporting /
-        conflicting / neutral. Results land in ``state['cross_check']``
-        and are surfaced in the write prompt's ``$cross_check_block``."""
-        findings = list((state.get("analysis") or {}).get("key_findings") or [])
-        if not findings:
-            self._log.info("[cross_check] no key_findings; skipping")
-            return {"cross_check": [], "cross_check_route": "write"}
-
+        """For each result FI's own record holds a value of (:mod:`core.cross_check_items`), search the literature with the
+        result's name and the literature step's query, then classify the hits as supporting / conflicting / neutral
+        against the sentence FI wrote from the record. Nothing is read from the analysis's text, so no note of FI's can
+        become a query, a sentence to classify or a stored claim. A result with no value is entered as not checked, with
+        FI's reason, and not searched. Results land in ``state['cross_check']`` and are surfaced in the write prompt's
+        ``$cross_check_block``."""
         per_finding_k = self.config.engine.cross_check_per_finding_k
         if per_finding_k <= 0:
             self._log.info("[cross_check] disabled by config (per_finding_k=0)")
             return {"cross_check": [], "cross_check_route": "write"}
 
+        try:
+            what = _cross_check_items.items(
+                quest_root=self.quest_root, protocol=self._protocol_block(state),
+                requirements=self._topic_requirements_read(), covered=self._topic_covered_read(),
+                design=state.get("design"),
+                context=str(state.get("literature_query") or "").strip()
+                or _topic_req.topic_sentence(state.get("topic") or self.config.topic),
+                no_simulation=bool(state.get("no_simulation_resolved")), result_json=state.get("result_json"),
+                # read from the run being checked, as analyze reads it: a flag an earlier all-zero run left on the state
+                # (or a checkpoint written before analyze wrote it on every pass) never marks a later real run as broken
+                degenerate=bool(self.config.engine.degenerate_run_guard
+                                and _is_degenerate_result(state.get("result_json") or {})))
+        except Exception as e:  # noqa: BLE001 -- a record FI cannot read is a literature check not made, never a stop
+            self._log.warning("[cross_check] FI's record of the results could not be read (%s: %s); nothing to look up",
+                              type(e).__name__, str(e)[:200])
+            what = []
+        if not what:
+            self._log.info("[cross_check] FI's record holds no result to look up; skipping")
+
         out: list[dict[str, Any]] = []
-        no_result = self._experiment_gave_no_result(state)
-        if no_result:
-            # The "findings" of a run with no results are its error text: no paper can support or refute that. The
-            # entries stay (the route after this step reads them), each saying plainly that nothing was checked.
-            self._log.info("[cross_check] the experiment produced no results, so there is nothing to check against "
-                           "the literature; no search made")
-        for finding in findings[:10]:  # cap to avoid runaway LLM cost
-            text = str(finding).strip()
-            if not text:
-                continue
-            if no_result:
+        for item in what:
+            text = item.sentence
+            if item.status != _cross_check_items.TO_CHECK:
+                self._log.info("[cross_check] not checked: %s (%s)", item.label[:60], item.why_not[:80])
                 out.append({
-                    "finding": text, "supporting": [], "conflicting": [], "neutral": [],
-                    "summary": "(not checked: the experiment produced no results)",
-                    "candidates": [],
+                    "finding": item.label, "result": item.result, "quantity": item.quantity, "status": "not_checked",
+                    "supporting": [], "conflicting": [], "neutral": [],
+                    "summary": f"(not checked: {item.why_not})", "why_not": item.why_not, "candidates": [],
                 })
                 continue
-            self._log.info("[cross_check] searching for: %s", text[:80])
+            base = {"result": item.result, "quantity": item.quantity, "query": item.query}
+            self._log.info("[cross_check] searching for: %s", item.query[:80])
             try:
                 hits = await self.knowledge.asearch(
-                    text, top_k=per_finding_k,
+                    item.query, top_k=per_finding_k,
                     chat_fn=functools.partial(self._chat_messages, node="source_router"),
                     work_scope=self._work_scope(state),
                 )
@@ -22161,7 +22525,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 hits = []
             if not hits:
                 out.append({
-                    "finding": text,
+                    "finding": text, **base, "status": "no_literature",
                     "supporting": [], "conflicting": [], "neutral": [],
                     "summary": "(no related literature surfaced)",
                     "candidates": [],
@@ -22318,7 +22682,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     )
 
             entry: dict[str, Any] = {
-                "finding": text,
+                "finding": text, **base, "status": "checked",
                 "supporting": parsed.get("supporting") or [],
                 "conflicting": parsed.get("conflicting") or [],
                 "neutral": parsed.get("neutral") or [],
@@ -22336,8 +22700,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             if parsed.get("first_pass") is not None:
                 entry["first_pass"] = parsed.get("first_pass")
             out.append(entry)
-        if not no_result:
-            self._log.info("[cross_check] checked %d findings", len(out))
+        self._log.info("[cross_check] checked %d of %d results", sum(1 for e in out if e["status"] != "not_checked"),
+                       len(out))
         patch: QuestState = {"cross_check": out}
         # The route is decided here, once, before the round is spent (the router reads it): a re-route raises the
         # shared iteration counter so the design node sees the new iteration on its next visit, as `_node_review`
@@ -22466,10 +22830,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             n_findings = len(findings)
             cc = state.get("cross_check")
             cc = cc if isinstance(cc, list) else []
-            n_conflicting = 0
+            n_conflicting = n_not_checked = n_quantities_checked = 0
             for rec in cc:
                 if not isinstance(rec, dict):
                     continue
+                if rec.get("status") == "not_checked":
+                    n_not_checked += 1  # no value in FI's record: nothing was searched, so it is neither support nor conflict
+                    continue
+                if rec.get("quantity"):
+                    n_quantities_checked += 1  # the plan's map to the person's quantity stands; else a plan result only
                 # ``_node_cross_check`` writes per-finding records shaped
                 # ``{supporting: [...], conflicting: [...], neutral: [...]}``
                 # — read THOSE buckets. (The old code looked for
@@ -22497,6 +22866,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "n_key_findings": n_findings,
                 "n_findings_with_supporting_lit": n_supporting,
                 "n_findings_with_conflicting_lit": n_conflicting,
+                "n_results_checked": sum(1 for r in cc if isinstance(r, dict)) - n_not_checked,
+                "n_results_not_checked": n_not_checked,
+                "n_topic_quantities_checked": n_quantities_checked,
                 "has_results": bool(state.get("result_json") or {}),
                 "mode": (
                     "no_simulation"
@@ -22836,12 +23208,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             ended = ("the settings of the plan were still more than FI lists"
                      if (state.get("exec_result") or {}).get("too_long_tried") else
                      "the experiment would still take longer than the time allowed")
+        # A study whose kept search cannot be used says, in its own words, what happened and what to do
+        # (core/optimise.py): those words are the whole report, with nothing added to them.
+        own_words = reason == "no_search" and bool((state.get("exec_result") or {}).get("no_search_advice"))
         if reason == "no_search":
             # The plan is a search for the best design and the plan's model could not write a search FI can run.
             said = str((state.get("exec_result") or {}).get("no_search") or "").strip().rstrip(".")
-            problem = f"{_one_line(said, 500)}, so nothing was run for the study"
+            problem = _one_line(said, 500) if own_words else f"{_one_line(said, 500)}, so nothing was run for the study"
             tried = [str(t) for t in (state.get("exec_result") or {}).get("no_search_tried") or []] or [said]
-            ended = "the plan's model could not write a search FI can run"
+            ended = ("the search this study keeps could not be used" if own_words
+                     else "the plan's model could not write a search FI can run")
         if reason == "cannot_repair":
             said = str((state.get("exec_result") or {}).get("cannot_repair") or "").strip().rstrip(".")
             problem = f"{_one_line(said, 400)}, and FI's repairs did not remove it, so there is nothing it can vouch for"
@@ -22893,7 +23269,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 (self.quest_root / "needs" / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
             except OSError:
                 pass
-        print(self._routed_words(
+        print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept "
+              "(needs/STUCK.json says what FI tried)." if own_words else self._routed_words(
             f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
             "fix: needs/STUCK.json says what FI tried; " + (offered + " Or " if offered else "") + "run the quest again, "
             + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
@@ -23082,16 +23459,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         budget = [_rerun_check.TOTAL_FACTOR * (allowed or 0.0)]  # all the runs of one check together
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
+        from . import reuse_key as _reuse_key
+
         for issue, _how in verdicts:
             fid = str(issue.get("id"))
             saved = (record.get("issues") or {}).get(fid)
             kept = saved.get("rerun") if isinstance(saved, dict) else None
             disputed = sorted(str(x) for x in issue.get("disputed") or []) if strict else []
-            # an answer kept for this code is reused only when it was made in the same way: a strict answer (the disputed
-            # quantities compared key by key) also stands for an ordinary one, never the other way round
-            same_way = (bool(kept.get("strict")) and (not strict or kept.get("disputed") == disputed)) if isinstance(kept, dict) and (
-                strict or kept.get("strict")) else isinstance(kept, dict)
-            if isinstance(kept, dict) and same_way and kept.get("version") == version and kept.get("status") in ("changed", "unchanged", "could_not"):
+            # The key of the answer (core/reuse_key.py): every file of the study, the finding's own test, the repairs kept for it
+            # and how it was asked. A strict answer (the disputed quantities compared key by key) also stands for an ordinary
+            # one, never the other way round. Only a measured answer is reused: "could not" is asked again.
+            repairs = [p for _n, p in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log)]
+            test_rel = str(issue.get("test") or "")
+            # also what the comparison is made against: the plan's protocol, the time allowed, the results the study delivered, and
+            # what the finding says
+            results = self.quest_root / "data" / "results"
+            extra = {"protocol": _reuse_key.digest_text(json.dumps(_frozen.protocol_of(self.quest_root) or {}, sort_keys=True, default=str)),
+                     "allowed": int(allowed or 0),
+                     "delivered": {p.relative_to(self.quest_root).as_posix(): _reuse_key.digest(p)
+                                   for folder in (results, self.quest_root / "raw") if folder.is_dir()
+                                   for p in sorted(folder.glob("*.json"))},
+                     "finding": _reuse_key.digest_text(json.dumps({k: issue.get(k) for k in ("text", "test", "file", "line", "where", "note", "fix", "name")},
+                                                                  sort_keys=True, default=str))}
+            mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed, extra=extra)
+            plain = mine if not strict else _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, extra=extra)
+            if (isinstance(kept, dict) and kept.get("status") in ("changed", "unchanged") and mine.complete
+                    and (kept.get("key") == mine.key or (not strict and kept.get("stands_for") == plain.key))):
                 out[fid] = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
                 continue
             if runs >= self.MAX_RERUNS:
@@ -23104,9 +23497,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
                                       type(exc).__name__, exc)
                     out[fid] = _rerun_check.Verdict("could_not", f"{type(exc).__name__}: {exc}"[:200])
-            if isinstance(saved, dict):
+            if isinstance(saved, dict) and out[fid].mode != "not_asked":  # a request not made is asked again next time
                 saved["rerun"] = {**out[fid].record(), "version": version, "strict": strict,
-                                  "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else []}
+                                  "disputed": sorted(str(x) for x in issue.get("disputed") or []) if strict else [],
+                                  "key": mine.key, "stands_for": plain.key}
             self._log_rerun(fid, out[fid])
         _code_review.save(self.quest_root, record)
         return out
@@ -23191,14 +23585,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     record["rerun_calls"] = int(record.get("rerun_calls") or 0) + 1
                     _code_review.save(self.quest_root, record)
                     trial = await asyncio.to_thread(_rerun_check.copy_code, self.quest_root, work / f"a{_round}")
-                    tried = await self._ask_repair_on_copy(issue, rel, trial, protocol, state, problem)
-                    if not tried:
-                        verdict = _rerun_check.Verdict("could_not", "no repair of it could be written")
-                        if _round == 0:  # the reply held no usable file: asked once more, told so
-                            problem = ("Your reply held no whole file. Reply with ONE fenced Python block whose first line inside the "
-                                       f"fence is `# file: {rel}` and that holds the whole corrected file.")
-                            continue
-                        return verdict
+                    try:
+                        tried = await self._ask_repair_on_copy(issue, rel, trial, protocol, state, problem)
+                    except _finding_repair.NotAsked as exc:
+                        # a failed call is no answer: the request is given back and nothing is kept for this code
+                        record["rerun_calls"] = max(0, int(record.get("rerun_calls") or 0) - 1)
+                        _code_review.save(self.quest_root, record)
+                        return _rerun_check.Verdict("could_not", f"not asked: {exc}"[:200], mode="not_asked")
+                    if not tried:  # a reply that could not be placed was already asked for once more inside the request
+                        return _rerun_check.Verdict("could_not", "no repair of it could be written")
                     for target, text in tried.items():
                         (trial / target).write_text(text, encoding="utf-8")
                     ok, said = await self._repair_passes_own_test(issue, trial)
@@ -23212,13 +23607,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
-                left = allowed if budget is None else min(allowed, budget[0])
-                if left < _rerun_check.FLOOR_S:
+                if budget is not None and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
                     return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 began = time.monotonic()
-                verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
-                                                   source=source, results_root=self.quest_root,
-                                                   disputed=list(issue.get("disputed") or []) if strict else None)
+                # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
+                # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
+                refused = await self._repair_small_run_refusal(copy_dir, protocol, env)
+                if budget is not None:
+                    budget[0] -= time.monotonic() - began  # the small run is part of the time of the check
+                    began = time.monotonic()
+                left = allowed if budget is None else min(allowed, budget[0])
+                if left < _rerun_check.FLOOR_S and not refused:
+                    return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
+                if refused:
+                    verdict = _rerun_check.Verdict("could_not", "the repaired simulation does not run: " + refused,
+                                                   source=source, files=sorted(_rerun_check.changed_files(self.quest_root, copy_dir)),
+                                                   crashed=True)
+                else:
+                    verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
+                                                       source=source, results_root=self.quest_root,
+                                                       disputed=list(issue.get("disputed") or []) if strict else None,
+                                                       finding=str(issue.get("id") or ""))
                 if budget is not None:
                     budget[0] -= time.monotonic() - began
                 if verdict.status == "could_not" and verdict.crashed and _round == 0:
@@ -23231,6 +23640,42 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             return verdict
         finally:
             await asyncio.to_thread(shutil.rmtree, work, True)
+
+    async def _repair_small_run_refusal(self, copy_dir: Path, protocol: Any, env: dict[str, str]) -> str:
+        """Why FI's small run (:func:`core.code_checks.small_run_refusal`) refuses the repaired code in ``copy_dir``, or ``""``
+        when it runs, cannot be judged, or the repair changed only the analysis (which the simulation's contract does not read)."""
+        from . import code_checks as _code_checks
+
+        files = sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir))
+        if all(Path(f).name in _rerun_check.ANALYSIS_FILES and "/" not in f for f in files):
+            return ""
+        async def refusal(root: Path) -> str:
+            # The ``code/`` of ``root`` is run in a folder of its own: the small run writes its files (``.fi/small_run``,
+            # FI's harness) beside the code it runs, and the study's run.py takes a folder that holds ``.fi/`` for a quest
+            # and writes to ``../run_output``. Made beside the repaired copy, the study's own rerun of that copy would write
+            # its results outside it, and a working repair would be read as one that wrote no results.
+            scratch = Path(tempfile.mkdtemp(prefix="fi_small_"))
+            try:
+                await asyncio.to_thread(_rerun_check.copy_code, root, scratch)
+                return await _code_checks.small_run_refusal(
+                    scratch, protocol if isinstance(protocol, dict) else None, executor=self.executor,
+                    python=self.executor.python_path(self.quest_root), env=dict(env),
+                    timeout_s=int(self.config.execution.timeout_s))
+            finally:
+                await asyncio.to_thread(shutil.rmtree, scratch, True)
+
+        try:
+            refused = await refusal(copy_dir.parent)
+            if not refused:
+                return ""
+            # The copy holds only ``code/``: a study that reads a file of the quest outside it fails there whatever the repair.
+            # A refusal counts only for what the repair changed: the code as it is must pass the same small run in the same place.
+            if await refusal(self.quest_root):
+                return ""
+            return refused
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made refuses nothing: the study's own run decides
+            self._log.warning("[rerun] the small run of the repair could not be made (%r); the study's own run decides", exc)
+            return ""
 
     async def _ask_repair_on_copy(self, issue: dict[str, Any], rel: str, copy_dir: Path, protocol: Any,
                                   state: Any, problem: str = "") -> dict[str, str]:
@@ -23326,6 +23771,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         by_fid: dict[str, list[dict[str, Any]]] = {}
         shown: dict[str, bool] = {}
         kept: list[dict[str, Any]] = []
+        not_asked: set[str] = set()  # findings whose test request could not be made in this pass
         version = _code_review.version(self.quest_root / "code")
         for c in checks:
             fid = str((differing.get(str(c["quantity"])) or {}).get("fid") or "")
@@ -23336,7 +23782,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             saved.setdefault("id", fid)
             if fid not in shown:
                 has_test = bool(saved.get("test") and (self.quest_root / str(saved["test"])).is_file())
-                shown[fid] = (saved.get("demonstrated") is True and has_test) or await self._demonstrate_reader_finding(saved, record, state)
+                try:
+                    shown[fid] = (saved.get("demonstrated") is True and has_test) or await self._demonstrate_reader_finding(saved, record, state)
+                except _finding_repair.NotAsked as exc:  # no answer is no finding of "not shown": undecided, asked again next time
+                    shown[fid] = False
+                    not_asked.add(fid)
+                    for x in checks:
+                        if str((differing.get(str(x["quantity"])) or {}).get("fid") or "") == fid:
+                            x["measured"] = {"status": "could_not", "why": f"not asked: {exc}"[:200], "not_asked": True}
                 _code_review.save(self.quest_root, record)
                 if shown[fid]:
                     pairs.append(({**saved, "disputed": [str(x["quantity"]) for x in checks if
@@ -23351,7 +23804,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             v = reruns.get(fid)
             for c in group:
                 if not shown.get(fid):
-                    if "measured" not in c:
+                    if "measured" not in c or (c["measured"].get("not_asked") and fid not in not_asked):
                         c["measured"] = {"status": "not_shown", "why": "no test FI could write fails on the delivered code because of it"}
                         kept.append(c)
                         self._log.warning("[evidence_gate] no test shows that `%s` is computed differently from the plan: a word alone "
@@ -23360,6 +23813,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 c["measured"] = ({"status": v.status, "why": v.why, "metrics": v.metrics, "notes": v.notes, "mode": v.mode,
                                   "version": version} if v is not None else {"status": "could_not", "why": "not run", "version": version})
+                if v is not None and v.mode == "not_asked":  # a request not made is no answer for this code: asked again next time
+                    c["measured"] = {k: x for k, x in c["measured"].items() if k != "version"} | {"not_asked": True}
                 if v is not None and v.status == "unchanged":
                     kept.append(c)
                 elif v is not None and v.status == "changed":
@@ -23569,6 +24024,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         not_done: list[tuple[dict[str, Any], str, list[str]]] = []
         figures: list[tuple[dict[str, Any], str, list[str]]] = []
         about_plan: list[dict[str, Any]] = []
+        untied: list[tuple[dict[str, Any], list[str]]] = []  # a failing test on text FI wrote, about a plan entry FI placed on no result
         changed: dict[str, set[str]] = {}  # per finding: the printed keys the study run again with a repair of it showed changed
         unchanged: list[dict[str, Any]] = []
         moved_checks: dict[str, bool] = {}  # unchanged because the rerun moved only check measures -> its draws changed
@@ -23657,6 +24113,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 if not (placed.left_out or placed.figures or placed.not_done):
                     self._log.info("[evidence_gate] %s: %s; it changes no reported result", issue.get("id"), placed.why)
                 continue
+            # a rerun that could not run (a failed request, a refused repair, no time left) shows nothing moving: only one
+            # that moved numbers (even ones it could not place on a result) keeps the finding from the plan-text release
+            moved = rerun is not None and (rerun.status == "changed" or bool(getattr(rerun, "keys", None))
+                                           or bool(getattr(rerun, "metrics", None)))
+            if not moved and (
+                    names := self._untied_plan_text_only(record, issue, result, headline or [], reach)):
+                untied.append((issue, names))
+                continue
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif _code_review.missing_quantities(record, issue):
@@ -23714,6 +24178,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                               "changes no reported number and does not stop the quest", issue.get("id"))
         if about_plan and not (left_out or not_done or figures):
             _code_review.save(self.quest_root, record)
+        for issue, names in untied:
+            # The plan lists a dependent variable that FI placed on no declared result, and the failing test reads only text FI
+            # wrote from the plan: no computed number is shown wrong. Kept in the quality report only, never in the paper.
+            saved = issues.get(str(issue.get("id")))
+            if isinstance(saved, dict):
+                saved["changes_result"] = False
+                saved["untied_plan_item"] = names
+            self._log.warning("[evidence_gate] %s is about %s, which FI did not place on any declared result, and its test reads "
+                              "only text FI wrote from the plan: it changes no reported number and does not stop the quest",
+                              issue.get("id"), ", ".join(names)[:200])
+        if untied and not (left_out or not_done or figures):
+            _code_review.save(self.quest_root, record)
         for issue, how, keys, _q in left_out:
             self._log.warning("[evidence_gate] %s: %s; FI leaves %s out of the results the paper may use, and the paper says "
                               "so", issue.get("id"), how, ", ".join(keys)[:200])
@@ -23749,6 +24225,32 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 figures=[(f, h) for _i, h, files in figures for f in files],
                 changed=changed_by_quantity)
         return None
+
+    def _untied_plan_text_only(self, record: dict[str, Any], issue: dict[str, Any], result: Any, headline: list[str],
+                               reach: "_shown_reach.Reach | None") -> list[str]:
+        """The plan's dependent variables a finding is about, when FI's own records show the one thing the gate may release it
+        for: they are placed on no declared result (:func:`core.code_review.untied_dependents`), the frozen plan is of the
+        contract form, the run's results and the analysis record exist, and the failing test reads only text FI wrote from the
+        plan: no key that holds a value, no trial run, no figure, no result. Anything missing returns ``[]`` (the finding is
+        judged as before)."""
+        contract = getattr(reach, "contract", None)
+        if reach is None or getattr(contract, "form", "") != "contract" or not reach.ids:
+            return []
+        if not (isinstance(result, dict) and result) or not _analysis_frame.read_record(self.quest_root):
+            return []
+        names = _code_review.untied_dependents(record, issue, reach.ids, headline)
+        if not names:
+            return []
+        try:
+            if reach.reads_held_key(issue, result):
+                return []
+            placed = reach.effect(record, issue, result)
+        except Exception as exc:  # noqa: BLE001 - what cannot be read is not released
+            self._log.warning("[evidence_gate] %s: FI's records could not place the test (%r)", issue.get("id"), exc)
+            return []
+        if placed is None or not placed.plan_text or placed.stop or placed.left_out or placed.not_done or placed.figures                 or placed.probes or placed.extra_keys or placed.cannot:
+            return []
+        return names
 
     @staticmethod
     def _part_not_done_or_stop(stops: list, not_done: list, issue: dict[str, Any], how: str, record: dict[str, Any], result: Any,
@@ -25263,7 +25765,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         # grounding cleared, and the review forces ``citations_unchecked``.
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
-            _, parsed = await self._chat_json(
+            reply, parsed = await self._chat_json(
                 prompt, node="claim_check", want=("claims",), usable=lambda p: isinstance(p.get("claims"), list),
             )
         except _ModelAnswerProblem:
@@ -25287,13 +25789,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         parsed_ok = isinstance(parsed, dict) and isinstance(parsed.get("claims"), list)
         raw_claims = parsed.get("claims") if isinstance(parsed, dict) else None
         n_refs = len(refs)
+        # Each claim's basis and fault are closed choices: a claim whose choice cannot be read is asked once more, alone
+        # with the others that failed (the rest of the answer is kept); one still unreadable is ``unread``.
+        raw_claims = await self._reask_claim_choices(prompt, reply, raw_claims or [])
         claims: list[dict[str, Any]] = []
         for c in (raw_claims or []):
             if not isinstance(c, dict) or not str(c.get("claim") or "").strip():
                 continue
-            basis = str(c.get("basis") or "unsupported").strip().lower()
-            if basis not in ("experiment", "citation", "unsupported"):
-                basis = "unsupported"
+            unread = _claim_choice_problem(c)
+            basis = "unsupported" if unread else str(_claim_choice(c.get("basis")))
+            fault = "unread" if unread else _claim_choice(c.get("fault"))
             # A "citation" basis only counts if it points at a real source: a
             # References number in [1, n_refs] or a Further reading label
             # W1..W<len(further)>. Anything else is effectively unsupported (a
@@ -25314,12 +25819,18 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     cite_idx = number
             quote = " ".join(str(c.get("quote") or "").split())
             evidence = str(c.get("evidence") or "").strip()
+            if unread:
+                evidence = (f"{evidence} (FI could not read the check's verdict on this claim after asking once: {unread}; "
+                            "it counts as unsupported)").strip()
+            # FI's own look-up of a citation: a claim it cannot place in a source's text is unsupported, and its sentence
+            # stays and is stated in the Limitations (fault ``wording``): a quote FI cannot find does not show the sentence
+            # false, only that FI could not confirm it.
             if basis == "citation" and cite_idx is None:
-                basis = "unsupported"
+                basis, fault = "unsupported", "wording"
             elif basis == "citation" and not _quote_in_source(quote, sources[str(cite_idx)][1]):
                 # The model had the source's text; a citation it cannot quote
                 # from that text is not one the source supports.
-                basis = "unsupported"
+                basis, fault = "unsupported", "wording"
                 why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
                 if quote and _quote_in_source(quote, readings_of.get(str(cite_idx), "")):
                     why = (f"the quote is a model's reading of a figure of [{cite_idx}], not the source's text: an "
@@ -25328,6 +25839,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             claims.append({
                 "claim": str(c["claim"]).strip(),
                 "basis": basis,
+                "fault": fault,
+                "keys": _claim_keys(c.get("keys")),
                 "citation_index": cite_idx,
                 "quote": quote,
                 "evidence": evidence,
@@ -25354,6 +25867,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             claims.extend(kept)
             self._log.info("[claim_check] %d sentence(s) an earlier check found unsupported are still in the paper unchanged "
                            "and this check did not judge them again: they stay unsupported", len(kept))
+        # FI's own checks set the fault where they fired: a retracted source backs nothing (``no_source``), and a sentence
+        # the check found unsupported that states a number the writer typed and FI cannot trace is ``number``.
+        plan_of_typed = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
+        topic_of_typed = str(self.config.topic or "")
+        claims = _claim_faults_from_sources(
+            claims, sources,
+            lambda passage: bool(_paper_facts.untraced_typed(passage, plan_of_typed, topic_of_typed, self.quest_root)))
+        n_unread = sum(1 for c in claims if c.get("fault") == "unread")
+        if n_unread:
+            self._log.warning("[claim_check] %d claim(s) whose verdict could not be read after asking once count as "
+                              "unsupported, and their sentences are taken out of the paper", n_unread)
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
@@ -25396,6 +25920,61 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         else:
             self._clear_check_stop("claim_check")
         return {"claim_grounding": grounding, "claim_check_failed": failed}
+
+    async def _reask_claim_choices(self, prompt: str, reply: str, raw_claims: list[Any]) -> list[Any]:
+        """The claim check's claims with the ones whose ``basis`` or ``fault`` is not a closed choice asked ONCE more, those
+        claims alone and each by what was wrong (``agents/json_reanswer_part.md``): every other claim is kept as written.
+        A new answer is matched to its claim by the claim's words; only when one claim was asked and one answer came back
+        is an answer with other words taken for it (two or more are never matched by order, which could mix them up). A
+        claim still unreadable, or a call that fails, leaves the claim as it was, and the reader then makes it ``unread``."""
+        asked = [(i, c) for i, c in enumerate(raw_claims)
+                 if isinstance(c, dict) and str(c.get("claim") or "").strip() and _claim_choice_problem(c)]
+        if not asked:
+            return raw_claims
+        wrong = "; ".join(f"the claim {' '.join(str(c['claim']).split())[:160]!r}: {_claim_choice_problem(c)}"
+                          for _i, c in asked)
+        what = (f"{wrong}. Give `claims` as a list holding only these {len(asked)} claim(s), each with `claim` copied as "
+                "you wrote it, its `basis` (experiment, citation or unsupported), its `fault` (JSON null for experiment "
+                "or citation; number, scope or wording for unsupported), `keys`, `citation_index`, `quote` and `evidence`")
+        self._log.warning("[claim_check] %d claim(s) gave a basis or fault that is not one of the choices; asking once "
+                          "more for those claims only", len(asked))
+        echo = (f"\nYour previous reply, for reference (say the same things for these claims):\n\n{reply}\n"
+                if len(reply or "") <= self._REANSWER_ECHO_CHARS else "")
+        retry = self._prompts["json_reanswer_part"].substitute(
+            original_prompt=prompt, what_was_wrong=what, keys="`claims`", earlier_reply=echo)
+        try:
+            again = await self._chat(retry, node="claim_check")
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a failed ask leaves those claims unread, never the whole check failed
+            self._log.warning("[claim_check] the ask for those claims failed (%s: %s); they count as unsupported",
+                              type(e).__name__, str(e)[:200])
+            return raw_claims
+        answer = _parse_json_lenient(again, node="claim_check", want=("claims",)) or {}
+        given = [c for c in (answer.get("claims") if isinstance(answer, dict) else None) or [] if isinstance(c, dict)]
+
+        def words(c: dict[str, Any]) -> str:
+            return " ".join(str(c.get("claim") or "").split()).lower()
+
+        out = list(raw_claims)
+        left = list(asked)
+        unmatched: list[dict[str, Any]] = []
+        for g in given:
+            hit = next(((i, c) for i, c in left if words(c) == words(g)), None)
+            if hit is None:
+                unmatched.append(g)
+                continue
+            left.remove(hit)
+            out[hit[0]] = {**hit[1], **{k: v for k, v in g.items() if k != "claim"}}
+        if len(left) == len(asked) == len(unmatched) == len(given) == 1:
+            for (i, c), g in zip(left, unmatched):
+                out[i] = {**c, **{k: v for k, v in g.items() if k != "claim"}}
+        still = sum(1 for i, _c in asked if _claim_choice_problem(out[i]))
+        if still:
+            self._log.warning("[claim_check] %d of those claim(s) still could not be read", still)
+        else:
+            self._log.info("[claim_check] the %d claim(s) asked again could be read", len(asked))
+        return out
 
     async def _node_citation_check(self, state: QuestState) -> QuestState:
         """The last step before the paper is delivered: its citations are read against their sources
@@ -26604,8 +27183,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 "## Claims",
             ]
             for c in grounding["claims"]:
-                tag = (f"cite [{c['citation_index']}]"
-                       if c["basis"] == "citation" else c["basis"])
+                tag = (f"cite [{c['citation_index']}]" if c["basis"] == "citation"
+                       else f"{c['basis']}: {c['fault']}" if c.get("fault") else c["basis"])
                 lines.append(f"- **[{tag}]** {c['claim']}"
                              + (f" — {c['evidence']}" if c["evidence"] else "")
                              + (f" — quoted: \"{c['quote']}\"" if c.get("quote") else ""))
@@ -26885,14 +27464,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             standing = [c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
-            # A sentence the check found unsupported that states a number is not delivered (core/record_claims.py): it is
-            # taken out of the paper and the Limitations say so. One with no number stays and is stated as unconfirmed.
+            # A sentence whose claim's fault takes it out (a number not in the record, a true value under a wrong setting or
+            # label, a source that backs nothing, a verdict FI could not read) is not delivered (core/record_claims.py): it
+            # is taken out of the paper and the Limitations say so. A ``wording`` claim stays and is stated as unconfirmed.
+            # Only the fault decides: what the sentence holds is not read. An unsupported claim with no fault was judged
+            # before faults were named (a record an older FI wrote, read when its quest is resumed; this FI's check gives
+            # every unsupported claim one): it is decided by the rule that FI applied, so its sentence goes when it states a
+            # number, one FI filled in or one the writer typed that FI cannot trace.
             # The paper, the claim list, the receipt, the record and the Limitations change together: if any write fails,
             # every file is put back as it was and nothing is reported as taken out.
             snapshot = self._snapshot_files(paper_path)
             removed: list[dict[str, Any]] = []
             try:
-                text, removed = self._plan_take_out_unsupported_numbers(state, paper_path, by_wording)
+                text, removed = self._plan_take_out_unsupported_numbers(
+                    state, paper_path, [c for c in by_wording if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT],
+                    unnamed=[c for c in by_wording if c.get("fault") is None])
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
                     _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
@@ -26948,11 +27534,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 f.write_bytes(data)
 
     def _plan_take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
-                                           standing: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-        """``(the paper without them, the entries taken out)``: the writer's sentences the last claim check found unsupported
-        that state a number, found exactly (core/record_claims.py::take_out_unsupported_numbers). Nothing is written here;
-        :meth:`_state_unsupported_claims` writes the paper, the claim list, the receipt and the record together."""
+                                           standing: list[dict[str, Any]], *, unnamed: list[dict[str, Any]] | None = None,
+                                           ) -> tuple[str, list[dict[str, Any]]]:
+        """``(the paper without them, the entries taken out)``: the writer's sentences of ``standing`` (claims whose fault
+        takes the sentence out, chosen by the caller), found exactly (core/record_claims.py::take_out_unsupported_numbers).
+        The claim's fault decides, never what the sentence holds, so every exactly placed sentence of these claims goes.
+        ``unnamed``: unsupported claims judged before faults were named (a record an older FI wrote); a placed sentence of
+        one goes by the rule that FI applied: when it holds a value FI filled in, or a number the writer typed that FI cannot
+        trace to the plan or its records. Nothing is written here; :meth:`_state_unsupported_claims` writes the paper, the
+        claim list, the receipt and the record together."""
         before = Path(paper_path).read_bytes().decode("utf-8")
+
+        def plain(raw: str) -> str:
+            return " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split())
+
+        def keyed(raw: str) -> str:
+            return " ".join(_paper_facts.to_placeholders(raw).split())
+
+        text, removed = _record_claims.take_out_unsupported_numbers(
+            before, standing, same=_same_statement, holds_number=lambda _sentence: True, plain=plain, keyed=keyed)
+        if not unnamed:
+            return text, removed
         plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))
         topic = str(self.config.topic or "")
 
@@ -26961,10 +27563,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                 return True
             return bool(_paper_facts.untraced_typed(sentence, plan, topic, self.quest_root))
 
-        return _record_claims.take_out_unsupported_numbers(
-            before, standing, same=_same_statement, holds_number=holds_number,
-            plain=lambda raw: " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split()),
-            keyed=lambda raw: " ".join(_paper_facts.to_placeholders(raw).split()))
+        text, older = _record_claims.take_out_unsupported_numbers(
+            text, unnamed, same=_same_statement, holds_number=holds_number, plain=plain, keyed=keyed)
+        return text, removed + older
 
     async def _state_page_overrun(self, state: QuestState, paper_path: Path, limit: int, pages: int) -> int:
         """The paper stays over its page limit: FI's measurement goes on record (``.fi/page_limit.json``), which the
@@ -29316,21 +29917,29 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         "credentials*.json", "client_secret*.json", "secret.json", "secrets*.json", "requirements*.txt", "constraints*.txt",
     )
 
-    def _save_run_data(self, since: float, split: bool, root_files: bool = True) -> list[str]:
+    def _save_run_data(self, since: float, split: bool, root_files: bool = True,
+                       wrote: set[str] | frozenset[str] | None = None) -> list[str]:
         """Copy what a successful run produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
 
         The scripts run from the quest folder, so a table a script writes lands beside ``plan.md``; a two-script quest's
         raw files are in ``raw/``. Both are copied (the originals stay where the scripts and FI's records expect them),
         each file and the raw folder only while small enough not to double a large quest's disk use. The raw copy is
         replaced, not merged, so it never keeps a file an earlier run wrote. ``root_files=False`` refreshes only the raw
-        copy (after the replicate seeds ran, which add raw files but overwrite the root tables). Never raises."""
+        copy (after the replicate seeds ran, which add raw files but overwrite the root tables). Never raises.
+
+        A file is this run's when FI's own record of what the run wrote names it (``wrote``, paths relative to the quest:
+        core/outside_run.py tells a file written again with the content it had, which is not copied back and so keeps its
+        old modification time), or when its modification time is not older than the run's start (a file written in the
+        quest folder itself, which has no such record). A file neither is an earlier run's and is removed."""
+        wrote = wrote or frozenset()
         saved: list[str] = []
         dest = self.quest_root / "data" / "results"
         try:
             if root_files and dest.is_dir():
                 # Tables an earlier iteration left are not this run's; what a script wrote here itself is newer.
                 for old in dest.iterdir():
-                    if old.is_file() and old.stat().st_mtime < since - 2:
+                    if (old.is_file() and f"data/results/{old.name}" not in wrote
+                            and old.stat().st_mtime < since - 2):
                         old.unlink(missing_ok=True)
             for path in sorted(self.quest_root.iterdir() if root_files else []):
                 if any(fnmatch.fnmatch(path.name.lower(), pat) for pat in self._RUN_DATA_SKIP):
@@ -29339,7 +29948,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
                     continue
                 if (
                     path.is_file() and path.suffix.lower() in self._RUN_DATA_SUFFIXES
-                    and path.stat().st_mtime >= since - 2
+                    and (path.name in wrote or path.stat().st_mtime >= since - 2)
                     and path.stat().st_size <= self._RUN_DATA_MAX_BYTES
                 ):
                     dest.mkdir(parents=True, exist_ok=True)
@@ -29735,14 +30344,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         standing = ("accepted" if accepted and result_use in ("research", "decision")
                     and evidence_status == "publication_ready" else "preliminary")
 
-        analysis = state.get("analysis") or {}
         design = state.get("design") or {}
-        summary_parts: list[str] = []
-        if analysis.get("summary"):
-            summary_parts.append(str(analysis["summary"]))
-        for kf in analysis.get("key_findings", []) or []:
-            summary_parts.append(f"- {kf}")
-        summary = "\n".join(summary_parts)
+        # What memory holds as the study's claims is FI's own: the sentences it wrote from its record of each result it
+        # looked up (the cross-check's entries), and the paper's own abstract. The analysis's text (its summary and key
+        # findings, where FI's notes were restated as findings) is never stored.
+        record_claims = [str(e["finding"]) for e in (state.get("cross_check") or [])
+                         if isinstance(e, dict) and e.get("status") in ("checked", "no_literature") and e.get("finding")]
+        try:
+            summary = _paper_sections.abstract_of(artifacts.paper_md.read_text(encoding="utf-8"))
+        except OSError:
+            summary = ""
 
         # Distill the literature the agent actually saw into a curated
         # `external_refs` list. The Knowledge layer writes a spine doc
@@ -29804,7 +30415,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             "iteration": state.get("iteration", 0),
             "hypothesis": design.get("hypothesis", ""),
             "method_summary": design.get("method", ""),
-            "key_findings": list(analysis.get("key_findings", []) or [])[:20],
+            "key_findings": record_claims[:20],
+            "claims_from": "record",
             # The idea this study pursued and the ones it chose it over, with how: what a later quest reads to know
             # the direction was one of several (the full record, pairwise verdicts included, is .fi/branch_ledger.jsonl).
             "chosen_idea": chosen_title,
@@ -30034,6 +30646,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_formulas",                    # ... and a formula FI cannot work out as written, when FI writes the analysis
         "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "plan_answers",                     # ... and which result answers each quantity the topic asks for
+        "plan_dependents",                  # ... and what a dependent variable that is no declared result is (adds checks only)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
@@ -30108,6 +30721,18 @@ _LIT_EXCERPT_CHARS = 2000
 # text or an abstract.
 _THIN_TEXT_CHARS = 100
 _THIN_MARKS = {"title": "title only", "blurb": "short blurb only"}
+
+
+#: The kinds a finished quest writes to Axon (accepted and preliminary standing).
+_QUEST_MEMORY_KINDS = frozenset({"fi_quest_summary", "fi_quest_paper", "fi_paper_spine", "fi_preliminary_summary",
+                                 "fi_preliminary_paper", "fi_preliminary_spine"})
+
+
+def _unchecked_quest_memory(meta: dict[str, Any]) -> bool:
+    """Whether ``meta`` is an entry a quest wrote before its findings were taken from FI's record: written by a quest
+    (it names one), of a kind a quest writes, and without ``claims_from == "record"``. Never a store write: read only."""
+    return (meta.get("kind") in _QUEST_MEMORY_KINDS and bool(meta.get("quest_id"))
+            and meta.get("claims_from") != "record")
 
 
 def _has_full_text(meta: dict[str, Any]) -> bool:
@@ -30193,6 +30818,9 @@ def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) ->
         # The record holds no more than this says, and the writer is told so
         # where it reads the entry (see agents/write.md, "Citing sources").
         line1 += f" [{_THIN_MARKS[thin]}]"
+    if _unchecked_quest_memory(meta):
+        # An entry an earlier quest wrote from the model's own text: a precedent only as far as that text is.
+        line1 += " [findings taken from the model's text, not checked against FI's record]"
     if _retractions.is_retracted(meta):
         # Crossref lists a retraction of it (core/retractions.py): every block that names it says so.
         line1 += " [retracted]"
@@ -30919,6 +31547,80 @@ def _title_only_sentences(
     return found
 
 
+# The claim check's closed choices (agents/claim_check.md): a claim's basis, and what is wrong with an unsupported one.
+_CLAIM_BASES = ("experiment", "citation", "unsupported")
+_CLAIM_MODEL_FAULTS = ("number", "scope", "wording")
+# FI's own faults: ``no_source``, a claim whose source can back nothing (held as its title only, retracted); ``unread``, a
+# claim whose basis or fault could not be read after the one ask (it counts as unsupported and its sentence goes).
+_CLAIM_FAULTS = (*_CLAIM_MODEL_FAULTS, "no_source", "unread")
+# The faults whose sentence is taken out of the paper; a ``wording`` claim stays and is stated in the Limitations.
+_CLAIM_FAULTS_TAKEN_OUT = frozenset({"number", "scope", "no_source", "unread"})
+
+
+def _claim_choice(value: Any) -> str | None:
+    """A closed choice as written (spaces and case aside); ``None`` for JSON null; anything else as its text."""
+    if value is None:
+        return None
+    return str(value).strip().lower()
+
+
+def _claim_choice_problem(c: dict[str, Any]) -> str:
+    """``""`` when the claim check's ``basis`` and ``fault`` for claim ``c`` are among the closed choices and agree, else
+    what is wrong, in plain words. A supported claim with no ``fault`` key is read as ``null``: its basis already says it is
+    supported. Nothing else is read leniently: an unknown word is asked again, never mapped to the nearest choice."""
+    basis = _claim_choice(c.get("basis"))
+    if basis not in _CLAIM_BASES:
+        return f"its basis {c.get('basis')!r} is not one of experiment, citation, unsupported"
+    fault = _claim_choice(c.get("fault"))
+    if basis == "unsupported":
+        if fault not in _CLAIM_MODEL_FAULTS:
+            return (f"it is unsupported and its fault {c.get('fault')!r} is not one of number, scope, wording"
+                    if "fault" in c else "it is unsupported and gives no fault (one of number, scope, wording)")
+    elif fault is not None:
+        return f"its basis is {basis} and its fault {c.get('fault')!r} is given; a supported claim's fault is null"
+    return ""
+
+
+def _claim_keys(value: Any) -> list[str]:
+    """The ``{{v:...}}`` keys a claim's fault is about, as the check wrote them, without their braces."""
+    out: list[str] = []
+    for k in value if isinstance(value, list) else []:
+        key = str(k or "").strip()
+        if key.startswith("{{") and key.endswith("}}"):
+            key = key[2:-2].strip()
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
+def _claim_faults_from_sources(claims: list[dict[str, Any]], sources: dict[str, tuple[dict[str, Any], str]],
+                               typed_untraced: Callable[[str], bool]) -> list[dict[str, Any]]:
+    """``claims`` with the fault FI's own checks set: a claim the retracted-source rule made unsupported (or that rests on a
+    retracted source) is ``no_source``; a ``wording`` claim, or one with no fault, whose stored passage states a number the
+    writer typed that FI cannot trace to the plan or its records (``typed_untraced(passage)``) is ``number`` (an old record
+    with no fault too: the take-out cut such a sentence before faults were named). A fault the check gave that already
+    takes the sentence out is kept. A ``no_source`` claim with no stored passage (one FI's rule added) gets its own
+    sentence as its passage. The caller's claims are not changed in place."""
+    retracted = {label for label, (meta, _text) in sources.items() if _retractions.is_retracted(meta)}
+    out: list[dict[str, Any]] = []
+    for c in claims:
+        c = dict(c)
+        if c.get("basis") == "unsupported" and c.get("fault") not in _CLAIM_FAULTS_TAKEN_OUT:
+            if str(c.get("citation_index")) in retracted:
+                c["fault"] = "no_source"
+            elif any(typed_untraced(str(w.get("passage") or "")) for w in c.get("where") or []
+                     if isinstance(w, dict) and str(w.get("passage") or "").strip()):
+                c["fault"] = "number"
+        c.setdefault("fault", None)
+        c.setdefault("keys", [])
+        if c["fault"] == "no_source" and not c.get("where"):
+            # A sentence FI's own rule added (it cites a title-only or retracted source and the check did not list it) is
+            # the paper's sentence itself: it is its own passage, so the take-out finds it exactly.
+            c["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(str(c.get("claim") or "")).split())}]
+        out.append(c)
+    return out
+
+
 def _unsupported_still_in(paper_text: str, earlier: list[Any], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The claims of an earlier check of this quest marked ``unsupported`` whose text, or a passage the check stored for
     it (:func:`_passage_stands`), the paper still holds word for word (spacing aside) and that ``claims`` (this check's)
@@ -30965,14 +31667,15 @@ def _apply_title_only_rule(
     claims: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
     """``claims`` with the sentences that rest on title-only sources marked
-    ``unsupported``, and how many were changed or added.
+    ``unsupported`` with fault ``no_source`` (their sentence is taken out of the paper), and how many were changed or added.
 
     For each sentence :func:`_title_only_sentences` finds: a claim the check
     grounded in one of its citations is marked ``unsupported`` (the quote it gave
     can only have been the title), and a sentence the check did not list as a claim
-    at all is added as one. A claim the check already marked ``unsupported`` is
-    left as it is, and so is one it grounded in the run's results: a result the
-    experiment produced does not need the citation beside it."""
+    at all is added as one. A claim the check already marked ``unsupported`` keeps
+    its basis and gets fault ``no_source`` (unless its fault already takes the
+    sentence out); one it grounded in the run's results is left as it is: a result
+    the experiment produced does not need the citation beside it."""
     found = _title_only_sentences(paper_md, sources)
     if not found:
         return claims, 0
@@ -30980,7 +31683,17 @@ def _apply_title_only_rule(
     changed = 0
     for sentence, labels, words in found:
         same = [c for c in out if _same_statement(c["claim"], sentence)]
-        if any(c["basis"] in ("unsupported", "experiment") for c in same):
+        if any(c["basis"] == "experiment" for c in same):
+            continue
+        weaker = [c for c in same if c["basis"] == "unsupported" and c.get("fault") not in _CLAIM_FAULTS_TAKEN_OUT]
+        if any(c["basis"] == "unsupported" for c in same):
+            # The check found it unsupported already; the source it cites backs nothing, so its fault is FI's.
+            for claim in weaker:
+                claim["fault"] = "no_source"
+                claim.setdefault("where", [])
+                if not claim["where"]:
+                    claim["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(sentence).split())}]
+            changed += bool(weaker)
             continue
         first = labels[0]
         why = (
@@ -30990,11 +31703,15 @@ def _apply_title_only_rule(
         cited = [c for c in same if c["basis"] == "citation" and str(c.get("citation_index")) in labels]
         if cited:
             for claim in cited:
-                claim.update(basis="unsupported", quote="", evidence=why)
+                claim.update(basis="unsupported", fault="no_source", quote="", evidence=why)
+                if not claim.get("where"):
+                    claim["where"] = [{"passage": " ".join(_paper_facts.to_placeholders(sentence).split())}]
         elif not same:
             out.append({
                 "claim": sentence,
                 "basis": "unsupported",
+                "fault": "no_source",
+                "keys": [],
                 "citation_index": int(first) if first.isdigit() else first,
                 "quote": "",
                 "evidence": why,
@@ -31241,6 +31958,11 @@ def _fit_request(why: str, fit: dict[str, Any], kept: list[str] | None = None) -
     if fit.get("search"):
         search = (" A search's evaluations count as settings too: each costs about as much as one setting, so its "
                   "evaluation_budget (starts times per_start) is part of the same total.")
+        build = fit.get("start_build")
+        if isinstance(build, dict) and build.get("numbers"):
+            search += (f" Each starting point of the search first moves each of the design's {int(build['numbers']):,} "
+                       f"numbers once ({int(build['evaluations']):,} of its {int(build.get('per_start') or 0):,} "
+                       "evaluations).")
         alternatives = int(fit.get("alternatives") or 0)
         if alternatives > 1:
             per_alt = int(fit.get("per_alternative") or 0)
@@ -31377,7 +32099,17 @@ def _flat_request(fact: dict[str, Any], kept: list[str] | None = None) -> str:
             + ("\n\nWhat the topic asks to vary stays varied:\n" + "\n".join(kept) if kept else ""))
 
 
+def _plan_search_mark(plan_text: str | None) -> str:
+    """A short hash of the search block of the plan ``plan_text`` as written (``protocol.optimisation``; none for no text,
+    or a plan without one): what a held search block is tied to (:meth:`Engine._keep_search_refused`)."""
+    raw = _plan.raw_design_block(plan_text) if plan_text else None
+    protocol = raw.get("protocol") if isinstance(raw, dict) else None
+    block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+    return hashlib.sha256(json.dumps(block, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 _SEARCH_ASKED = "search_block_asked.json"
+_SEARCH_REFUSED = "search_refused.json"  # the search block that could not be used, whole, with its faults by path
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
 #: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
@@ -35128,10 +35860,14 @@ def _format_cross_check(state: QuestState) -> str:
     bulleted block for the write prompt's `$cross_check_block`."""
     checks = state.get("cross_check") or []
     if not checks:
-        return "(none — cross-check disabled or no key findings)"
+        return "(none — cross-check disabled or FI holds no result to look up)"
     lines: list[str] = []
     for c in checks:
         lines.append(f"### Finding: {c.get('finding', '(?)')}")
+        if c.get("status") == "not_checked":
+            lines.append(f"  not checked: {c.get('why_not') or 'FI holds no value of it'}")
+            lines.append("")
+            continue
         for bucket in ("supporting", "conflicting"):
             items = c.get(bucket) or []
             if not items:
@@ -35636,13 +36372,50 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
     ]
 
 
-def _entries_as_written(protocol: Any, why: str | None, *, you: bool = False) -> str:
-    """The entries of ``protocol`` that the problems in ``why`` (one or several, as
-    :func:`core.optimisation_plan.normalize` gives them) name, as written, in one sentence; ``""`` when none is found. One
-    problem gives the same sentence as before (``the entry as written: ...``; ``you``: ``the entry as you wrote it: ...``)."""
+def _read_a_search_block(block: Any) -> tuple[dict[str, Any] | None, list[str], list[Any]]:
+    """``(block, left_out, stopping)`` for a search block a model wrote: ``block`` is what FI uses (every part and entry that
+    could be read, the faulted ones left out alone, the block's own parts as written when it reads whole), ``left_out`` one
+    sentence per part left out, and ``stopping`` the faults that make the block unusable (``block`` is then ``None``).
+    What a search cannot do without stops it: an objective, a baseline, a limit, a design variable whose value at the
+    baseline is not given (a variable that has one is held there and said), or every entry of its scan's settings or parts;
+    every other fault costs only its own part (:func:`core.optimisation_plan.read_block`,
+    :func:`core.optimisation_plan.repair`)."""
+    reading = _optim.read_block(block)
+    if not reading.faults:
+        return block, [], []
+    repaired, notes = _optim.repair(block)
+    stopping = [f for f in reading.faults if f.required and len(_reading.split(f.path)) > 2
+                and str(_reading.split(f.path)[2]) in ("objective", "baseline", "constraints")]
+    # The scan's settings and its parts are the question the search starts from: every entry of one lost would leave the
+    # scan running as a different (larger) one, so the answer is asked again, as for an objective.
+    for part in ("grid", "sub_studies", "in_each_run"):
+        if block.get(part) and repaired is not None and not repaired.get(part):
+            stopping += [f for f in reading.faults if len(_reading.split(f.path)) > 2 and str(_reading.split(f.path)[2]) == part]
+    if repaired is None or stopping or reading.nothing_read:
+        return None, [], stopping or list(reading.faults)
+    return repaired, notes, []
+
+
+def _fault_record(fault: Any) -> dict[str, Any]:
+    """A fault as plain data (for a record or a refused-change item)."""
+    return {"path": fault.path, "kind": fault.kind, "reason": fault.reason, "allowed": list(fault.allowed or []) or None,
+            "as_written": fault.as_written, "required": bool(fault.required)}
+
+
+def _fault_from_record(record: dict[str, Any]) -> Any:
+    """The :class:`~core.answer_reading.Fault` of :func:`_fault_record`."""
+    return _reading.Fault(record["path"], record["kind"], record["reason"],
+                          tuple(record["allowed"]) if record.get("allowed") else None, record.get("as_written"),
+                          bool(record.get("required")))
+
+
+def _entries_as_written(protocol: Any, faults: Any, *, you: bool = False) -> str:
+    """The entries of ``protocol`` that ``faults`` (each at its path) are about, as written, in one sentence; ``""`` when none
+    is found. One entry gives ``the entry as written: ...`` (``you``: ``the entry as you wrote it: ...``). Each entry is
+    found by its fault's path (:func:`core.plan.offending_entry`), not by words in a reason."""
     found: list[str] = []
-    for one in _optim.split_problems(why):
-        entry = _plan.offending_entry(protocol, one)
+    for fault in faults or []:
+        entry = _plan.offending_entry(protocol, fault)
         if entry and entry not in found:
             found.append(entry)
     if not found:

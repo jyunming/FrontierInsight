@@ -8,9 +8,10 @@
   "row"
  ],
  "x": "col",
+ "series": "row",
  "series_ids": [
-  "row_0",
-  "row_2"
+  "load@row:0",
+  "load@row:2"
  ],
  "references": {},
  "labels": {
@@ -19,9 +20,7 @@
    "scale": "linear"
   },
   "col": "Column",
-  "row": "Row",
-  "row_0": "Row 0",
-  "row_2": "Row 2"
+  "row": "Row"
  },
  "figure": {
   "id": "map",
@@ -31,8 +30,8 @@
  "plan": {
   "series": [
    "load",
-   "row_0",
-   "row_2"
+   "load@row:0",
+   "load@row:2"
   ],
   "grid": [
    0,
@@ -60,14 +59,14 @@
   {
    "claim": "drawn",
    "args": {
-    "series": "row_0",
+    "series": "load@row:0",
     "panel": "2"
    }
   },
   {
    "claim": "trend",
    "args": {
-    "series": "row_0",
+    "series": "load@row:0",
     "panel": "2"
    }
   },
@@ -81,7 +80,7 @@
   {
    "claim": "value_at",
    "args": {
-    "series": "row_2",
+    "series": "load@row:2",
     "x": "3",
     "panel": "2"
    }

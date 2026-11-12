@@ -42,6 +42,7 @@ from typing import Any
 
 import yaml
 
+from . import answer_reading as _reading
 from .latex_text import escape_latex_backslashes
 
 PLAN_FILE = "plan.md"
@@ -93,19 +94,32 @@ PROTOCOL_PARTS = (
 def hoist_protocol_parts(design: Any) -> tuple[Any, list[str]]:
     """``(design, moved)``: ``design`` with each protocol part written at its top level moved under ``protocol``, and the
     names moved. A part the protocol already has stays as the protocol has it (the top-level one is then left where it
-    is, and not moved). ``design`` itself is not changed."""
+    is, and not moved; :func:`read_hoist` says when the two differ). ``design`` itself is not changed."""
+    reading = read_hoist(design)
+    return reading.kept, [m.path for m in reading.moved]
+
+
+def read_hoist(design: Any) -> _reading.Reading:
+    """The reading of :func:`hoist_protocol_parts`: ``kept`` is the design with each part written beside ``protocol``
+    moved under it (a :class:`~core.answer_reading.Moved` each, by the part's name), and a ``conflict`` for each part
+    written both beside ``protocol`` and in it with different content (the protocol's own is the one read, so the one
+    beside it would be lost unsaid; both versions are in ``as_written``). The same part written twice alike is neither."""
     if not isinstance(design, dict):
-        return design, []
+        return _reading.Reading(kept=design)
     protocol = design.get("protocol")
     if protocol is not None and not isinstance(protocol, dict):
-        return design, []
-    stray = [k for k in PROTOCOL_PARTS if k in design and design[k] not in (None, "", [], {})
-             and not (isinstance(protocol, dict) and protocol.get(k) is not None)]
+        return _reading.Reading(kept=design)
+    written = [k for k in PROTOCOL_PARTS if k in design and design[k] not in (None, "", [], {})]
+    stray = [k for k in written if not (isinstance(protocol, dict) and protocol.get(k) is not None)]
+    faults = [_fault(k, (f"`{k}` is written beside `protocol` and also in it (`protocol.{k}`), and the two differ: the "
+                         "protocol's own is the one read, so say which is meant"), "conflict",
+                     {k: design[k], f"protocol.{k}": protocol[k]})
+              for k in written if k not in stray and not _same(design[k], protocol[k])]
     if not stray:
-        return design, []
+        return _reading.Reading(kept=design, faults=faults)
     out = {k: v for k, v in design.items() if k not in stray}
     out["protocol"] = {**(protocol or {}), **{k: design[k] for k in stray}}
-    return out, stray
+    return _reading.Reading(kept=out, faults=faults, moved=[_reading.Moved(k, f"protocol.{k}") for k in stray])
 
 
 _ENTRY_NAME = re.compile(r"entry `([^`]+)`|`protocol\.\w+(?:\.\w+)?` `([^`]+)`")
@@ -113,9 +127,28 @@ _ENTRY_INDEX = re.compile(r"entry (\d+)")
 _PART_KEY = re.compile(r"`protocol\.(\w+)(?:\.(\w+))?`")
 
 
-def offending_entry(protocol: Any, why: str | None, limit: int = 500) -> str:
+def offending_entry(protocol: Any, why: "str | _reading.Fault | None", limit: int = 500) -> str:
     """The entry of ``protocol`` that a reader's reason ``why`` names (``entry 2``, ``entry `id```, ``design_variables`
-    `name```), as written, in one short line; ``""`` when the reason names none or it cannot be found."""
+    `name```), as written, in one short line; ``""`` when the reason names none or it cannot be found. Given a
+    :class:`~core.answer_reading.Fault`, the entry at its path (a reason in words is the older form, still read)."""
+    if isinstance(why, _reading.Fault):
+        # A fault says where it is: the entry is found by its path, not again in the words of its reason.
+        steps = _reading.split(why.path)
+        # The entry is the list entry or the named setting the fault is in, not the leaf inside it (`...mesh.search`).
+        depth = 4 if len(steps) > 1 and steps[1] == "optimisation" else 3
+        for n, step in enumerate(steps):
+            if isinstance(step, int):
+                depth = min(depth, n + 1)
+                break
+        entry_path = why.path
+        if len(steps) > depth:
+            entry_path = steps[0]
+            for step in steps[1:depth]:
+                entry_path = _reading.join(entry_path, step)
+        found_at = _reading.value_at(protocol, entry_path, "protocol") if len(steps) > 2 else None
+        if found_at is None and why.as_written is not None and len(steps) > 2 and entry_path == why.path:
+            found_at = why.as_written
+        return "" if found_at is None else _reading.shown(found_at, limit)
     if not isinstance(protocol, dict) or not why:
         return ""
     part = _PART_KEY.search(why)
@@ -319,32 +352,45 @@ def _sub_studies(subs: Any, grid: Any, inside: Any) -> tuple[list[dict[str, Any]
     its values between them; otherwise some of its values would never be run, so that is refused. ``why`` names every entry
     that cannot be read (one after the other, joined by :data:`ALSO`), not only the first; when one reads badly the
     settings of the entries together are not judged, as they cannot be known."""
-    where = "`protocol.sub_studies`"
+    fixed, faults = sub_study_faults(subs, grid, inside)
+    return (fixed, None) if not faults else (None, ALSO.join(f.reason for f in faults))
+
+
+def sub_study_faults(subs: Any, grid: Any, inside: Any, where: str = "protocol") -> tuple[list[dict[str, Any]] | None, list[_reading.Fault]]:
+    """:func:`_sub_studies` with each fault where it is: one per entry that cannot be read on its own
+    (``<where>.sub_studies[n]``), then, when every entry reads, the check of the entries together
+    (``<where>.sub_studies``, kind ``together``). ``where``: the container (``protocol``, or a search's block
+    ``protocol.optimisation``); the reasons are worded for ``protocol`` as :func:`_sub_studies` words them."""
+    part = f"`protocol.sub_studies`"
+    path = f"{where}.sub_studies"
     if not isinstance(grid, dict) or not grid:
-        return None, f"{where} divides the settings of `protocol.grid`, which is missing"
+        return None, [_fault(path, f"{part} divides the settings of `protocol.grid`, which is missing", "missing", subs)]
     if not isinstance(subs, list) or not subs or not all(isinstance(s, dict) for s in subs):
-        return None, (f"{where} must be a list; each entry has a `name` and the `vary` list of the settings of "
-                      "`protocol.grid` that part of the study varies and `hold`: the value it holds every other setting at")
+        return None, [_fault(path, (f"{part} must be a list; each entry has a `name` and the `vary` list of the settings of "
+                                    "`protocol.grid` that part of the study varies and `hold`: the value it holds every "
+                                    "other setting at"), as_written=subs)]
     inside = inside if isinstance(inside, dict) else {}
     fixed: list[dict[str, Any]] = []
-    whys: list[str] = []
+    faults: list[_reading.Fault] = []
     for number, sub in enumerate(subs, start=1):
         one, why = _read_sub_study(number, sub, grid, inside)
         if one is None:
-            whys.append(str(why))
+            faults.append(_fault(_reading.join(path, number), str(why), as_written=sub))
         else:
             fixed.append(one)
-    if whys:
-        return None, ALSO.join(whys)
+    if faults:
+        return None, faults
     for axis, values in grid.items():
         if len(values) > 1 and not any(axis in sub["vary"] for sub in fixed):
             held_at = [sub["hold"][axis] for sub in fixed if axis in sub["hold"]]
             missing = [v for v in values if not any(v == h for h in held_at)]
             if missing:
-                return None, (f"`{axis}` is a setting of `protocol.grid` that no entry of {where} varies, and the entries do "
-                              f"not hold it at {', '.join(repr(v) for v in missing)}, so those values would never be run: add "
-                              "it to the `vary` of the sub-study it belongs to, or give a sub-study that value in its `hold`")
-    return fixed, None
+                return None, [_fault(path, (
+                    f"`{axis}` is a setting of `protocol.grid` that no entry of {part} varies, and the entries do "
+                    f"not hold it at {', '.join(repr(v) for v in missing)}, so those values would never be run: add "
+                    "it to the `vary` of the sub-study it belongs to, or give a sub-study that value in its `hold`"),
+                    "together")]
+    return fixed, []
 
 
 def _numerical_settings(settings: Any, protocol: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -352,28 +398,42 @@ def _numerical_settings(settings: Any, protocol: dict[str, Any]) -> tuple[dict[s
     resolution of the simulation (a sampling density, a step, a mesh size) with the one value the study uses (``search``)
     and the finer values FI reruns the headline results at (``check``; FI's fixed rule when left out), as a search's
     ``numerical_settings`` are read (:func:`core.optimisation_plan.normalize`). The study runs each at its one value."""
+    out, fault = _numerical_settings_fault(settings, protocol)
+    return (out, None) if fault is None else (None, fault.reason)
+
+
+def _numerical_settings_fault(settings: Any, protocol: dict[str, Any]) -> tuple[dict[str, Any] | None, _reading.Fault | None]:
+    """:func:`_numerical_settings` with the first fault where it is: the whole part, or the one setting
+    (``protocol.numerical_settings.<name>``)."""
     from . import optimisation_plan as _optim  # the reader of a search's numerical settings, the same rules
 
     where = "`protocol.numerical_settings`"
     if protocol.get("optimisation") is not None:
-        return None, (f"{where} cannot stand beside `protocol.optimisation`: a search's numerical settings are "
-                      "`protocol.optimisation.numerical_settings`")
+        return None, _fault("protocol.numerical_settings", (
+            f"{where} cannot stand beside `protocol.optimisation`: a search's numerical settings are "
+            "`protocol.optimisation.numerical_settings`"), "conflict", settings)
     if not isinstance(settings, dict) or not settings:
-        return None, f"{where} must map each numerical setting of the simulation (a mesh size, a step) to its values"
+        return None, _fault("protocol.numerical_settings",
+                            f"{where} must map each numerical setting of the simulation (a mesh size, a step) to its values",
+                            as_written=settings)
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else {}
     out: dict[str, Any] = {}
     for name, item in settings.items():
+        path = _reading.join("protocol.numerical_settings", name)
         setting, why = _optim._setting(str(name), item)
         if setting is None:
-            return None, (why or "").replace("`protocol.optimisation.numerical_settings`", where).replace(
-                "the value the search uses", "the value the study uses")
+            return None, _fault(path, (why or "").replace("`protocol.optimisation.numerical_settings`", where).replace(
+                "the value the search uses", "the value the study uses"), as_written=item)
         if str(name) in inside:
-            return None, f"{where} `{name}` is also in `protocol.in_each_run`: a numerical setting has one value in a run"
+            return None, _fault(path, f"{where} `{name}` is also in `protocol.in_each_run`: a numerical setting has one "
+                                      "value in a run", "conflict", {"protocol.numerical_settings": item,
+                                                                     "protocol.in_each_run": inside[str(name)]})
         if str(name) in grid and [v for v in grid[str(name)]] != [setting["search"]]:
-            return None, (f"{where} `{name}` is also a setting of `protocol.grid` with the values {grid[str(name)]}: a "
-                          f"numerical setting has one value in the study ({setting['search']}); its finer values are "
-                          "`check`, which FI reruns the results at")
+            return None, _fault(path, (f"{where} `{name}` is also a setting of `protocol.grid` with the values "
+                                       f"{grid[str(name)]}: a numerical setting has one value in the study "
+                                       f"({setting['search']}); its finer values are `check`, which FI reruns the results at"),
+                                "conflict", {"protocol.numerical_settings": item, "protocol.grid": grid[str(name)]})
         out[str(name)] = setting
     return out, None
 
@@ -525,25 +585,39 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     The protocol fixes what an experiment is not allowed to change on its own (:mod:`core.protocol_check`): ``grid`` (each
     parameter it sweeps, with every value), ``runs_per_setting``, ``thresholds``, and the prose ``seed_policy``,
     ``ci_method``, ``failure_policy`` (how a trial that fails is treated) and ``acceptance`` (what would count as support). Every key is optional, and keys beyond these are kept.
-    Strict about the numbers, which are what a check reads."""
+    Strict about the numbers, which are what a check reads. ``why`` is the reason of the first fault
+    (:func:`protocol_fault`, which also says where it is)."""
+    out, fault = protocol_fault(protocol)
+    return (out, None) if fault is None else (None, fault.reason)
+
+
+def _fault(path: str, reason: str, kind: str = "unreadable", as_written: Any = None, **extra: Any) -> _reading.Fault:
+    return _reading.Fault(path=path, kind=kind, reason=reason, as_written=as_written, **extra)
+
+
+def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault | None]:
+    """``(protocol, None)`` as :func:`normalize_protocol` reads it, or ``(None, the first fault)``: the reason with the path
+    of the part or entry it is about, so a repair leaves out that one and nothing found by matching words."""
     if not isinstance(protocol, dict):
-        return None, "`protocol` must be a mapping (`grid`, `runs_per_setting`, `thresholds`, ...)"
+        return None, _fault("protocol", "`protocol` must be a mapping (`grid`, `runs_per_setting`, `thresholds`, ...)",
+                            "form", protocol)
     out: dict[str, Any] = dict(protocol)
     outputs = declared_outputs(protocol)
     grid = out.get("grid")
     if grid is not None:
         if not isinstance(grid, dict):
-            return None, "`protocol.grid` must map each parameter to the list of values it takes"
+            return None, _fault("protocol.grid", "`protocol.grid` must map each parameter to the list of values it takes",
+                                as_written=grid, required=True)
         fixed: dict[str, list[Any]] = {}
         for axis, values in grid.items():
             if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
             fixed_values, why = _grid_values(axis, values)
             if why:
-                return None, why
+                return None, _fault(_reading.join("protocol.grid", axis), why, as_written=grid[axis], required=True)
             why = setting_names_a_result("grid", axis, fixed_values, outputs)
             if why:
-                return None, why
+                return None, _fault(_reading.join("protocol.grid", axis), why, "not_allowed", grid[axis], required=True)
             fixed[str(axis)] = fixed_values
         out["grid"] = fixed
     inside = out.get("in_each_run")
@@ -551,95 +625,117 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         # What every run goes through together (core/in_run.py): all five temperatures one fit uses, every procedure applied
         # to the same simulated data. Not a setting of its own: each run is given the whole list.
         if not isinstance(inside, dict) or not inside:
-            return None, ("`protocol.in_each_run` must map each thing every run compares inside it (all its values in "
-                          "one run, on the same random numbers) to the list of those values")
+            return None, _fault("protocol.in_each_run", (
+                "`protocol.in_each_run` must map each thing every run compares inside it (all its values in "
+                "one run, on the same random numbers) to the list of those values"), as_written=inside, required=True)
         fixed_inside: dict[str, list[Any]] = {}
         for factor, values in inside.items():
+            where = _reading.join("protocol.in_each_run", factor)
             fixed_values, why = _grid_values(factor, values, part="in_each_run")
             if why:
-                return None, why
+                return None, _fault(where, why, as_written=values, required=True)
             why = setting_names_a_result("in_each_run", factor, fixed_values, outputs)
             if why:
-                return None, why
+                return None, _fault(where, why, "not_allowed", values, required=True)
             seen_values = [json.dumps(float(v) if _number(v) else v) for v in fixed_values or []]
             if len(set(seen_values)) < len(seen_values):
-                return None, (f"`protocol.in_each_run.{factor}` lists the same value twice: each value is compared "
-                              "once, so list every value one time")
+                return None, _fault(where, (f"`protocol.in_each_run.{factor}` lists the same value twice: each value is "
+                                            "compared once, so list every value one time"), "duplicate", values, required=True)
             if len(fixed_values or []) < 2:
-                return None, (f"`protocol.in_each_run.{factor}` has one value: a single value is not compared; it is "
-                              "a fixed setting of the run")
+                return None, _fault(where, (f"`protocol.in_each_run.{factor}` has one value: a single value is not "
+                                            "compared; it is a fixed setting of the run"), as_written=values, required=True)
             if str(factor) in (out.get("grid") or {}):
-                return None, (f"`{factor}` is both a setting of `protocol.grid` (each value run on its own) and in "
-                              "`protocol.in_each_run` (all its values in one run): it is one or the other")
+                return None, _fault(where, (
+                    f"`{factor}` is both a setting of `protocol.grid` (each value run on its own) and in "
+                    "`protocol.in_each_run` (all its values in one run): it is one or the other"), "conflict",
+                    {"protocol.grid": (out.get("grid") or {}).get(str(factor)), "protocol.in_each_run": values}, required=True)
             fixed_inside[str(factor)] = fixed_values or []
         out["in_each_run"] = fixed_inside
     subs = out.get("sub_studies")
     if subs is not None and out.get("optimisation") is not None and out.get("grid") is None:
         from . import optimisation_plan as _optim_rule
 
-        return None, ("`protocol.sub_studies` cannot stand beside `protocol.optimisation`: "
-                      + _optim_rule.SCAN_PARTS_RULE + " (the settings of `protocol.optimisation.grid` each part varies, "
-                      "and the value it holds the others at)")
+        return None, _fault("protocol.sub_studies", (
+            "`protocol.sub_studies` cannot stand beside `protocol.optimisation`: "
+            + _optim_rule.SCAN_PARTS_RULE + " (the settings of `protocol.optimisation.grid` each part varies, "
+            "and the value it holds the others at)"), "conflict", subs)
     if subs is not None:
         fixed_subs, why = _sub_studies(subs, out.get("grid"), out.get("in_each_run"))
         if why:
-            return None, why
+            return None, _fault("protocol.sub_studies", why, as_written=subs, required=True)
         out["sub_studies"] = fixed_subs
     numerical = out.get("numerical_settings")
     if numerical is not None:
-        fixed_numerical, why = _numerical_settings(numerical, out)
-        if fixed_numerical is None:
-            return None, why
+        fixed_numerical, fault = _numerical_settings_fault(numerical, out)
+        if fault is not None:
+            return None, fault
         out["numerical_settings"] = fixed_numerical
         # Each is a setting of the study at its one value (every cell carries it); its finer values are FI's check.
         out["grid"] = {**(out.get("grid") or {}), **{n: [s["search"]] for n, s in fixed_numerical.items()}}
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
-        return None, "`protocol.runs_per_setting` must be a whole number of at least 1"
+        return None, _fault("protocol.runs_per_setting", "`protocol.runs_per_setting` must be a whole number of at least 1",
+                            as_written=runs)
     thresholds = out.get("thresholds")
     if thresholds is not None:
         if not isinstance(thresholds, dict) or not all(_number(v) for v in thresholds.values()):
-            return None, "`protocol.thresholds` must map each name to a number"
+            first = (next((k for k, v in thresholds.items() if not _number(v)), None)
+                     if isinstance(thresholds, dict) else None)
+            return None, _fault("protocol.thresholds" if first is None else _reading.join("protocol.thresholds", first),
+                                "`protocol.thresholds` must map each name to a number",
+                                as_written=thresholds if first is None else thresholds[first])
     if out.get("shared_draws") is not None and not isinstance(out["shared_draws"], bool):
-        return None, "`protocol.shared_draws` must be true or false"
+        return None, _fault("protocol.shared_draws", "`protocol.shared_draws` must be true or false", "not_allowed",
+                            out["shared_draws"], allowed=("true", "false"))
     for key in ("seed_policy", "ci_method", "failure_policy"):
         if out.get(key) is not None and not isinstance(out[key], str):
-            return None, f"`protocol.{key}` must be text"
+            return None, _fault(f"protocol.{key}", f"`protocol.{key}` must be text", as_written=out[key])
     precision = out.get("precision")
     if precision is not None:
         if not isinstance(precision, dict) or not _number(precision.get("target_half_width")) or not (
             0 < precision["target_half_width"] < 1
         ):
-            return None, "`protocol.precision` must be a mapping with a `target_half_width` between 0 and 1 (for example 0.03)"
+            return None, _fault("protocol.precision", (
+                "`protocol.precision` must be a mapping with a `target_half_width` between 0 and 1 (for example 0.03)"),
+                as_written=precision)
         for key in ("metric", "reason"):
             if precision.get(key) is not None and not isinstance(precision[key], str):
-                return None, f"`protocol.precision.{key}` must be text"
+                return None, _fault(f"protocol.precision.{key}", f"`protocol.precision.{key}` must be text",
+                                    as_written=precision[key])
     metrics = out.get("metrics")
     if metrics is not None:
         from . import metric_spec
 
         fixed_metrics, why = metric_spec.normalize(metrics)
         if fixed_metrics is None:
-            return None, why
+            # The fault is put at the entry that cannot be read on its own, so a request quotes that entry as written; a
+            # reason about the list as a whole (no entry fails alone) stays at the list.
+            for index, metric in enumerate(metrics if isinstance(metrics, list) else [], start=1):
+                if metric_spec.normalize([metric])[0] is None:
+                    return None, _fault(_reading.join("protocol.metrics", index), str(why), as_written=metric)
+            return None, _fault("protocol.metrics", str(why), as_written=None)
         out["metrics"] = fixed_metrics
         subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]
         if subset and out.get("in_each_run"):
-            return None, (f"`protocol.metrics` gives a mean over a subset of the trials (`given`) for {', '.join(subset)}, "
-                          "and `protocol.in_each_run` records a number per value inside each run: the two cannot be "
-                          "combined. Make what each run compares a setting of `protocol.grid` (each value run on its "
-                          "own), or drop `given` and report the mean over every run")
+            return None, _fault("protocol.metrics", (
+                f"`protocol.metrics` gives a mean over a subset of the trials (`given`) for {', '.join(subset)}, "
+                "and `protocol.in_each_run` records a number per value inside each run: the two cannot be "
+                "combined. Make what each run compares a setting of `protocol.grid` (each value run on its "
+                "own), or drop `given` and report the mean over every run"), "together")
     oracles = out.get("oracles")
     if oracles is not None:
         if isinstance(oracles, (str, dict)):
             oracles = [oracles]
         if not isinstance(oracles, list):
-            return None, "`protocol.oracles` must be a list of checks (each with a `name` and a `check`)"
+            return None, _fault("protocol.oracles", "`protocol.oracles` must be a list of checks (each with a `name` and a `check`)",
+                                as_written=oracles)
         fixed_oracles: list[dict[str, Any]] = []
         for index, item in enumerate(oracles, start=1):
+            where = _reading.join("protocol.oracles", index)
             if isinstance(item, str) and item.strip():
                 item = {"name": item.strip(), "check": item.strip()}
             if not isinstance(item, dict) or not str(item.get("name") or "").strip():
-                return None, f"`protocol.oracles` entry {index} has no `name`"
+                return None, _fault(where, f"`protocol.oracles` entry {index} has no `name`", as_written=item)
             for key in ("check", "kind", "reference"):
                 value = item.get(key)
                 if isinstance(value, (list, tuple, dict)):
@@ -648,10 +744,11 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
                     from .oracle_check import _text
                     item = {**item, key: _text(value)}
                 elif value is not None and not isinstance(value, str):
-                    return None, f"`protocol.oracles` entry {index}: `{key}` must be text"
+                    return None, _fault(where, f"`protocol.oracles` entry {index}: `{key}` must be text", as_written=item)
             for key in ("expected", "tolerance"):
                 if isinstance(item.get(key), (dict, list, bool)):
-                    return None, f"`protocol.oracles` entry {index}: `{key}` must be a number (the engine judges the script's value against it)"
+                    return None, _fault(where, (f"`protocol.oracles` entry {index}: `{key}` must be a number (the engine "
+                                                "judges the script's value against it)"), as_written=item)
             # A `case`, `measure` or `order` that is not usable is left out (the oracle is then read from the script's
             # own oracle(), as before) instead of refusing a plan, or dropping every oracle of a draft, over one field.
             if not isinstance(item.get("case"), dict):
@@ -662,7 +759,8 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
                 item = {k: v for k, v in item.items() if k != "order"}
             mode = item.get("tolerance_mode")
             if mode is not None and str(mode).strip().lower() not in ("absolute", "relative"):
-                return None, f"`protocol.oracles` entry {index}: `tolerance_mode` must be `absolute` or `relative`"
+                return None, _fault(where, f"`protocol.oracles` entry {index}: `tolerance_mode` must be `absolute` or `relative`",
+                                    "not_allowed", item, allowed=("absolute", "relative"))
             fixed_oracles.append({**item, "name": str(item["name"]).strip()})
         out["oracles"] = fixed_oracles
     if out.get("acceptance") is not None:
@@ -673,7 +771,7 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
 
         fixed_criteria, why = _criteria.normalize(out["criteria"], out)
         if fixed_criteria is None:
-            return None, why
+            return None, _fault("protocol.criteria", str(why))
         out["criteria"] = fixed_criteria
     if out.get("optimisation") is not None:
         # A search for the best design (core/optimisation_plan.py). A coarse scan before the search is the block's own
@@ -681,21 +779,27 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         from . import optimisation_plan
 
         if out.get("in_each_run") is not None:
-            return None, ("`protocol.in_each_run` cannot stand beside `protocol.optimisation`: the values every evaluation "
-                          "of a design goes through together go in `protocol.optimisation.in_each_run`")
+            return None, _fault("protocol.in_each_run", (
+                "`protocol.in_each_run` cannot stand beside `protocol.optimisation`: the values every evaluation "
+                "of a design goes through together go in `protocol.optimisation.in_each_run`"), "conflict",
+                protocol.get("in_each_run"))
         if out.get("grid") is not None:
-            return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
-                          "best design puts the settings it compares, and a coarse scan run before it, in "
-                          "`optimisation.grid` (a design variable, or a condition also listed under `optimisation.fixed` "
-                          "with the value the search holds it at)")
-        block, why = optimisation_plan.normalize(out["optimisation"])
+            return None, _fault("protocol.grid", (
+                "`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
+                "best design puts the settings it compares, and a coarse scan run before it, in "
+                "`optimisation.grid` (a design variable, or a condition also listed under `optimisation.fixed` "
+                "with the value the search holds it at)"), "conflict", protocol.get("grid"))
+        block, faults = optimisation_plan.block_faults(out["optimisation"])
         if block is None:
-            return None, why
+            return None, _fault(faults[0].path if faults else "protocol.optimisation",
+                                optimisation_plan.ALSO.join(f.reason for f in faults),
+                                faults[0].kind if faults else "unreadable", faults[0].as_written if faults else None,
+                                required=bool(faults and faults[0].required))
         out["optimisation"] = block
     if "model" in out:
         model, why = normalize_model(out.pop("model"))
         if model is None:
-            return None, why
+            return None, _fault("protocol.model", str(why))
         # Last, so a cut of the protocol (the claim check shows its first few thousand characters) keeps the grid and
         # the checks, which a long list of equations would push out.
         out["model"] = model
@@ -707,7 +811,7 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
 
         found = reference_values.problems(out)
         if found:
-            return None, found[0]
+            return None, _fault("protocol.metrics", found[0])
     return out, None
 
 
@@ -877,8 +981,6 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
     return fixed, notes
 
 
-_PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
-
 #: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
 #: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
 ASKED_PARTS = ("grid", "sub_studies", "in_each_run", "metrics", "runs_per_setting", "precision")
@@ -1027,46 +1129,132 @@ def grid_request(topic: str, problem: str) -> str:
 
 
 def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
-    """``(protocol, notes)``: ``protocol`` with each key that cannot be checked left out, and a sentence per key saying so.
+    """``(protocol, notes)``: ``protocol`` with each part or entry that cannot be checked left out, and a sentence per one
+    saying so.
 
     A model asked for a protocol writes what it means in the shape it likes (a real quest wrote the thresholds as prose
     where numbers were asked for), and one such key used to cost the whole plan: the design was refused and drafted again
-    without a plan. A draft is repaired instead, key by key, and the plan says which keys were left out, so a person reads
-    it and puts them right; a protocol that a person has edited in ``plan.md`` is still refused with the reason
-    (:func:`normalize_protocol` is strict). ``(None, notes)`` when nothing usable is left."""
+    without a plan. A draft is repaired instead, entry by entry (:func:`read_protocol`), and the plan says which were left
+    out, so a person reads it and puts them right; a protocol that a person has edited in ``plan.md`` is still refused with
+    the reason (:func:`normalize_protocol` is strict). ``(None, notes)`` only when the protocol is not a mapping at all."""
+    reading, notes = _repair_protocol(protocol)
+    return reading.kept, notes
+
+
+def read_protocol(protocol: Any, base: Any = None) -> _reading.Reading:
+    """``protocol`` (a model's answer, shaped like ``design.protocol``) read entry by entry: what is kept, each fault at the
+    path of the part or entry it is about, and each part moved unchanged into an empty place (a search's scan written
+    beside its block). One entry that cannot be read costs that entry: an oracle, a threshold, a numerical setting, a
+    sub-study, a metric, a constraint of a search. A part written twice is kept once when the two are the same, and is a
+    ``conflict`` (both versions in ``as_written``) when they differ. Only an answer that is not a mapping is
+    ``nothing_read``. ``base``: the plan's own protocol, or ``None``; it is not merged in (a caller decides what of the
+    plan to keep for a fault)."""
+    return _reading.read_answer(protocol, base, lambda answer, _base: _repair_protocol(answer)[0], root="protocol")
+
+
+def read_protocol_with_notes(protocol: Any) -> tuple[_reading.Reading, list[str]]:
+    """``(reading, notes)``: :func:`read_protocol` and, with it, the sentence :func:`repair_protocol` gives for each part left
+    out or moved (the plan says them to a person; the reading names each fault at its path)."""
+    return _repair_protocol(protocol)
+
+
+def _same(a: Any, b: Any) -> bool:
+    """Whether two versions of a part are the same, as written."""
+    try:
+        return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
+    """``(reading, notes)`` of :func:`read_protocol` and :func:`repair_protocol`."""
     if not isinstance(protocol, dict):
-        return None, ["the protocol was not a mapping of names to values and was left out"]
+        fault = _fault("protocol", "the protocol was not a mapping of names to values", "form", protocol)
+        return (_reading.Reading(kept=None, faults=[fault], nothing_read=True),
+                ["the protocol was not a mapping of names to values and was left out"])
     out = dict(protocol)
     notes: list[str] = []
-    for _ in range(len(out) + 1):
-        fixed, why = normalize_protocol(out)
-        if fixed is not None:
-            return fixed, notes
-        match = _PROTOCOL_KEY.search(why or "")
-        key = match.group(1) if match else ""
-        if key not in out:
-            return None, notes + [f"the protocol could not be repaired and was left out ({why})"]
-        if key in ("sub_studies", "in_each_run", "numerical_settings") and isinstance(out.get("optimisation"), dict) \
-                and "cannot stand beside `protocol.optimisation`" in (why or ""):
-            # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it.
-            if out["optimisation"].get(key) is None:
-                out["optimisation"] = {**out["optimisation"], key: out[key]}
+    faults: list[_reading.Fault] = []
+    moved: list[_reading.Moved] = []
+    from .optimisation_plan import _size
+
+    for _ in range(64 + _size(out)):  # each round leaves out one entry or part, so this many rounds always end it
+        fixed, fault = protocol_fault(out)
+        if fault is None:
+            return _reading.Reading(kept=fixed, faults=faults, moved=moved), notes
+        why = fault.reason
+        steps = _reading.split(fault.path)
+        key = str(steps[1]) if len(steps) > 1 else ""
+        if key not in out:  # (every fault names a part of the protocol it read; kept for safety)
+            faults.append(fault)
+            return (_reading.Reading(kept=None, faults=faults, moved=moved),
+                    notes + [f"the protocol could not be repaired ({why})"])
+        block = out.get("optimisation") if isinstance(out.get("optimisation"), dict) else None
+        if key in ("sub_studies", "in_each_run", "numerical_settings") and block is not None and fault.kind == "conflict" \
+                and len(steps) == 2:
+            # A search's scan parts, or what each of its evaluations goes through, written beside the block: moved into it
+            # when the block has none; kept once when the block's own is the same; a conflict when they differ.
+            to = f"protocol.optimisation.{key}"
+            if block.get(key) is None:
+                out["optimisation"] = {**block, key: out[key]}
+                moved.append(_reading.Moved(f"protocol.{key}", to))
                 notes.append(f"`protocol.{key}` was moved into `protocol.optimisation.{key}`: a search for the best design "
                              "keeps it in its own block")
+            elif _same(block[key], out[key]):
+                moved.append(_reading.Moved(f"protocol.{key}", to, into_empty=False))  # the same part twice: kept once
             else:
-                notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`")
+                faults.append(_fault(f"protocol.{key}", (
+                    f"`protocol.{key}` is written beside the search's block, which has its own `{key}`, and the two "
+                    "differ: a search keeps it in its block, so say which is meant"), "conflict",
+                    {f"protocol.{key}": out[key], to: block[key]}))
+                notes.append(f"`protocol.{key}` was left out: the search's block has its own `{key}`, and the two differ "
+                             f"(beside the block: {_reading.shown(out[key], 300)}; in the block: "
+                             f"{_reading.shown(block[key], 300)})")
             del out[key]
             continue
-        if key == "numerical_settings" and isinstance(out["numerical_settings"], dict):
+        if key == "grid" and block is not None and fault.kind == "conflict" and len(steps) == 2:
+            to = "protocol.optimisation.grid"
+            if block.get("grid") is None:
+                out["optimisation"] = {**block, "grid": out["grid"]}
+                moved.append(_reading.Moved("protocol.grid", to))
+                notes.append("the sweep in `protocol.grid` was moved into `protocol.optimisation.grid`: a search for "
+                             "the best design runs it as a coarse scan first, then searches from its best point")
+            elif _same(block["grid"], out["grid"]):
+                moved.append(_reading.Moved("protocol.grid", to, into_empty=False))
+            else:
+                faults.append(_fault("protocol.grid", (
+                    "`protocol.grid` is written beside the search's block, whose coarse scan "
+                    "(`protocol.optimisation.grid`) differs from it: a search has no separate sweep, so say which is meant"),
+                    "conflict", {"protocol.grid": out["grid"], to: block["grid"]}))
+                notes.append("`protocol.grid` was left out: a search for the best design has no separate sweep (its "
+                             f"coarse scan is `protocol.optimisation.grid`), and the two differ (the sweep: "
+                             f"{_reading.shown(out['grid'], 300)}; the scan: {_reading.shown(block['grid'], 300)})")
+            del out["grid"]
+            continue
+        if key == "numerical_settings" and isinstance(out["numerical_settings"], dict) and len(steps) > 2 \
+                and len(out["numerical_settings"]) > 1:
             # One numerical setting that cannot be read is left out, not every one of them.
-            kept_n = {n: item for n, item in out["numerical_settings"].items()
-                      if _numerical_settings({n: item}, out)[0] is not None}
-            if kept_n and len(kept_n) < len(out["numerical_settings"]):
-                for n in [n for n in out["numerical_settings"] if n not in kept_n]:
-                    notes.append(f"the numerical setting `{n}` was left out of `protocol.numerical_settings` because it "
-                                 f"could not be read ({_numerical_settings({n: out['numerical_settings'][n]}, out)[1]}); "
-                                 "the others are run again at their finer values")
-                out["numerical_settings"] = kept_n
+            name = str(steps[2])
+            if name in {str(n) for n in out["numerical_settings"]}:
+                faults.append(fault)
+                notes.append(f"the numerical setting `{name}` was left out of `protocol.numerical_settings` because it "
+                             f"could not be read ({why}); the others are run again at their finer values")
+                out["numerical_settings"] = {n: v for n, v in out["numerical_settings"].items() if str(n) != name}
+                continue
+        if key == "sub_studies" and isinstance(out["sub_studies"], list) and fault.kind != "together":
+            # One part of the study that cannot be read is left out alone, when the parts that can be read still run every
+            # value of every setting of the grid between them (the rule is asked of them as of any list of parts).
+            grid_now = (protocol_fault({k: v for k, v in out.items() if k in ("grid", "in_each_run")})[0] or {})
+            _kept, entry_faults = sub_study_faults(out["sub_studies"], grid_now.get("grid"), grid_now.get("in_each_run"))
+            entry_faults = [f for f in entry_faults if len(_reading.split(f.path)) > 2]
+            bad = {_reading.split(f.path)[2] for f in entry_faults}
+            entries = [e for i, e in enumerate(out["sub_studies"], start=1) if i not in bad]
+            if entries and bad and not sub_study_faults(entries, grid_now.get("grid"), grid_now.get("in_each_run"))[1]:
+                faults.extend(entry_faults)
+                notes.extend(f"an entry of `protocol.sub_studies` was left out of the plan because it could not be read "
+                             f"({f.reason}); the other parts of the study are kept, and they run every value of every "
+                             "setting between them" for f in entry_faults)
+                out["sub_studies"] = entries
                 continue
         if key == "metrics":
             # A reference value that cannot be used is left out, not the metric it belongs to.
@@ -1075,6 +1263,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             without, note = reference_values.without_bad_reference(out, why)
             if without is not None:
                 out = without
+                faults.append(fault)
                 notes.append(note)
                 continue
             # One metric the check refuses is left out, not the list it is in.
@@ -1082,6 +1271,16 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
 
             kept, partial, dropped = metric_spec.repair_parts(out["metrics"])
             if kept and (partial or dropped):
+                listed = out["metrics"] if isinstance(out["metrics"], list) else [out["metrics"]]
+                kept_ids = {str(m.get("id")) for m in kept if isinstance(m, dict)}
+                for index, metric in enumerate(listed, start=1):  # each metric left out, at its own place in the list
+                    ident = str(metric.get("id")) if isinstance(metric, dict) else None
+                    if ident is None or ident not in kept_ids:
+                        alone = metric_spec.normalize([metric])[1]
+                        faults.append(_fault(_reading.join("protocol.metrics", index), str(alone or why), as_written=metric))
+                for ident, parts, reason in partial:
+                    at = next((i for i, m in enumerate(listed, start=1) if isinstance(m, dict) and str(m.get("id")) == ident), None)
+                    faults.append(_fault(_reading.join("protocol.metrics", at) if at else "protocol.metrics", reason))
                 out["metrics"] = kept
                 notes.extend(
                     f"the `protocol.metrics` entry `{ident}` is kept without its {parts}, which could not be checked "
@@ -1100,6 +1299,8 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             kept_t = {name: v for name, v in out["thresholds"].items() if _number(v)}
             left_out = [name for name in out["thresholds"] if name not in kept_t]
             if kept_t and left_out:
+                faults.extend(_fault(_reading.join("protocol.thresholds", name), f"the threshold `{name}` is not one number",
+                                     as_written=out["thresholds"][name]) for name in left_out)
                 out["thresholds"] = kept_t
                 notes.extend(
                     f"the threshold `{name}` was left out of `protocol.thresholds` because it is not one number "
@@ -1113,6 +1314,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
 
             kept_c, dropped_c = _criteria.repair(out["criteria"], {k: v for k, v in out.items() if k != "criteria"})
             notes.extend(dropped_c)
+            faults.append(fault)
             if kept_c:
                 out["criteria"] = kept_c
                 continue
@@ -1122,21 +1324,11 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             # One part of a search for the best design that cannot be read is left out, not the block.
             from . import optimisation_plan
 
-            if out.get("grid") is not None and "top-level `protocol.grid`" in (why or ""):
-                block = out["optimisation"]
-                if isinstance(block, dict) and block.get("grid") is None:
-                    out["optimisation"] = {**block, "grid": out["grid"]}
-                    notes.append("the sweep in `protocol.grid` was moved into `protocol.optimisation.grid`: a search for "
-                                 "the best design runs it as a coarse scan first, then searches from its best point")
-                else:
-                    notes.append("`protocol.grid` was left out: a search for the best design has no separate sweep (its "
-                                 "coarse scan is `protocol.optimisation.grid`)")
-                del out["grid"]
-                continue
-            fixed_block, block_notes = optimisation_plan.repair(out["optimisation"])
+            block_reading, block_notes, usable = optimisation_plan._repair_block(out["optimisation"])
             notes.extend(block_notes)
-            if fixed_block is not None:
-                out["optimisation"] = fixed_block
+            faults.extend(block_reading.faults)
+            if usable:
+                out["optimisation"] = block_reading.kept
                 continue
             del out[key]
             continue
@@ -1145,12 +1337,15 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             # checks over one field, and the engine then asked for new ones that said nothing of where their values came from.
             kept_o: list[Any] = []
             for index, item in enumerate(out["oracles"], start=1):
-                one, why_one = normalize_protocol({"oracles": [item]})
+                one, fault_one = protocol_fault({"oracles": [item]})
                 if one is not None:
                     kept_o.append(item)
                     continue
                 label = (str(item.get("name") or "").strip() if isinstance(item, dict) else "") or f"number {index}"
-                reason = (why_one or "").replace("`protocol.oracles` entry 1: ", "").replace("`protocol.oracles` entry 1 ", "")
+                reason = (fault_one.reason if fault_one else "").replace("`protocol.oracles` entry 1: ", "").replace(
+                    "`protocol.oracles` entry 1 ", "")
+                faults.append(_fault(_reading.join("protocol.oracles", index), reason,
+                                     fault_one.kind if fault_one else "unreadable", item))
                 notes.append(f"the check {label!r} was left out of `protocol.oracles` because it could not be read "
                              f"({reason}); it is not used")
             if len(kept_o) < len(out["oracles"]):
@@ -1163,11 +1358,13 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             # One equation that cannot be read is left out, not the model it is part of.
             fixed_model, model_notes = repair_model(out["model"])
             notes.extend(model_notes)
+            faults.append(fault)
             if fixed_model is not None:
                 out["model"] = fixed_model
                 continue
             del out[key]
             continue
+        faults.append(fault)
         if key == "grid":
             notes.append(
                 f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has no settings to vary yet. "
@@ -1179,7 +1376,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
         else:
             notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); it is not used")
         del out[key]
-    return None, notes
+    return _reading.Reading(kept=None, faults=faults, moved=moved), notes
 
 
 def _bullets(items: Any, empty: str) -> str:
@@ -1723,30 +1920,6 @@ def accept_answer(before: Any, after: Any) -> tuple[dict[str, Any] | None, list[
     return repaired, notes
 
 
-def put_back_unread_keys(before: Any, protocol: dict[str, Any], part: str) -> tuple[dict[str, Any], list[str]]:
-    """``(protocol, put_back)``: ``protocol`` (a protocol as read, after a rewrite of its mapping part ``part``) with each
-    key of ``before[part]`` (the plan's own, as it was) that the reading of the rewrite lacks put back as the plan had it,
-    one key at a time, each kept only when the protocol still reads with it and loses nothing it had. A rewrite of one key
-    of a block must not cost the block a key it had: a real audit rewrote a search's block with its evaluation budget in a
-    form that could not be read, the reader left the budget out, and the plan's own readable budget was lost with it, so
-    the search could not start. ``put_back``: the keys put back, in the plan's order."""
-    old = before.get(part) if isinstance(before, dict) else None
-    if not isinstance(old, dict) or not isinstance(protocol, dict) or not isinstance(protocol.get(part), dict):
-        return protocol, []
-    back: list[str] = []
-    for key, value in old.items():
-        now = protocol[part]
-        if key in now:
-            continue
-        trial, _why = normalize_protocol({**protocol, part: {**now, key: value}})
-        if (trial is None or not isinstance(trial.get(part), dict) or key not in trial[part]
-                or any(k not in trial for k in protocol) or any(k not in trial[part] for k in now)):
-            continue
-        protocol = trial
-        back.append(str(key))
-    return protocol, back
-
-
 def repair_design(text: str) -> tuple[str | None, list[str]]:
     """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
     cannot be repaired that way, or it was valid already)."""
@@ -1780,22 +1953,6 @@ def block_fix_request(block: str, why: str) -> str:
     parts.append("Return ONLY the corrected block, as one fenced ```yaml block, and nothing else. Fix only what makes it "
                  "unusable: keep every key and every value as they are, add nothing and leave nothing out.")
     return "\n\n".join(parts)
-
-
-def audit_repair_request(parts: list[tuple[str, Any, str]]) -> str:
-    """The one request to the methodology audit's model to correct parts of its change that FI could not read: for each
-    protocol key, the value as the audit wrote it and FI's exact reason. Only those keys are asked for, in one JSON object."""
-    fence = "`" * 3
-    lines = ["Your amended design could not be used in full. For each protocol key below, the value you wrote and why part "
-             "of it could not be read:"]
-    for key, value, reason in parts:
-        lines.append(f"`protocol.{key}` as you wrote it:\n{fence}json\n{json.dumps(value, indent=1, default=str)}\n{fence}\n"
-                     f"Why part of it was left out: {reason}")
-    names = ", ".join(f'"{k}"' for k, _v, _r in parts)
-    lines.append('Return ONLY one JSON object of the form {"protocol": {...}} holding, for each of the keys ' + names
-                 + ", its whole corrected value. Fix only what the reason names; keep every other part exactly as you wrote it "
-                 "and add nothing.")
-    return "\n\n".join(lines)
 
 
 def block_from_reply(reply: str) -> str | None:

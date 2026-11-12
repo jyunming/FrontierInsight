@@ -116,6 +116,38 @@ FINISHED_FILES_RECORD = ".fi/finished_files.json"
 STOPPED_ASIDE = ".fi/previous"
 _record_lock = threading.Lock()
 
+#: FI's own count of the files each run wrote, by quest folder: ``{quest: {path: the number of the write}}``, in memory.
+#: A run from a copy (:class:`OutsideCopy`) tells here every file it wrote, also one it wrote again with the content it
+#: already had (that one is not copied back, so the quest's file keeps its old modification time). Whoever must know what
+#: a run wrote takes :func:`write_mark` before it and asks :func:`written_since` after; a file's time never decides it.
+_writes: dict[str, dict[str, int]] = {}
+_write_count = 0
+
+
+def write_mark(quest_root: Path | str) -> int:
+    """A point in the count of writes: what :func:`written_since` is asked about later."""
+    with _record_lock:
+        return _write_count
+
+
+def note_written(quest_root: Path | str, rels: list[str] | set[str]) -> None:
+    """A run in this quest wrote these files (paths relative to the quest folder)."""
+    global _write_count
+    if not rels:
+        return
+    with _record_lock:
+        _write_count += 1
+        table = _writes.setdefault(str(Path(quest_root).resolve()), {})
+        for rel in rels:
+            table[rel] = _write_count
+
+
+def written_since(quest_root: Path | str, mark: int) -> set[str]:
+    """The files (relative to the quest folder) any run from a copy wrote in this quest after ``mark`` was taken. A run
+    that ran at the same time is counted too: a file may be kept because of it, never removed."""
+    with _record_lock:
+        return {rel for rel, n in _writes.get(str(Path(quest_root).resolve()), {}).items() if n > mark}
+
 
 def _file_state(quest_root: Path, rel: str) -> list[int] | None:
     """A file's size and modification time (ns) as FI records it, or None when it is not there."""
@@ -397,20 +429,9 @@ def code_version(quest_root: Path | str) -> str:
     computes, so the cached values of the old version are not reused; so does a note or a hidden file in ``code/``, which
     the run can read. The analysis script and the tests work out nothing kept in :data:`SHARED_CACHE`: when a real run's analysis script was repaired after every
     setting had run, the values its unchanged simulation had kept were moved aside and worked out again."""
-    from . import code_layout
+    from . import reuse_key
 
-    h = hashlib.sha256()
-    root = Path(quest_root)
-    code = root / CODE
-    with contextlib.suppress(OSError):
-        h.update(b"simulate.py\0" + (code / "simulate.py").read_bytes() + b"\0")
-    if code.is_dir():
-        for rel, body in sorted(code_layout.package_sources(code).items()):
-            h.update(rel.encode("utf-8") + b"\0" + body.encode("utf-8") + b"\0")
-    for path in code_layout.simulation_inputs(root):
-        with contextlib.suppress(OSError):
-            h.update(code_layout.input_label(path, root).encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
-    return h.hexdigest()
+    return reuse_key.simulation_sha(quest_root)
 
 
 #: How long a setting waits for another to finish preparing :data:`SHARED_CACHE`, and the age at which FI's own lock on it
@@ -598,7 +619,9 @@ def _sig(path: Path) -> Any:
     return (st.st_size, st.st_mtime_ns)
 
 
-def _files(folder: Path, leave: tuple[str, ...] = ()) -> dict[str, Any]:
+def _files(folder: Path, leave: tuple[str, ...] = (), *, stamps: bool = False) -> dict[str, Any]:
+    """``{path: content signature}`` of the files under ``folder`` (``stamps``: ``{path: modification time ns}``, to tell
+    a file the run wrote again with the same content from one it did not touch)."""
     out: dict[str, Any] = {}
     if not folder.is_dir():
         return out
@@ -610,7 +633,7 @@ def _files(folder: Path, leave: tuple[str, ...] = ()) -> dict[str, Any]:
         for leaf in leaves:
             path = Path(here) / leaf
             with contextlib.suppress(OSError):
-                out[path.relative_to(folder).as_posix()] = _sig(path)
+                out[path.relative_to(folder).as_posix()] = path.stat().st_mtime_ns if stamps else _sig(path)
     return out
 
 
@@ -636,7 +659,10 @@ class OutsideCopy:
         self._base = base
         self.root: Path | None = None
         self._before: dict[str, Any] = {}
+        self._before_stamps: dict[str, int] = {}
         self.brought_back: list[str] = []
+        #: Files the run wrote again with the content they had (not copied back: the quest's file is already that).
+        self.rewritten: list[str] = []
         self.left_out: list[str] = []
         self.unfinished: list[str] = []
         #: The folders linked to the quest's own (:data:`SHARED_CACHE`), relative to the copy.
@@ -682,7 +708,14 @@ class OutsideCopy:
             else:
                 self.not_shared = True
         self._before = _files(root, tuple(self.linked))
+        self._before_stamps = _files(root, tuple(self.linked), stamps=True)
         return root
+
+    @property
+    def wrote(self) -> list[str]:
+        """Every file of the quest the run wrote, whether its content changed (:attr:`brought_back`) or not
+        (:attr:`rewritten`)."""
+        return [*self.brought_back, *self.rewritten]
 
     def _comes_back(self, rel: str) -> bool:
         if _never(rel):
@@ -713,9 +746,14 @@ class OutsideCopy:
         FI named for it) is not written back, and is listed in :attr:`unfinished`."""
         assert self.root is not None
         now = _files(self.root, tuple(self.linked))
+        stamps = _files(self.root, tuple(self.linked), stamps=True)
         back: list[str] = []
         for rel in sorted(set(now) | set(self._before)):
             if now.get(rel) == self._before.get(rel):
+                # The same content. The copy's own record of the file (made when the copy was made, not a clock) tells a
+                # file the run wrote again from one it never touched.
+                if stamps.get(rel) != self._before_stamps.get(rel) and self._comes_back(rel):
+                    self.rewritten.append(rel)
                 continue
             if not self._comes_back(rel):
                 self.left_out.append(rel)
@@ -863,6 +901,7 @@ class OutsideExecutor:
             if self.meter is not None:
                 self.meter(getattr(result, "peak_mb", None))
             await asyncio.to_thread(box.bring_back, stopped=stopped)
+            note_written(self.quest_root, box.wrote)
             if box.unfinished:
                 say_removed(self._log, box.unfinished)
             if stopped and box.linked:

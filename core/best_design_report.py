@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import optimise as _optimise
+from . import optimise_search as _search
 from . import optimum_check as _check
 
 BEGIN = "<!-- fi:best-design -->"
@@ -304,10 +305,15 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                       "): that one did not hold at the finest settings (see the check below).", ""]
     ev = best.get("evaluations") or {}
     method = best.get("method") or {}
+    compared_all = best.get("compared")
+    alts = [x for x in (compared_all.get("levels") or []) if isinstance(x, dict)] if isinstance(compared_all, dict) else []
     search = (f"**How the search ran.** Method: {method_name(method.get('used'))}"
               + (f" ({method_name(method.get('requested'))} was asked for, but {_plain(method.get('why'))})"
                  if method.get("why") else "")
-              + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
+              + (f"; {ev.get('search')} evaluations in all over {len(alts)} alternatives, each with a budget of its own ("
+                 + _search.alternatives_budget_says(
+                     alts, lambda r: re.sub(r"^its ", "the ", _STOPPED.get(r, r))) + ")"
+                 if len(alts) > 1 else f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used"))
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
         if isinstance(best.get("compared"), dict) and best["compared"].get("levels"):
@@ -322,7 +328,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
         search += ")"
     if ev.get("scan"):
         search += f", after a coarse scan of {ev['scan']} design(s) not counted in the budget"
-    search += f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}."
+    search += ("." if len(alts) > 1 else
+               f"; the search stopped because {_STOPPED.get(str(ev.get('stopped_because')), ev.get('stopped_because'))}.")
     if flat := flat_went_on(ev):
         search += f" {flat[0].upper()}{flat[1:]}."
     if stepped := stepped_went_on(ev):
@@ -331,10 +338,13 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     compared = (best.get("compared") or {}).get("levels") if isinstance(best.get("compared"), dict) else None
     if compared:
         won = (best.get("best") or {}).get("level")
-        searched = ("Each of the" if not any(p.get("same_as") or p.get("status") == "not_searched" for p in compared)
-                    else "Each of the searched ones of the")
-        lines += [f"**Alternatives compared.** {searched} {len(compared)} alternatives was searched on its own, with the "
-                  "plan's own variables and budget, and the comparison is between their best designs:", ""]
+        comparison = (best.get("compared") or {}).get("comparison")
+        by_level = {_search.level_key(a.get("level")): a for a in (comparison or {}).get("alternatives") or []
+                    if isinstance(a, dict)}
+        lines += [f"**Alternatives compared.** {len(compared)} alternatives were compared. The comparison is made between "
+                  "the best designs of the alternatives that were searched on their own, with the plan's own variables "
+                  "and budget:", ""]
+        same_done = False
         for p in compared:
             name = ", ".join(f"{k} = {v}" for k, v in (p.get("level") or {}).items())
             top = p.get("best") if isinstance(p.get("best"), dict) else None
@@ -345,15 +355,34 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                 lines.append(f"- {name}: not searched, because {why}; {p.get('evaluations')} evaluation(s).")
                 continue
             if p.get("same_as"):
-                other = ", ".join(f"{k} = {v}" for k, v in p["same_as"].items())
-                lines.append(f"- {name}: gave the same results as {other} for every one of the {p.get('probes')} designs "
-                             f"tried at both, so the search was not run again for it; {p.get('evaluations')} "
-                             "evaluation(s).")
+                if not same_done:
+                    same_done = True
+                    lines += [f"- {x}; {sum(int(q.get('evaluations') or 0) for q in compared if q.get('same_as'))} "
+                              "evaluation(s) in all." for x in _search.same_as_group_says([q for q in compared if q.get("same_as")])]
                 continue
-            lines.append(f"- {name}{' (the best)' if p.get('level') == won else ''}: {text}; "
-                         f"{p.get('evaluations')} evaluation(s).")
+            mine = by_level.get(_search.level_key(p.get("level"))) or {}
+            counts = (f" ({mine.get('starts')} starting point(s); {mine.get('answered')} answered, {mine.get('failed')} "
+                      "failed)" if mine else "")
+            lines.append(f"- {name}{' (the best design found is here)' if p.get('level') == won else ''}: {text}; "
+                         f"{p.get('evaluations')} evaluation(s){counts}.")
         lines.append("")
-    for r in best.get("continued") or []:
+        if isinstance(comparison, dict) and comparison.get("says_1"):
+            said = [str(comparison["says_1"])]
+            if comparison.get("statement_1"):
+                said.append(_search.second_statement(comparison, (check or {}).get("alternatives")))
+            elif any(a.get("kind") == "searched" for a in comparison.get("alternatives") or []):
+                said.append("Neither statement is made, so FI names no best alternative.")
+            same = ("The searched alternatives started from the same designs, with the same budget and method."
+                    if comparison.get("same_setup") else
+                    "The searched alternatives did not start from the same designs with the same budget and method.")
+            lines += [" ".join(x for x in [*said, same] if x), ""]
+        if best.get("first_round"):
+            lines += ["**What the search's first round showed.** " + " ".join(best["first_round"]), ""]
+    elif best.get("first_round"):
+        lines += ["**What the search's first round showed.** " + " ".join(best["first_round"]), ""]
+    if best.get("notes"):
+        lines += ["**Notes on the search.** " + "; ".join(_plain(n) for n in best["notes"]) + ".", ""]
+    for r in _optimise.continued_rounds(best):
         toward = f", toward {quantity} = {_fmt(r['target'])}{u}" if _num(r.get("target")) else ""
         who = ("by FI, still improving when its budget ran out" if r.get("by") == "FI" else "at the person's request")
         lines += [f"*Continued {who} (round {r.get('round')}):* {r.get('evaluations')} of "
@@ -557,6 +586,11 @@ def summary_line(quest_root: Path) -> str:
         text += "; above the plan's threshold at finer numerical settings, but not shown to be more than their numerical error"
     else:
         text += f"; {_VERDICT_SHORT.get(verdict, verdict)}"
+    comparison = (best.get("compared") or {}).get("comparison") if isinstance(best.get("compared"), dict) else None
+    if isinstance(comparison, dict) and comparison.get("says_1"):
+        text += "; " + str(comparison["says_1"]).rstrip(".")
+        if comparison.get("statement_1"):
+            text += "; " + _search.second_statement(comparison, (check or {}).get("alternatives")).rstrip(".")
     target = best.get("target") if isinstance(best.get("target"), dict) else None
     if target and _num(target.get("value")):
         reached = target.get("reached_at_finest_settings")

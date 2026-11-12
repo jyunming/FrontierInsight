@@ -19,19 +19,20 @@ PAPER = (f"# T\n\n## Abstract\nThe study measures a period. {MARKED} {TYPED} Don
          "## Limitations\nFew settings were run.\n\n## References\n1. A.\n")
 
 
-def _claim(text: str, basis: str, evidence: str = "x", passage: str | None = None) -> dict:
+def _claim(text: str, basis: str, evidence: str = "x", passage: str | None = None, fault: str | None = None) -> dict:
     where = [{"id": "1.1", "section": "S", "passage": passage}] if passage else []
-    return {"claim": text, "basis": basis, "citation_index": None, "quote": "", "evidence": evidence, "where": where}
+    return {"claim": text, "basis": basis, "fault": fault, "citation_index": None, "quote": "", "evidence": evidence,
+            "where": where}
 
 
 def _grounding(status: str = "ok") -> dict:
     claims = [
         _claim("At a step of 0.0025 s the error was 1.374e-11 to 2.164e-07 across the settings", "unsupported",
                "the range at that step is 1.374e-11 to 3.122e-11; this one was pooled over all steps",
-               "At a step of 0.0025 s the error was {{v:err @ dt=all | range}} across the settings."),
+               "At a step of 0.0025 s the error was {{v:err @ dt=all | range}} across the settings.", "scope"),
         _claim("The fit stays above 0.9991 in every case", "unsupported", "the table shows 0.9990875",
-               "The fit stays above 0.9991 in every case."),
-        _claim(SOFT, "unsupported", "no source or result shows it", SOFT + "."),
+               "The fit stays above 0.9991 in every case.", "number"),
+        _claim(SOFT, "unsupported", "no source or result shows it", SOFT + ".", "wording"),
         _claim("The settle time was 4.2 s", "experiment"),
     ]
     return {"claims": claims, "total": len(claims), "status": status,
@@ -75,6 +76,34 @@ def test_the_taken_out_sentences_are_in_the_record_and_leave_the_claim_list(tmp_
     assert "pooled over all steps" in record["removed"][0]["evidence"]
     kept = json.loads((eng.quest_root / "paper" / "claims.json").read_text(encoding="utf-8"))["claims"]
     assert not [c for c in kept if "2.164e-07" in c["claim"] or "0.9991" in c["claim"]]
+
+
+def test_a_claim_record_written_before_faults_were_named_is_taken_out_as_it_was_then(tmp_path: Path) -> None:
+    """A quest resumed on this FI keeps the claim record an older FI wrote, with no ``fault`` on any claim: a sentence it
+    found unsupported that states a number (one FI filled in, or one the writer typed that FI cannot trace) is taken out,
+    as that FI took it out. Old code: no fault, so both stayed, stated only as unconfirmed."""
+    eng, path = _paper(tmp_path)
+    g = _grounding()
+    for c in g["claims"]:
+        c.pop("fault")
+    n = eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
+    body = path.read_text(encoding="utf-8").split("## Limitations")[0]
+    assert "2.164e-07" not in body and "0.9991" not in body
+    # known positive: an unsupported sentence with no number stays and is stated as unconfirmed, as it was then too
+    assert n == 1 and f"{SOFT}." in body and GOOD in body
+    record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
+    assert [r["claim"][:20] for r in record["removed"]] == ["At a step of 0.0025 ", "The fit stays above "]
+
+
+def test_a_claim_of_this_fi_that_its_fault_keeps_is_not_cut_for_its_number(tmp_path: Path) -> None:
+    """The older rule is for a record with no fault only: a claim of this FI whose fault keeps its sentence (``wording``) stays,
+    whatever number it states."""
+    eng, path = _paper(tmp_path)
+    g = _grounding()
+    g["claims"][1]["fault"] = "wording"  # the typed-number sentence, judged a wording fault by this FI
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
+    body = path.read_text(encoding="utf-8").split("## Limitations")[0]
+    assert TYPED in body and "2.164e-07" not in body
 
 
 def test_a_supported_sentence_stays(tmp_path: Path) -> None:

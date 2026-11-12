@@ -261,7 +261,8 @@ async def test_every_request_is_counted_on_disk_before_it_is_made_and_the_counts
     models = _small_models(repair=lambda who, prompt: "")
     engine = _engine_with(tmp_path, SMALL, models)
     assert await engine._code_review_gate(WITH_PLAN) is None
-    assert models.seen == [("test", 1)] + [("repair", n) for n in range(2, 2 + fr.REPAIR_CALLS + fr.OTHER_CALLS)], \
+    # an empty reply cannot be placed: it is asked once more inside the same request, which is counted once
+    assert models.seen == [("test", 1)] + [("repair", n) for n in range(2, 2 + fr.REPAIR_CALLS + fr.OTHER_CALLS) for _ in (1, 2)], \
         "when each request is made, it is already counted in .fi/code_review.json"
     record = cr.load(engine.quest_root)
     assert record["finding_calls"] == 1 + fr.REPAIR_CALLS + fr.OTHER_CALLS <= cr.MAX_FINDING_CALLS

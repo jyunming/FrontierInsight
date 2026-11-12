@@ -95,7 +95,7 @@ async def test_an_answer_whose_parts_do_not_fit_the_settings_put_back_is_refused
     eng, asked = await _plan_step(tmp_path, [json.dumps({"protocol": {"optimisation": block}})] * 6)
     scan_asks = [a for a in asked if "a part of it in the plan could not be read" in a or "was not used" in a]
     assert 1 <= len(scan_asks) <= 4, len(scan_asks)
-    assert any("Your last answer was not used" in a for a in asked), "the reason goes back to the plan's model"
+    assert any("only these parts of it could not be read" in a for a in asked), "the faulted path goes back to the plan's model"
     design = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
     kept = design["protocol"]["optimisation"]
     assert kept["grid"] == {"fin_spacing": SCAN["fin_spacing"]} and "sub_studies" not in kept, "the answer is not used"

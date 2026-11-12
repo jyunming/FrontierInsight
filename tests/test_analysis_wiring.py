@@ -462,8 +462,11 @@ PINS_AT_811719AF = {
     # number for a compared value became a missing number (it was "dab51e372647d8db", then "87e0998489e5371b") and again
     # when a run's numbers given level first are read and a case is not read from one plain number of a run given every value
     # and again when a refused per-value result raises FI's typed LevelsRefused (core/in_run.py); it was "a170adc907d3a756"
-    "run_none": "31f40a3da41e1bf3",
-    "run_plain": "31f40a3da41e1bf3",
+    # and again (intended text changes) when core/in_run.py gained the search's one-number rule (search_one_number_names,
+    # one_number_rule) and the check of a run's result shape (shape_problem), and the search's scan in run.py began to read
+    # the pooled candidates of every searched alternative (scan(..., pool=True)); it was "31f40a3da41e1bf3"
+    "run_none": "bb9434d6181daa8e",
+    "run_plain": "bb9434d6181daa8e",
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
@@ -480,7 +483,11 @@ PINS_AT_811719AF = {
     # and again with core/in_run.py's typed LevelsRefused (run.py carries the runtime); it was "968739116e2bd633"
     # and again when the table took the plan's kinds (Table(..., kinds=): a result gets a binomial interval only when the plan
     # declares it a proportion, an intended text change); it was "7c0c2a465be6c47e"
-    "run_framed": "11ff3296ced4b58f",
+    # and again with core/in_run.py's one-number rule and result-shape check and run.py's pooled scan, as above; it was
+    # "11ff3296ced4b58f"
+    # and again when the table began to serve a quantity FI derives for each setting through mean() (Table.set_derived, for
+    # a figure line FI names only when every point is its own record); it was "31055f8a3362dd1d"
+    "run_framed": "d22eddb03edf07e6",
 }
 
 

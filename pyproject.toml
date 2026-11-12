@@ -192,7 +192,7 @@ exclude = [
 # wheel and are reachable via the same relative paths the runtime
 # uses in the source tree.
 [tool.setuptools.package-data]
-"*" = ["*.md", "*.tex", "*.sty", "*.css", "*.html", "*.js", "*.otf"]
+"*" = ["*.md", "*.tex", "*.sty", "*.css", "*.html", "*.js", "*.otf", "*.txt"]
 
 [tool.coverage.run]
 # tests/test_crash_kind.py compiles a small function under this name inside core/ so its frames count as FI's own

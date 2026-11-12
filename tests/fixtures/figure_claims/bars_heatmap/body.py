@@ -3,6 +3,7 @@
 
 def figure_bars_heatmap(fig, table):
     methods = ["m1", "m2", "m3"]
+    fig.panel(0, dose=2)  # the bars are of dose 2
     for arm in ("treated", "control"):
         keys = [table.at(method=m, arm=arm, dose=2)[0] for m in methods]
         means = [table.mean("growth", k) for k in keys]

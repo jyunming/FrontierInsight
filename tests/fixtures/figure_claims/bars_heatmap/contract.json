@@ -9,9 +9,10 @@
   "dose"
  ],
  "x": "method",
+ "series": "arm",
  "series_ids": [
-  "treated",
-  "control"
+  "growth@arm:treated",
+  "growth@arm:control"
  ],
  "references": {},
  "labels": {
@@ -20,9 +21,8 @@
    "scale": "linear"
   },
   "method": "Method",
-  "treated": "Treated",
-  "control": "Control",
-  "dose": "Dose"
+  "dose": "Dose",
+  "arm": "Arm"
  },
  "figure": {
   "id": "bars_heatmap",
@@ -31,8 +31,8 @@
  },
  "plan": {
   "series": [
-   "treated",
-   "control"
+   "growth@arm:treated",
+   "growth@arm:control"
   ],
   "grid": []
  },
@@ -40,28 +40,28 @@
   {
    "claim": "drawn",
    "args": {
-    "series": "treated",
+    "series": "growth@arm:treated",
     "panel": "1"
    }
   },
   {
    "claim": "drawn",
    "args": {
-    "series": "control",
+    "series": "growth@arm:control",
     "panel": "1"
    }
   },
   {
    "claim": "errorbars",
    "args": {
-    "series": "treated",
+    "series": "growth@arm:treated",
     "panel": "1"
    }
   },
   {
    "claim": "value_at",
    "args": {
-    "series": "treated",
+    "series": "growth@arm:treated",
     "x": "m2",
     "panel": "1"
    }

@@ -362,7 +362,7 @@ def test_a_baseline_that_breaks_a_limit_is_drawn_and_said(tmp_path):
 
 def test_the_scan_map_orders_its_axes_by_count_then_name(tmp_path):
     data = {"scan": [{"design": {"b": b, "a": a}, "objective": a + b} for a in (1, 2) for b in (1, 2)]}
-    assert af._scan_figure(data, str(tmp_path))["status"] == "ok"
+    assert [o["status"] for o in af._scan_figure(data, str(tmp_path))] == ["ok"]
 
 
 def test_no_best_design_and_no_check_are_said_in_a_plain_sentence_not_a_crash(tmp_path):
@@ -390,8 +390,8 @@ def test_a_scan_with_one_setting_is_a_line_and_without_a_scan_there_is_no_map(tm
     root = _search_record(tmp_path / "q")
     assert [o["file"] for o in af.search_figures(str(root), str(tmp_path / "f1"))] == [af.PROGRESS_FILE, af.BEST_VS_BASELINE_FILE]
     data = {"scan": [{"design": {"dose": d}, "objective": d * 2.0, "level": None} for d in (1, 2, 3)]}
-    assert af._scan_figure(data, str(tmp_path / "f2"))["status"] == "ok"
-    assert af._scan_figure({"scan": [{"design": {"dose": 1}, "objective": 1.0}]}, str(tmp_path / "f3"))["status"] == "skipped"
+    assert [o["status"] for o in af._scan_figure(data, str(tmp_path / "f2"))] == ["ok"]
+    assert [o["status"] for o in af._scan_figure({"scan": [{"design": {"dose": 1}, "objective": 1.0}]}, str(tmp_path / "f3"))] == ["skipped"]
 
 
 @pytest.mark.skipif(not (RECORD / "results" / "best_design.json").is_file(), reason="the copied record of the recorded search is absent")
@@ -438,7 +438,7 @@ def test_an_alternative_that_was_not_searched_gives_no_false_fault_and_is_said(t
     _write(tmp_path / "q", rows, record)
     out = af.search_figures(str(tmp_path / "q"), str(tmp_path / "f"))
     assert out[0]["status"] == "ok" and af.fi_faults(out) == []
-    assert "family = b gave the same results as family = a" in out[0]["note"]
+    assert "family = b was not searched on its own (it gave the objective and limits of family = a" in out[0]["note"]
 
 
 @pytest.mark.parametrize("where", ["handle", "folder"])
@@ -1853,21 +1853,22 @@ def test_a_reference_line_changed_to_a_slope_after_fi_drew_it_is_not_verified(tm
 
 
 def test_a_scan_map_over_three_varying_settings_does_not_hide_points_behind_each_other(tmp_path, monkeypatch):
-    """Before: points that differed only in the third setting were drawn at one position, with no word of it."""
-    seen = {}
+    """Before: points that differed only in the third setting were drawn at one position. Now each value of it is its own panel
+    (tests/test_scan_map_panels.py has the rest)."""
+    made = []
     orig = af._new_figure
 
     def spy(n):
         plt, fig, axes = orig(n)
-        seen["ax"] = axes[0]
+        made.append(axes)
         return plt, fig, axes
 
     monkeypatch.setattr(af, "_new_figure", spy)
     scan = [{"design": {"a": a, "b": b, "c": c}, "objective": a + b + 10 * c} for a in (1, 2, 3) for b in (1, 2, 3) for c in (0, 1)]
-    out = af._scan_figure({"scan": scan}, str(tmp_path))
+    (out,) = af._scan_figure({"scan": scan}, str(tmp_path))
     assert out["status"] == "ok" and "c" in out["note"]
-    marks = [(tuple(o), c.get_paths()[0].vertices.tobytes()) for c in seen["ax"].collections for o in c.get_offsets().tolist()]
-    assert len(marks) == len(scan) and len(set(marks)) == len(marks)  # every point has its own position or its own marker
-    assert seen["ax"].get_legend() is not None
-    two = af._scan_figure({"scan": [s for s in scan if s["design"]["c"] == 0]}, str(tmp_path))
+    for ax in made[0]:
+        marks = [tuple(o) for c in ax.collections for o in c.get_offsets().tolist()]
+        assert len(marks) == 9 and len(set(marks)) == 9  # every point of a panel has its own position
+    (two,) = af._scan_figure({"scan": [s for s in scan if s["design"]["c"] == 0]}, str(tmp_path))
     assert "note" not in two  # known positive: two varying settings need no note

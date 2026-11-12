@@ -89,3 +89,26 @@ def test_replay_r7_the_test_asked_for_again_fails_by_its_assertion_and_the_quest
     assert "one value typed in" in issue["failure"]
     # the test ran the analysis in a folder of its own: the quest's results are not rewritten
     assert not (root / "data" / "results" / "results.json").exists()
+
+
+def test_a_failed_call_for_the_test_asked_again_spends_nothing_and_may_be_asked_later(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import finding_repair
+    from tests.test_disclosure import _engine
+
+    root = tmp_path / "r7"
+    shutil.copytree(FIX / "replay" / "finding_v2" / "r7_final", root)
+    shutil.copytree(FIX / "shown_fault_names" / "euv_r7", root, dirs_exist_ok=True)
+    record = code_review.load(root)
+    issue = record["issues"]["F-bed59bff"]
+    before = (int(record.get("finding_calls") or 0), int(record.get("test_calls") or 0))
+
+    async def chat(self, prompt, *a, **kw):  # noqa: ANN001, ANN002, ANN003
+        raise RuntimeError("the provider gave no answer")
+
+    monkeypatch.setattr(Engine, "_chat", chat)
+    eng = _engine(root)
+    error = finding_repair.TestRun("error", "AttributeError: in the test itself")
+    assert asyncio.run(eng._ask_finding_test_again(issue, error, record)) is None
+    assert "asked_again" not in issue, "not asked: a later pass may ask again"
+    assert (int(record.get("finding_calls") or 0), int(record.get("test_calls") or 0)) == before

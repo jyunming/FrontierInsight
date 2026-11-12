@@ -20,6 +20,16 @@ quest's code may call any function of ``m``, so it reaches all of them (and noth
 :func:`_fis_files`) a computed ``getattr`` on any other object reaches only the functions of FI's own files, since FI's text
 is known; so does one on ``table`` or ``fig``, the two objects FI hands every function of ``derive.py`` (:data:`FI_OBJECT_PARAMS`),
 in a file the study's model wrote; on any other object there it still means FI cannot tell.
+
+An attribute read inside a file FI wrote is read more closely too (:func:`_fis_names`, :func:`_receivers`). When its name is
+one FI's own classes define (a method, a class attribute, or an attribute set as ``self.name``) it reaches only FI's own
+functions of that name, never the study's: ``ctx.trial`` in FI's frame is the trial's number, not the study's ``trial``. The
+object's type is used where the code fixes it: ``self`` in a method of FI's class and a name bound from a call to FI's class
+are FI's objects; a name bound in the same function from any other call (a study class, a function that returns a study
+object) and a name imported from a module of the study's keep "any function of that name". Limit, said plainly: a receiver whose type the code does not fix (a parameter, an
+attribute of another object) is judged by the name alone, so a study object handed to FI's code under such a name, whose
+method shares a name with an attribute of FI's classes, is not followed by that read (FI's own text does not do that today;
+the tests hold the case).
 """
 
 from __future__ import annotations
@@ -84,6 +94,87 @@ def _definition_time(stmts: list[ast.stmt], *, main: bool) -> list[ast.AST]:
 #: The parameters FI gives every function of ``derive.py`` it calls (``analysis_frame.SIGNATURES``): its own table of the trials and
 #: its own figure. A computed ``getattr`` on one of them looks a name up on FI's object, whose text is FI's.
 FI_OBJECT_PARAMS = frozenset({"table", "fig"})
+
+
+def _fis_names(mods: list["_Module"]) -> tuple[set[str], set[str]]:
+    """``(attribute names, class names)`` of FI's own classes, read from FI's own files ``mods``: every method, every class
+    attribute and every attribute a method sets as ``self.name``."""
+    attrs: set[str] = set()
+    classes: set[str] = set()
+    for m in mods:
+        for node in ast.walk(m.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            classes.add(node.name)
+            for s in node.body:
+                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    attrs.add(s.name)
+                elif isinstance(s, ast.Assign):
+                    attrs |= {t.id for t in s.targets if isinstance(t, ast.Name)}
+                elif isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name):
+                    attrs.add(s.target.id)
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store) and isinstance(n.value, ast.Name)
+                        and n.value.id == "self"):
+                    attrs.add(n.attr)
+    return attrs, classes
+
+
+def _receivers(m: "_Module", fi_classes: set[str]) -> dict[int, str]:
+    """For the attribute reads of FI's file ``m`` whose object is a plain name, what the code fixes that object to be:
+    ``"fi"`` (``self`` in a method of a class of the file, or a name the same function binds only from a call to one of FI's
+    classes ``fi_classes``) or ``"other"`` (a name the function binds from any other call). A read missing from the answer
+    has an object whose type the code does not fix (``{id(node): kind}``)."""
+    out: dict[int, str] = {}
+    methods: set[int] = set()
+    for node in ast.walk(m.tree):
+        if isinstance(node, ast.ClassDef):
+            methods |= {id(s) for s in node.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    # The module first (its bindings anywhere, a name a function does not bind itself), then each function, outer ones before
+    # the functions inside them: a function's own names decide over what holds them around it.
+    for fn in ast.walk(m.tree):
+        if not isinstance(fn, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        kinds: dict[str, set[str]] = {}
+        params = [*fn.args.posonlyargs, *fn.args.args] if not isinstance(fn, ast.Module) else []
+        if id(fn) in methods and params:
+            kinds.setdefault(params[0].arg, set()).add("fi")
+        for n in ast.walk(fn):
+            targets: list[ast.AST] = []
+            if isinstance(n, ast.Assign):
+                targets = n.targets
+            elif isinstance(n, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                targets = [n.target]
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+                targets = [n.target]
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                targets = [i.optional_vars for i in n.items if i.optional_vars is not None]
+            value = getattr(n, "value", None) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) else None
+            for t in targets:
+                if not isinstance(t, ast.Name):
+                    for sub in ast.walk(t):
+                        if isinstance(sub, ast.Name):
+                            kinds.setdefault(sub.id, set()).add("unknown")
+                    continue
+                if isinstance(value, ast.Call):
+                    callee = value.func
+                    fi = (isinstance(callee, ast.Name) and callee.id in fi_classes and callee.id not in m.imports)
+                    kinds.setdefault(t.id, set()).add("fi" if fi else "other")
+                else:
+                    kinds.setdefault(t.id, set()).add("unknown")
+        for p in [*params, *(fn.args.kwonlyargs if not isinstance(fn, ast.Module) else [])]:
+            if not (id(fn) in methods and params and p is params[0]):
+                kinds.setdefault(p.arg, set()).add("unknown")
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and isinstance(n.value, ast.Name):
+                got = kinds.get(n.value.id)
+                if got == {"fi"}:
+                    out[id(n)] = "fi"
+                elif got and "other" in got:
+                    out[id(n)] = "other"
+                elif got is not None:
+                    out.pop(id(n), None)
+    return out
 
 
 def _fis_object(m: "_Module", node: ast.AST | None) -> bool:
@@ -181,6 +272,8 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
             by_name.setdefault(name, m)
 
     fis = _fis_files(code_dir, modules)
+    fi_attrs, fi_classes = _fis_names([modules[rel] for rel in fis])
+    receivers = {rel: _receivers(modules[rel], fi_classes) for rel in fis}
     done: set[tuple[str, str]] = set()
     work: list[tuple[_Module, list[ast.AST]]] = []
 
@@ -279,6 +372,16 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
                         target = by_name.get(module if name is None else f"{module}.{name}" if module else name)
                         if target is not None and reach(target, node.attr):
                             continue
+                    # a name the file imports from a module of the study's (``from model import Box``) is the study's object
+                    imported = (isinstance(owner, ast.Name) and owner.id in m.imports
+                                and (src := by_name.get(m.imports[owner.id][0])) is not None and src.rel not in fis)
+                    if (m.rel in fis and node.attr in fi_attrs and not imported
+                            and receivers[m.rel].get(id(node)) != "other"):
+                        # In FI's own file, a name FI's own classes define, on an object that is FI's or whose type the code
+                        # does not fix: FI's own functions of that name only (see the module docstring for the limit).
+                        for rel in fis:
+                            reach(modules[rel], node.attr)
+                        continue
                     # Any other object, or a module that does not hold the name itself: any function of that name.
                     everywhere(node.attr)
     return done

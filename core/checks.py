@@ -1383,7 +1383,8 @@ CHECKS: tuple[Check, ...] = (
     Check('citation_pair_rules', 'core.citation_support', 'pre_problem',
           'citation_check', 'own_record', 'strip',
           "per (sentence, source): retracted, no retrieved text, a number in neither source nor the run's "
-          'results, or snippet/title-only text saying more; only ever adds unsupported'),
+          'results, or snippet/title-only text saying more, read on the part of the sentence the bracket closes '
+          '(the whole sentence for a pair the reader leaves unanswered); only ever adds unsupported'),
     Check('citation_quote_not_in_source', 'core.citation_support', 'post_problem',
           'citation_check', 'own_record', 'strip',
           "the passage a reader names must be in the source's own text"),

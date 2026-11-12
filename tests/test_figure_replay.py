@@ -29,9 +29,12 @@ def _close_figures():
 
 
 def _clean_host(tmp_path):
-    """A host on the spectra fixture's table whose axes are empty."""
+    """A host on the spectra fixture's table whose axes are empty, set up as the replay sets up its own: with no setting it
+    draws one curve per level of (the replay names each curve by its quantity)."""
     contract, drawn, _stem = fixtures._run("spectra", tmp_path)
-    return contract, fixtures._Host(contract, drawn.table)
+    host = fixtures._Host(contract, drawn.table)
+    host.series = None
+    return contract, host
 
 
 def _run_on_spectra(tmp_path, grid, draw, held=()):
@@ -155,23 +158,23 @@ def _record(change):
 
 
 def _a_series_is_drawn(calls):
-    s = copy.deepcopy(_series(calls, 1, "sample_a"))
-    s["id"] = "sample_c"
+    s = copy.deepcopy(_series(calls, 1, "signal@sample:a"))
+    s["id"] = "signal@sample:c"
     _panel(calls, 1)["series"].append(s)
 
 
 def _sample_b_above(calls):
-    s = _series(calls, 1, "sample_b")
+    s = _series(calls, 1, "signal@sample:b")
     s["y"] = [v + 100 for v in s["y"]]
 
 
 def _rows_cross(calls):
-    low, high = _series(calls, 2, "row_0"), _series(calls, 2, "row_2")
+    low, high = _series(calls, 2, "load@row:0"), _series(calls, 2, "load@row:2")
     low["y"][-2:], high["y"][-2:] = list(high["y"][-2:]), list(low["y"][-2:])  # the order flips at the last two columns
 
 
 def _negative_bars(calls):
-    s = _series(calls, 1, "sample_a")
+    s = _series(calls, 1, "signal@sample:a")
     s["yerr"] = [-0.1] * len(s["y"])
 
 
@@ -181,26 +184,26 @@ def _band_upside_down(calls):
 
 
 def _not_a_step(calls):
-    _series(calls, 1, "group_a")["step"] = False
+    _series(calls, 1, "survival@group:a")["step"] = False
 
 
 # one fault in each claim kind the fixtures offer: the sentence or the record is changed so that the sentence is false
 FAULTS = [
-    ("spectra", "drawn", {"series": "sample_a"}, _words("Sample A", "Sample Z")),
-    ("spectra", "not_drawn", {"series": "sample_c"}, _record(_a_series_is_drawn)),
-    ("spectra", "range", {"series": "sample_a", "axis": "y"}, _number),
-    ("spectra", "value_at", {"series": "sample_a", "x": "450"}, _number),
-    ("spectra", "trend", {"series": "sample_a"}, _words("does not change monotonically", "increases")),
-    ("spectra", "order", {"at": "400"}, _words("Sample A, Sample B", "Sample B, Sample A")),
-    ("spectra", "crossing", {"a": "sample_a", "b": "sample_b"}, _record(_sample_b_above)),
+    ("spectra", "drawn", {"series": "signal@sample:a"}, _words("Sample = a", "Sample = z")),
+    ("spectra", "not_drawn", {"series": "signal@sample:c"}, _record(_a_series_is_drawn)),
+    ("spectra", "range", {"series": "signal@sample:a", "axis": "y"}, _number),
+    ("spectra", "value_at", {"series": "signal@sample:a", "x": "450"}, _number),
+    ("spectra", "trend", {"series": "signal@sample:a"}, _words("does not change monotonically", "increases")),
+    ("spectra", "order", {"at": "400"}, _words("Sample = a, Sample = b", "Sample = b, Sample = a")),
+    ("spectra", "crossing", {"a": "signal@sample:a", "b": "signal@sample:b"}, _record(_sample_b_above)),
     ("spectra", "reference", {"ref": "baseline"}, _number),
-    ("spectra", "errorbars", {"series": "sample_a"}, _record(_negative_bars)),
-    ("spectra", "band", {"series": "sample_b"}, _record(_band_upside_down)),
+    ("spectra", "errorbars", {"series": "signal@sample:a"}, _record(_negative_bars)),
+    ("spectra", "band", {"series": "signal@sample:b"}, _record(_band_upside_down)),
     ("spectra", "scale", {"axis": "x", "panel": "1"}, _words("is linear", "is logarithmic")),
     ("spectra", "note", {"note": "signal"}, _words("6.5", "6.4")),
-    ("map", "no_crossing", {"a": "row_0", "b": "row_2"}, _record(_rows_cross)),
-    ("survival", "steps", {"series": "group_a"}, _number),
-    ("survival", "steps", {"series": "group_a"}, _record(_not_a_step)),
+    ("map", "no_crossing", {"a": "load@row:0", "b": "load@row:2"}, _record(_rows_cross)),
+    ("survival", "steps", {"series": "survival@group:a"}, _number),
+    ("survival", "steps", {"series": "survival@group:a"}, _record(_not_a_step)),
 ]
 
 
@@ -223,19 +226,19 @@ def test_every_claim_kind_the_fixtures_offer_has_a_planted_fault(tmp_path):
 
 def test_identical_and_missing_x_disagree_when_planted(tmp_path):
     calls, _offers, scale_of = _built("spectra", tmp_path)
-    twin = copy.deepcopy(_series(calls, 1, "sample_a"))
+    twin = copy.deepcopy(_series(calls, 1, "signal@sample:a"))
     twin["id"] = "twin"
     _panel(calls, 1)["series"].append(twin)
-    both = figure_claims.menu(calls, {"series": ["sample_a", "twin"], "grid": []}, stem="s")
+    both = figure_claims.menu(calls, {"series": ["signal@sample:a", "twin"], "grid": []}, stem="s")
     same = next(o for o in both if o["claim"] == "identical")
     assert replay._agree(calls, same, [], scale_of)[0] == "agree"
     _series(calls, 1, "twin")["y"][0] += 5
     assert replay._agree(calls, same, [], scale_of)[0] == "disagree"
     # missing_x: a points series that lacks a grid x; the fault draws that x after all
-    pts = _series(calls, 1, "sample_a")
+    pts = _series(calls, 1, "signal@sample:a")
     gone = pts["x"][-1]
     pts["kind"], pts["x"], pts["y"] = "points", pts["x"][:-1], pts["y"][:-1]
-    offer = {"claim": "missing_x", "args": {"series": "sample_a", "panel": "1"}, "text": "Sample A has no point at %g" % gone}
+    offer = {"claim": "missing_x", "args": {"series": "signal@sample:a", "panel": "1"}, "text": "Sample = a has no point at %g" % gone}
     assert replay._agree(calls, offer, [gone], scale_of)[0] == "agree"
     pts["x"].append(gone)
     pts["y"].append(1.0)
