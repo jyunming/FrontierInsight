@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import call_record as _calls
 from . import in_run as _in_run
 from . import metric_spec as _metric_spec
 from . import optimise_search as _search
@@ -278,8 +279,14 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
             if left <= 0:
                 setting.timed_out = True
                 continue
-            result = await executor.execute([str(python), _trials.HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-                                            cwd=quest_root, timeout_s=max(1, left), env=env)
+            # The small run is a checking run: it notes which functions of the code were called (core/call_record.py).
+            runner, calls = _calls.prepare(quest_root, "small_run")
+            try:
+                result = await executor.execute([str(python), runner, calls.as_posix(), _trials.HARNESS_PATH.as_posix(),
+                                                 task["spec"], task["out"]],
+                                                cwd=quest_root, timeout_s=max(1, left), env=env)
+            finally:
+                _calls.absorb(quest_root, quest_root / calls)
             reasons: Counter = Counter()
             seen: set[int] = set()
             try:

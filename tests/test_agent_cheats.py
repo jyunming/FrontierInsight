@@ -25,6 +25,10 @@ from core import figure_data_check, run_facts, typed_results
 from core.execution import SharedInterpreterExecutor
 from tests.equation_judge_helpers import fi_verdict
 
+# The run-time half runs FI's checks on 18 folders in one fixture, and a checking run notes the calls it makes
+# (core/call_record.py), which makes each of them slower: the limit is the end-to-end files'.
+pytestmark = pytest.mark.timeout(1800)
+
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_cheats"
 CHEATS = sorted(p.name for p in (FIXTURES / "cheats").iterdir() if p.is_dir())
 
