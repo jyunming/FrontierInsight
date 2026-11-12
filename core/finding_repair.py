@@ -44,6 +44,7 @@ from . import code_findings as _issues
 from . import function_steps as _steps
 from . import optimise as _optimise
 from . import skeleton as _skeleton
+from . import small_run as _small
 from . import trial_runner as _trials
 from .provider import ProviderUnusable
 
@@ -1690,6 +1691,10 @@ class Env:
     #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
     #: not kept); ``None`` when there is none to make.
     small_run: Callable[[], Awaitable[str]] | None = None
+    #: What FI's small run gives for each result on the code as it is, ``{setting: {result: [value of each trial]}}`` (the
+    #: run is made when the code changed since its record); ``None`` when there is no small run. A repair of a finding that a
+    #: result is missing may not change the values of the results the small run gave before it (:func:`core.small_run.changed_results`).
+    small_values: Callable[[], Awaitable[dict[str, dict[str, list[Any]]] | None]] | None = None
     #: The analysis gate on the code as it is (core/pipeline_gate.py): ``""`` when the analysis still runs from start to end on
     #: the recorded results, else why not (the repair is not kept); ``None`` when there is no gate.
     gate: Callable[[], Awaitable[str]] | None = None
@@ -2352,6 +2357,9 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     if env.baseline_response is None:
         env.baseline_response = await _measure_behaviour(env, "design_response")
     env.measured = {}
+    # a finding that a result is missing: the small run's values of the results it already had, on the code as it is
+    held = env.small_values is not None and issue.get("kind") == "quantity" and bool(issue.get("quantity"))
+    values_before = (await env.small_values()) if held else None  # type: ignore[misc]
     answers: dict[str, dict[str, Any]] | None = None
     response: dict[str, Any] | None = None
 
@@ -2372,6 +2380,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
+        if held and values_before:
+            moved = _small.changed_results(values_before, await env.small_values() or {})  # type: ignore[misc]
+            if moved:
+                raise _Rejected("it changed " + ", ".join(f"`{n}`" for n in moved[:4]) + " in FI's small run, which the "
+                                f"finding is not about (the finding is that `{issue.get('quantity')}` is missing)")
         if env.gate is not None:
             if refused := await env.gate():
                 raise _Rejected(refused)

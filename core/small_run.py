@@ -371,6 +371,30 @@ def read_record(quest_root: Path | str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def values_of(record: dict[str, Any]) -> dict[str, dict[str, list[Any]]]:
+    """What a small run's record holds of each result: ``{setting: {result name: [value of each trial]}}``."""
+    return {str(s.get("key") or ""): {str(n): list(v) for n, v in (s.get("values") or {}).items() if isinstance(v, list)}
+            for s in _settings_of(record) if isinstance(s, dict)}
+
+
+def changed_results(before: dict[str, dict[str, list[Any]]], after: dict[str, dict[str, list[Any]]]) -> list[str]:
+    """The names (sorted) of the results ``before`` has, in a setting both small runs ran, whose values are not exactly
+    what they were in ``after`` (a result taken out of a setting counts as changed; a result only ``after`` has is new and
+    is not compared). The small run's seeds are fixed, so the same code gives the same values."""
+    def same(a: Any, b: Any) -> bool:
+        return a == b or (isinstance(a, float) and isinstance(b, float) and a != a and b != b)  # NaN is NaN
+
+    out: set[str] = set()
+    for key, names in before.items():
+        if key not in after:
+            continue
+        for name, values in names.items():
+            now = after[key].get(name)
+            if now is None or len(now) != len(values) or not all(same(a, b) for a, b in zip(values, now)):
+                out.add(name)
+    return sorted(out)
+
+
 # --- what the small run says about the frozen plan --------------------------------------------------------------------
 # Each check reads a fact FI holds (the plan's declarations, the names and shapes the small run returned, the search's own
 # judgement of its baseline design) and gives a :class:`Fault`. Only an exact contradiction is sent back to the code
