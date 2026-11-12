@@ -66,6 +66,13 @@ def without_measured(text: Any, measured: float | None) -> str:
     return _NUMBER_RE.sub(one, text)
 
 
+def without_numbers(text: Any) -> str:
+    """``text`` with every number in it taken out. The step a repair disputes is written by a model that saw what the
+    simulation measured, and it may write that value at any rounding, so no number of its own reaches a blind model:
+    the argument stays in its words, and the value it claims is carried by its formula, which FI computes."""
+    return _NUMBER_RE.sub("(a value not shown)", " ".join(str(text or "").split()))
+
+
 def _same_formula(a: Any, b: Any) -> bool:
     return bool(a) and "".join(str(a).split()).lower() == "".join(str(b or "").split()).lower()
 
@@ -192,11 +199,12 @@ def challenge_of(oracle: dict[str, Any], proposal: dict[str, Any], measured: flo
     """The repair's question to the plan, as FI takes it: ``({step, formula, value, reason, measured}, "")``, or
     ``(None, why)`` when it cannot be taken (no step named, no formula FI computes, a formula that restates the measured
     value, or one that does not give the value claimed). ``measured``: what the simulation measured on the check's case;
-    kept with the challenge for FI's own use, and taken out of the step a blind model is shown."""
+    kept with the challenge for FI's own use; the step a blind model is shown carries no number at all
+    (:func:`without_numbers`)."""
     if zero_by_form(oracle):
         return None, ("the check measures how far a rule is broken, which is 0 by its form: its expected value is not "
                       "disputed, the code is what a repair changes")
-    step = without_measured(proposal.get("disputed_step"), measured)[:600]
+    step = without_numbers(proposal.get("disputed_step"))[:600]
     formula = str(proposal.get("expected_formula") or "").strip()
     if not step or not formula:
         return None, ("it does not name the step of the plan's working it disputes and give the expected value as a "

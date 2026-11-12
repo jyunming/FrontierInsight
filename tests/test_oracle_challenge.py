@@ -224,7 +224,19 @@ def test_a_formula_that_writes_the_measurement_down_is_no_working_and_the_step_n
     assert ch.challenge_of(_CHECK, {**_QUESTION[0], "expected_formula": "n * 0 + 0.5"}, measured=0.5)[0] is None
     taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": "the simulation gives 0.500, the plan 1.0"},
                                measured=0.5)
-    assert taken is not None and "0.500" not in taken["step"] and "1.0" in taken["step"]
+    assert taken is not None and "0.500" not in taken["step"] and "1.0" not in taken["step"]
+
+
+def test_the_step_a_blind_model_reads_carries_no_number_however_the_measurement_is_rounded() -> None:
+    """A repair wrote the measured 0.10355 as "about 0.10": three matching digits were needed to take it out, so the
+    rounding reached the judge. No number the repair typed reaches it now, with or without a measured value."""
+    said = "the simulation's mean is about 0.10 (1.0e-1), near 10% of the 4 runs, so the plan's second term is wrong"
+    for measured in (0.10355, None):
+        taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": said}, measured=measured)
+        assert taken is not None
+        assert not any(ch._NUMBER_RE.search(part) for part in taken["step"].split("(a value not shown)")), taken["step"]
+        assert "the plan's second term is wrong" in taken["step"]
+    assert ch.without_measured("the check expects 0.10 at 4 runs", 0.10355) == "the check expects 0.10 at 4 runs"
 
 
 def test_a_concession_or_a_verdict_that_copies_the_codes_formula_settles_nothing_by_itself() -> None:
