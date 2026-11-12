@@ -14560,6 +14560,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
             other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
             on_accept=on_accept, small_run=self._small_run_again, small_values=self._small_values_now,
+            small_missing=self._small_missing_now,
             gate=lambda: self._finding_gate(state),
             known_answers=lambda: self._finding_known_answers(protocol, notes),
             design_response=lambda: self._finding_design_response(protocol, notes), notes=notes)

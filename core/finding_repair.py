@@ -1695,6 +1695,10 @@ class Env:
     #: run is made when the code changed since its record); ``None`` when there is no small run. A repair of a finding that a
     #: result is missing may not change the values of the results the small run gave before it (:func:`core.small_run.changed_results`).
     small_values: Callable[[], Awaitable[dict[str, dict[str, list[Any]]] | None]] | None = None
+    #: The results the plan declares each run returns that no trial of FI's small run returned, on the code as it is
+    #: (:func:`core.small_run.missing_outputs`); ``None`` when there is no small run or it did not run. This record, never a
+    #: finding's words, says that a result is missing.
+    small_missing: Callable[[], Awaitable[list[str] | None]] | None = None
     #: The analysis gate on the code as it is (core/pipeline_gate.py): ``""`` when the analysis still runs from start to end on
     #: the recorded results, else why not (the repair is not kept); ``None`` when there is no gate.
     gate: Callable[[], Awaitable[str]] | None = None
@@ -2357,8 +2361,15 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     if env.baseline_response is None:
         env.baseline_response = await _measure_behaviour(env, "design_response")
     env.measured = {}
-    # a finding that a result is missing: the small run's values of the results it already had, on the code as it is
-    held = env.small_values is not None and issue.get("kind") == "quantity" and bool(issue.get("quantity"))
+    # A finding that a result is missing, by FI's own record: its small run of the code as it is got no value of a result
+    # the plan declares each run returns, and the finding names that result. Only then are the other results held to the
+    # values they had. A finding about a result the code already returns is about that result's value, which its repair
+    # must change, and with it every result computed from it.
+    own = _quantity_keys(issue)
+    absent: list[str] = []
+    if env.small_values is not None and env.small_missing is not None and issue.get("kind") == "quantity" and own:
+        absent = [n for n in (await env.small_missing()) or [] if _issues.norm(n) in own]
+    held = bool(absent)
     values_before = (await env.small_values()) if held else None  # type: ignore[misc]
     # The small run on the code as it is: a repair answers for the run only when the run was good before it. A run that
     # already failed stays the small run's own finding, whatever this repair does.
@@ -2387,7 +2398,8 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             moved = _small.changed_results(values_before, await env.small_values() or {})  # type: ignore[misc]
             if moved:
                 raise _Rejected("it changed " + ", ".join(f"`{n}`" for n in moved[:4]) + " in FI's small run, which the "
-                                f"finding is not about (the finding is that `{issue.get('quantity')}` is missing)")
+                                "finding is not about (the finding is that " + ", ".join(f"`{n}`" for n in absent[:4])
+                                + " is missing)")
         if env.gate is not None:
             if refused := await env.gate():
                 raise _Rejected(refused)

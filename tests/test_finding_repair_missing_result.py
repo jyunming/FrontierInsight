@@ -108,9 +108,11 @@ def test_the_repair_request_carries_the_names_the_plan_declares(tmp_path: Path) 
 
 
 # --- a repair that adds a missing result may not change the other results of FI's small run -------------------------------
-# The fact is FI's own: the values the small run gave for every result before the repair are compared with the values it gives
-# after it (``Env.small_values``); a result that is new after the repair is not compared. Here the "small run" is the file's own
-# results on fixed rows, as FI's run of the study would give them.
+# The facts are FI's own. That the result is missing is what the small run's record says (``Env.small_missing``: a result the
+# plan declares each run returns that no trial returned), never the finding's words; then the values the small run gave for
+# every result before the repair are compared with the values it gives after it (``Env.small_values``); a result that is new
+# after the repair is not compared. Here the "small run" is the file's own results on fixed rows, as FI's run of the study
+# would give them.
 ROWS = [{"x": 1.0, "y": 2.0}, {"x": 3.0, "y": 6.0}, {"x": 5.0, "y": 4.0}]
 
 FUNCS = '''ROLES = {"mean_x": "result", "mean_y": "result"}
@@ -138,10 +140,18 @@ def _small_values_of(code: Path):
     return values
 
 
-def _run_with_small(tmp_path: Path, reply: str, *, issue: dict | None = None, source: str = TABLE, test: str = TEST) -> Run:
+def _small_missing(names: list[str]):
+    async def missing() -> list[str]:
+        return list(names)
+    return missing
+
+
+def _run_with_small(tmp_path: Path, reply: str, *, issue: dict | None = None, source: str = TABLE, test: str = TEST,
+                    missing: tuple[str, ...] = ("spread_width",)) -> Run:
     run = Run(tmp_path, [issue or ISSUE], {"code:test": [_block(test)], "code:repair": [_block("# file: spring.py\n" + reply)]})
     (run.code / "spring.py").write_text(source, encoding="utf-8")
     run.env.small_values = _small_values_of(run.code)
+    run.env.small_missing = _small_missing(list(missing))
     return run
 
 
@@ -171,6 +181,26 @@ def test_wiring_the_new_result_into_the_function_that_returns_the_results_is_acc
     run = _run_with_small(tmp_path, wired, source=FUNCS, test=FUNCS_TEST)
     assert run.go() == ["spring.py"]
     assert [r["outcome"] for r in run.record["issues"]["F-1"]["repairs"]] == ["accepted"]
+
+
+WRONG = TABLE.replace('def derive_mean_y(rows):\n    return sum(r["y"] for r in rows) / len(rows)',
+                      'def derive_mean_y(rows):\n    return sum(r["y"] for r in rows)')
+WRONG_TEST = ("import spring\n\ndef test_mean():\n"
+              "    assert spring.derive_mean_y([{'y': 2.0}, {'y': 4.0}]) == 3.0, 'mean_y is the sum, not the mean'\n")
+
+
+def test_a_repair_of_a_result_the_small_run_already_returns_may_change_that_result(tmp_path: Path) -> None:
+    """Live: a finding that a result the code returns is computed wrongly (kind ``quantity``, the result named) had each
+    of its repairs refused because the repair "changed" that very result in FI's small run. The other results are held to
+    their values only when the small run's own record says the finding's result is missing."""
+    assert TABLE != WRONG
+    for name, function in (("named", "derive_mean_y"), ("unnamed", "")):
+        issue = {"id": "F-1", "kind": "quantity", "file": "spring.py", "function": function, "quantity": "mean_y",
+                 "text": "mean_y is the sum of y, not its mean", "wordings": []}
+        run = _run_with_small(tmp_path / name, TABLE, issue=issue, source=WRONG, test=WRONG_TEST, missing=())
+        assert run.go() == ["spring.py"], (name, run.record["issues"]["F-1"]["repairs"])
+        assert [r["outcome"] for r in run.record["issues"]["F-1"]["repairs"]] == ["accepted"], name
+        assert (run.code / "spring.py").read_text(encoding="utf-8") == TABLE
 
 
 def test_a_small_run_that_already_failed_before_the_repair_is_not_the_repairs_fault(tmp_path: Path) -> None:
