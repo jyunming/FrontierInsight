@@ -1035,13 +1035,20 @@ def enc(x):
 
 
 def dec_in(v):
+    if isinstance(v, dict):
+        if set(v) == {"__complex__"} and isinstance(v["__complex__"], list) and len(v["__complex__"]) == 2:
+            return complex(v["__complex__"][0], v["__complex__"][1])
+        return {k: dec_in(x) for k, x in v.items()}
     if isinstance(v, list):
+        items = [dec_in(x) for x in v]
         if np is not None:
             try:
-                return np.array(v)
+                arr = np.array(items)
+                if arr.dtype != object:
+                    return arr
             except Exception:
                 pass
-        return list(v)
+        return items
     return v
 
 
