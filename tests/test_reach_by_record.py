@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core import call_record, code_reach
-from tests.test_call_record import _check_run, _quest
+from tests.test_call_record_of_runs import _check_run, _quest
 
 
 # ---- what code_reach makes of it -----------------------------------------------------------------------------------------
