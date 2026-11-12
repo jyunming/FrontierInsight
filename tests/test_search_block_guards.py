@@ -15,8 +15,14 @@ from core import optimisation_plan as op
 from core import plan
 from tests.test_plan_optimisation import BLOCK, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
 from tests.test_search_block_asked import (
-    TOPIC, Model, _broken_draft, _complete, _no_budget, _record, _with_block,
+    TOPIC, Model, _broken_draft, _complete, _record, _with_block,
 )
+
+
+def _no_budget(text: str) -> str:
+    block = copy.deepcopy(BLOCK)
+    del block["evaluation_budget"]
+    return _with_block(text, block)
 
 
 def _stop(eng: Any) -> list[dict[str, Any]]:

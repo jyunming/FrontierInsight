@@ -708,6 +708,11 @@ def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault
 
         fixed_metrics, why = metric_spec.normalize(metrics)
         if fixed_metrics is None:
+            # The fault is put at the entry that cannot be read on its own, so a request quotes that entry as written; a
+            # reason about the list as a whole (no entry fails alone) stays at the list.
+            for index, metric in enumerate(metrics if isinstance(metrics, list) else [], start=1):
+                if metric_spec.normalize([metric])[0] is None:
+                    return None, _fault(_reading.join("protocol.metrics", index), str(why), as_written=metric)
             return None, _fault("protocol.metrics", str(why), as_written=None)
         out["metrics"] = fixed_metrics
         subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]

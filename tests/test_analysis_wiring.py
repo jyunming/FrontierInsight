@@ -485,7 +485,9 @@ PINS_AT_811719AF = {
     # declares it a proportion, an intended text change); it was "7c0c2a465be6c47e"
     # and again with core/in_run.py's one-number rule and result-shape check and run.py's pooled scan, as above; it was
     # "11ff3296ced4b58f"
-    "run_framed": "31055f8a3362dd1d",
+    # and again when the table began to serve a quantity FI derives for each setting through mean() (Table.set_derived, for
+    # a figure line FI names only when every point is its own record); it was "31055f8a3362dd1d"
+    "run_framed": "d22eddb03edf07e6",
 }
 
 

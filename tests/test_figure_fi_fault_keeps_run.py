@@ -120,6 +120,8 @@ async def test_a_figure_fault_of_fi_does_not_stop_a_run_from_being_kept_but_anot
         record["figures"] = [{"id": "over_dose", "status": "fi_fault", "said": said, "why": "x"}]
         record["fi_faults"] = faults
         path.write_text(json.dumps(record), encoding="utf-8")
+        # the run writes its record and then its receipt (core/kept_bodies.py record_run), so the receipt follows the record
+        assert kb.write_receipt(engine.quest_root, kb.receipt_inputs(engine.quest_root, None))
         return sorted(kb.snapshot(engine.quest_root, DESIGN))
 
     assert await kept("figure_only", [said]) == ["derive_peak", "figure_over_rate"]
