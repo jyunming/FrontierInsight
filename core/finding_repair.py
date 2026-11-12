@@ -2255,7 +2255,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     call it directly, in any file of the code, to pass them on (:func:`params_kept`, :func:`direct_callers`); a repair of a
     whole file may move statements that run when the file is imported under an ``if __name__ == "__main__":`` block
     (:func:`without_main_guard`). It is accepted only when the finding's own test passes, every check that passed before
-    still passes, no static check finds more faults, and FI's small run of the simulation still runs (``env.small_run``)."""
+    still passes, no static check finds more faults, and FI's small run of the simulation still runs when it ran before the repair (``env.small_run``)."""
     path = env.code / rel
     old = _read(path)
     scope = scope_function(issue, old)
@@ -2360,6 +2360,9 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     # a finding that a result is missing: the small run's values of the results it already had, on the code as it is
     held = env.small_values is not None and issue.get("kind") == "quantity" and bool(issue.get("quantity"))
     values_before = (await env.small_values()) if held else None  # type: ignore[misc]
+    # The small run on the code as it is: a repair answers for the run only when the run was good before it. A run that
+    # already failed stays the small run's own finding, whatever this repair does.
+    ran_before = env.small_run is None or not await env.small_run()
     answers: dict[str, dict[str, Any]] | None = None
     response: dict[str, Any] | None = None
 
@@ -2376,7 +2379,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         more = worse_static(env.baseline_static, env.static())
         if more:
             raise _Rejected("it added faults to the static checks: " + ", ".join(more))
-        if env.small_run is not None:
+        if env.small_run is not None and ran_before:
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)

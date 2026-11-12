@@ -173,6 +173,33 @@ def test_wiring_the_new_result_into_the_function_that_returns_the_results_is_acc
     assert [r["outcome"] for r in run.record["issues"]["F-1"]["repairs"]] == ["accepted"]
 
 
+def test_a_small_run_that_already_failed_before_the_repair_is_not_the_repairs_fault(tmp_path: Path) -> None:
+    """Live: the small run failed in every setting before the code was read, and each repair of another finding was then
+    refused because the small run "no longer runs". A repair answers for the small run only when it ran before the repair."""
+    asked: list[str] = []
+
+    def small_run(says: dict[str, str]):
+        async def run_it() -> str:
+            text = (run.code / "spring.py").read_text(encoding="utf-8")
+            asked.append("after" if "spread_width" in text else "before")
+            return says[asked[-1]]
+        return run_it
+
+    run = Run(tmp_path / "failed_before", [ISSUE], {"code:test": [_block(TEST)],
+                                                    "code:repair": [_block("# file: spring.py\n" + TABLE + NEW_FN + LISTED)]})
+    (run.code / "spring.py").write_text(TABLE, encoding="utf-8")
+    run.env.small_run = small_run({"before": "in 3 of 3 setting(s) most trials failed", "after": "in 3 of 3 setting(s) most trials failed"})
+    assert run.go() == ["spring.py"], run.record["issues"]["F-1"]["repairs"]
+
+    asked.clear()
+    run = Run(tmp_path / "ran_before", [ISSUE], {"code:test": [_block(TEST)],
+                                                 "code:repair": [_block("# file: spring.py\n" + TABLE + NEW_FN + LISTED)] * 3})
+    (run.code / "spring.py").write_text(TABLE, encoding="utf-8")
+    run.env.small_run = small_run({"before": "", "after": "it failed"})
+    assert run.go() == []
+    assert all("no longer runs" in str(r) for r in run.record["issues"]["F-1"]["repairs"])
+
+
 def test_a_finding_of_another_kind_is_not_held_to_the_rule(tmp_path: Path) -> None:
     run = _run_with_small(tmp_path, PLANTED, issue={**ISSUE, "kind": "logic"})
     run.go()

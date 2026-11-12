@@ -135,7 +135,8 @@ def test_replay_r12_the_correct_repair_is_accepted_with_its_caller(tmp_path: Pat
     env = _env(root, correct, small_run=small_run)
     ok, why = asyncio.run(fr._attempt(env, dict(ISSUE), "kinetics_parameter_recovery/model.py", "code", ""))
     assert ok, why
-    assert sorted(env.changed) == ["kinetics_parameter_recovery/model.py", "simulate.py"] and ran == [1]
+    assert sorted(env.changed) == ["kinetics_parameter_recovery/model.py", "simulate.py"]
+    assert ran == [1, 1], "the small run is read before the repair and after it"
     sim = (root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert "model.fit_rate(time, observed, noise_std_rel)" in sim and "def oracle()" in sim
     assert "noise_std_rel = 0.01" not in (root / "code" / "kinetics_parameter_recovery" / "model.py").read_text(encoding="utf-8")
@@ -231,8 +232,8 @@ def test_a_repair_the_small_run_no_longer_runs_is_not_kept(tmp_path: Path) -> No
     correct, _wrong = _replies(root)
     before = (root / "code" / "simulate.py").read_text(encoding="utf-8")
 
-    async def small_run() -> str:
-        return "every trial at noise_std_rel=0.08 failed"
+    async def small_run() -> str:  # it ran on the code as it was, and fails on the repaired code
+        return "" if (root / "code" / "simulate.py").read_text(encoding="utf-8") == before else "every trial at noise_std_rel=0.08 failed"
 
     ok, why = asyncio.run(fr._attempt(_env(root, correct, small_run=small_run), dict(ISSUE),
                                       "kinetics_parameter_recovery/model.py", "code", ""))
