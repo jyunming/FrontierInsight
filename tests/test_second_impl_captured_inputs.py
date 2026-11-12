@@ -129,3 +129,54 @@ def test_fi_records_every_key_a_function_returned(tmp_path: Path) -> None:
     asyncio.run(si.capture_inputs(_run(root), root, "pkg", ["fit", "plain"], [{"gap": 3.0}], deterministic=True))
     returned = si.read_captured(root)["returned"]
     assert returned["fit"] == ["cov", "slope", "spare"] and "plain" not in returned
+
+
+PACKAGE_MODEL = '''import numpy as np
+
+
+def combine(orders, source, z):
+    t = np.asarray(orders["t"])
+    return np.real(t * np.conj(t)).sum() * float(np.sum(source["w"])) + z
+
+
+def never_called(a):
+    return a
+'''
+
+PACKAGE_SIMULATE = '''import numpy as np
+from pkg import model
+
+
+def run_cell(cell):
+    orders = {"t": np.array([1 + 2j, 0.5 - 1j]), "pitch": cell["gap"]}
+    return {"v": model.combine(orders, {"w": np.array([0.25, 0.75])}, 1.0)}
+'''
+
+
+def test_calls_with_dicts_and_complex_arrays_are_recorded_and_called_back_as_they_were(tmp_path: Path) -> None:
+    (tmp_path / "code" / "pkg").mkdir(parents=True)
+    (tmp_path / "code" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "code" / "pkg" / "model.py").write_text(PACKAGE_MODEL, encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(PACKAGE_SIMULATE, encoding="utf-8")
+    got = asyncio.run(si.capture_inputs(_run(tmp_path), tmp_path, "pkg", ["combine", "never_called"], [{"gap": 3.0}],
+                                        deterministic=True))
+    assert "combine" in got, "a call through a package module with dict and complex arguments is recorded"
+    assert "never_called" not in got, "a function the run never calls is still not recorded"
+    record = si.read_captured(tmp_path)
+    assert record["called_at"] == {"combine": [0]}
+    case = got["combine"][0]
+    assert case["orders"]["t"][0] == {"__complex__": [1.0, 2.0]} and case["source"] == {"w": [0.25, 0.75]}
+    # The comparison script decodes the case into what the function was given (its own helper, taken from its text).
+    ns: dict = {}
+    script = si.compare_script(code_dir="code", module="pkg.model", name="combine", reference="r.py", inputs="i.json",
+                               uses=[], own={}, study="", setup=None)
+    head = script[script.index("def dec_in"):script.index("def done")]
+    exec("import numpy as np\n" + head, ns)  # noqa: S102
+    decoded = {k: ns["dec_in"](v) for k, v in case.items()}
+    assert decoded["orders"]["t"].dtype.kind == "c" and decoded["orders"]["t"][0] == 1 + 2j
+    sys.path.insert(0, str(tmp_path / "code"))
+    try:
+        from pkg import model  # type: ignore[import-not-found]
+        assert model.combine(**decoded) == model.combine({"t": [1 + 2j, 0.5 - 1j]}, {"w": [0.25, 0.75]}, 1.0)
+    finally:
+        sys.path.remove(str(tmp_path / "code"))

@@ -116,11 +116,13 @@ def _fi_capture(cfg):
     returned = {}
 
     def conv(x, left):
+        # Plain data as JSON: numbers, text, flags, lists, dicts with text keys, real or complex arrays (a complex number is
+        # {"__complex__": [re, im]}, which the comparison script turns back into a complex number).
         if np is not None and isinstance(x, np.ndarray):
-            if x.dtype.kind not in "biuf" or x.size > left[0]:
+            if x.dtype.kind not in "biufc" or x.size > left[0]:
                 raise TypeError("not plain data")
             left[0] -= x.size
-            return x.tolist()
+            return conv(x.tolist(), [10 ** 9])  # the size was checked above
         if np is not None and isinstance(x, np.generic):
             x = x.item()
         if x is None or isinstance(x, (bool, str)):
@@ -131,11 +133,20 @@ def _fi_capture(cfg):
             if not math.isfinite(x):
                 raise TypeError("not finite")
             return x
+        if isinstance(x, complex):
+            if not (math.isfinite(x.real) and math.isfinite(x.imag)):
+                raise TypeError("not finite")
+            return {"__complex__": [x.real, x.imag]}
         if isinstance(x, (list, tuple)):
             left[0] -= len(x)
             if left[0] < 0:
                 raise TypeError("too large")
             return [conv(i, left) for i in x]
+        if isinstance(x, dict):
+            left[0] -= len(x)
+            if left[0] < 0 or not all(isinstance(k, str) for k in x):
+                raise TypeError("too large or not text keys")
+            return {k: conv(v, left) for k, v in x.items()}
         raise TypeError("not plain data")
 
     # Each number is changed by its own share (scale times the next of these, in turn): a share common to all of them
