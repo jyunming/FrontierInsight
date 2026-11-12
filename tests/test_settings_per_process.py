@@ -496,13 +496,16 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # It moves again for `search_one_number_names` and `one_number_rule` (a search's objective and limits are one number
     # per call), added there and nothing else changed (ce17183f...).
     # It moves again for the recording of the files a run opened (the audit hook between the ``#<audit-begin>`` and
-    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines is still ce17183f...
+    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines was still ce17183f...
     # (the key of a frozen study's search record of an older FI is made from main's own harness text, kept whole in
     # ``core/legacy_keys/`` and pinned in test_reuse_key.py, not from this one).
+    # It moves again for `_level_of` reading a returned key as the text value of the one compared setting, exactly, before
+    # taking it apart as ``factor=value`` (a text value may hold an equals sign itself); only that loop was added there. It
+    # was ae98b6e4..., and the text without the audit lines was ce17183f...
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "ae98b6e471a6a04c9338787d60dbf1f43004f2f1e1b2a4b874a5bb75414649ef")
+        "b255180578b3e9cf01fbc1df7bf9c1daa7a3abb3083676d67d3974f6bf72d835")
     assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
-        "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
+        "fd9f5cc0dd421d044e5061d9110904228360b5b16a6a2fb051932121abea5370")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 

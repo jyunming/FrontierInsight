@@ -109,3 +109,23 @@ def test_a_key_naming_one_setting_twice_is_not_a_level() -> None:
     assert in_run.axes_of_key("width=0,width=74") is None
     got, why = in_run.read_returned({"spread": {"width=0,width=74": 1.0, "width=80": 2.0, "width=90": 3.0}}, LEVELS, "run_cell")
     assert got is None and "not one of the values" in why
+
+
+def test_a_text_value_that_holds_an_equals_sign_is_read_when_the_result_is_keyed_by_the_value_alone() -> None:
+    """Live: a plan gave the one setting compared inside each run five texts, one of them ``"rate = a/b"``; the simulation
+    keyed its result by each value alone, and the one with the equals sign was refused as "not one of the values the run
+    was given", so no repair of the code could make the study run."""
+    levels = in_run.level_cells({"rule": ["plain rule", "rate = a/b", "ratio of a to b, halved"]})
+    assert [in_run._level_of(v, levels) for v in ("plain rule", "rate = a/b", " rate = a/b ")] == [
+        {"rule": "plain rule"}, {"rule": "rate = a/b"}, {"rule": "rate = a/b"}]
+    returned = {"spread": {"plain rule": 1.0, "rate = a/b": 2.0, "ratio of a to b, halved": 3.0}}
+    got, why = in_run.read_returned(returned, levels, "run_cell")
+    assert why == "" and got == {"spread": {in_run.level_key(lv): x for lv, x in zip(levels, (1.0, 2.0, 3.0))}}
+    # the setting's own form still reads, and a text that is none of the values is still refused
+    assert in_run._level_of("rule=rate = a/b", levels) == {"rule": "rate = a/b"}
+    assert in_run._level_of("rate = a/c", levels) is None and in_run._level_of("other = a/b", levels) is None
+    got, why = in_run.read_returned({"spread": {"plain rule": 1.0, "rate = a/c": 2.0, "ratio of a to b, halved": 3.0}},
+                                    levels, "run_cell")
+    assert got is None and "not one of the values" in why
+    # with several settings compared inside the run a bare value names none of them, as before
+    assert in_run._level_of("rate = a/b", in_run.level_cells({"rule": ["rate = a/b"], "gap": [80, 90]})) is None

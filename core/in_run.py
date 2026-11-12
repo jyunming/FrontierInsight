@@ -286,6 +286,13 @@ def _level_of(key, levels):
         # cannot be split back into its pairs, and every key of every level was refused.
         if text == level_key(level):
             return level
+    for level in levels:
+        # Then the value alone, exactly as the run was given it: a text value may hold an equals sign itself
+        # ("rate = a/b"), and taking it apart as ``factor=value`` refused the very value the run was given.
+        if len(level) == 1:
+            (only,) = level.values()
+            if isinstance(only, str) and isinstance(key, str) and text == only:
+                return level
     pairs = {}
     if "=" in text:
         for part in text.split(","):
