@@ -502,10 +502,13 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # It moves again for `_level_of` reading a returned key as the text value of the one compared setting, exactly, before
     # taking it apart as ``factor=value`` (a text value may hold an equals sign itself); only that loop was added there. It
     # was ae98b6e4..., and the text without the audit lines was ce17183f...
+    # It moves again for a part of a recorded key being a setting only when the run has that setting (`axes_of_key` with
+    # the names FI holds, `parse_level_key` with its levels; `_names`, `_value_of` added). It was b2551805..., and the
+    # text without the audit lines was fd9f5cc0...
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "b255180578b3e9cf01fbc1df7bf9c1daa7a3abb3083676d67d3974f6bf72d835")
+        "9a3f902fda8059006ea44c203c601ace3bb67d7abeb67f37981e7e9f994b97df")
     assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
-        "fd9f5cc0dd421d044e5061d9110904228360b5b16a6a2fb051932121abea5370")
+        "42bf07d8729a583f34b83bf02afc531f9a33f522170cea7e792f2e7cd960e027")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 
