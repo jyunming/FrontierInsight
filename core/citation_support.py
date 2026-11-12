@@ -10,7 +10,10 @@ end. This module is the check that runs last, on the text that will be delivered
 2. **Rules no model can loosen** (:func:`pre_problem`, :func:`post_problem`) only ever add "unsupported": a retracted
    source or one with no retrieved text, a number the sentence states that is in neither the source nor the run's own
    results, a source whose retrieved text is only a snippet, a contents list or a title (it supports "X studied Y", not
-   a number, a method or a finding), and a quote that is not in the source's own text.
+   a number, a method or a finding), and a quote that is not in the source's own text. A source is read against its
+   own part of the sentence (:func:`own_part`): a bracket closes the part before it, so in "A [1], and B [2]." the
+   words and numbers of B are [2]'s claim, not [1]'s. A pair this frees that the reader then does not answer is
+   settled by the reading of the whole sentence, as before.
 3. **A reader judges the rest** (``agents/citation_check.md``): is there a passage of the retrieved text that says what
    the sentence takes from the source? The reader is the step a person routes with ``provider.node_providers.citation_check``
    and, while that is not set, the plan's checks' reader (``core/review_pairs.py``).
@@ -262,9 +265,51 @@ def _has_number(text: str, token: str) -> bool:
     return token in flat or (token.startswith("0.") and token[1:] in flat)
 
 
-def pre_problem(site: Site, label: str, src: Source | None, own_numbers: Any) -> str:
+#: A part of a sentence with fewer content words than this before its bracket names no claim of its own (", [2]" or
+#: "and [2]" in a list of citations): the claim before it is its claim too.
+_OWN_CLAIM_STEMS = 2
+
+
+def _citation_brackets(sentence: str) -> list[re.Match[str]]:
+    """The brackets of a sentence that are citations, as :func:`find_sites` counts them: not in code or math, not a
+    link, not one holding 0 or a year-sized number."""
+    spans = [(m.start(), m.end()) for m in _NOT_PROSE_RE.finditer(sentence)]
+    out: list[re.Match[str]] = []
+    for m in CITE_RE.finditer(sentence):
+        if sentence[m.end():m.end() + 1] == "(" or any(a <= m.start() < b for a, b in spans):
+            continue
+        if any(x.isdigit() and (int(x) == 0 or int(x) >= 1000) for x in labels_in(m.group(1))):
+            continue
+        out.append(m)
+    return out
+
+
+def own_part(sentence: str, label: str) -> str:
+    """The words of ``sentence`` that ``label`` is read against. The one assumption: a bracket closes the part before
+    it. A label's part runs from the previous citation bracket (or the sentence start) to its own bracket, joined to the
+    part before it while its own has fewer than ``_OWN_CLAIM_STEMS`` content words (a bracket in a list of citations
+    shares the claim before it); a label in two brackets is read against both parts; the text after the sentence's last
+    bracket is read against every label. The parts cover the whole sentence, so each word and number is still read
+    against at least one cited source. A sentence with one bracket is read whole."""
+    marks = _citation_brackets(sentence)
+    mine = [i for i, m in enumerate(marks) if label in labels_in(m.group(1))]
+    if len(marks) < 2 or not mine:
+        return sentence
+    starts = [0] + [m.end() for m in marks[:-1]]
+    parts: list[str] = []
+    for i in mine:
+        j = i
+        while j > 0 and len(_content_stems(CITE_RE.sub(" ", sentence[starts[j]:marks[j].start()]))) < _OWN_CLAIM_STEMS:
+            j -= 1
+        parts.append(sentence[starts[j]:marks[i].end()])
+    return " ".join(parts) + sentence[marks[-1].end():]
+
+
+def pre_problem(site: Site, label: str, src: Source | None, own_numbers: Any, *, whole_sentence: bool = False) -> str:
     """Why the sentence cannot be backed by this source whatever a reader says, or ``""``. Each rule here only ever adds
-    "unsupported"; none can be loosened by a reply."""
+    "unsupported"; none can be loosened by a reply. The numbers and snippet rules read the label's own part of the
+    sentence (:func:`own_part`), or the whole sentence with ``whole_sentence`` (the fail-safe for a pair the reader did
+    not answer)."""
     if src is None:
         return f"[{label}] is not one of the paper's sources"
     if src.retracted:
@@ -272,7 +317,7 @@ def pre_problem(site: Site, label: str, src: Source | None, own_numbers: Any) ->
     kind = src.kind()
     if kind == "nothing":
         return f"no text of [{label}] was retrieved, so nothing can be quoted from it"
-    sentence = site.text
+    sentence = site.text if whole_sentence else own_part(site.text, label)
     missing = [n for n in _numbers(sentence) if n not in own_numbers and not _has_number(src.text, n)]
     if missing:
         return (f"the sentence states {', '.join(missing[:4])}, which is neither in the retrieved text of [{label}] "
@@ -667,6 +712,13 @@ async def check_paper(
         save(record)
         # the pairs a reply left out go to the back, so one that answers nothing cannot keep the others waiting
         to_ask = rest + [c for c in chunk if c[0] not in judged]
+    # A pair that passed the rules only because its own part of the sentence was read, and that the reader did not answer
+    # (an error, a cap reached), is settled by the reading of the whole sentence: reading parts never leaves it unchecked.
+    for pid, site, label in pairs:
+        if pid not in problems and pid not in judged:
+            why = pre_problem(site, label, sources.get(label), own_numbers, whole_sentence=True)
+            if why:
+                problems[pid] = why
     for pid, site, label in pairs:
         if pid in problems or pid not in judged:
             continue

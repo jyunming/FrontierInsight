@@ -667,9 +667,14 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
     check = json.loads((root / "needs" / "OPTIMUM_CHECK.json").read_text(encoding="utf-8"))
     assert check["verdict"] == "verified" and best["check"]["verdict"] == "verified", check["says"]
     assert check["ledger_sha256"] == best["ledger_sha256"]
-    # The simulation's own count of its calls: FI's small run on the scan's one setting, the oracle's one case, the search
-    # once (no replicate seeds, no second search), then the check's evaluations.
-    assert _count(tmp_path / "quest") == 1 + best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
+    # The simulation's own count of its calls: FI's small run on the scan's one setting and its evaluation of the baseline
+    # design as the search calls it (core/small_run.py baseline_answer), each design variable moved once before the search
+    # (core/design_moves.py, its own record), the oracle's one case, the search once (no replicate seeds, no second
+    # search), then the check's evaluations.
+    moves = json.loads((root / ".fi" / "design_moves.json").read_text(encoding="utf-8"))
+    assert moves["evaluations"] > 0
+    assert _count(tmp_path / "quest") == (1 + 1 + moves["evaluations"] + best["evaluations"]["search"] + 1
+                                          + check["evaluations"]["check"])
     result = artifacts.raw_state["result_json"]
     assert result["fi_search"]["best_objective"] == best["best"]["objective"], "FI's own numbers ride with the result"
     assert result["fi_search"]["check"]["verdict"] == "verified"
@@ -725,7 +730,9 @@ async def test_a_search_stopped_before_its_end_goes_on_from_where_it_stopped(tmp
     run = await _run(root, protocol)
     assert _count(root) == total, "the 7 evaluations done before the stop are not run again"
     assert _without_times(_ledger(root)) == _without_times(_ledger(whole)), "the same search as one never stopped"
-    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 7
+    assert run.record["resumed"]["evaluations_taken_from_the_stopped_search"] == 7
+    assert "continued" not in run.record, "a resumed search is not a continued round (that key is a list of rounds)"
+    assert optimise.summary_lines(run.record), "run.log reads the record of a resumed search"
     assert not (root / optimise.JOURNAL).exists()
 
 
@@ -773,7 +780,7 @@ async def test_a_record_cut_off_when_the_search_stopped_does_not_swallow_the_nex
         await optimise.run_search(_KilledAfter(3), sys.executable, root, "code/simulate.py", protocol, base_seed=0,
                                   timeout_s=300)
     run = await _run(root, protocol)
-    assert run.record["continued"]["evaluations_taken_from_the_stopped_search"] == 6 + 3, \
+    assert run.record["resumed"]["evaluations_taken_from_the_stopped_search"] == 6 + 3, \
         "the cut record is lost, the three after it are kept"
 
 
@@ -811,7 +818,7 @@ def test_the_frozen_studys_key_covers_the_models_package_and_not_its_tests(tmp_p
     block = protocol["optimisation"]
     simulate = root / "code" / "simulate.py"
     keys = lambda: (optimise._run_key(root, simulate, block, 0, "run_cell", None),  # noqa: E731
-                    optimise._study_key(root, simulate, block, "run_cell", None))
+                    optimise._study_keys(root, block, "run_cell", None)[0].key)
     before = keys()
     (root / "code" / "tests").mkdir()
     (root / "code" / "tests" / "test_model.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
@@ -1002,3 +1009,13 @@ async def test_cancelling_a_search_run_with_designs_running_stops_them_at_once(t
     assert time.monotonic() - started < 20
     await asyncio.sleep(1.0)
     assert not [p for p in pids if psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE]
+
+def test_a_record_an_older_fi_wrote_after_a_resumed_search_is_read() -> None:
+    """Before: an older FI kept the count of a resumed search under "continued", the key of the list of rounds, and
+    run.log's summary stopped the quest ('str' object has no attribute 'get')."""
+    old = {"continued": {"evaluations_taken_from_the_stopped_search": 2341, "seconds_before_the_stop": 22449.6}}
+    assert optimise.continued_rounds(old) == []
+    optimise.summary_lines(old)
+    rounds = {"continued": [{"by": "FI", "round": 1, "evaluations": 5}]}
+    assert optimise.continued_rounds(rounds) == rounds["continued"], "known positive: a real round is read"
+    assert any("continued by FI" in x for x in optimise.summary_lines(rounds))

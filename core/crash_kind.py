@@ -268,6 +268,12 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     refused = _settings_refusal(exc)
     if refused:
         return refused
+    if model_call:
+        from core.provider import billing_stop
+
+        empty = billing_stop(exc, provider)  # an empty balance, said as that and not as a usage limit
+        if empty:
+            return f"{empty[0]}.", f"{empty[1]}, then continue the quest."
     if model_call and (_quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS))):
         from core.provider import limit_resumes_at
 

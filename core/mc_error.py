@@ -667,7 +667,9 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
         return (f"a rule of every trial held in the {int(mc.get('trials') or 0)} trials FI could run in the time it had, "
                 f"fewer than the {int(mc.get('trials_asked') or 0)} it needs, so it is not shown to hold in all of them")
     n, se = int(mc.get("trials") or 0), mc.get("se")
-    when = ("the most FI runs for one check" if mc.get("why") == "most_trials" else "all FI could run in the time it had")
+    when = ("the most FI runs for one check" if mc.get("why") == "most_trials"
+            else "all the trials of the delivered run" if mc.get("why") == "delivered"
+            else "all FI could run in the time it had")
     tolerance = f"±{_oracle.fmt_digits(float(limit), 2)}" if _number(limit) else "its tolerance"
     interval = mc.get("binomial_interval")
     if isinstance(interval, list) and len(interval) == 2 and all(_number(x) for x in interval):
@@ -693,7 +695,7 @@ def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, wh
     """The ``mc`` entry a check keeps (``needs/ORACLE_CHECK.json``): how it was read, its trials and their error, and
     the verdict they gave (``pass``, ``fail``, ``undecided``, or ``partial``: passed on every trial judged but time ran
     out before all ``planned`` were; it carries ``judged`` and ``planned``) with why it was not decided (``time``, ``most_trials``,
-    ``failed_trials``)."""
+    ``failed_trials``, or ``delivered``: still not decided on the delivered run's own trials)."""
     stat = stat or {}
     se = stat.get("se")
     out = {

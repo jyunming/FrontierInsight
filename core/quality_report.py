@@ -233,6 +233,17 @@ def _first_said(item: dict[str, Any]) -> str:
     return ""
 
 
+# What a sentence the claim check took out of the paper did wrong, by its fault (core/engine.py _CLAIM_FAULTS_TAKEN_OUT);
+# an entry written before faults were named is the old take-out's: a sentence with a number.
+_TAKEN_OUT_BECAUSE = {
+    "number": "that stated a number the claim check did not find in the run's results",
+    "scope": "that stated a true value of the run under the wrong setting, label or interval",
+    "no_source": "that rested on a source that backs nothing (held as its title only, or retracted)",
+    "unread": "whose claim check verdict could not be read after asking once more",
+    "": "that stated a number the claim check did not find in the run's results",
+}
+
+
 def _problem(stage: str, text: str, by: str, status: str, source: str) -> dict[str, str]:
     return {"stage": stage, "text": _one(text, 220), "found_by": by, "status": status, "source": source}
 
@@ -527,13 +538,50 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
             from . import contract_parts as _cparts
 
             why = "the call failed" if rec.get("error") else "its answer could not be used after " + str(rec.get("asks")) + " asks"
+            if part == "dependents":  # asked alone: it never moves the plan's form
+                out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS[part]} ({why}); they stay unplaced",
+                                    "FI's plan check", "disclosed", ".fi/contract_parts.json"))
+                continue
             out.append(_problem("plan", f"the plan was not given {_cparts.PART_WORDS.get(part, part)} ({why}); it stays in the "
                                 "older form", "FI's plan check", "disclosed", ".fi/contract_parts.json"))
     out.extend(_unit_problems(q))
     out.extend(_candidate_problems(q))
+    out.extend(_unplaced_problems(q))
     if q.pause.get("kind") == "plan":
         out.append(_problem("plan", q.pause.get("headline") or "the plan cannot be run as written", "FI's plan check",
                             "not fixed", ".fi/pause.json"))
+    return out
+
+
+def _unplaced_problems(q: _Quest) -> list[dict[str, str]]:
+    """What FI knows of the plan's dependent variables that are not exactly a declared result (the plan's own words for them
+    are free text): one row for what the plan's model answered about them (and which model), one for those still unplaced. It
+    never says the study does not report an entry on FI's own word; only the plan's model's answer says that."""
+    try:
+        from . import code_review as _cr
+        from . import dependent_map as _dep
+        from . import frozen_protocol as _fp
+        from . import plan as _plan
+
+        protocol = _fp.protocol_of(q.root)
+        text = (q.root / "plan.md").read_text(encoding="utf-8", errors="replace")
+        names = _cr.unplaced_dependents(_plan.parse(text).design, protocol)
+        given = _dep.rows_of(protocol)
+    except Exception:  # noqa: BLE001 -- the report only reads; a record it cannot read leaves the row out
+        return []
+    out: list[dict[str, str]] = []
+    if given:
+        models = sorted({_who(r) for r in q.calls if str(r.get("node", "")).split(".")[0] == "plan_contract"} - {""})
+        said = "; ".join(_dep.sentence(entry, row) for entry, row in list(given.items())[:5]) + (
+            f" and {len(given) - 5} more" if len(given) > 5 else "")
+        out.append(_problem("plan", f"the plan's model ({', '.join(models) or 'model not recorded'}) said {said}; added to the checks "
+                            "only, and a small model ties wrongly 1 time in 20", "FI's plan check", "disclosed",
+                            ".fi/contract_parts.json"))
+    names = [n for n in names if n not in given]
+    if names:
+        shown = "; ".join(f"\"{_one(n, 70)}\"" for n in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+        out.append(_problem("plan", f"the plan names {shown} as a dependent variable; FI did not place it on any declared result, "
+                            "so its check of the code is on the plan's words alone", "FI's plan check", "disclosed", "plan.md"))
     return out
 
 
@@ -622,6 +670,11 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
                             "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     out += _precision_not_judged(q)
     out += _precision_per_setting(q)
+    # A kept search of a frozen study whose simulation changed only in comments or line endings, or FI's own code, after it (core/optimise.py).
+    reused = _dict(_dict(_json(q.root / ".fi" / "optimisation" / "run.json")).get("reuse")).get("note")
+    if reused:
+        out.append(_problem("run", _one(str(reused), 400), "FI's reuse check (recorded only)", "not fixed",
+                            ".fi/optimisation/run.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"].startswith("FI's run-record check") for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
@@ -754,7 +807,8 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
 
     said = {"not_written": "the study's function for it was not written", "no_data": "no trial gave a value for it",
             "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned",
-            "blocked": "a quantity it is worked out from was not computed"}
+            "blocked": "a quantity it is worked out from was not computed",
+            "missing": "the study's function for it gave no value at any setting"}
     for item in _analysis.not_computed(_analysis.read_record(q.root)):
         out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
                             + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
@@ -850,8 +904,8 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
                             "FI's citation rendering", "left out", ".fi/citations_removed.json"))
     for r in q.unsupported_removed:
         r = _dict(r)
-        out.append(_problem("paper", f"a sentence that stated a number the claim check did not find in the run's results was "
-                            f"taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
+        out.append(_problem("paper", f"a sentence {_TAKEN_OUT_BECAUSE.get(str(r.get('fault') or ''), _TAKEN_OUT_BECAUSE[''])} "
+                            f"was taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
                             "FI's claim check", "left out", ".fi/unsupported_claims.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
@@ -1305,6 +1359,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
             "at_gate": issue.get("at_gate") if isinstance(issue.get("at_gate"), dict) else {},
             "about_plan_text": bool(issue.get("about_plan_text")),
+            "untied_plan_item": [str(n) for n in _list(issue.get("untied_plan_item"))],
             "rerun_unchanged": bool(issue.get("rerun_unchanged")),
             "rerun_moved_checks": bool(issue.get("rerun_moved_checks")),
             "rerun_redrawn": bool(issue.get("rerun_redrawn")),
@@ -1499,6 +1554,10 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
         elif row["open"] and row.get("rerun_unchanged"):
             still = ("yes, but the study run again on a repaired copy of the code, with the same random numbers, reports no other "
                      "number beyond its uncertainty: it changes no reported number, and it is kept here")
+        elif row["open"] and row.get("untied_plan_item"):
+            still = ("yes, but the plan names " + ", ".join(row["untied_plan_item"][:2]) + ", and FI did not place it on any "
+                     "declared result; its test fails on text FI wrote from the plan, not on a number the code computed, so no "
+                     "reported number is changed, and it is kept here")
         elif row["open"] and row.get("about_plan_text"):
             still = ("yes, but its test fails on text FI wrote from the plan, not on a number the code computed; no reported "
                      "number is changed, and it is kept here")

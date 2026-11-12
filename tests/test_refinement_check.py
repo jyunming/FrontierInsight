@@ -203,6 +203,22 @@ def test_a_record_on_other_settings_is_a_gap(tmp_path: Path) -> None:
     assert "other settings" in rc.evidence_gaps(tmp_path, other)[0]
 
 
+def test_a_record_an_older_fi_wrote_on_the_same_code_is_not_on_other_code(tmp_path: Path) -> None:
+    """main kept its own hash of ``code/`` in the record: on the same code it reads as made on it, on changed code not."""
+    from tests.test_reuse_key import main_digest
+
+    simulate = b"def run_cell(cell):\n    return {}\n"
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "simulate.py").write_bytes(simulate)
+    (tmp_path / "code" / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    protocol, _why = plan.normalize_protocol(dict(PROTOCOL))
+    rc.write(tmp_path, {"code_sha256": main_digest({"simulate.py": simulate}), "key": rc.key(protocol),
+                        "status": "converged", "settings": {"step_mm": {"verdict": "converged"}}})
+    assert rc.evidence_gaps(tmp_path, protocol) == []
+    (tmp_path / "code" / "simulate.py").write_bytes(simulate + b"# changed\n")
+    assert "other code" in rc.evidence_gaps(tmp_path, protocol)[0]
+
+
 def test_one_unreadable_numerical_setting_is_left_out_not_all_of_them() -> None:
     protocol = {"grid": {"gap_mm": [1.0, 2.0, 3.0, 4.0, 5.0], "step_mm": [0.1, 0.2, 0.3, 0.4, 0.5]},
                 "numerical_settings": {"step_mm": {"search": 0.1}, "points": {"search": 64, "finer": "larger"}}}

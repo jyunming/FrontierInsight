@@ -43,7 +43,7 @@ NOTE_FORMS = ("mean", "n", "low", "high")
 LOG_NOTE = " (log scale)"  # said on the label of a log axis
 LOG_RATIO = 1e3  # FI's rule for an axis the plan does not scale: log when all values are above zero and span this ratio
 IDENTICAL_RTOL = 1e-12  # two series equal within this relative tolerance are one line to the reader
-Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (plus 1e-12 absolute)
+Y_RTOL = 1e-3  # a drawn y matches the table's value within this relative tolerance (relative only: a recorded 0 equals only a 0)
 Y_FORMS = ("mean", "sd", "se", "min", "max", "range", "max_abs")  # which statistic of the trials at a setting y may be (``form``)
 BAR_RTOL = 1e-3  # error-bar widths the body typed match the table's own widths within this relative tolerance (plus 1e-12 absolute)
 
@@ -60,7 +60,8 @@ class BadArgument(ValueError):
 
 
 RECORD_VERSION = 2  # 2: a curve's name and y are FI's, series carry ``x_checked`` / ``neutral``, "range" bars are checked
-NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values
+NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values (or, for a result
+# on x, did not find to be the trials' own pairs of the two results)
 #: Set by FI for the last run, when no repair of a figure is left: a line FI cannot name is then left out of the figure and
 #: recorded in ``removed``, where before it is refused (sent to the figure's repair).
 LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
@@ -186,7 +187,22 @@ def _sides(entry):
 
 
 def _close_y(a, b):
-    return abs(a - b) <= Y_RTOL * max(abs(a), abs(b)) + 1e-12
+    return abs(a - b) <= Y_RTOL * max(abs(a), abs(b))
+
+
+def _read_back(value):
+    """A number written so it reads back as the same number: the shortest of 4 to 17 significant figures that does (``2`` for
+    2.0, ``1.0000004``, not ``1``); anything else as its text."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return str(value)
+    f = float(value)
+    if not math.isfinite(f):
+        return repr(f)
+    for digits in range(4, 18):
+        text = "%.*g" % (digits, f)
+        if float(text) == f:
+            return text
+    return repr(f)
 
 
 def _close_width(a, b):
@@ -210,9 +226,131 @@ def _gaps(values):
     return [float("nan") if v is None else v for v in values]
 
 
+#: The getters of an artist that are not part of its own state: values worked out from that state in display coordinates (they
+#: change when the limits or the layout change, which is not a change of the artist), and its links to the figure and axes.
+_DERIVED_GETTERS = frozenset({"get_window_extent", "get_tightbbox", "get_transformed_clip_path_and_affine", "get_extents",
+                              "get_verts", "get_children", "get_figure", "get_axes", "get_cursor_data", "get_datalim"})
+
+
+class _Unreadable:
+    """A value the state cannot read: never equal to anything, so an artist whose state cannot be read counts as changed."""
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    __hash__ = None
+
+
+def _home_of(ax):
+    """The ids of the transforms and boxes the axes and the figure own (the data, axes and axis transforms, the view and data
+    limits, the axes' box): they change with the limits and the layout, so an artist's state names them by identity."""
+    found = set()
+    stack = []
+    if ax is not None:
+        fig = getattr(ax, "figure", None)
+        for name in ("transData", "transAxes", "transScale", "transLimits", "bbox", "viewLim", "dataLim", "_position",
+                     "_originalPosition", "_xaxis_transform", "_yaxis_transform"):
+            stack.append(getattr(ax, name, None))
+        for which in ("grid", "tick1", "tick2"):
+            for get in ("get_xaxis_transform", "get_yaxis_transform"):
+                try:
+                    stack.append(getattr(ax, get)(which=which))
+                except Exception:  # noqa: BLE001 -- an axes without that transform
+                    pass
+        for name in ("transFigure", "transSubfigure", "dpi_scale_trans", "bbox", "bbox_inches"):
+            stack.append(getattr(fig, name, None))
+    while stack:
+        t = stack.pop()
+        if t is None or id(t) in found:
+            continue
+        found.add(id(t))
+        for name in ("_a", "_b", "_x", "_y", "_child", "_boxin", "_boxout", "_bbox", "_transform", "_points_orig"):
+            child = getattr(t, name, None)
+            if child is not None and not isinstance(child, (int, float, str)) and not hasattr(child, "tolist"):
+                stack.append(child)
+    return found
+
+
+def _state_value(v, home, depth=0):
+    """A value of an artist's state in a form two states can be compared in: numbers, text, lists; a transform as its structure
+    (the axes' and the figure's own by identity, every other part by its matrix); a box of the axes by identity, another box by
+    its corners; a path by its vertices and codes; any other object by its type and identity (a replaced object is a change)."""
+    if depth > 8:
+        return _Unreadable()
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, numbers.Integral):
+        return int(v)
+    if isinstance(v, numbers.Real):
+        f = float(v)
+        return "nan" if f != f else f
+    if id(v) in home:
+        return ("home", id(v))
+    try:
+        if hasattr(v, "is_affine") and hasattr(v, "transform") and hasattr(v, "get_matrix"):
+            kids = [getattr(v, n) for n in ("_a", "_b", "_x", "_y", "_child") if getattr(v, n, None) is not None]
+            if kids:
+                return ("transform", type(v).__name__, [_state_value(k, home, depth + 1) for k in kids])
+            return ("transform", type(v).__name__, _state_value(v.get_matrix(), home, depth + 1) if v.is_affine else id(v))
+        if hasattr(v, "get_points") and hasattr(v, "bounds"):  # a box that is not the axes' own
+            return ("box", _state_value(v.get_points(), home, depth + 1))
+        if hasattr(v, "vertices") and hasattr(v, "codes"):  # a path
+            return ("path", _state_value(v.vertices, home, depth + 1), _state_value(v.codes, home, depth + 1))
+        if callable(getattr(v, "filled", None)):  # a numpy array with gaps (numpy.ma): a gap is NaN
+            try:
+                v = v.astype(float).filled(float("nan"))
+            except Exception:  # noqa: BLE001 -- not a number array
+                v = v.filled()
+        if hasattr(v, "tolist") and callable(v.tolist):
+            return ("array", _state_value(v.tolist(), home, depth + 1))
+        if isinstance(v, (list, tuple)):
+            return [_state_value(u, home, depth + 1) for u in v]
+        if isinstance(v, dict):
+            return sorted((str(k), _state_value(u, home, depth + 1)) for k, u in v.items())
+    except Exception:  # noqa: BLE001 -- a value this cannot read counts as changed
+        return _Unreadable()
+    return ("object", type(v).__name__, id(v))
+
+
+def _drawn_state(art):
+    """The whole drawable state of an artist: the value of every getter of it that takes no argument (the data, offsets and
+    rectangles, the transform, the clip box, clip path and clip on, path effects, visibility, alpha, line width, marker size,
+    z-order, ...), but for the values worked out from that state in display coordinates (``_DERIVED_GETTERS``). The transform is
+    the one the artist holds (``Artist.get_transform``: a patch's own getter builds a new one on every call). A getter that
+    raises is left out the same way at both times. Two states are compared with ``==``."""
+    import warnings
+
+    ax = getattr(art, "axes", None)
+    home = _home_of(ax)
+    out = {}
+    for name in sorted(dir(art)):
+        if not name.startswith("get_") or name in _DERIVED_GETTERS:
+            continue
+        try:
+            get = getattr(art, name)
+            if not callable(get):
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                if name == "get_transform":
+                    got = getattr(art, "_transform", None)
+                    got = got if got is not None else get()
+                else:
+                    got = get()
+        except Exception:  # noqa: BLE001 -- a getter that needs an argument, or cannot answer now
+            continue
+        out[name[4:]] = _state_value(got, home)
+    out["(on the axes)"] = ax is not None and art in getattr(ax, "get_children", lambda: [])()
+    return out
+
+
 @contextlib.contextmanager
-def _undone(ax, rec):
-    """If a call fails part way, leave the record and the axes as they were: the record holds only what was drawn."""
+def _undone(ax, rec, host=None):
+    """If a call fails part way, leave the record and the axes as they were: the record holds only what was drawn (and ``host``
+    keeps no state of an artist the failed call drew and that was taken out again)."""
     saved = copy.deepcopy(rec)
     before = {id(a) for a in ax.get_children()}
     try:
@@ -226,6 +364,9 @@ def _undone(ax, rec):
                     a.remove()
                 except Exception:  # noqa: BLE001 -- best effort; the record is already restored
                     pass
+                if host is not None:
+                    host.__dict__.get("_fc_owned", {}).pop(id(a), None)
+                    host.__dict__.get("_fc_snap", {}).pop(id(a), None)
         raise
 
 
@@ -240,6 +381,8 @@ class FigureCalls:
             self._fc_gid = 0
             self._fc_extra = {}  # panel -> {"series": [(first artist, what)], "refs": [artist]}, parallel to the record's lists
             self._fc_owned = {}  # id(artist) -> (artist, the artists of the same call): everything these calls drew, by identity (never by gid)
+            self._fc_snap = {}  # id(artist) -> (its axes, its whole drawable state when FI last drew or moved it): see ``_drawn_state``
+            self._fc_latched = {}  # panel -> why: a change of the body FI saw before it moved an artist itself; outlives ``_undone``
         return self._fc_panels
 
     def _remember(self, panel, part, artist, what=None):
@@ -277,7 +420,35 @@ class FigureCalls:
                 walk(a)
         for a in group:
             self._fc_owned[id(a)] = (a, group)
+            self._fc_snap[id(a)] = (getattr(a, "axes", None), _drawn_state(a))
         return gid
+
+    def changed_artists(self, ax=None):
+        """The artists FI's calls drew (on ``ax``, else on any axes) whose drawable state is no longer the one FI left them in:
+        ``[(axes FI drew it on, artist)]``. An artist taken off its axes counts as changed."""
+        self._state()
+        out = []
+        for key, (art, _group) in list(self._fc_owned.items()):
+            home, state = self._fc_snap.get(key, (None, None))
+            if ax is not None and home is not ax:
+                continue
+            if state is None or getattr(art, "axes", None) is None or _drawn_state(art) != state:
+                out.append((home, art))
+        return out
+
+    def _latch_changes(self, panel):
+        """Before FI moves artists of ``panel`` itself: a change the body made to any of them is kept (in ``_fc_latched``, which a
+        failed call does not undo, and in the record), so the move cannot erase it. Then the moved artists are snapshot again."""
+        ax, rec = self._panel(panel)
+        if self.changed_artists(ax):
+            self._fc_latched[panel] = "drawing changed after FI's call"
+            if not rec["raw"]:
+                rec["raw"], rec["raw_reason"] = True, self._fc_latched[panel]
+
+    def _snap_again(self, ax):
+        for key, (art, _group) in list(self._fc_owned.items()):
+            if self._fc_snap.get(key, (None,))[0] is ax:
+                self._fc_snap[key] = (ax, _drawn_state(art))
 
     def _panel(self, panel):
         axes = list(getattr(self, "axes", []) or [])
@@ -348,7 +519,13 @@ class FigureCalls:
                                      series, "names a result, not a curve" if series in self._results() else "is not a value of " + label,
                                      label, label, setting, "; its values are: " + shown if shown else ""))
             raise ValueError("`%r` is not a value of %s; its values are: %s" % (series, label, shown or "(none)"))
-        text = ("%.6g" % series) if isinstance(series, float) else str(series)
+        text = str(series)
+        if isinstance(series, float):  # the level as FI's table holds it, written so it reads back as that value
+            held = [t for t in levels if self._same_value(t, series)]
+            try:
+                text = _read_back(float(held[0])) if held else _read_back(series)
+            except (TypeError, ValueError):
+                text = _read_back(series)
         info = {"setting": setting, "setting_label": label, "value": series, "text": text, "result": what,
                 "result_label": NEUTRAL_Y if what == "other" else self._label_of(what)}
         return "%s@%s:%s" % (what, setting, text), info
@@ -374,13 +551,14 @@ class FigureCalls:
 
     def _set_x(self, rec, x_id, checked=True):
         settings = list(getattr(self, "settings", []) or [])
-        if x_id in self._results():
+        results = self._results() + [d for d in (getattr(self, "derived_ids", []) or []) if d not in self._results()]
+        if x_id in results:  # a result the table holds, or a quantity the plan derives (as ``what`` may be one)
             kind = "result"
         elif x_id in settings:
             kind = "setting"
         else:
             raise UnknownResult("`x=%r` is neither a setting nor a result of the plan; the settings are: %s; the results are: %s"
-                             % (x_id, ", ".join(settings) or "(none)", ", ".join(self._results()) or "(none)"))
+                             % (x_id, ", ".join(settings) or "(none)", ", ".join(results) or "(none)"))
         new = {"id": x_id, "kind": kind, "label": self._label_of(x_id), "scale": "linear"}
         if rec["x"] is not None and rec["x"]["id"] != x_id:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
@@ -488,9 +666,11 @@ class FigureCalls:
             hi.append(b)
         return (lo, hi) if any(v is not None for v in lo + hi) else None
 
-    def _table_stats(self, what, key, form):
+    def _table_stats(self, what, key, form, own=None):
         """The numbers the table gives for ``form`` of result ``what`` at ``key``: one, or one for each value a sub-study compared
-        inside the setting (the level-aware read). Empty when the table gives none."""
+        inside the setting (the level-aware read). Empty when the table gives none. ``own`` (``(series id, {factor: value})``)
+        keeps, of the values compared inside the runs, only the series' own (``_is_own``): never another value's number; when it
+        names none of them, every value is given (the name check then needs them all to agree)."""
         table = self.table
         if form == "mean":
             try:
@@ -498,16 +678,20 @@ class FigureCalls:
                 return [float(m)] if _finite(m) else []
             except Exception:  # noqa: BLE001 -- a sub-study records a result for each compared value, not for the setting
                 try:
-                    return [float(m) for m in table.level_means(what, key).values() if _finite(m)]
+                    got = table.level_means(what, key)
                 except Exception:  # noqa: BLE001 -- a read the table refuses gives nothing to compare with
                     return []
+                mine = [t for t in got if own is not None and self._is_own(t, own)]
+                return [float(got[t]) for t in (mine or list(got)) if _finite(got[t])]
         try:
             groups = [list(table.values(what, key))]
         except Exception:  # noqa: BLE001 -- as above: the values of each compared value
             try:
-                groups = [list(v) for _k, _t, v in table.level_rows(what, key)]
+                rows = list(table.level_rows(what, key))
             except Exception:  # noqa: BLE001
                 return []
+            mine = [r for r in rows if own is not None and self._is_own(r[1], own)]
+            groups = [list(v) for _k, _t, v in (mine or rows)]
         out = []
         for vals in groups:
             vals = [float(v) for v in vals if _finite(v)]
@@ -527,31 +711,124 @@ class FigureCalls:
                 out.append(max(abs(v) for v in vals))
         return out
 
-    def _y_matches(self, form, what, x_id, xs, ys):
-        """Whether every drawn y (a gap is skipped) equals, within ``Y_RTOL``, the table's ``form`` of result ``what`` at a setting
-        whose ``x_id`` is the drawn x (when other settings also vary, at any of them: a y that is a real value of another slice
-        is not told apart). A point with no x, no such setting or no table value cannot be checked, which counts as not matching;
-        so does a series with no finite y at all (nothing was checked) and a figure with no table."""
-        return self._y_comparison(form, what, x_id, xs, ys) == "matches"
+    def _y_matches(self, form, what, x_id, xs, ys, rec=None, level=None, series=None):
+        """Whether every drawn y (a gap is skipped) equals, within ``Y_RTOL`` (relative only), the table's ``form`` of result
+        ``what`` at the one setting the call says: the keys that hold the drawn x, the curve's level and the settings the panel
+        holds (``rec["hold"]``), each exactly once at an equal value (``_fitting_keys``). When further settings still vary at those
+        keys, every fitting key must give one and the same value (then the drawn number is true of each). A result recorded for
+        each value compared inside the runs is read at the series' own value only. A point with no x, no fitting key, no table
+        value, or two points at one x, cannot be checked, which counts as not matching; so does a series with no finite y at all
+        and a figure with no table."""
+        return self._y_comparison(form, what, x_id, xs, ys, rec, level, series) == "matches"
 
-    def _y_comparison(self, form, what, x_id, xs, ys):
-        """``matches`` (the rule of ``_y_matches``), ``differs`` (FI read the table's value at a drawn point and it is not the drawn
-        y) or ``not compared`` (FI could not read a value to compare at some point, or there was nothing to compare)."""
+    def _y_comparison(self, form, what, x_id, xs, ys, rec=None, level=None, series=None):
+        """``matches`` (the rule of ``_y_matches``), ``differs`` (FI read the table's one value at a drawn point and it is not the
+        drawn y) or ``not compared`` (FI could not read one value to compare at some point, or there was nothing to compare)."""
         if getattr(self, "table", None) is None:
             return "not compared"
-        checked = 0
-        for x, y in zip(xs, ys):
-            if y is None or not _finite(y):
-                continue
-            if x is None:
+        fixed = self._fixed_of(rec, level)
+        if fixed is None:
+            return "not compared"
+        fixed, inside = fixed
+        own = (None if level else series, inside)
+        pts = [(x, y) for x, y in zip(xs, ys) if y is not None and _finite(y)]
+        if not pts:
+            return "not compared"
+        seen = []
+        for x, _y in pts:
+            if x is None or any(self._same_value(x, v) for v in seen):
+                return "not compared"  # a point with no x, or two points at one x: no one setting per point
+            seen.append(x)
+        for x, y in pts:
+            if x_id in fixed and not self._same_value(x, fixed[x_id]):
                 return "not compared"
-            stats = [t for key in self._keys_at(x_id, x) for t in self._table_stats(what, key, form)]
-            if not stats:
+            try:
+                keys = self._fitting_keys(dict(fixed, **{x_id: x}))
+                values = [self._table_stats(what, key, form, own) for key in keys]
+            except Exception:  # noqa: BLE001 -- a table read that fails gives nothing to compare with, never a stop of the call
                 return "not compared"
-            if not any(_close_y(float(y), t) for t in stats):
+            if not keys or any(not v for v in values):
+                return "not compared"
+            flat = [t for v in values for t in v]
+            first = flat[0]
+            if any(abs(t - first) > IDENTICAL_RTOL * max(abs(t), abs(first)) for t in flat):
+                return "not compared"  # the settings (or compared values) the call does not say give different values: no one number
+            if not _close_y(float(y), first):
                 return "differs"
-            checked += 1
-        return "matches" if checked > 0 else "not compared"
+        return "matches"
+
+    # ---- the one setting a drawn point stands for -------------------------------------------------------------------------
+
+    @staticmethod
+    def _key_pieces(key):
+        """``{setting: text}`` of a table key, or None when the key names a setting twice (it states two values of it)."""
+        out = {}
+        for piece in str(key).split(","):
+            name, _, text = piece.partition("=")
+            name = name.strip()
+            if name in out:
+                return None
+            out[name] = text.strip()
+        return out
+
+    @staticmethod
+    def _same_value(text, want):
+        """A key's text and a value as the same value: numbers as numbers (relative only), anything else as text."""
+        try:
+            return math.isclose(float(text), float(want), rel_tol=1e-9, abs_tol=0.0)
+        except (TypeError, ValueError):
+            return str(text).strip() == str(want).strip()
+
+    def _fitting_keys(self, fixed):
+        """The table's keys that hold every setting of ``fixed`` (``{name: value}``) exactly once at an equal value: positive
+        evidence only, so a key that lacks one of them, or names one twice, is never taken."""
+        table = getattr(self, "table", None)
+        out = []
+        for key in (list(table.keys()) if table is not None else []):
+            pieces = self._key_pieces(key)
+            if pieces is not None and all(n in pieces and self._same_value(pieces[n], v) for n, v in fixed.items()):
+                out.append(key)
+        return out
+
+    def _key_names(self):
+        table = getattr(self, "table", None)
+        names = set()
+        for key in (list(table.keys()) if table is not None else []):
+            names |= set(self._key_pieces(key) or {})
+        return names
+
+    def _fixed_of(self, rec, level):
+        """``({setting: value}, {factor: value})``: the settings of the table's keys a series is held to by its panel (``hold``) and
+        its level, and the values compared inside the runs the panel holds (a held name no key carries). None when the panel and
+        the level hold one setting at two values (no key fits)."""
+        names = self._key_names()
+        hold = rec.get("hold") if isinstance(rec, dict) and isinstance(rec.get("hold"), dict) else {}
+        fixed, inside = {}, {}
+        for name, value in hold.items():
+            (fixed if str(name) in names else inside)[str(name)] = value
+        if level:  # the level of a setting of the keys, or of a factor compared inside the runs (a value of it)
+            name = str(level["setting"])
+            to = fixed if name in names else inside
+            if name in to and not self._same_value(level["value"], to[name]):
+                return None
+            to[name] = level["value"]
+        return fixed, inside
+
+    def _is_own(self, text, own):
+        """Whether ``text`` (a value, or a combination ``a=1,b=2``, compared inside the runs, as ``level_means`` names it) is the
+        series' own: the values the panel holds of the compared factors, else the series' own id. Nothing is any series' own when
+        neither says one."""
+        series, inside = own if isinstance(own, tuple) else (own, {})
+        pieces = self._key_pieces(text) if "=" in str(text) else None
+        if inside:
+            if pieces is None:
+                return len(inside) == 1 and self._same_value(text, next(iter(inside.values())))
+            return all(n in pieces and self._same_value(pieces[n], v) for n, v in inside.items())
+        if series is None:
+            return False
+        if pieces is None:
+            return str(text) == str(series)
+        return sum(1 for v in pieces.values() if v == str(series)) == 1
 
     def _names_a_result(self, series):
         """Whether a series id, or its plan label, is a result of the plan's (id or label): such a name says what the y is."""
@@ -561,28 +838,131 @@ class FigureCalls:
     def _x_checked(self, x_id, xs, ys):
         """Whether every drawn x is a value of the setting ``x_id`` in FI's table (a number compared as a number): then the axis
         may carry the setting's name and the claims that read x may be offered. An x that is a result, a transform of the setting
-        (1/N), a point with no x, a figure without a table, or no x at all cannot be checked, which counts as not (fail closed)."""
+        (1/N), a point with no x, a figure without a table, or no x at all cannot be checked, which counts as not (fail closed).
+        (A result on x may still carry its name: when every point is one trial's pair of the two results, ``_pair_check``.)"""
         if getattr(self, "table", None) is None or x_id not in (getattr(self, "settings", None) or []):
             return False
         pts = [x for x, y in zip(xs, ys) if y is not None and _finite(y)]  # a gap has no point, so its x says nothing
         return bool(pts) and all(x is not None and self._keys_at(x_id, x) for x in pts)
 
+    def _x_is_table_result(self, x_id):
+        """Whether ``x_id`` is a result the table holds (declared) and not a setting: a figure of one result against another."""
+        return x_id in self._results() and x_id not in (getattr(self, "settings", None) or [])
+
+    def _record_pairs(self, what, x_id, level, rec=None, own=None):
+        """The ``(x, y)`` pairs FI's own record holds of result ``x_id`` and result ``what``, as FI's default figure draws them: at
+        each setting (only those of ``level``'s value of the series setting, when the series is one), one pair for each trial that
+        gave both, paired by the record's trial numbers; at a setting whose record does not say the trials of both, one pair of
+        the two values FI holds for the setting (its mean of each, or the means of each value compared inside the runs, value by
+        value). Reads that fail give no pair. The check is FI's, not the body's: what the reads gave, served and raised is put back
+        as it was, so a body that read nothing is still seen to have read nothing."""
+        table = self.table
+        saved = {name: copy.copy(getattr(table, name)) for name in ("last_error", "gave_values", "served")
+                 if isinstance(getattr(table, name, None), (dict, set, list))}
+        out = []
+        try:
+            keys = list(table.keys())
+            fixed = self._fixed_of(rec, level)
+            if fixed is None:
+                return []
+            if fixed[0]:  # the points of the panel's held settings and of the curve's level come from those settings only
+                at = set(self._fitting_keys(fixed[0]))
+                keys = [k for k in keys if k in at]
+            if fixed[1]:
+                own = (own[0] if isinstance(own, tuple) else own, fixed[1])
+            for key in keys:
+                try:
+                    by_trial = bool(table.trials(x_id, key)) and bool(table.trials(what, key))
+                except Exception:  # noqa: BLE001 -- recorded for each compared value, or a table without trial numbers
+                    by_trial = False
+                if by_trial:
+                    try:
+                        a, b = table.paired(x_id, what, key)
+                    except Exception:  # noqa: BLE001
+                        a, b = [], []
+                    out += [(float(u), float(v)) for u, v in zip(a, b) if _finite(u) and _finite(v)]
+                    continue
+                xa, yb = self._setting_values(x_id, key), self._setting_values(what, key)
+                both = [t for t in xa if t in yb]
+                mine = [t for t in both if t != "" and own is not None and self._is_own(t, own)]
+                out += [(xa[t], yb[t]) for t in (mine or both)]  # the series' own compared value, when it names one
+        finally:
+            for name, was in saved.items():
+                now = getattr(table, name)
+                now.clear()
+                (now.extend if isinstance(now, list) else now.update)(was)
+        return out
+
+    def _setting_values(self, ident, key):
+        """``{"": mean}`` of result ``ident`` at setting ``key``, or ``{compared value: mean}`` for a result recorded for each value
+        compared inside the runs; ``{}`` when the table holds none."""
+        table = self.table
+        try:
+            m = table.mean(ident, key)
+            return {"": float(m)} if _finite(m) else {}
+        except Exception:  # noqa: BLE001 -- recorded for each compared value: read by value below
+            try:
+                return {str(t): float(m) for t, m in table.level_means(ident, key).items() if _finite(m)}
+            except Exception:  # noqa: BLE001
+                return {}
+
+    def _pair_check(self, what, x_id, xs, ys, level=None, rec=None, series=None):
+        """``matches`` when every drawn point (a gap is skipped) is one of FI's own pairs of result ``x_id`` and result ``what``
+        (``_record_pairs``) exactly, each pair used by one point at most; ``differs`` when FI holds pairs and a drawn point is
+        none of them (a pairing of two trials, of two settings, or by position, or a value changed on the way: a recorded value is
+        drawn as it is, so no tolerance is given); ``not compared`` when FI holds no pair, there is no table, or no point was
+        drawn. Then the axis may carry the result's name and y the result's."""
+        if getattr(self, "table", None) is None:
+            return "not compared"
+        pts = [(x, y) for x, y in zip(xs, ys) if y is not None and _finite(y)]
+        if not pts:
+            return "not compared"
+        left = {}
+        for pair in self._record_pairs(what, x_id, level, rec, None if level else series):
+            left[pair] = left.get(pair, 0) + 1
+        if not left:
+            return "not compared"
+        for x, y in pts:
+            if x is None or isinstance(x, bool) or not _finite(x):
+                return "differs"
+            pair = (float(x), float(y))
+            if not left.get(pair):
+                return "differs"
+            left[pair] -= 1
+        return "matches"
+
     def _checked_what(self, what, form, x_id, xs, ys):
         """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
         from it. A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
-        not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting, a figure
-        without a table, a point the table cannot say, a series with no finite y. ``form`` (default the mean) says which statistic
-        of the trials y is. No case refuses the call."""
+        not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting whose
+        points are not FI's own pairs of the two results (``_pair_check``), a figure without a table, a point the table cannot
+        say, a series with no finite y. ``form`` (default the mean) says which statistic of the trials y is. No case refuses the
+        call."""
         return self._check_of_what(what, form, x_id, xs, ys)[0]
 
-    def _check_of_what(self, what, form, x_id, xs, ys):
+    def _check_of_what(self, what, form, x_id, xs, ys, level=None, rec=None, series=None):
         """``(checked what, how)``: how is ``matches``, ``differs`` (FI compared and the values are not the table's) or
-        ``not compared`` (FI had nothing to compare the series with), from what the check did."""
-        if what == "other" or what not in self._results() or x_id not in (getattr(self, "settings", None) or []):
+        ``not compared`` (FI had nothing to compare the series with), from what the check did, at the one setting the call says
+        (the drawn x, the ``level`` and the panel's held settings in ``rec``; ``series`` is the series' own compared value). A
+        series whose x is a result of the table (one result against another) is checked point by point against the trials' own
+        pairs (``_pair_check``). A quantity FI derives for each setting is compared as a result is, through the table's ``mean``
+        (the table serves it when FI handed the figure step its derived record; else it is not compared)."""
+        served = getattr(getattr(self, "table", None), "_derived", None)  # the derived values the table serves (``set_derived``)
+        derived = [d for d in (getattr(self, "derived_ids", []) or []) if isinstance(served, dict) and d in served]
+        if what == "other" or (what not in self._results() and what not in derived):
             return "other", "not compared"
-        if form not in Y_FORMS:
+        if self._x_is_table_result(x_id):
+            if form != "mean":  # a statistic of the trials (sd, max, ...) against a result is no trial's pair
+                return "other", "not compared"
+            if x_id == what:  # a result against itself pairs nothing: every (v, v) is one, so any value drawn twice would pass
+                return "other", "not compared"
+            how = self._pair_check(what, x_id, xs, ys, level, rec, series)
+            return (what if how == "matches" else "other"), how
+        if x_id not in (getattr(self, "settings", None) or []):
             return "other", "not compared"
-        how = self._y_comparison(form, what, x_id, xs, ys)
+        if form not in Y_FORMS or (what not in self._results() and form != "mean"):
+            return "other", "not compared"  # a derived quantity has one value per setting: its mean
+        how = self._y_comparison(form, what, x_id, xs, ys, rec, level, series)
         return (what if how == "matches" else "other"), how
 
     def _checked_meaning(self, meaning, what, x_id, xs, ys, lo, hi):
@@ -728,8 +1108,12 @@ class FigureCalls:
                                  "one of upper widths)" % (len(lo), len(ys)))
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         declared = what
-        what, how = self._check_of_what(what, form, x_id, xs, ys)
+        what, how = self._check_of_what(what, form, x_id, xs, ys, level, rec, series)
         x_ok = self._x_checked(x_id, xs, ys)
+        # One result against another: when every point is one of FI's own pairs of the two results (the check above kept the
+        # result), both axes carry the results' names. ``x_checked`` stays False: the x values are no setting's, so no claim
+        # that reads x (a trend, an order at an x, a crossing) is offered.
+        x_paired = what != "other" and self._x_is_table_result(x_id)
         # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
         # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
         neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
@@ -741,8 +1125,8 @@ class FigureCalls:
             if level:
                 level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
         legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
-        with _undone(ax, rec):
-            self._set_x(rec, x_id, x_ok)
+        with _undone(ax, rec, self):
+            self._set_x(rec, x_id, x_ok or x_paired)
             self._set_y(rec, what)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
@@ -753,8 +1137,10 @@ class FigureCalls:
                 self._fc_extra.setdefault(panel, {"series": [], "refs": []}).setdefault("bars", {})[len(rec["series"])] = bars
             rec["series"].append({"id": series, "label": legend, "kind": kind, "step": bool(step), "x": xs, "y": ys,
                                   "yerr": lo if lo is not None and _same(lo, hi) else None, "yerr_lo": lo, "yerr_hi": hi,
-                                  "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "merged_with": [],
-                                  "x_checked": x_ok, **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
+                                  "yerr_meaning": yerr_meaning if lo is not None else None, "what": what, "form": form,
+                                  "merged_with": [],
+                                  "x_checked": x_ok, **({"x_paired": True} if x_paired else {}),
+                                  **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
                                   **({"level": level} if level else {})})
             loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
             for k, e in enumerate(loose, 1):
@@ -813,6 +1199,7 @@ class FigureCalls:
         values = {k: [ax.xaxis.convert_units(v) for v in rec["series"][k]["x"]] for k in mine}
         if any(len(values[k]) != len(drawn[k]) for k in mine):
             return
+        self._latch_changes(panel)  # what the body changed on this panel is kept before FI moves anything on it
         numeric = all(_finite(v) for k in mine for v in values[k])
         alone = all(e["kind"] == "bars" for e in rec["series"]) and not rec["bands"] and not any(r["axis"] == "x" for r in rec["refs"])
         slots = sorted({round(v, 12) for k in mine for v in values[k]}) if numeric and alone else None
@@ -870,6 +1257,7 @@ class FigureCalls:
             ax._fi_bar_slots = None
         ax.relim()
         ax.autoscale_view()
+        self._snap_again(ax)  # FI's own move is not a change of the body's
 
     @staticmethod
     def _draw_series(ax, kind, xs, ys, legend, step):
@@ -952,7 +1340,7 @@ class FigureCalls:
         x = sorted(by_x)
         y = [by_x[v] for v in x]
         label = self._reference_label(ref_id)
-        with _undone(ax, rec):
+        with _undone(ax, rec, self):
             arts = ax.plot(x, y, linestyle="--", color="0.35", label=label)
             self._tag(arts)
             rec["series"].append({"id": ref_id, "label": label, "kind": "curve", "step": False, "x": x, "y": y, "yerr": None,
@@ -983,7 +1371,7 @@ class FigureCalls:
         if all(_finite(v) for v in cols + rws) and cols and rws:
             extent = [min(cols), max(cols), max(rws), min(rws)]
         what = self._checked_image_what(what, x_id, y_id, cols, rws, rows) if x is not None and y is not None else "other"
-        with _undone(ax, rec):
+        with _undone(ax, rec, self):
             if rec["x"] is None:
                 rec["x"] = {"id": "column", "kind": "setting", "label": "column", "scale": "linear"}
             self._set_y(rec, what)
@@ -1042,8 +1430,8 @@ class FigureCalls:
                              "series" % (series, panel))
         if meaning in ("ci95", "sd", "range"):
             meaning = self._checked_band_meaning(meaning, what, x_id, xs, los, his, drawn)
-        with _undone(ax, rec):
-            self._set_x(rec, x_id, any(e["x"] == xs and e.get("x_checked") for e in drawn))
+        with _undone(ax, rec, self):
+            self._set_x(rec, x_id, any(e["x"] == xs and (e.get("x_checked") or e.get("x_paired")) for e in drawn))
             self._set_y(rec, what)
             stepped = any(e["step"] for e in drawn if e["x"] == xs)  # the edges of a band follow the steps of its line
             art = ax.fill_between(xs, _gaps(los), _gaps(his), alpha=0.25, linewidth=0, step="post" if stepped else None)
@@ -1196,8 +1584,7 @@ class FigureCalls:
             ident, source = ref_id, "plan"
         elif at is not None:
             number, used = self._table_read(at, form, key)
-            words = {"mean": "Mean", "n": "Number of runs", "low": "Lower 95% bound", "high": "Upper 95% bound"}[form]
-            label = "%s of %s at %s" % (words, self._label_of(at), used)
+            label = self._at_label(at, form, used)
             ident, source = self._next_line_id(rec), "table"
         else:
             if not _finite(value):
@@ -1228,6 +1615,20 @@ class FigureCalls:
         self._remember(panel, "refs", art)
         self._group_bars(panel)
         return art
+
+    def _at_label(self, ident, form, key):
+        """The label of a line at a table value: ``Mean of <result> at <setting> = <value>, ...`` in the plan's words for each
+        setting of the key (a setting without a plan label keeps its id), each value written so it reads back as the value."""
+        words = {"mean": "Mean", "n": "Number of runs", "low": "Lower 95% bound", "high": "Upper 95% bound"}[form]
+        pieces = self._key_pieces(key) or {}
+        where = []
+        for name, text in pieces.items():
+            try:
+                shown = _read_back(float(text))
+            except (TypeError, ValueError):
+                shown = text
+            where.append("%s = %s" % (self._label_of(name), shown))
+        return "%s of %s at %s" % (words, self._label_of(ident), ", ".join(where) or key)
 
     def note(self, panel, x=None, y=None, what=None, form="mean", key=None):
         """Text in the figure: ``what`` is digit-free words with one ``{result id}`` where FI writes the number it reads from the
@@ -1294,7 +1695,8 @@ class FigureCalls:
         An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
         result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
         itself is never a label. Two results on one axis are joined with " / "; ``what="other"`` is "computed value". The x label
-        comes from the id of the call's ``x=``. In an image panel the vertical axis is "row".
+        comes from the id of the call's ``x=``; it is "computed x" when FI could not check the drawn x (not the setting's values,
+        or, for a result on x, not the trials' own pairs of the two results). In an image panel the vertical axis is "row".
 
         Series whose x, y, error bars, kind and result are equal within ``IDENTICAL_RTOL`` (relative) are one line to the reader:
         the later ids go to the first one's ``merged_with`` (both entries stay in the record, since both were drawn) and the

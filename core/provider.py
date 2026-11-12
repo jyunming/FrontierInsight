@@ -19,6 +19,11 @@ but resolves to one of three transports:
   - `claude_cli` — `claude --print --output-format text` reusing the
     user's `claude auth login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
+    An `ANTHROPIC_API_KEY` in the environment (a `.env` loaded at launch can
+    put one there) makes the CLI bill that API account instead of the
+    subscription; FI never removes it, it only says which account is used
+    (`claude_cli_account_line`) and, for an empty API balance, what to do
+    (`billing_stop`).
   - `copilot_cli` — `copilot -s --available-tools= --disable-builtin-mcps
     --no-custom-instructions` reusing the user's Copilot login. Answer-only:
     every tool is off, the prompt is on stdin and images go as
@@ -2271,6 +2276,9 @@ _CLI_FATAL_MARKERS: tuple[str, ...] = (
     "usage limit reached",
     "hit your usage limit",      # codex CLI: "You've hit your usage limit. ... try again at 4:51 AM."
     "out of credits",
+    # The claude CLI's own fixed sentence for a billing error (with an API key: "Credit balance is too low"). Its stream
+    # also names the kind (``_CLI_ACCOUNT_ERRORS``); the text is for a failure that reaches FI as text only.
+    "credit balance is too low",
     "copilot requests",          # gh token lacking the Copilot scope
     *_CLI_AUTH_MARKERS,
 )
@@ -2282,6 +2290,36 @@ def _cli_fatal(text: str) -> bool:
     """Whether a CLI failure's text names a limit or a refused sign-in that does not clear within the run."""
     text = text.lower()
     return any(m in text for m in _CLI_FATAL_MARKERS) or bool(_CLI_AUTH_STATUS.search(text))
+
+
+#: The kinds of failed call the claude CLI names itself in its stream (the ``error`` field of an assistant or result
+#: message) that are about the account, not the call: no credit left, a refused or missing sign-in, an account held or
+#: not allowed. Waiting minutes does not bring any of them back, so the run pauses instead of retrying. A rate limit or an
+#: overloaded server is not one of them (it clears).
+_CLI_ACCOUNT_ERRORS = frozenset({"billing_error", "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
+                                 "verification_required"})
+
+
+def _stream_account_error(raw: bytes) -> str:
+    """The CLI's own kind of an account error a stream line carries (``_CLI_ACCOUNT_ERRORS``), ``""`` when it carries none."""
+    if b'"error"' not in raw:
+        return ""
+    try:
+        msg = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(msg, dict) or msg.get("type") not in ("assistant", "result"):
+        return ""
+    kind = msg.get("error")
+    return kind if isinstance(kind, str) and kind in _CLI_ACCOUNT_ERRORS else ""
+
+
+def _cli_failure(message: str, account_error: str = "") -> "_CliTransientError":
+    """The error for a failed CLI call: a :class:`ProviderLimitError` (not retried; the run pauses) when the CLI named an
+    account error in its stream, else a :class:`_CliTransientError`, which the text rules (:func:`_cli_fatal`) still sort."""
+    if account_error:
+        return ProviderLimitError(f"{message} [the CLI named it: {account_error}]")
+    return _CliTransientError(message)
 
 
 #: What a person runs to sign in to a CLI provider again (``None`` where FI does not know the CLI's login command).
@@ -2317,6 +2355,50 @@ def sign_in_advice(provider: str, model: str = "") -> str:
     else:
         todo = f"Check or replace the key or sign-in for {who}."
     return f"The sign-in for {who} has expired or was refused. {todo}"
+
+
+#: The variable that makes the Claude CLI bill an API account instead of the signed-in Claude subscription.
+CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+
+def claude_cli_bills_api_account() -> bool:
+    """Whether the Claude CLI, started the way FI starts it, bills an API account (``ANTHROPIC_API_KEY`` is set in the
+    environment it inherits) and not the signed-in subscription. Only whether the variable holds something is read; its
+    value is never used or kept."""
+    env = _child_env(_CLI_SPECS["claude_cli"])
+    return bool(((env if env is not None else os.environ).get(CLAUDE_API_KEY_ENV) or "").strip())
+
+
+def claude_cli_account_line() -> str:
+    """One plain sentence for the start of a quest: which account the Claude CLI will bill. The key is never printed."""
+    if claude_cli_bills_api_account():
+        return (f"The Claude CLI will bill the API account ({CLAUDE_API_KEY_ENV} is set). To use your Claude subscription "
+                f"instead, remove {CLAUDE_API_KEY_ENV} from the environment and from any .env file.")
+    return f"The Claude CLI will use your Claude subscription ({CLAUDE_API_KEY_ENV} is not set)."
+
+
+def is_billing_error(exc: BaseException) -> bool:
+    """A CLI call that failed because the account's balance is empty, not because a usage limit was reached: the Claude CLI
+    names the kind ``billing_error`` in its stream (``_cli_failure`` keeps it in the message) and says "Credit balance is too
+    low". Only a CLI provider's own failure counts."""
+    if not isinstance(exc, _CliTransientError):
+        return False
+    text = str(exc).lower()
+    return "billing_error" in text or "credit balance is too low" in text
+
+
+def billing_stop(exc: BaseException, provider: str = "") -> tuple[str, str] | None:
+    """``(what happened, what to do)``, in plain words, for a call that failed on an empty balance (:func:`is_billing_error`);
+    ``None`` for any other failure. For the Claude CLI with ``ANTHROPIC_API_KEY`` set it is the API account's balance that
+    is empty, and removing the key makes the CLI use the subscription (FI does not remove it itself)."""
+    if not is_billing_error(exc):
+        return None
+    if provider in ("", "claude_cli") and claude_cli_bills_api_account():
+        return (f"The Claude CLI bills the API account ({CLAUDE_API_KEY_ENV} is set) and the API account's balance is empty",
+                f"Remove {CLAUDE_API_KEY_ENV} (from the environment and from any .env file) so the CLI uses your Claude "
+                f"subscription, or add credit to the API account")
+    return (f"The account behind {provider or 'the model provider'} has no credit left",
+            "Add credit to that account or fix its billing")
 
 
 def _retry_http_error(exc: BaseException) -> bool:
@@ -2539,6 +2621,8 @@ def _retry_cli_error(exc: BaseException) -> bool:
     abort fast with the original message rather than burning the budget."""
     if isinstance(exc, OSError):
         return True
+    if isinstance(exc, ProviderLimitError):
+        return False
     if isinstance(exc, _CliTransientError):
         return not _cli_fatal(str(exc))
     return False
@@ -3391,6 +3475,7 @@ async def _collect_via_streaming(
     thinking_streamed = False  # a thinking_delta was seen: the final assistant message would repeat it
     note_thinking("")  # this attempt's own reasoning only
     error_message: str | None = None  # populated from stream_json error events
+    account_error = ""  # the CLI's own kind of an account error (``_CLI_ACCOUNT_ERRORS``), "" when it named none
     result_envelope_seen = False  # see _parse_stream_json_line caller below
     unreadable_line: str | None = None  # a line past even _CLI_STREAM_LIMIT: see read_stdout
     turns: list[dict[str, Any]] = []  # per model turn: its streamed text and why it stopped (see the envelope below)
@@ -3409,7 +3494,7 @@ async def _collect_via_streaming(
 
     async def read_stdout() -> None:
         nonlocal last_activity, thinking_token_count, error_message, thinking_streamed
-        nonlocal text_chars_total, result_envelope_seen, unreadable_line
+        nonlocal text_chars_total, result_envelope_seen, unreadable_line, account_error
         while True:
             try:
                 line = await proc.stdout.readline()
@@ -3448,6 +3533,7 @@ async def _collect_via_streaming(
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
+                account_error = account_error or _stream_account_error(line)
                 for kind, thought in _stream_thinking(line):
                     if kind == "delta":
                         thinking_streamed = True
@@ -3579,7 +3665,11 @@ async def _collect_via_streaming(
         if watchdog_raised is not None:
             await _kill_and_reap(proc, spec.argv[0], tree)
     if watchdog_raised is not None:
+        if account_error and isinstance(watchdog_raised, _CliTransientError):  # the CLI named an account error, then hung
+            raise _cli_failure(str(watchdog_raised), account_error) from watchdog_raised
         raise watchdog_raised
+    if account_error and error_message is None:  # an account error the CLI named with no error event or envelope
+        error_message = f"the CLI named an account error ({account_error})"
     # Reader finished (EOF). Wait for the child to exit and check rc.
     # Important: if we already collected text_deltas before EOF, the
     # LLM call SUCCEEDED — claude.exe streamed its response and then
@@ -3620,8 +3710,8 @@ async def _collect_via_streaming(
             # Skip the rc-based error check below — we never got rc.
             # An empty error_message and have_output=True means good.
             if error_message is not None:
-                raise _CliTransientError(
-                    f"{spec.argv[0]} stream error: {error_message[:500]}"
+                raise _cli_failure(
+                    f"{spec.argv[0]} stream error: {error_message[:500]}", account_error
                 )
             _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
@@ -3662,8 +3752,8 @@ async def _collect_via_streaming(
                 stderr_b.decode("utf-8", "replace")[-300:],
             )
             if error_message is not None:
-                raise _CliTransientError(
-                    f"{spec.argv[0]} stream error: {error_message[:500]}"
+                raise _cli_failure(
+                    f"{spec.argv[0]} stream error: {error_message[:500]}", account_error
                 )
             _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
@@ -3675,16 +3765,16 @@ async def _collect_via_streaming(
                 pass
         # The claude CLI writes nothing to stderr when the API is unreachable; the reason is in its stream.
         reason = f" (stream error: {error_message[:500]})" if error_message is not None else ""
-        raise _CliTransientError(
+        raise _cli_failure(
             f"{argv[0]} exited rc={rc}{reason}: "
-            f"{stderr_b.decode('utf-8', 'replace')[-500:]}"
+            f"{stderr_b.decode('utf-8', 'replace')[-500:]}", account_error
         )
     if error_message is not None:
         # stream-json carried a fatal error event but the process exited
         # 0 anyway (claude_cli does this for some error classes). Treat
-        # as transient so tenacity retries.
-        raise _CliTransientError(
-            f"{spec.argv[0]} stream error: {error_message[:500]}"
+        # as transient so tenacity retries (unless the CLI named an account error: see _cli_failure).
+        raise _cli_failure(
+            f"{spec.argv[0]} stream error: {error_message[:500]}", account_error
         )
     _raise_if_cut_off(turns, spec)
     return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
@@ -5462,6 +5552,8 @@ def _stays_unusable(exc: BaseException) -> bool:
     usage limit or refused sign-in, an exhausted quota (HTTP 402, or a 429 that names one) and a refused sign-in
     (401). Never a bare 403 (a refusal of one request, which a fallback chain's later probe may find lifted) or anything
     else."""
+    if isinstance(exc, ProviderLimitError):
+        return True
     if isinstance(exc, _CliTransientError):
         return _cli_fatal(str(exc))
     if isinstance(exc, httpx.HTTPStatusError):
@@ -5475,6 +5567,8 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     exhaustion — so the breaker should open immediately rather than after the
     usual failure threshold. Transient blips (5xx, timeouts) trip only after
     repeated failures."""
+    if isinstance(exc, ProviderLimitError):
+        return True
     if isinstance(exc, _CliTransientError):
         return _cli_fatal(str(exc))
     if isinstance(exc, httpx.HTTPStatusError):

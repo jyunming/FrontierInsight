@@ -34,6 +34,7 @@ import math
 import re
 from typing import Any
 
+from . import answer_reading as _reading
 from . import optimise_search as _optimise_search
 
 STUDY_TYPES = {
@@ -507,43 +508,51 @@ def _constraint(item: Any, index: int) -> tuple[dict[str, Any] | None, str | Non
 def _setting_problems(name: str, item: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """``(the setting, [])`` or ``(None, every problem found in it)``. The check against ``search`` is made only when both
     ``search`` and ``finer`` can be read."""
+    out, found = _setting_faults(name, item)
+    return out, [text for _part, text in found]
+
+
+def _setting_faults(name: str, item: Any) -> tuple[dict[str, Any] | None, list[tuple[str | None, str]]]:
+    """:func:`_setting_problems` with the key of the setting each problem is about (``check``, ``search``, ...; ``None``
+    for the setting as a whole), so a repair can leave out only the finer check values when only they cannot be read."""
     where = f"{_P}.numerical_settings` `{name}`"
     if _number(item):
         item = {"search": item}
     if not isinstance(item, dict):
-        return None, [f"{where} must be a mapping with `search` (and `check`, the finer values)"]
+        return None, [(None, f"{where} must be a mapping with `search` (and `check`, the finer values)")]
     out = dict(item)
-    problems: list[str] = []
+    problems: list[tuple[str | None, str]] = []
     search = out.get("search")
     search_ok = _number(search) and search > 0
     if not search_ok:
-        problems.append(f"{where}: `search` must be a positive number (the value the search uses); "
-                        f"{SETTING_FROM_DESIGN_NOTE}")
+        problems.append(("search", f"{where}: `search` must be a positive number (the value the search uses); "
+                                   f"{SETTING_FROM_DESIGN_NOTE}"))
     finer = str(out.get("finer") or "smaller").strip().lower()
     finer_ok = finer in ("smaller", "larger")
     if not finer_ok:
-        problems.append(f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of elements)")
+        problems.append(("finer", f"{where}: `finer` must be `smaller` (a mesh size, a time step) or `larger` (a count of "
+                                  "elements)"))
     elif out.get("finer") is not None:
         out["finer"] = finer
     if out.get("unit") is not None and not isinstance(out["unit"], str):
-        problems.append(f"{where}: `unit` must be text (the setting's unit, such as nm), or leave it out")
+        problems.append(("unit", f"{where}: `unit` must be text (the setting's unit, such as nm), or leave it out"))
     tolerance = out.get("tolerance")
     if tolerance is not None and not (_number(tolerance) and 0 < tolerance < 1):
-        problems.append(f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of 5% of the "
-                        "result's spread counts as converged), or leave it out")
+        problems.append(("tolerance", f"{where}: `tolerance` must be a fraction between 0 and 1 (0.05 means a change of "
+                                      "5% of the result's spread counts as converged), or leave it out"))
     check = out.get("check")
     if check is not None:
         levels = check if isinstance(check, list) else [check]
         if not levels or not all(_number(v) and v > 0 for v in levels):
-            problems.append(f"{where}: `check` must be one or more positive numbers (the finer values)")
+            problems.append(("check", f"{where}: `check` must be one or more positive numbers (the finer values)"))
         elif search_ok and finer_ok:
             before = search
             for level in levels:
                 ratio = before / level if finer == "smaller" else level / before
                 if ratio < MIN_REFINEMENT:
-                    problems.append(f"{where}: the check value {_fmt(level)} is not finer than {_fmt(before)} (each level "
-                                    f"must be at least {MIN_REFINEMENT} times {'smaller' if finer == 'smaller' else 'larger'} "
-                                    "than the one before it)")
+                    problems.append(("check", f"{where}: the check value {_fmt(level)} is not finer than {_fmt(before)} "
+                                              f"(each level must be at least {MIN_REFINEMENT} times "
+                                              f"{'smaller' if finer == 'smaller' else 'larger'} than the one before it)"))
                     break
                 before = level
             else:
@@ -564,39 +573,52 @@ def _whole_at_least_one(value: Any) -> bool:
 
 def _grid(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any] | None = None,
           unread: set[str] | None = None) -> list[str]:
+    """The reasons of :func:`_grid_faults`."""
+    return [f.reason for f in _grid_faults(grid, variables, fixed, unread)]
+
+
+def _grid_faults(grid: Any, variables: dict[str, dict[str, Any]], fixed: dict[str, Any] | None = None,
+                 unread: set[str] | None = None) -> list[_reading.Fault]:
     """The problems of the scan run before the search, one for each axis that has one (empty when it can be read): each
     axis is a design variable (its values inside its range) or a condition the plan holds fixed for the search
     (``fixed``; any values: the scan compares the study across them, and only the cells at the held value can start the
     search). ``unread``: names of design variables that could not be read; an axis with such a name is not judged here."""
     if not isinstance(grid, dict) or not grid:
-        return [f"{_P}.grid` (the scan run first) must map each design variable, or each condition held fixed that is "
-                "compared across settings, to the values it takes"]
+        return [_reading.Fault(f"{BLOCK}.grid", "unreadable", f"{_P}.grid` (the scan run first) must map each design "
+                               "variable, or each condition held fixed that is compared across settings, to the values it "
+                               "takes", as_written=grid)]
     fixed = fixed or {}
     unread = unread or set()
-    problems: list[str] = []
+    problems: list[_reading.Fault] = []
     for axis, values in grid.items():
+        written = values
         values = values if isinstance(values, list) else [values]
+
+        def add(reason: str, axis: Any = axis, written: Any = written) -> None:
+            problems.append(_reading.Fault(_reading.join(f"{BLOCK}.grid", str(axis)), "unreadable", reason,
+                                           as_written=written))
+
         if str(axis) in variables:
             if is_array(variables[str(axis)]):
-                problems.append(f"{_P}.grid` `{axis}`: `{axis}` is an array variable; a scan axis takes single numbers, so "
+                add(f"{_P}.grid` `{axis}`: `{axis}` is an array variable; a scan axis takes single numbers, so "
                                 "scan another setting (the search changes the array from its baseline)")
             elif not values or not all(_inside(variables[str(axis)], v) for v in values):
-                problems.append(f"{_P}.grid` `{axis}`: every value must lie inside that variable's range")
+                add(f"{_P}.grid` `{axis}`: every value must lie inside that variable's range")
         elif str(axis) in unread:
             continue
         elif str(axis) in fixed:
             if not values or not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) and
                                      (not isinstance(v, float) or math.isfinite(v)) for v in values):
-                problems.append(f"{_P}.grid` `{axis}`: give the settings to compare as a list of numbers or a list of names")
+                add(f"{_P}.grid` `{axis}`: give the settings to compare as a list of numbers or a list of names")
             elif len({isinstance(v, str) for v in values}) > 1:
-                problems.append(f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix")
+                add(f"{_P}.grid` `{axis}`: the settings to compare are all numbers or all names, not a mix")
         else:
             near = _near_a_variable(str(axis), variables)
             if near and values and all(isinstance(v, str) for v in values):
-                problems.append(f"{_P}.grid` scans `{axis}`, which looks like a misspelling of the design variable "
+                add(f"{_P}.grid` scans `{axis}`, which looks like a misspelling of the design variable "
                                 f"`{near}`: write `{near}`, or rename the comparison so it is not mistaken for it")
             else:
-                problems.append(f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held "
+                add(f"{_P}.grid` scans `{axis}`, which is neither a design variable nor a condition held "
                                 f"fixed: to compare the study across `{axis}`, also list it under "
                                 "`protocol.optimisation.fixed` with the value the search holds it at (a setting whose "
                                 "values are names needs no such entry)")
@@ -647,28 +669,59 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
 
 def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """``(the block read, [])`` or ``(None, every problem found)``, in the order the block is read."""
-    problems: list[str] = []
+    out, faults = block_faults(block)
+    return out, [f.reason for f in faults]
+
+
+#: Where the block is in a protocol (each fault's path starts here).
+BLOCK = "protocol.optimisation"
+#: The parts a search cannot do without: when one cannot be read the search cannot start, and it is never dropped unsaid.
+REQUIRED_PARTS = ("objective", "design_variables", "baseline", "constraints")
+
+
+def _f(path: str, reason: str, kind: str = "unreadable", as_written: Any = None, **extra: Any) -> _reading.Fault:
+    top = _reading.split(path)[2:3]
+    required = bool(top and top[0] in REQUIRED_PARTS) and extra.pop("required", True)
+    return _reading.Fault(path=path, kind=kind, reason=reason, as_written=as_written, required=required, **extra)
+
+
+def _at(*steps: Any) -> str:
+    path = BLOCK
+    for step in steps:
+        path = _reading.join(path, step)
+    return path
+
+
+def block_faults(block: Any) -> tuple[dict[str, Any] | None, list[_reading.Fault]]:
+    """``(the block read, [])`` or ``(None, every fault found)``, in the order the block is read: each with the path of
+    the part or entry it is about (``protocol.optimisation.constraints[2]``,
+    ``protocol.optimisation.numerical_settings.mesh_size``), so a repair leaves out that one entry and nothing else."""
+    problems: list[_reading.Fault] = []
     if not isinstance(block, dict):
-        return None, [f"{_P}` must be a mapping (`objective`, `design_variables`, `baseline`, ...)"]
+        return None, [_reading.Fault(BLOCK, "form", f"{_P}` must be a mapping (`objective`, `design_variables`, `baseline`, ...)",
+                                     as_written=block)]
     out: dict[str, Any] = dict(block)
     objective = out.get("objective")
     if not isinstance(objective, dict):
-        problems.append(f"{_P}.objective` must say the `quantity` to minimise or maximise and its `direction`")
+        problems.append(_f(_at("objective"), f"{_P}.objective` must say the `quantity` to minimise or maximise and its "
+                                             "`direction`", as_written=objective))
     else:
         objective = dict(objective)
         if not _text(objective.get("quantity")):
-            problems.append(f"{_P}.objective` has no `quantity` (the name the simulation returns it under)")
+            problems.append(_f(_at("objective", "quantity"), f"{_P}.objective` has no `quantity` (the name the simulation "
+                                                             "returns it under)", "missing", block.get("objective")))
         else:
             objective["quantity"] = _text(objective["quantity"])
         word = str(objective.get("direction") or "").strip().lower()
         direction = DIRECTIONS.get(word, word)
         if direction not in closed_values("objective.direction"):
-            problems.append(choice_refusal("objective.direction", objective.get("direction")))
+            problems.append(_f(_at("objective", "direction"), choice_refusal("objective.direction", objective.get("direction")),
+                               "not_allowed", objective.get("direction"), allowed=closed_values("objective.direction")))
         else:
             objective["direction"] = direction
         for key in ("unit", "meaning"):
             if objective.get(key) is not None and not isinstance(objective[key], (str, int, float)):
-                problems.append(f"{_P}.objective.{key}` must be text")
+                problems.append(_f(_at("objective", key), f"{_P}.objective.{key}` must be text", as_written=objective[key]))
         out["objective"] = objective
 
     items = out.get("design_variables")
@@ -679,13 +732,15 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     names_known = True  # whether every design variable's name is known, so what is checked by name can be
     fixed_items: list[dict[str, Any]] = []
     if not isinstance(items, list) or not items:
-        problems.append(f"{_P}.design_variables` must list what the search may change (each with a `name` and a range)")
+        problems.append(_f(_at("design_variables"), f"{_P}.design_variables` must list what the search may change (each "
+                                                    "with a `name` and a range)", "missing", out.get("design_variables")))
         names_known = False
     else:
         for index, item in enumerate(items, start=1):
             variable, why = _variable(item, index)
             if variable is None:
-                problems.append(why or f"{_P}.design_variables` entry {index} cannot be read")
+                problems.append(_f(_at("design_variables", index), why or f"{_P}.design_variables` entry {index} cannot be read",
+                                   as_written=item))
                 label = _text(item.get("name")) if isinstance(item, dict) else ""
                 if label:
                     named.setdefault(label)
@@ -693,7 +748,11 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     names_known = False
                 continue
             if variable["name"] in named:
-                problems.append(f"{_P}.design_variables` names `{variable['name']}` twice")
+                first = next(x for x in items if isinstance(x, dict) and _text(x.get("name")) == variable["name"])
+                alike = json.dumps(first, sort_keys=True, default=str) == json.dumps(item, sort_keys=True, default=str)
+                problems.append(_f(_at("design_variables", index), f"{_P}.design_variables` names `{variable['name']}` twice",
+                                   "duplicate" if alike else "conflict", item if alike else [first, item],
+                                   required=False))
                 continue
             variables[variable["name"]] = variable
             named.setdefault(variable["name"])
@@ -704,52 +763,63 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     fixed = out.get("fixed")
     if fixed is not None:
         if not isinstance(fixed, dict):
-            problems.append(f"{_P}.fixed` must map each condition held fixed to its value")
+            problems.append(_f(_at("fixed"), f"{_P}.fixed` must map each condition held fixed to its value", as_written=fixed))
         else:
             clash = sorted(set(map(str, fixed)) & set(named))
             if clash:
-                problems.append(f"{_P}.fixed` holds `{clash[0]}` fixed, but it is also a design variable the search may change")
+                held = next(v for k, v in fixed.items() if str(k) == clash[0])
+                variable = next((v for v in (items or []) if isinstance(v, dict) and _text(v.get("name")) == clash[0]), None)
+                problems.append(_f(_at("fixed", clash[0]), f"{_P}.fixed` holds `{clash[0]}` fixed, but it is also a design "
+                                                           "variable the search may change", "conflict",
+                                   {f"{BLOCK}.fixed": {clash[0]: held}, f"{BLOCK}.design_variables": variable}))
 
     baseline = out.get("baseline")
     if not isinstance(baseline, dict) or not isinstance(baseline.get("values"), dict):
-        problems.append(f"{_P}.baseline` must give the design to beat: `values` ({BASELINE_VALUES_RULE}) and `source` "
-                        "(where it comes from)")
+        problems.append(_f(_at("baseline"), f"{_P}.baseline` must give the design to beat: `values` ({BASELINE_VALUES_RULE}) "
+                                            "and `source` (where it comes from)", as_written=baseline))
     else:
         values = {_text(k): v for k, v in baseline["values"].items()}  # a name is read with its spaces collapsed
         out["baseline"] = {**baseline, "values": values}
         if names_known:
             missing = [name for name in named if name not in values]
             if missing:
-                problems.append(f"{_P}.baseline.values` has no value for `{missing[0]}` (the baseline gives every design "
-                                "variable)")
+                problems.append(_f(_at("baseline", "values", missing[0]), (
+                    f"{_P}.baseline.values` has no value for `{missing[0]}` (the baseline gives every design variable)"),
+                    "missing"))
             extra = [str(name) for name in values if str(name) not in named]
             if extra:
-                problems.append(f"{_P}.baseline.values` names `{extra[0]}`, which is not a design variable")
+                problems.append(_f(_at("baseline", "values", extra[0]), (
+                    f"{_P}.baseline.values` names `{extra[0]}`, which is not a design variable"), "not_allowed",
+                    values[extra[0]], required=False))
         for name, variable in variables.items():
             if name not in values:
                 continue
             if is_array(variable):
                 why = array_problem(variable, values[name])
                 if why:
-                    problems.append(f"{_P}.baseline.values` `{name}`: {why}")
+                    problems.append(_f(_at("baseline", "values", name), f"{_P}.baseline.values` `{name}`: {why}",
+                                       as_written=values[name]))
             elif not _inside(variable, values[name]):
-                problems.append(f"{_P}.baseline.values` `{name}` = {values[name]!r} is outside the range the search may use "
-                                "(or not a value that variable takes)")
+                problems.append(_f(_at("baseline", "values", name), (
+                    f"{_P}.baseline.values` `{name}` = {values[name]!r} is outside the range the search may use "
+                    "(or not a value that variable takes)"), "not_allowed", values[name]))
         if baseline.get("source") is not None and not isinstance(baseline["source"], (str, int, float)):
-            problems.append(f"{_P}.baseline.source` must be text")
+            problems.append(_f(_at("baseline", "source"), f"{_P}.baseline.source` must be text", as_written=baseline["source"],
+                               required=False))
 
     constraints = out.get("constraints")
     if constraints is not None:
         if isinstance(constraints, dict):
             constraints = [constraints]
         if not isinstance(constraints, list):
-            problems.append(f"{_P}.constraints` must be a list (each a `quantity` and a `limit` such as \"<= 120\")")
+            problems.append(_f(_at("constraints"), f"{_P}.constraints` must be a list (each a `quantity` and a `limit` such "
+                                                   "as \"<= 120\")", as_written=constraints))
         else:
             fixed_constraints = []
             for index, item in enumerate(constraints, start=1):
                 constraint, found = _constraint_problems(item, index)
                 if constraint is None:
-                    problems.extend(found)
+                    problems.extend(_f(_at("constraints", index), one, as_written=item) for one in found)
                 else:
                     fixed_constraints.append(constraint)
             out["constraints"] = fixed_constraints
@@ -757,13 +827,15 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     settings = out.get("numerical_settings")
     if settings is not None:
         if not isinstance(settings, dict):
-            problems.append(f"{_P}.numerical_settings` must map each setting (a mesh size, a time step) to its values")
+            problems.append(_f(_at("numerical_settings"), f"{_P}.numerical_settings` must map each setting (a mesh size, a "
+                                                          "time step) to its values", as_written=settings))
         else:
             fixed_settings: dict[str, Any] = {}
             for name, item in settings.items():
-                setting, found = _setting_problems(str(name), item)
+                setting, found = _setting_faults(str(name), item)
                 if setting is None:
-                    problems.extend(found)
+                    problems.extend(_f(_at("numerical_settings", str(name), *([part] if part else [])), one,
+                                       as_written=item) for part, one in found)
                 else:
                     fixed_settings[str(name)] = setting
             out["numerical_settings"] = fixed_settings
@@ -771,23 +843,28 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     budget = out.get("evaluation_budget")
     if budget is not None:
         if not isinstance(budget, dict):
-            problems.append(f"{_P}.evaluation_budget` must give `starts` and `per_start` (whole numbers)")
+            problems.append(_f(_at("evaluation_budget"), f"{_P}.evaluation_budget` must give `starts` and `per_start` "
+                                                         "(whole numbers)", as_written=budget))
         else:
             for key in ("starts", "per_start"):
                 if not _whole_at_least_one(budget.get(key)):
-                    problems.append(f"{_P}.evaluation_budget.{key}` must be a whole number of at least 1")
+                    problems.append(_f(_at("evaluation_budget", key), f"{_P}.evaluation_budget.{key}` must be a whole "
+                                                                      "number of at least 1", as_written=budget.get(key)))
             seconds = budget.get("seconds_per_evaluation")
             if seconds is not None and (not _number(seconds) or seconds <= 0):
-                problems.append(f"{_P}.evaluation_budget.seconds_per_evaluation` must be a positive number (an estimate)")
+                problems.append(_f(_at("evaluation_budget", "seconds_per_evaluation"), (
+                    f"{_P}.evaluation_budget.seconds_per_evaluation` must be a positive number (an estimate)"),
+                    as_written=seconds))
     for key in ("runs_per_evaluation", "check_runs"):
         if out.get(key) is not None and not _whole_at_least_one(out[key]):
-            problems.append(f"{_P}.{key}` must be a whole number of at least 1")
+            problems.append(_f(_at(key), f"{_P}.{key}` must be a whole number of at least 1", as_written=out[key]))
 
     method = out.get("search_method")
     if method is not None:
         word = str(method).strip() if isinstance(method, str) else ""
         if not in_closed_choices("search_method", word):
-            problems.append(choice_refusal("search_method", method))
+            problems.append(_f(_at("search_method"), choice_refusal("search_method", method), "not_allowed", method,
+                               allowed=closed_values("search_method")))
         else:
             out["search_method"] = word
 
@@ -796,27 +873,35 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
         if isinstance(tolerance, dict):
             value, mode = tolerance.get("value"), str(tolerance.get("mode") or "absolute").strip().lower()
             if not _number(value) or value < 0:
-                problems.append(f"{_P}.improvement_tolerance.value` must be a number of at least 0")
+                problems.append(_f(_at("improvement_tolerance", "value"), (
+                    f"{_P}.improvement_tolerance.value` must be a number of at least 0"), as_written=value))
             if mode not in closed_values("improvement_tolerance.mode"):
-                problems.append(choice_refusal("improvement_tolerance.mode", tolerance.get("mode")))
+                problems.append(_f(_at("improvement_tolerance", "mode"), choice_refusal("improvement_tolerance.mode",
+                                                                                        tolerance.get("mode")),
+                                   "not_allowed", tolerance.get("mode"), allowed=closed_values("improvement_tolerance.mode")))
             elif _number(value) and value >= 0:
                 if mode == "relative" and value > 1:
-                    problems.append(f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means "
-                                    f"5%); {_fmt(value)} would mean more than 100%")
+                    problems.append(_f(_at("improvement_tolerance", "value"), (
+                        f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means "
+                        f"5%); {_fmt(value)} would mean more than 100%"), as_written=value))
                 elif tolerance.get("mode") is not None:
                     out["improvement_tolerance"] = {**tolerance, "mode": mode}
         elif not _number(tolerance) or tolerance < 0:
-            problems.append(f"{_P}.improvement_tolerance` must be a number (how much better counts), or leave it out")
+            problems.append(_f(_at("improvement_tolerance"), (
+                f"{_P}.improvement_tolerance` must be a number (how much better counts), or leave it out"),
+                as_written=tolerance))
 
     target = out.get("target")
     if target is not None:
         value = target.get("value") if isinstance(target, dict) else target
         if not _number(value):
-            problems.append(f"{_P}.target` must be a number (the value of the objective you hope to reach), or leave it out")
+            problems.append(_f(_at("target"), (f"{_P}.target` must be a number (the value of the objective you hope to "
+                                               "reach), or leave it out"), as_written=target))
 
     margin = out.get("constraint_margin")
     if margin is not None and (not _number(margin) or margin < 0):
-        problems.append(f"{_P}.constraint_margin` must be a number of at least 0")
+        problems.append(_f(_at("constraint_margin"), f"{_P}.constraint_margin` must be a number of at least 0",
+                           as_written=margin))
 
     grid = out.get("grid")
     grid_ok = True
@@ -837,7 +922,8 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     if grid is not None:
         if names_known or not (isinstance(grid, dict) and grid):
             # (a scan can be judged only against the design variables' names; without them only its form is)
-            found = _grid(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None, unread)
+            found = _grid_faults(grid, variables, {str(k): v for k, v in fixed.items()} if isinstance(fixed, dict) else None,
+                                 unread)
             problems.extend(found)
             grid_ok = not found
         else:
@@ -852,7 +938,8 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     inside_read: dict[str, list[Any]] = {}  # the axes of `in_each_run` that could be read, whether or not all of them could
     if inside is not None:
         if not isinstance(inside, dict) or not inside:
-            problems.append(f"{_P}.in_each_run` must map each setting every evaluation goes through to its list of values")
+            problems.append(_f(_at("in_each_run"), f"{_P}.in_each_run` must map each setting every evaluation goes through "
+                                                   "to its list of values", as_written=inside))
             inside_ok = False
         else:
             from . import plan as _plan
@@ -862,24 +949,27 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
             setting_names = {str(k) for k in settings} if isinstance(settings, dict) else set()
             held_names = {str(k) for k in fixed} if isinstance(fixed, dict) else set()
             for name, values in inside.items():
+                where = _at("in_each_run", str(name))
                 # Read as a measurement's `in_each_run` is: numbers, names or tuples, each value once.
                 kept, why = _plan._grid_values(name, values, part="optimisation.in_each_run")
                 if why:
-                    problems.append(why)
+                    problems.append(_f(where, why, as_written=values))
                     inside_ok = False
                     continue
                 if len({json.dumps(float(v) if _number(v) else v) for v in kept or []}) < len(kept or []):
-                    problems.append(f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one time")
+                    problems.append(_f(where, f"{_P}.in_each_run` `{name}` lists the same value twice: list every value one "
+                                              "time", "duplicate", values))
                     inside_ok = False
                     continue
                 if len(kept or []) < 2:
-                    problems.append(f"{_P}.in_each_run` `{name}` must list two or more values (one value is a condition: "
-                                    f"put it under `{_P[1:]}.fixed`)")
+                    problems.append(_f(where, f"{_P}.in_each_run` `{name}` must list two or more values (one value is a "
+                                              f"condition: put it under `{_P[1:]}.fixed`)", as_written=values))
                     inside_ok = False
                     continue
                 if str(name) in named or str(name) in held_names or str(name) in grid_names or str(name) in setting_names:
-                    problems.append(f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, a "
-                                    "numerical setting or a setting of the scan: it is one of them")
+                    problems.append(_f(where, f"{_P}.in_each_run` `{name}` is also a design variable, a condition held fixed, "
+                                              "a numerical setting or a setting of the scan: it is one of them", "conflict",
+                                       values))
                     inside_ok = False
                     continue
                 read[str(name)] = list(kept or [])
@@ -905,15 +995,16 @@ def _read(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     {str(a) for a in inside} - set(inside_read) - set(sub_grid) if isinstance(inside, dict) else set())
                 subs = _without_axes(subs, unreadable_axes)
         if grid_ok and inside_ok or sub_grid:  # (else nothing of the scan could be read: its own problems say so)
-            fixed_subs, why = _plan._sub_studies(subs, sub_grid, sub_inside)
-            if why:
-                for one in why.split(_plan.ALSO):
+            fixed_subs, found = _plan.sub_study_faults(subs, sub_grid, sub_inside, where=BLOCK)
+            if found:
+                for fault in found:
+                    one = fault.reason
                     for old, new in (("`protocol.sub_studies`", f"{_P}.sub_studies`"), ("`protocol.grid`", f"{_P}.grid`"),
                                      ("`protocol.in_each_run`", f"{_P}.in_each_run`")):
                         one = one.replace(old, new)
                     if not one.startswith(_P):  # the block's repair reads the part a message is about from its first words
                         one = f"{_P}.sub_studies`: {one}"
-                    problems.append(one)
+                    problems.append(_reading.Fault(fault.path, fault.kind, one, as_written=fault.as_written))
             elif grid_ok and inside_ok:
                 out["sub_studies"] = fixed_subs
     return (None, problems) if problems else (out, [])
@@ -964,10 +1055,6 @@ def scan_size(block: dict[str, Any]) -> int:
         return 0
 
 
-_ENTRY = re.compile(r"entry (\d+)")
-_NAMED = re.compile(r"`protocol\.optimisation\.(\w+)` `([^`]+)`")
-
-
 #: How :func:`repair` says that a part of the block was left out (the engine finds a left-out first scan by it).
 LEFT_OUT_UNREAD = "was left out of the plan because it could not be read"
 #: How FI's note says one setting of a search's first scan was left out (the rest of the scan kept): the plan step asks
@@ -985,92 +1072,182 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """A drafted block with each part that cannot be read left out, and a sentence per part saying so; ``(None, notes)``
     when what is left cannot drive a search (no objective, no design variable, or no usable baseline).
 
-    Left out one at a time: a design variable (and its baseline value and coarse-scan axis with it), a constraint, a
+    Left out one at a time, each found by the path its fault names (:func:`read_block`): a design variable (held at its
+    baseline value, under ``fixed``, when the baseline gives one; its coarse-scan axis with it), a constraint, a
     numerical setting, or an optional part. A ``check`` that is not finer than ``search`` is left out on its own: FI's
     fixed rule then gives the finer values, and the plan says so."""
+    reading, notes, usable = _repair_block(block)
+    return (reading.kept if usable else None), notes
+
+
+def read_block(block: Any, base: Any = None) -> _reading.Reading:
+    """``block`` (a search's ``protocol.optimisation``) read entry by entry: what is kept, each fault at its path (the
+    parts a search cannot do without marked ``required``), and nothing else. A block whose objective, baseline or list of
+    design variables cannot be read keeps its other parts in ``kept`` (as written, the faulted parts out), with the
+    faults that stop the search; only a block that is not a mapping at all is ``nothing_read``. ``base`` is not used: a
+    draft has no plan of its own to fall back on."""
+    return _repair_block(block)[0]
+
+
+def _held_at_baseline(out: dict[str, Any], name: str) -> Any:
+    """The baseline's value of the design variable ``name``, or :data:`_reading._ABSENT` when the baseline gives none."""
+    values = out.get("baseline", {}).get("values") if isinstance(out.get("baseline"), dict) else None
+    if not isinstance(values, dict):
+        return _reading._ABSENT
+    return next((v for k, v in values.items() if _text(k) == name), _reading._ABSENT)
+
+
+def _without_faults(block: dict[str, Any], faults: list[_reading.Fault]) -> dict[str, Any]:
+    """``block`` with what each fault is about left out, and nothing else (what a search that cannot start still kept):
+    the one entry of a list or a mapping when the fault names one, else the part."""
+    out = dict(block)
+    marked = object()
+    for fault in faults:
+        steps = _reading.split(fault.path)[2:]
+        key = next((k for k in out if steps and str(k) == str(steps[0])), None)
+        if key is None:
+            continue
+        part = out[key]
+        if len(steps) > 1 and isinstance(steps[1], int) and isinstance(part, list) and 0 < steps[1] <= len(part):
+            out[key] = part[:steps[1] - 1] + [marked] + part[steps[1]:]  # marked, so the others keep their numbers
+        elif len(steps) > 1 and isinstance(part, dict) and str(steps[1]) in {str(k) for k in part}:
+            out[key] = {k: v for k, v in part.items() if str(k) != str(steps[1])}
+        else:
+            del out[key]
+    return {k: ([e for e in v if e is not marked] if isinstance(v, list) else v) for k, v in out.items()}
+
+
+def _size(value: Any) -> int:
+    """How many entries ``value`` holds at any depth (each round of a repair leaves out at least one)."""
+    if isinstance(value, dict):
+        return 1 + sum(_size(v) for v in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_size(v) for v in value)
+    return 1
+
+
+def _repair_block(block: Any) -> tuple[_reading.Reading, list[str], bool]:
+    """``(reading, notes, usable)``: the reading of :func:`read_block`, the sentences :func:`repair` gives, and whether
+    what is kept can drive a search."""
     if not isinstance(block, dict):
-        return None, [f"the optimisation block (`protocol.optimisation`) was not a mapping and was left out"]
+        fault = _reading.Fault(BLOCK, "form", "the optimisation block (`protocol.optimisation`) was not a mapping",
+                               as_written=block)
+        return (_reading.Reading(kept=None, faults=[fault], nothing_read=True),
+                ["the optimisation block (`protocol.optimisation`) was not a mapping and was left out"], False)
     out: dict[str, Any] = dict(block)
     notes: list[str] = []
-    for _ in range(64):
-        fixed, found = _read(out)
-        if fixed is not None:
-            return fixed, notes
-        # One problem at a time, the first in reading order: the block is read again after each part is left out, so a
-        # later problem (the scan's, say) is found the next time round.
-        why = found[0] if found else ""
-        part = re.match(r"`protocol\.optimisation\.?(\w*)", why)
-        key = part.group(1) if part else ""
-        from . import plan as _plan_module
+    faults: list[_reading.Fault] = []
+    # Where each entry of a list now read was in the answer, so a fault found after others were left out still names
+    # the entry by the number it had as written.
+    order = {key: list(range(1, len(out[key]) + 1)) if isinstance(out.get(key), list) else [1]
+             for key in ("design_variables", "constraints", "sub_studies")}
 
-        written = _plan_module.offending_entry({"optimisation": out}, why)
-        shown = f"; the entry as written: {written}" if written else ""
+    def placed(fault: _reading.Fault) -> _reading.Fault:
+        steps = _reading.split(fault.path)
+        if len(steps) > 3 and isinstance(steps[3], int) and str(steps[2]) in order \
+                and 0 < steps[3] <= len(order[str(steps[2])]):
+            path = _at(steps[2], order[str(steps[2])][steps[3] - 1], *steps[4:])
+            return _reading.Fault(path, fault.kind, fault.reason, fault.allowed, fault.as_written, fault.required)
+        return fault
+
+    def stop(found: list[_reading.Fault], note: str) -> tuple[_reading.Reading, list[str], bool]:
+        # A part the search cannot do without: every fault of the block is said, the rest of it is kept as written.
+        said = faults + [placed(f) for f in found if placed(f) not in faults]
+        return _reading.Reading(kept=_without_faults(out, found), faults=said), notes + [note], False
+
+    entries = _size(out)
+    for _ in range(64 + entries):  # each round leaves out one entry or part, so this many rounds always end it
+        fixed, found = block_faults(out)
+        if fixed is not None:
+            return _reading.Reading(kept=fixed, faults=faults), notes, True
+        # One fault at a time, the first in reading order: the block is read again after each part is left out, so a
+        # later one (the scan's, say) is found the next time round.
+        fault = found[0]
+        why = fault.reason
+        steps = _reading.split(fault.path)
+        key = str(steps[2]) if len(steps) > 2 else ""
+        entry = steps[3] if len(steps) > 3 else None
+        written = ""  # the entry the fault is about, as written (found by its path, not again in the reason's words)
+        if key in ("design_variables", "constraints") and isinstance(entry, int):
+            items = out.get(key) if isinstance(out.get(key), list) else [out.get(key)]
+            written = _reading.shown(items[entry - 1]) if 0 < entry <= len(items) else ""
+        elif key in ("numerical_settings", "grid") and entry is not None and isinstance(out.get(key), dict):
+            value = next((v for k, v in out[key].items() if str(k) == str(entry)), None)
+            written = _reading.shown(value) if value is not None else ""
+        shown = f"; the entry as written: {written}" if written and written != "null" else ""
         cannot = f"the optimisation block was left out because it cannot drive a search ({why}{shown})"
         if key in ("", "objective"):
-            return None, notes + [cannot]
+            return stop(found, cannot)
         if key == "design_variables":
             items = out["design_variables"] if isinstance(out.get("design_variables"), list) else []
-            entry = _ENTRY.search(why)
-            named = re.search(r"`protocol\.optimisation\.design_variables` (?:names )?`([^`]+)`", why)
-            drop = None
-            if entry:
-                drop = int(entry.group(1)) - 1
-            elif named:
-                same = [i for i, v in enumerate(items) if isinstance(v, dict) and _text(v.get("name")) == named.group(1)]
-                if f"{_P}.design_variables` names `" in why:
-                    drop = same[-1] if same else None
-                else:
-                    drop = next((i for i in same if _variable(items[i], i + 1)[0] is None), None)
+            drop = entry - 1 if isinstance(entry, int) else None
             if drop is None or not (0 <= drop < len(items)) or len(items) <= 1:
-                return None, notes + [cannot]
+                return stop(found, cannot)
             gone = items[drop]
             name = _text(gone.get("name")) if isinstance(gone, dict) else ""
-            out["design_variables"] = items[:drop] + items[drop + 1:]
-            if f"{_P}.design_variables` names `" in why:
-                notes.append(f"the design variable {name} was listed twice; the second entry was left out")
+            if fault.kind in ("duplicate", "conflict"):
+                out["design_variables"] = items[:drop] + items[drop + 1:]
+                faults.append(placed(fault))
+                order["design_variables"].pop(drop)
+                notes.append(f"the design variable {name} was listed twice; the second entry was left out"
+                             + ("" if fault.kind == "duplicate" else
+                                f" (the two differ: {_reading.shown(fault.as_written, 300)})"))
                 continue
-            if name and isinstance(out.get("baseline"), dict) and isinstance(out["baseline"].get("values"), dict):
-                out["baseline"] = {**out["baseline"], "values": {k: v for k, v in out["baseline"]["values"].items()
-                                                                 if str(k) != name}}
-            if name and isinstance(out.get("grid"), dict):
+            value = _held_at_baseline(out, name) if name else _reading._ABSENT
+            if value is _reading._ABSENT:
+                # The search cannot hold it at the design to beat, so it cannot leave it out either: it stops, as for an
+                # objective that cannot be read.
+                faults.append(placed(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True)))
+                return stop(found, cannot)
+            out["design_variables"] = items[:drop] + items[drop + 1:]
+            faults.append(placed(_reading.Fault(fault.path, fault.kind, why, as_written=gone, required=True)))
+            order["design_variables"].pop(drop)
+            out["baseline"] = {**out["baseline"], "values": {k: v for k, v in out["baseline"]["values"].items()
+                                                             if _text(k) != name}}
+            held = out.get("fixed") if isinstance(out.get("fixed"), dict) else {}
+            out["fixed"] = {**held, name: value}
+            if isinstance(out.get("grid"), dict):
                 out["grid"] = {k: v for k, v in out["grid"].items() if str(k) != name} or None
                 if out["grid"] is None:
                     del out["grid"]
-            notes.append(f"a design variable ({name or f'entry {drop + 1}'}) was left out of the optimisation because it "
-                         f"could not be read ({why}{shown}); put it right in the plan if the search should change it")
+            notes.append(f"a design variable ({name}) could not be read ({why}{shown}); the search holds it at its baseline "
+                         f"value ({_reading.shown(value, 120)}, under `fixed`) and does not change it, and the best design "
+                         f"is reported as found with {name} held there. Put it right in the plan if the search should "
+                         "change it")
             continue
-        if key == "fixed" and isinstance(out.get("fixed"), dict) and "also a design variable" in why:
-            clash = [k for k in out["fixed"] if _text(k) in {_text(v.get("name")) for v in out.get("design_variables") or []
-                                                              if isinstance(v, dict)}]
-            out["fixed"] = {k: v for k, v in out["fixed"].items() if k not in clash}
-            notes.append(f"{', '.join(map(str, clash))} is a design variable the search may change, so it is not held "
-                         "fixed; the other fixed conditions are kept")
+        if key == "fixed" and fault.kind == "conflict" and isinstance(out.get("fixed"), dict) and entry is not None:
+            out["fixed"] = {k: v for k, v in out["fixed"].items() if str(k) != str(entry)}
+            faults.append(fault)
+            notes.append(f"{entry} is a design variable the search may change, so it is not held fixed; the other fixed "
+                         f"conditions are kept (both as written: {_reading.shown(fault.as_written, 300)})")
             continue
         if key == "baseline":
-            extra = re.search(r"names `([^`]+)`, which is not a design variable", why)
-            if extra and isinstance(out.get("baseline"), dict) and isinstance(out["baseline"].get("values"), dict):
+            if fault.kind == "not_allowed" and not fault.required and entry == "values" and len(steps) > 4:
+                extra = str(steps[4])
                 out["baseline"] = {**out["baseline"], "values": {k: v for k, v in out["baseline"]["values"].items()
-                                                                 if str(k) != extra.group(1)}}
-                notes.append(f"the baseline's value of `{extra.group(1)}` was left out: it is not one of the design "
+                                                                 if str(k) != extra}}
+                faults.append(fault)
+                notes.append(f"the baseline's value of `{extra}` was left out: it is not one of the design "
                              "variables (hold it fixed under `fixed` if the simulation needs it)")
                 continue
-            return None, notes + [f"the optimisation block was left out because its baseline cannot be used ({why})"]
-        if key == "constraints" and isinstance(out.get("constraints"), list):
-            entry = _ENTRY.search(why)
-            index = int(entry.group(1)) - 1 if entry else -1
+            return stop(found, f"the optimisation block was left out because its baseline cannot be used ({why})")
+        if key == "constraints" and isinstance(out.get("constraints"), list) and isinstance(entry, int):
+            index = entry - 1
             if 0 <= index < len(out["constraints"]):
                 gone = out["constraints"][index]
                 label = _text(gone.get("quantity")) if isinstance(gone, dict) else ""
                 out["constraints"] = out["constraints"][:index] + out["constraints"][index + 1:]
+                faults.append(placed(fault))
+                order["constraints"].pop(index)
                 notes.append(f"the limit on {label or f'entry {index + 1}'} was left out of the optimisation because it "
                              f"could not be read ({why}); write it in the plan, or the search will not respect it")
                 continue
-        if key == "numerical_settings" and isinstance(out.get("numerical_settings"), dict):
-            named = _NAMED.search(why)
-            name = named.group(2) if named else ""
+        if key == "numerical_settings" and isinstance(out.get("numerical_settings"), dict) and entry is not None:
+            name = str(entry)
             settings = dict(out["numerical_settings"])
             if name in settings:
-                if ("`check`" in why or "check value" in why) and isinstance(settings[name], dict) and "check" in settings[name]:
+                part = steps[4] if len(steps) > 4 else None
+                if part == "check" and isinstance(settings[name], dict) and "check" in settings[name]:
                     settings[name] = {k: v for k, v in settings[name].items() if k != "check"}
                     notes.append(f"the finer check values of `{name}` were left out ({why}); FI's fixed rule gives them "
                                  "instead (half, then a quarter of the search value, or twice and four times for a count)")
@@ -1078,23 +1255,25 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     del settings[name]
                     notes.append(f"the numerical setting `{name}` was left out of the optimisation because it could not "
                                  f"be read ({why}); write it in the plan if the check should refine it")
+                faults.append(fault)
                 out["numerical_settings"] = settings
                 continue
-        if key == "grid" and isinstance(out.get("grid"), dict) and len(out["grid"]) > 1:
+        if key == "grid" and isinstance(out.get("grid"), dict) and len(out["grid"]) > 1 and entry is not None:
             # One setting of the scan that cannot be read is left out, not the scan and its parts with it: real plans lost
             # every setting they compared, and the parts that divide them, over one condition with no held value.
-            axis = re.match(re.escape(_P) + r"\.grid` scans `([^`]+)`, which is neither a design variable", why)
-            name = axis.group(1) if axis else ""
+            name = str(entry)
             variables = {_text(v.get("name")) for v in out.get("design_variables") or [] if isinstance(v, dict)}
-            # Only a compared condition with no held value: a design variable's own scan axis stays the whole scan's to
-            # rewrite, since the search would otherwise scan without it and still change it.
+            # Only a compared condition: a design variable's own scan axis stays the whole scan's to rewrite, since the
+            # search would otherwise scan without it and still change it.
             if name in {str(k) for k in out["grid"]} and name not in variables:
                 out["grid"] = {k: v for k, v in out["grid"].items() if str(k) != name}
                 if isinstance(out.get("sub_studies"), list):
                     kept_parts = []
-                    for sub in out["sub_studies"]:
+                    kept_order = []
+                    for place, sub in zip(order["sub_studies"], out["sub_studies"]):
                         if not isinstance(sub, dict):
                             kept_parts.append(sub)
+                            kept_order.append(place)
                             continue
                         part = dict(sub)
                         if isinstance(sub.get("vary"), list):
@@ -1104,7 +1283,10 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                         if isinstance(sub.get("hold"), dict):
                             part["hold"] = {k: v for k, v in sub["hold"].items() if str(k) != name}
                         kept_parts.append(part)
+                        kept_order.append(place)
                     out["sub_studies"] = kept_parts
+                    order["sub_studies"] = kept_order
+                faults.append(fault)
                 notes.append(f"the setting `{name}` {SCAN_SETTING_LEFT_OUT} ({why}{shown}); the other settings of the "
                              "scan are kept. Put it back, with what it needs, if the study should be compared across it")
                 continue
@@ -1116,16 +1298,22 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
 
             entries, entry_reasons = _plan_parts.readable_sub_studies(out["sub_studies"], out.get("grid"), out.get("in_each_run"))
             if entries and entry_reasons and len(entries) < len(out["sub_studies"]):
+                faults.extend(placed(f) for f in found if _reading.split(f.path)[2:3] == ["sub_studies"])
+                order["sub_studies"] = [n for n, e in zip(order["sub_studies"], out["sub_studies"]) if any(e is k for k in entries)]
                 out["sub_studies"] = entries
                 notes.extend(f"an entry of {_P}.sub_studies` {LEFT_OUT_UNREAD}: {reason.replace('`protocol.sub_studies`', _P + '.sub_studies`')}"
                              for reason in entry_reasons)
                 continue
         if key in out:
+            # each entry of the part that could not be read, at its own place; else the part itself
+            entry_faults = [placed(f) for f in found if _reading.split(f.path)[2:3] == [key] and len(_reading.split(f.path)) > 3]
             del out[key]
+            faults.extend(entry_faults or [_reading.Fault(_at(key), fault.kind, why, as_written=block.get(key),
+                                                          required=fault.required)])
             notes.append(f"`protocol.optimisation.{key}` {LEFT_OUT_UNREAD} ({why}); it is not used")
             continue
-        return None, notes + [f"the optimisation block was left out because it could not be repaired ({why})"]
-    return None, notes + ["the optimisation block was left out because it could not be repaired"]
+        return stop(found, f"the optimisation block was left out because it could not be repaired ({why})")
+    return stop([], "the optimisation block was left out because it could not be repaired")
 
 
 # --- what FI does with what the plan left out ---------------------------------------------------------------------
@@ -1393,9 +1581,10 @@ def plain_gaps(design: Any, why: str | None = None, limit_s: float | None = None
         gaps.append(_PLAIN_PARTS["baseline"])
     if not isinstance(block.get("evaluation_budget"), dict):
         gaps.append(_PLAIN_PARTS["evaluation_budget"])
-    for problem in split_problems(why):  # every part the reason names, not only the first
-        named = re.match(r"`protocol\.optimisation\.?(\w*)", problem)
-        plain = _PLAIN_PARTS.get(named.group(1) if named else "")
+    # every part the block's reading faults, by the path of each fault (not found again in the words of ``why``)
+    for fault in (block_faults(block)[1] if why else []):
+        steps = _reading.split(fault.path)
+        plain = _PLAIN_PARTS.get(str(steps[2]) if len(steps) > 2 else "")
         if plain and plain not in gaps:
             gaps.append(plain)
     if scan_problem(design, limit_s):

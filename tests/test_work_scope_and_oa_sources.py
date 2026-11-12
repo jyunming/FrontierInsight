@@ -191,7 +191,13 @@ async def test_the_literature_node_keeps_books_only_for_a_quest_without_an_exper
     (True, WORK_SCOPE_PAPERS_AND_BOOKS),
 ])
 @pytest.mark.asyncio
-async def test_cross_check_searches_with_the_same_scope(tmp_path: Path, no_sim: bool, expected: str) -> None:
+async def test_cross_check_searches_with_the_same_scope(tmp_path: Path, no_sim: bool, expected: str,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import cross_check_items as cci
+
+    # what is looked up is FI's own record of the results (core/cross_check_items.py): one result with a value
+    monkeypatch.setattr("core.engine._cross_check_items.items", lambda **kw: [
+        cci.Item("x_rate", "X rate", "x rises with y", "X rate: 1.5.", cci.TO_CHECK, "", None)])
     eng = _engine(tmp_path)
     scopes: list = []
 

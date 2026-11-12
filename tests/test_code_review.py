@@ -184,13 +184,15 @@ async def test_a_repair_that_changes_nothing_ends_the_repairs_and_what_is_open_s
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
     assert len(reader.prompts) == 1 and len(reader.test_prompts) == 1, "one test shows it"
-    assert len(reader.repair_prompts) == fr.REPAIR_CALLS + fr.OTHER_CALLS, "the code model's tries, then the other model's one"
+    # each request whose reply cannot be placed is asked once more inside it (core/finding_repair.py: a form fault)
+    assert len(reader.repair_prompts) == 2 * (fr.REPAIR_CALLS + fr.OTHER_CALLS), "the code model's tries, then the other model's one"
+    assert cr.load(engine.quest_root)["repair_calls"] == fr.REPAIR_CALLS + fr.OTHER_CALLS, "the second asks are not counted"
     record = cr.load(engine.quest_root)
     assert record["final"] is True and record["send_backs"] == 1
     assert [v["kind"] for v in cr.not_computed(engine.quest_root, engine.quest_root / "code")] == ["dependent variable"]
     # The same code is read once; asked again, it is not read or repaired again.
     assert await engine._code_review_gate(STATE) is None and len(reader.prompts) == 1
-    assert len(reader.repair_prompts) == fr.REPAIR_CALLS + fr.OTHER_CALLS
+    assert len(reader.repair_prompts) == 2 * (fr.REPAIR_CALLS + fr.OTHER_CALLS)
 
 
 @pytest.mark.asyncio

@@ -799,3 +799,59 @@ def test_a_refused_result_per_value_is_raised_as_FIs_typed_refusal(tmp_path):
     protocol = {"grid": {"n": [1]}, "runs_per_setting": 1, "thresholds": {}, "in_each_run": {"mode": ["a", "b"]}}
     code_project.refresh(root, deps=[], protocol=protocol, title="T", question="q")
     assert "LevelsRefused: " in _run(root).stderr
+
+
+# ---- the clean-environment check of a study that carries FI's own modules ----------------------------------------------------
+
+def test_requirements_leave_out_the_modules_fi_writes_itself(tmp_path):
+    """fi_frame.py imports FI's reader of the record where it is used; a study whose analysis is its own never gets that file,
+    and it is not a package on PyPI, so it must not reach requirements.txt."""
+    from core import skeleton
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / skeleton.RUNTIME_FILE).write_text("def f():\n    import fi_table\n    from fi_figure_calls import FigureCalls\n", encoding="utf-8")
+    (code / "simulate.py").write_text("import numpy\nfrom fi_frame import Ctx\nimport fi_search\nimport fi_figures\nimport fi_core.oracle_forms\n", encoding="utf-8")
+    lines = code_project.requirements_for(code, ["numpy"])
+    assert lines == ["numpy"], lines
+    assert {"fi_frame", "fi_table", "fi_figure_calls", "fi_search", "fi_figures", "fi_core"} <= code_project.fi_module_names()
+
+
+def test_requirements_still_list_an_unknown_third_party_package(tmp_path):
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text("import fi_table\nimport somethingelse\n", encoding="utf-8")
+    assert code_project.requirements_for(code, []) == ["somethingelse"]
+
+
+def test_pip_error_keeps_the_error_lines_not_the_notices():
+    stderr = ("ERROR: Could not find a version that satisfies the requirement fi_table (from versions: none)\n"
+              "ERROR: No matching distribution found for fi_table\n\n"
+              "[notice] A new release of pip is available: 24.0 -> 26.3\n"
+              "[notice] To update, run: python.exe -m pip install --upgrade pip\n")
+    said = code_project.pip_error(stderr)
+    assert said.splitlines() == ["ERROR: Could not find a version that satisfies the requirement fi_table (from versions: none)",
+                                 "ERROR: No matching distribution found for fi_table"]
+    assert "notice" not in said
+    # without an ERROR line every line but the notices is kept; nothing at all gives nothing
+    assert code_project.pip_error("something odd\n[notice] new pip\n") == "something odd"
+    assert code_project.pip_error(None) == "" and code_project.pip_error("[notice] only\n") == ""
+
+
+def test_verify_reports_pips_error_when_the_install_fails(tmp_path, monkeypatch):
+    root = _quest(tmp_path, two=False)
+    code_project.refresh(root, deps=[], protocol=None)
+    (root / "code" / "requirements.txt").write_text("fi_table\n", encoding="utf-8")
+    real_run = subprocess.run
+    pip_said = ("ERROR: No matching distribution found for fi_table\n" + "[notice] A new release of pip is available\n" * 6)
+
+    def fake_run(cmd, *args, **kwargs):
+        if len(cmd) > 4 and cmd[1:4] == ["-m", "pip", "install"]:
+            return subprocess.CompletedProcess(cmd, 1, "", pip_said)  # no network: pip is mocked
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = code_project.verify(root)
+    assert result["ok"] is False and result["status"] == "failed"
+    assert "installing requirements.txt failed: ERROR: No matching distribution found for fi_table" in result["reason"]
+    assert "notice" not in result["says"]

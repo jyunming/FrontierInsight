@@ -121,6 +121,20 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     dependent = [d for d in (variables.get("dependent") if isinstance(variables.get("dependent"), list) else []) if _text(d)]
     for i, name in enumerate(dependent):
         add("dependent variable", f"the dependent variable {_text(name)} is computed and reported in the result", i == 0, str(name))
+    # What the plan's model said its list of dependent variables is (core/dependent_map.py): only adds checks. The wording is
+    # added to the item of each result it names (the original item for the entry above stays). It never makes an item the main
+    # quantity: `headline` decides stops (a fault there stops the quest, elsewhere it is left out and said), and the model's
+    # tie is not checked against anything FI knows (a small model ties wrongly about one time in twenty).
+    mapped = _dependent_placements(protocol)
+    named_by: dict[str, list[str]] = {}
+    for entry, ids in mapped.items():
+        for rid in ids:
+            named_by.setdefault(rid, []).append(entry)
+
+    def also(rid: str) -> str:
+        names = named_by.get(rid)
+        return "; the plan's list of dependent variables also names it as " + " and ".join(f'"{_text(n, 80)}"' for n in names) if names else ""
+
     for m in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(m, dict) and _text(m.get("id")):
             mid = _text(m["id"])
@@ -129,8 +143,9 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
             if any(isinstance(d, dict) and _text(d.get("metric")) == mid
                    for d in (protocol.get("definitions") if isinstance(protocol.get("definitions"), list) else [])):
                 defined.append(["definitions", mid])
-            add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
-                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid, defined)
+            add("metric", f"the result reports {mid}" + (f" ({est})" if est else "") + also(mid),
+                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()),
+                mid, defined)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
         add("figure", f"the script draws the planned figure {figure_file(fig)}")
     grid, inside = _settings_of(protocol)  # where the plan view takes them from
@@ -150,6 +165,25 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`",
             defined_by=[["equations", str(eid)]])
+    have = {r["name"] for r in out if r["kind"] == "metric"}
+    for rid in dict.fromkeys(i for ids in mapped.values() for i in ids):  # a derived result the plan's model named: one more item
+        if _text(rid, 80) not in have:
+            add("metric", f"the result reports {_text(rid)}" + also(rid), False, rid)
+    return out
+
+
+def _dependent_placements(protocol: dict[str, Any]) -> dict[str, list[str]]:
+    """``{entry text: [declared result ids]}`` of the ``dependent_map`` the plan's model answered with ``result`` (the ids are
+    kept to the metrics and derived results the frozen plan declares)."""
+    raw = protocol.get("dependent_map") if isinstance(protocol.get("dependent_map"), dict) else {}
+    ids = {_text(m.get("id")) for k in ("metrics", "derived") for m in (protocol.get(k) if isinstance(protocol.get(k), list) else [])
+           if isinstance(m, dict) and _text(m.get("id"))}
+    out: dict[str, list[str]] = {}
+    for entry, row in raw.items():
+        if isinstance(row, dict) and row.get("answer") == "result" and isinstance(row.get("by"), list):
+            by = [_text(i) for i in row["by"] if _text(i) in ids]
+            if by:
+                out[_text(entry)] = by
     return out
 
 
@@ -920,19 +954,8 @@ def reading_calls(code_dir: Path, design: dict[str, Any] | None, protocol: dict[
     return out
 
 
-#: What a reading of one part of the code left behind, kept so a part nobody changed is not read again (:func:`request_key`).
+#: What a reading of one part of the code left behind, kept so a request whose text nobody changed is not asked again (:func:`core.reuse_key.answer_key`).
 READING_CACHE = Path(".fi") / "code_reading_cache.json"
-
-
-def part_dependencies(code_dir: Path, calls: list[dict[str, Any]]) -> list[str]:
-    """For each request of a reading (``calls``, :func:`reading_calls`), a hash of what the part of the code it shows
-    DEPENDS ON beyond its own text: the study's settings file (``study.json``), which the whole study reads. The reader is
-    shown only its part, so what a part calls in another part is not in the question and is not in the key."""
-    files = _code_files(Path(code_dir))
-    settings = [hashlib.sha256(t.encode("utf-8", errors="replace")).hexdigest()[:16]
-                for rel, t in sorted(files.items()) if rel.endswith(".json")]
-    digest = hashlib.sha256(json.dumps(settings).encode()).hexdigest()[:16]
-    return [digest for _ in calls]
 
 
 def part_label(call: dict[str, Any], count: int) -> str:
@@ -941,19 +964,6 @@ def part_label(call: dict[str, Any], count: int) -> str:
     for name, ranges in sorted((call.get("shown") or {}).items()):
         where.append(name + " lines " + ", ".join(f"{a}-{b}" for a, b in ranges))
     return f"part {int(call.get('code_index', 0)) + 1} of {count} ({'; '.join(where)})"
-
-
-def request_key(call: dict[str, Any], depends: str, *, asked: list[dict[str, Any]], reader: str, template: str,
-                small_run: str, shown_values: list[float] | None) -> str:
-    """What one request of a reading is a question about: the text of the part (with its line numbers),
-    the study's settings (:func:`part_dependencies`), the plan and the audit's open items it is given, the requirements it must judge (their
-    ids, kinds and words), the note of FI's own small run, the values a reply may not quote, the model that reads and the
-    prompt's text. The findings of the version before (``previous``) are not in it: they ask about places, and a part with
-    the same text holds the same places. The same key gives the same question, so the reading it
-    kept is reused instead of asked again."""
-    body = [call.get("code") or "", depends, call.get("plan") or "", call.get("open_items") or "",
-            [[r.get("id"), r.get("kind"), r.get("text")] for r in asked], small_run, list(shown_values or []), reader, template]
-    return hashlib.sha256(json.dumps(body, default=str, sort_keys=True).encode("utf-8", errors="replace")).hexdigest()
 
 
 def load_reading_cache(quest_root: Path) -> dict[str, Any]:
@@ -1587,6 +1597,42 @@ def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
     return names
 
 
+def untied_dependents(record: dict[str, Any], issue: dict[str, Any], ids: list[str], headline: list[str]) -> list[str]:
+    """The plan's dependent variables an issue is about when it is about nothing else and FI placed none of them on a declared
+    result: every requirement the issue stands for (its stored reading) is a dependent variable the reader called missing, and
+    the name is no declared result's id (``ids``: the metrics and derived results of the frozen plan), equal to none by case and
+    punctuation, and is not the plan's main quantity (``headline``). No tie is made from a prefix or a contained id: a name is
+    placed only by being exactly an id. ``[]`` otherwise."""
+    reqs = _requirements_of(record, issue)
+    if not reqs or not missing_quantities(record, issue):
+        return []
+    declared = {_norm(i) for i in ids} - {""}
+    main = {_norm(h) for h in headline} - {""}
+    names: list[str] = []
+    for v in reqs:
+        name = str(v.get("name") or "").strip()
+        if v.get("kind") != "dependent variable" or v.get("headline") or not _norm(name) or _norm(name) in declared | main:
+            return []
+        names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def unplaced_dependents(design: Any, protocol: Any, contract_only: bool = True) -> list[str]:
+    """The plan's dependent variables (its own free text) that are not exactly a declared result's id (a metric or a derived
+    result of the frozen plan, case and punctuation ignored): FI has not placed them on any declared result. Empty when the
+    plan declares nothing. ``contract_only``: only a frozen plan of the contract form (the plan's model is asked before
+    that form is written, so it passes False)."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    ids = [str(m.get("id")) for key in ("metrics", "derived") for m in (protocol.get(key) if isinstance(protocol.get(key), list) else [])
+           if isinstance(m, dict) and str(m.get("id") or "").strip()]
+    if not ids or (contract_only and protocol.get("form") != "contract"):
+        return []
+    variables = design.get("variables") if isinstance(design, dict) and isinstance(design.get("variables"), dict) else {}
+    dependent = variables.get("dependent") if isinstance(variables.get("dependent"), list) else []
+    declared = {_norm(i) for i in ids}
+    return list(dict.fromkeys(_text(d, 120) for d in dependent if _text(d) and _norm(d) not in declared))
+
+
 def headline_names(design: Any, protocol: Any) -> list[str]:
     """The names of the plan's main quantity: its first dependent variable and the metric its precision target is for."""
     reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
@@ -1652,12 +1698,23 @@ def keys_of_issue(record: dict[str, Any], issue: dict[str, Any], result: Any) ->
 
 def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]:
     """The names of the quantities the plan declares as results: its dependent variables and its metrics (FI's own
-    reading of the plan, :func:`requirements`). With ``derived`` (FI's record of the last run of its analysis,
+    reading of the plan, :func:`requirements`), and the id of each quantity the frozen protocol declares as worked out from
+    the results (``derived``) in a counting role: the name the analysis records it under, whatever words the design used
+    for it. With ``derived`` (FI's record of the last run of its analysis,
     ``data/results/derived.json``), only those that record lists as not worked out (``not_computed``: no trial gave a
     value for it, a function that failed): FI's own fact that the run holds no value for the quantity, never a guess from
     the names of the results."""
     reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
     names = [str(r["name"]) for r in reqs if r.get("kind") in QUANTITY_KINDS and str(r.get("name") or "").strip()]
+    from .numeric_warnings import COUNTING_ROLES
+
+    worked_out = protocol.get("derived") if isinstance(protocol, dict) and isinstance(protocol.get("derived"), list) else []
+    have = {_norm(n) for n in names}
+    for d in worked_out:
+        ident = str(d.get("id") or "").strip() if isinstance(d, dict) else ""
+        if ident and (d.get("role") or "result") in COUNTING_ROLES and _norm(ident) not in have:
+            names.append(ident)
+            have.add(_norm(ident))
     if derived is None:
         return names
     if isinstance(derived, dict) and derived.get("from_earlier_run"):

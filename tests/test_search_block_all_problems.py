@@ -166,13 +166,14 @@ def test_each_problem_names_its_entry_as_written() -> None:
     from core.engine import _entries_as_written
 
     block = _three_problems()
-    _, why = op.normalize(block)
-    shown = _entries_as_written({"optimisation": block}, why)
+    shown = _entries_as_written({"optimisation": block}, op.block_faults(block)[1])
     assert shown.startswith("the entries as written: ") and "other_setting" in shown and '"search": 0' in shown
-    _, one = op.normalize({**RICH, "constraints": [{"quantity": "d", "limit": "bad"}]})
+    one = op.block_faults({**RICH, "constraints": [{"quantity": "d", "limit": "bad"}]})[1]
     one_shown = _entries_as_written({"optimisation": {**RICH, "constraints": [{"quantity": "d", "limit": "bad"}]}}, one)
     assert one_shown.startswith("the entry as written: ")
-    assert _entries_as_written({}, one, you=True) == ""
+    assert _entries_as_written({}, one, you=True) == 'the entry as you wrote it: {"quantity": "d", "limit": "bad"}', (
+        "a fault carries its entry as written, so it is quoted even where the protocol is not at hand")
+    assert _entries_as_written({}, [], you=True) == ""
 
 
 @pytest.mark.asyncio
@@ -194,9 +195,9 @@ async def test_the_model_is_sent_every_problem_in_the_next_request(tmp_path: Pat
     eng, asked, _paused = _setup(tmp_path, [reply] * 6)
     design, sha = eng._design_from_plan()
     await eng._ask_plan_for_the_search(STATE, design, sha)
-    refused = [a for a in asked if "Your last answer was not used" in a]
-    assert refused, "the second request quotes the refusal"
-    tail = refused[0].split("Your last answer was not used. The reason, exactly:", 1)[1]
+    refused = [a for a in asked if "only these parts of it could not be read" in a]
+    assert len(refused) >= 2, "the second request names every faulted path of the block the first answer wrote"
+    tail = refused[1].split("only these parts of it could not be read", 1)[1]
     assert "constraints` entry 1" in tail and "numerical_settings` `m`" in tail and ".grid` scans `w`" in tail
     record = json.loads((eng.fi_dir / "search_block_asked.json").read_text(encoding="utf-8"))
     assert record["problem"].count("And also:") == 2, "all three problems are kept to be sent, none cut off"

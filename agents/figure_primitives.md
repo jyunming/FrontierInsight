@@ -28,4 +28,6 @@ Use `fig.raw(panel)` (the real axes) only for a drawing none of these calls can 
 
 When panels show different settings, say which on each: `fig.panel(0, m=200)` (the panel's place in `fig.axes`, then the setting and its value). FI writes that panel's title from it (`m = 200`); do not type a title for such a panel.
 
+FI names a line by its result only when every point is the table's value at exactly the settings the reader sees: the x, the curve's level (with a `series` setting) and the settings the panel holds (`fig.panel`). A line that shows one value of another setting that varies says which: hold that value on the panel with `fig.panel`, or draw one curve per value with the figure's `series` setting. Otherwise FI names the line neutrally and states no value from it.
+
 Never type text into a figure: no title, no axis label, no legend, no number written as a string. FI writes them from the plan and from the table.

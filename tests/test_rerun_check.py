@@ -290,6 +290,81 @@ def test_only_the_analysis_is_run_again_when_only_the_analysis_changed(tmp_path:
     assert got.mode == "analysis only" and got.status == "changed" and got.metrics == ["est"]
 
 
+# ---- an older study names its own result file (not derived.json) -----------------------------------------------------------------------------
+def _delivered_as(root: Path, name: str) -> None:
+    """A delivered study whose results are in ``data/results/<name>`` (no ``derived.json``), as older studies left them."""
+    _delivered(root, 1.0)
+    results = root / "data" / "results"
+    (results / "derived.json").rename(results / name)
+    run = root / "code" / "run.py"
+    run.write_text(run.read_text(encoding="utf-8").replace("derived.json", name), encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(
+        "import json, os\nfrom pathlib import Path\nt = json.load(open(os.environ['FI_TRIALS']))\n"
+        "Path('data/results').mkdir(parents=True, exist_ok=True)\n"
+        f"Path('data/results/{name}').write_text(json.dumps({{'derived': {{'est': {{'by_setting': {{'s': 4.5}}}}}}}}))\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["result.json", "results.json"])
+def test_a_rerun_of_a_study_that_wrote_its_own_result_file_is_read_from_that_file(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "quest"
+    _delivered_as(root, name)
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8") + "\n# a comment\n", encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.mode == "whole study" and got.status == "unchanged", got.why
+    assert "wrote no results" not in got.why
+
+
+@pytest.mark.parametrize("name", ["result.json", "results.json"])
+def test_an_analysis_only_rerun_of_a_study_that_wrote_its_own_result_file_is_read_too(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "quest"
+    _delivered_as(root, name)
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "experiment.py").write_text((copy / "experiment.py").read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.mode == "analysis only" and got.status == "unchanged", got.why
+
+
+def test_a_study_that_wrote_no_result_file_at_all_still_reports_that(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    _delivered_as(root, "result.json")
+    run = root / "code" / "run.py"
+    # the repaired study runs to the end and writes its trials, but none of the result files the delivered run had
+    nothing = run.read_text(encoding="utf-8").replace("sys.exit(1)", "sys.exit(0)").replace("(out / \"data\" / \"results\" / \"result.json\")",
+                                                                                           "(out / \"data\" / \"results\" / \"other.txt\")")
+    run.write_text(nothing, encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8") + "\n# a comment\n", encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.status == "could_not" and "wrote no results" in got.why
+
+
+def test_a_study_with_a_derived_record_is_still_read_from_that_record_alone(tmp_path: Path) -> None:
+    """The analysis frame's record (derived.json) is what a frame study's numbers are read from: a rerun that wrote another
+    result file but not that record wrote no results."""
+    root = tmp_path / "quest"
+    _delivered(root, 1.0)
+    run = root / "code" / "run.py"
+    run.write_text(run.read_text(encoding="utf-8").replace("derived.json", "elsewhere.json").replace("sys.exit(1)", "sys.exit(0)"),
+                   encoding="utf-8")
+    (root / "data" / "results" / "elsewhere.json").write_text(json.dumps({"x": 1.0}), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text((copy / "run.py").read_text(encoding="utf-8") + "\n# a comment\n", encoding="utf-8")
+    got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None))
+    assert got.status == "could_not" and "wrote no results" in got.why
+
+
+def test_the_files_a_delivered_run_is_read_from_are_the_record_when_there_is_one_else_its_result_files(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "data" / "results").mkdir(parents=True)
+    assert rerun_check.result_names(root) == ["data/results/derived.json"]  # nothing delivered: the frame's own name
+    (root / "data" / "results" / "results.json").write_text("{}", encoding="utf-8")
+    (root / "data" / "results" / "extra.json").write_text("{}", encoding="utf-8")
+    assert rerun_check.result_names(root) == ["data/results/extra.json", "data/results/results.json"]
+    (root / "data" / "results" / "derived.json").write_text("{}", encoding="utf-8")
+    assert rerun_check.result_names(root) == ["data/results/derived.json"]
+
+
 # ---- what the gate does with the answer --------------------------------------------------------------------------------------------------
 def _gate(tmp_path: Path, verdict: Verdict | None, *, headline: tuple[str, ...], test: str, quantity: str = "cover",
           function: str = "") -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -458,6 +533,192 @@ def test_a_repair_is_run_only_when_the_findings_own_test_passes_on_it(tmp_path: 
     engine._ask_repair_on_copy = ask_fixed  # type: ignore[method-assign,assignment]
     record["rerun_calls"] = 0
     assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
+
+
+SIM_BREAKS_CONTRACT = "def run_cell(cell):\n    return {'q': {'wrong_key': 1.0}}\n"
+SIM_KEEPS_CONTRACT = "def run_cell(cell):\n    return {'q': 1.0}\n"
+
+
+def test_a_repair_the_small_run_refuses_is_never_run_and_goes_back_once_with_the_reason(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_checks
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    judged: list[Any] = []
+    asked: list[str] = []
+    reason = "run_cell() returned `q` with the key 'wrong_key', which is not one of the values the run was given: key it `c=1`"
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(a)
+        return Verdict("unchanged")
+
+    async def refusal(quest_root: Path, protocol: Any, **k: Any) -> str:
+        return reason if "wrong_key" in (Path(quest_root) / "code" / "simulate.py").read_text(encoding="utf-8") else ""
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        return {"simulate.py": SIM_BREAKS_CONTRACT}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    # refused twice: the study is never run, the model is asked once more with the contract's own reason, and the answer is could_not
+    assert got.status == "could_not" and got.crashed and reason in got.why and judged == []
+    assert len(asked) == 2 and asked[0] == "" and reason in asked[1]
+
+    # a repair that keeps the contract is run as before
+    async def ask_good(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "\n# repaired\n"}
+
+    engine._ask_repair_on_copy = ask_good  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
+
+
+def test_a_small_run_that_fails_on_the_code_as_it_is_too_refuses_nothing_of_the_repair(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_checks
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    judged: list[Any] = []
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(a)
+        return Verdict("unchanged")
+
+    async def refusal(quest_root: Path, protocol: Any, **k: Any) -> str:
+        return "a file of the quest outside code/ is not in the copy"  # the same for any code run in a copy
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "# repaired" + chr(10)}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    assert asyncio.run(engine._rerun_one(issue, record, {}, {})).status == "unchanged" and len(judged) == 1
+
+
+class _LocalRun:
+    """Runs a command for real (FI's small run and the study's own run.py), with this interpreter."""
+
+    async def execute(self, cmd: list[str], *, cwd: Any, timeout_s: int, env: dict[str, str] | None = None) -> Any:
+        import os
+
+        done = await asyncio.to_thread(subprocess.run, cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s,
+                                       env={**os.environ, **(env or {})})
+        return SimpleNamespace(returncode=done.returncode, stdout=done.stdout, stderr=done.stderr, timed_out=False)
+
+    def python_path(self, _root: Any) -> Path:
+        return Path(sys.executable)
+
+
+SIM_TRIAL = "def run_trial(cell, trial, seed):\n    return {'y': 1.0 + 0.0 * trial}\n"
+EXP_WRITES = ("import json, os\nos.makedirs('data/results', exist_ok=True)\n"
+              "json.dump({'derived': {'y_mean': {'status': 'ok', 'value': 1.0}}}, open('data/results/derived.json', 'w'))\n")
+
+
+def test_the_real_small_run_of_a_repair_leaves_the_copy_as_the_studys_own_run_reads_it(tmp_path: Path) -> None:
+    """The small run of a repaired simulation is made in a folder of its own: FI's small-run files beside the copy's code/
+    would make the copy's run.py write to ../run_output, and a working repair would be judged as writing no results."""
+    engine, root, _issue, _record = _engine_with_code(tmp_path)
+    (root / "code" / "simulate.py").write_text(SIM_TRIAL, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(EXP_WRITES, encoding="utf-8")
+    (root / "code" / "run.py").write_text(code_project.RUN_SOURCE, encoding="utf-8")
+    (root / "code" / "study.json").write_text(json.dumps({"entry": "run_trial", "grid": {}, "runs_per_setting": 2}),
+                                              encoding="utf-8")
+    engine.executor = _LocalRun()  # type: ignore[assignment]
+    copy_dir = rerun_check.copy_code(root, tmp_path / "a0")
+    (copy_dir / "simulate.py").write_text(SIM_TRIAL.replace("1.0 +", "2.0 +"), encoding="utf-8")  # the repair keeps the contract
+    assert asyncio.run(engine._repair_small_run_refusal(copy_dir, {}, {})) == ""
+    assert not (copy_dir.parent / ".fi").exists(), "the small run wrote beside the copy's code/"
+    mode, out, why, _secs, crashed = asyncio.run(rerun_check.run_copy(
+        _LocalRun(), sys.executable, root, copy_dir, ["simulate.py"], 60, None, tmp_path / "w0"))
+    assert (mode, why, crashed) == ("whole study", "", False) and out == copy_dir / "output"
+
+    # known positive: the same real small run still refuses a repair whose every trial fails, and still leaves nothing beside it
+    broken = rerun_check.copy_code(root, tmp_path / "a1")
+    (broken / "simulate.py").write_text("def run_trial(cell, trial, seed):\n    raise ValueError('broken')\n", encoding="utf-8")
+    refused = asyncio.run(engine._repair_small_run_refusal(broken, {}, {}))
+    assert "trials failed" in refused and "ValueError" in refused
+    assert not (broken.parent / ".fi").exists()
+
+
+def test_no_small_run_is_started_when_the_time_of_the_check_is_spent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import code_checks
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    small: list[int] = []
+
+    async def refusal(*a: Any, **k: Any) -> str:
+        small.append(1)
+        return ""
+
+    async def ask(*a: Any, **k: Any) -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "# repaired" + chr(10)}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}, [5.0]))
+    assert got.status == "could_not" and "spent" in got.why and small == []
+
+
+def test_a_failed_call_for_a_rerun_repair_gives_its_request_back_and_no_answer_is_kept(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import finding_repair as fr
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    asked: list[str] = []
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        raise fr.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    assert got.status == "could_not" and got.mode == "not_asked" and got.why.startswith("not asked")
+    assert record["rerun_calls"] == 0 and asked == [""]
+    # the gate keeps no answer for this version of the code: its next pass asks again
+    out = asyncio.run(type(engine)._rerun_shown(engine, [(record["issues"]["F-1"], "shown")], record, {}))
+    assert out["F-1"].mode == "not_asked" and "rerun" not in record["issues"]["F-1"]
+
+
+def test_a_rerun_repair_that_gave_no_usable_file_is_one_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    asked: list[str] = []
+
+    async def ask(issue: Any, rel: str, copy_dir: Path, protocol: Any, state: Any, problem: str = "") -> dict[str, str]:
+        asked.append(problem)
+        return {}
+
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    record["rerun_calls"] = 0
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
+    # a reply that could not be placed is asked for once more inside the request (core/finding_repair.py), not again here
+    assert got.status == "could_not" and got.why == "no repair of it could be written"
+    assert asked == [""] and record["rerun_calls"] == 1
 
 
 def test_nothing_is_run_when_the_time_of_the_check_is_spent_and_no_request_is_spent_in_docker(
@@ -1011,3 +1272,181 @@ def test_a_run_that_stops_early_forgets_the_writers_of_the_files_it_changed(tmp_
             w.mark(step_writes.SIMULATION)
             raise RuntimeError
     assert step_writes.read(root) == {}
+
+
+# ---- a rerun that takes long says where it is in run.log ---------------------------------------------------------------------------
+def _slow_quest(tmp_path: Path, qid: str) -> tuple[Path, Path]:
+    """A quest folder whose study has three settings that take about a second each, and a copy of its code with one file changed."""
+    root = tmp_path / qid
+    code = root / "code"
+    code.mkdir(parents=True)
+    (code / "run.py").write_text(code_project.RUN_SOURCE, encoding="utf-8")
+    (code / "study.json").write_text(json.dumps({"entry": "run_cell", "grid": {"a": [1, 2, 3]}, "runs_per_setting": 1}), encoding="utf-8")
+    (code / "simulate.py").write_text("import time\n\n\ndef run_cell(cell):\n    time.sleep(1.0)\n    return {'est': float(cell['a'])}\n",
+                                      encoding="utf-8")
+    (code / "experiment.py").write_text("import json, pathlib\np = pathlib.Path('data/results')\np.mkdir(parents=True, exist_ok=True)\n"
+                                        "(p / 'derived.json').write_text(json.dumps({'derived': {'est': {'by_setting': {'x': 1.0}}}}))\n",
+                                        encoding="utf-8")
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": []}), encoding="utf-8")
+    (root / "data" / "results").mkdir(parents=True)
+    (root / "data" / "results" / "derived.json").write_text(json.dumps({"derived": {"est": {"by_setting": {"x": 1.0}}}}), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "simulate.py").write_text((copy / "simulate.py").read_text(encoding="utf-8") + "\n# repaired\n", encoding="utf-8")
+    return root, copy
+
+
+def test_a_long_rerun_says_in_run_log_which_finding_it_is_and_how_far_it_has_got(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import _close_quest_logger, _quest_logger
+
+    qid = "q_progress"
+    root, copy = _slow_quest(tmp_path, qid)
+    monkeypatch.setattr(rerun_check, "PROGRESS_EVERY_S", 1.2)
+    _quest_logger(qid, root / ".fi")
+    try:
+        asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 120, None, source="a repair", finding="F-9"))
+    finally:
+        _close_quest_logger(qid)
+    text = (root / ".fi" / "run.log").read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if "rerun of finding F-9" in ln]
+    assert lines, text
+    assert any("of 3 settings done" in ln for ln in lines), lines
+    print("\n".join(lines))
+
+
+# ---- a result given at another grain of settings ------------------------------------------------------------------------------------
+GRID_KEYS = ["a=1,b=1", "a=1,b=2", "a=2,b=1", "a=2,b=2"]
+
+
+def _grain_quest(tmp_path: Path, delivered: dict[str, Any], repaired: dict[str, Any], grid: list[str] = GRID_KEYS) -> tuple[Path, Path]:
+    """A quest whose analysis delivered ``delivered`` (derived.json's ``derived``) over the settings ``grid``; the copy's study
+    writes ``repaired`` instead."""
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    cells = [{"key": k, "ok": 2, "failed": 0, "metrics": {}} for k in grid]
+
+    def run_py(doc: dict[str, Any]) -> str:
+        return ("import json\nfrom pathlib import Path\nout = Path('output')\n(out / 'raw').mkdir(parents=True, exist_ok=True)\n"
+                "(out / 'data' / 'results').mkdir(parents=True, exist_ok=True)\n"
+                f"(out / 'raw' / 'trials.json').write_text(json.dumps({{'cells': {cells!r}}}))\n"
+                f"(out / 'data' / 'results' / 'derived.json').write_text(json.dumps({{'derived': {doc!r}}}))\n")
+
+    (root / "code" / "run.py").write_text(run_py(delivered), encoding="utf-8")
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (root / "data" / "results").mkdir(parents=True)
+    (root / "data" / "results" / "derived.json").write_text(json.dumps({"derived": delivered}), encoding="utf-8")
+    copy = rerun_check.copy_code(root, tmp_path / "w")
+    (copy / "run.py").write_text(run_py(repaired), encoding="utf-8")
+    return root, copy
+
+
+def _grain_judge(tmp_path: Path, delivered: dict[str, Any], repaired: dict[str, Any], disputed: list[str] | None = None,
+                 grid: list[str] = GRID_KEYS) -> Verdict:
+    root, copy = _grain_quest(tmp_path, delivered, repaired, grid)
+    return asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None, disputed=disputed))
+
+
+def _per_a(scale: float = 1.0, *, keys: list[str] = GRID_KEYS) -> dict[str, float]:
+    return {k: scale * float(k.split(",")[0].split("=")[1]) for k in keys}
+
+
+def test_the_same_numbers_given_once_per_coarser_setting_are_unchanged(tmp_path: Path) -> None:
+    # delivered once per (a, b), the repair gives the same number once per a: every delivered number maps to one repaired number
+    delivered = {"est": {"status": "ok", "by_setting": _per_a()}}
+    repaired = {"est": {"status": "ok", "by_setting": {"a=1": 1.0, "a=2": 2.0}}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "unchanged", got
+    assert _grain_judge(tmp_path / "plain", delivered, repaired).status == "unchanged"
+
+
+def test_a_number_given_once_and_given_at_every_setting_with_the_same_value_is_unchanged(tmp_path: Path) -> None:
+    delivered = {"est": {"status": "ok", "value": 3.0}}
+    repaired = {"est": {"status": "ok", "by_setting": {k: 3.0 for k in GRID_KEYS}}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "unchanged", got
+
+
+def test_a_number_that_moved_at_another_grain_is_changed(tmp_path: Path) -> None:
+    delivered = {"est": {"status": "ok", "by_setting": _per_a()}}
+    repaired = {"est": {"status": "ok", "by_setting": {"a=1": 1.01, "a=2": 2.0}}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "changed" and got.metrics == ["est"], got
+    # one real move at one setting of the same grain stays changed as before
+    moved = {"est": {"status": "ok", "by_setting": {**_per_a(), "a=2,b=2": 2.5}}}
+    assert _grain_judge(tmp_path / "same", delivered, moved, disputed=["est"]).status == "changed"
+
+
+def test_a_number_given_for_only_some_settings_has_no_number_for_the_rest(tmp_path: Path) -> None:
+    delivered = {"est": {"status": "ok", "value": 3.0}}
+    repaired = {"est": {"status": "ok", "by_setting": {"a=1,b=1": 3.0}}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "could_not" and "no number" in got.why, got
+
+
+def test_an_extra_repaired_setting_with_another_value_is_a_change(tmp_path: Path) -> None:
+    # every setting of the frozen grid holds the delivered value, and a setting the grid does not hold differs: it is compared too
+    delivered = {"est": {"status": "ok", "value": 3.0}}
+    repaired = {"est": {"status": "ok", "by_setting": {**{k: 3.0 for k in GRID_KEYS}, "a=3,b=1": 4.0}}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "changed" and got.metrics == ["est"], got
+
+
+def test_a_finer_repaired_grain_maps_each_delivered_number_to_every_cell_it_covers(tmp_path: Path) -> None:
+    grid = [f"a={a},b={b},c={c}" for a in (1, 2) for b in (1, 2) for c in (1, 2)]
+    delivered = {"est": {"status": "ok", "by_setting": {"a=1": 1.0, "a=2": 2.0}}}
+    same = {"est": {"status": "ok", "by_setting": {f"a={a},b={b}": float(a) for a in (1, 2) for b in (1, 2)}}}
+    assert _grain_judge(tmp_path / "s", delivered, same, disputed=["est"], grid=grid).status == "unchanged"
+    one_moved = {"est": {"status": "ok", "by_setting": {**same["est"]["by_setting"], "a=2,b=2": 2.2}}}
+    assert _grain_judge(tmp_path / "m", delivered, one_moved, disputed=["est"], grid=grid).status == "changed"
+    missing = {"est": {"status": "ok", "by_setting": {"a=1,b=1": 1.0, "a=1,b=2": 1.0, "a=2,b=1": 2.0}}}
+    assert _grain_judge(tmp_path / "x", delivered, missing, disputed=["est"], grid=grid).status == "could_not"
+
+
+@pytest.mark.parametrize("repaired", [
+    {"est": {"status": "ok", "by_setting": {"c=1": 1.0, "c=2": 2.0}}},  # setting names unrelated to the delivered ones
+    {"est": {"status": "ok", "by_setting": {"a=1": 1.0, "a=2,b=1": 2.0, "a=2,b=2": 2.0}}},  # two grains in one record
+    {"est": {"status": "ok", "by_setting": {"a=1": 1.0, "a=2;b": 2.0}}},  # a key FI cannot read as a setting
+    {"est": {"status": "ok", "by_setting": {"a=1": 1.0, "a=2=b": 2.0}}},  # a part with two '='
+    {"est": {"status": "ok", "value": 1.5, "by_setting": {"a=1": 1.0, "a=2": 2.0}}},  # a value and settings at once
+    {"est": {"status": "not_computed", "by_setting": {"a=1": 1.0, "a=2": 2.0}}},  # the repaired record says it is not obtained
+])
+def test_a_grain_fi_cannot_map_stays_no_number(tmp_path: Path, repaired: dict[str, Any]) -> None:
+    delivered = {"est": {"status": "ok", "by_setting": _per_a()}}
+    got = _grain_judge(tmp_path, delivered, repaired, disputed=["est"])
+    assert got.status == "could_not" and "no number" in got.why, got
+
+
+def test_the_regrained_numbers_are_read_from_fis_own_record_only() -> None:
+    base = {"derived": {"est": {"status": "ok", "value": 3.0}, "other": {"status": "ok", "by_setting": {"a=1": 1.0}}}}
+    new = {"derived": {"est": {"status": "ok", "by_setting": {"a=1": 3.0, "a=2": 3.5}}, "other": {"status": "ok", "by_setting": {"a=1": 1.0}}}}
+    got = rerun_check.regrained(base, new, [{"a": "1"}, {"a": "2"}])
+    # the number given once is compared with the cell farthest from it; a result at the same grain is left to the plain compare
+    assert got == {"derived/derived/est": 3.5}
+    assert rerun_check.regrained(base, new, None) == {}  # no record of the settings: a finer grain cannot be checked
+    assert rerun_check.setting_of("a=1,b=[1;2]") == {"a": "1", "b": "[1;2]"}
+    assert rerun_check.setting_of("a=1,,b=2") is None and rerun_check.setting_of("a=1,a=2") is None
+
+
+def test_the_code_a_rerun_ran_is_kept_in_the_quests_own_history(tmp_path: Path) -> None:
+    delivered = {"est": {"status": "ok", "value": 3.0}}
+    repaired = {"est": {"status": "ok", "by_setting": {k: 3.0 for k in GRID_KEYS}}}
+    root, copy = _grain_quest(tmp_path, delivered, repaired)
+    code = root / "code"
+    _git(code, "init", "-q")
+    _git(code, "add", "-A")
+    _git(code, "commit", "-q", "-m", "start")
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", *args], cwd=code, capture_output=True, text=True).stdout
+
+    head = git("rev-parse", "HEAD").strip()
+    for _ in range(2):
+        got = asyncio.run(rerun_check.judge(_Local(), sys.executable, root, copy, PROTOCOL, 60, None, finding="F-1"))
+        assert got.status == "unchanged"
+    assert git("for-each-ref", "--format=%(refname)", "refs/fi/").split() == ["refs/fi/rerun/F-1", "refs/fi/rerun/F-1-2"]
+    assert git("show", "refs/fi/rerun/F-1:run.py") == (copy / "run.py").read_text(encoding="utf-8")
+    assert json.loads(git("show", "refs/fi/rerun/F-1:.fi_rerun/verdict.json"))["status"] == "unchanged"
+    assert json.loads(git("show", "refs/fi/rerun/F-1:.fi_rerun/derived.json"))["derived"]["est"]["by_setting"]["a=1,b=1"] == 3.0
+    # the branch, the index and the working folder are untouched
+    assert git("rev-parse", "HEAD").strip() == head and git("status", "--porcelain").strip() == ""

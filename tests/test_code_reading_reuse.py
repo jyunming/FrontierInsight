@@ -65,7 +65,7 @@ async def test_a_part_is_reused_when_only_a_function_it_calls_in_another_part_ch
 
 
 @pytest.mark.asyncio
-async def test_a_changed_settings_file_is_read_again_by_every_part(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_changed_settings_file_is_read_again_only_by_the_request_that_shows_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _engine(tmp_path)
     _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": CALLER, "study.json": '{"a": 1}\n'})
     monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 600)
@@ -76,7 +76,7 @@ async def test_a_changed_settings_file_is_read_again_by_every_part(tmp_path: Pat
     (engine.quest_root / "code" / "study.json").write_text('{"a": 2}\n', encoding="utf-8")
     reader.prompts.clear()
     await engine._code_review_gate(WITH_PLAN)
-    assert n >= 2 and len(reader.prompts) == n, "the settings file is in every part's key"
+    assert n >= 2 and len(reader.prompts) == 1, "only the request that shows the settings file is a new question"
 
 
 @pytest.mark.asyncio
@@ -102,14 +102,21 @@ async def test_a_changed_plan_is_a_new_question_so_nothing_is_reused(tmp_path: P
     assert len(reader.prompts) == 2
 
 
-def test_what_a_part_depends_on_is_the_settings_file_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 600)
-    _write(tmp_path, {"simulate.py": SIM, "experiment.py": CALLER, "study.json": '{"a": 1}\n'})
-    base = cr.part_dependencies(tmp_path, cr.reading_calls(tmp_path, None, None))
-    (tmp_path / "simulate.py").write_text(SIM.replace("1.0", "2.0"), encoding="utf-8")
-    assert cr.part_dependencies(tmp_path, cr.reading_calls(tmp_path, None, None)) == base, "a callee is not in the key"
-    (tmp_path / "study.json").write_text('{"a": 2}\n', encoding="utf-8")
-    assert cr.part_dependencies(tmp_path, cr.reading_calls(tmp_path, None, None))[1] != base[1]
+@pytest.mark.asyncio
+async def test_a_reply_is_kept_under_the_text_sent_and_the_model_and_the_same_text_is_not_asked_again(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache holds the raw reply under the exact text sent: the same text to the same model is not asked again, and what is
+    kept is read again with today's rules."""
+    from core import reuse_key
+
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    kept = cr.load_reading_cache(engine.quest_root)
+    assert kept and all(isinstance(v, dict) and isinstance(v.get("reply"), str) for v in kept.values())
+    assert all(len(k) == 64 for k in kept) and reuse_key.answer_key("a", "m") != reuse_key.answer_key("a", "n")
+    assert reuse_key.answer_key("a", "m") != reuse_key.answer_key("b", "m")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert reader.prompts == [], "the same text to the same model is not asked again"
 
 
 @pytest.mark.asyncio
@@ -183,3 +190,15 @@ def test_the_quality_report_names_the_parts_of_the_code_that_were_not_read(tmp_p
         "parts_not_read": ["part 2 of 2 (experiment.py lines 1-24)"]}), encoding="utf-8")
     text = qr.render(qr.build(root))
     assert "not read by a second model." in text and "part 2 of 2 (experiment.py lines 1-24)" in text
+
+
+@pytest.mark.asyncio
+async def test_a_part_is_asked_again_when_the_findings_of_the_version_before_it_is_shown_changed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The earlier findings are part of the text the reader is sent, so a new one is a new question (the old key left them out)."""
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    (engine.quest_root / "code" / "experiment.py").write_text(CALLER + "other = 3"+chr(92)+"n", encoding="utf-8")
+    monkeypatch.setattr(cr, "earlier_block", lambda previous: "- L1 an earlier finding about simulate.py line 2")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert len(reader.prompts) == 2 and all("an earlier finding" in p for p in reader.prompts)

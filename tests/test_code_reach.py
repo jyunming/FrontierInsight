@@ -122,7 +122,8 @@ def test_a_computed_name_in_a_study_file_still_means_fi_cannot_tell_even_in_fi_s
 
 def test_a_study_module_called_like_one_of_fi_s_files_is_not_fi_s(tmp_path: Path) -> None:
     code = _frame_quest(tmp_path, "def dose():\n    return 1.0\n", MODEL_NESTED)
-    (code / "fi_table.py").write_text("def read(obj, n):\n    return getattr(obj, n)\n", encoding="utf-8")
+    # a function FI's analysis calls on its table module (``fi_table.load``), here the study's own
+    (code / "fi_table.py").write_text("def load(obj, n):\n    return getattr(obj, n)\n", encoding="utf-8")
     assert code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py") is None
 
 
@@ -218,3 +219,88 @@ def test_a_computed_key_into_globals_still_means_fi_cannot_tell(tmp_path: Path) 
         files["pkg/model.py"] = "def fit(a, name='x'):" + chr(10) + "    " + body + chr(10)
         code = _code(tmp_path / f"case{i}", files)
         assert code_reach.reached(code, scripts=[], start=[("trial.py", "run")]) is None, body
+
+
+# ---- an attribute of FI's own objects read in FI's own files ------------------------------------------------------------------------
+TRIAL_STUDY = ("from pkg.model import helper\n\n\ndef trial(cell, ctx):\n    return {'x': helper(cell)}\n\n\n"
+               "def run_trial(cell, trial_id, seed):\n    return trial(cell, None)\n")
+FIGURE_DERIVE = "def figure_f1(table, fig):\n    fig.line([1.0], [2.0])\n    return fig\n\n\ndef derive_x(table):\n    return 1.0\n"
+
+
+def _trial_quest(tmp_path: Path, model: str = "def helper(cell):\n    return 1.0\n") -> Path:
+    code = _frame_quest(tmp_path, FIGURE_DERIVE, model)
+    (code / "simulate.py").write_text(TRIAL_STUDY, encoding="utf-8")
+    return code
+
+
+def test_an_attribute_fi_s_own_classes_define_does_not_reach_the_study_function_of_that_name(tmp_path: Path) -> None:
+    # FI's frame reads ``ctx.trial`` (the trial's number); the study has a function ``trial``: a figure's function reaches FI's
+    # figure code, which reads ctx.trial, and must not reach the study's trial and its helpers through that name
+    code = _trial_quest(tmp_path)
+    from_figure = code_reach.reached(code, scripts=[], start=[("derive.py", "figure_f1")])
+    assert from_figure is not None
+    assert ("simulate.py", "trial") not in from_figure and ("pkg/model.py", "helper") not in from_figure
+    # the run still reaches them: FI's harness calls run_trial, which calls trial
+    run = code_reach.reached(code, scripts=["experiment.py"], harness="simulate.py")
+    assert run is not None and {("simulate.py", "trial"), ("pkg/model.py", "helper")} <= run
+
+
+def test_the_names_fi_s_classes_define_are_read_from_fi_s_own_text(tmp_path: Path) -> None:
+    import ast as _ast
+
+    from core import skeleton
+
+    mod = code_reach._Module("fi_frame.py", _ast.parse(skeleton.RUNTIME))
+    attrs, classes = code_reach._fis_names([mod])
+    assert {"trial", "seed", "results"} <= attrs and "Ctx" in classes
+    assert "helper" not in attrs
+
+
+STUDY_OBJECT = ("class Model:\n    def trial(self, cell):\n        return 1.0\n\n    def results(self, cell):\n        return 2.0\n\n\n"
+                "def make():\n    return Model()\n")
+FI_EXTRA = {
+    "typed": "def _typed(cell):\n    import pkg.model as study\n    box = study.Model()\n    return box.trial(cell)\n",
+    "made": "def _made(cell):\n    from pkg.model import make\n    box = make()\n    return box.results(cell)\n",
+    "imported": "from pkg.model import Model as _Study\n\n\ndef _imported(cell):\n    return _Study.results(None, cell)\n",
+    "fi_own": "def _fi_own(cell):\n    c = Ctx(seed=1, trial=0)\n    return c.trial\n",
+    "untyped": "def _untyped(obj, cell):\n    return obj.results(cell)\n",
+    "other": "def _other(obj):\n    return obj.make()\n",
+}
+
+
+def _with_fi_function(tmp_path: Path, which: str) -> set[tuple[str, str]]:
+    """What the run reaches when FI's own frame file holds one more function (FI's own computed getattr reaches every
+    function of FI's files, so the quest holds one such function at a time)."""
+    code = _trial_quest(tmp_path / which, "def helper(cell):\n    return 1.0\n\n\n" + STUDY_OBJECT)
+    (code / "fi_frame.py").write_text((code / "fi_frame.py").read_text(encoding="utf-8") + "\n\n" + FI_EXTRA[which],
+                                      encoding="utf-8")
+    assert "fi_frame.py" in code_reach._fis_files(code, ["fi_frame.py"])  # still FI's file with the extra function
+    done = code_reach.reached(code, scripts=[], start=[("fi_frame.py", "_" + which)])
+    assert done is not None
+    return done
+
+
+def test_a_study_object_whose_type_the_code_fixes_is_still_followed_in_fi_s_files(tmp_path: Path) -> None:
+    # an object bound from a study class or from any call that is not FI's class, or a name imported from a study module:
+    # any function of that name, as before
+    assert ("pkg/model.py", "trial") in _with_fi_function(tmp_path, "typed")
+    assert ("pkg/model.py", "results") in _with_fi_function(tmp_path, "made")
+    assert ("pkg/model.py", "results") in _with_fi_function(tmp_path, "imported")
+    # an object bound from FI's own class: FI's functions only
+    own = _with_fi_function(tmp_path, "fi_own")
+    assert ("simulate.py", "trial") not in own and ("pkg/model.py", "trial") not in own
+
+
+def test_the_limit_an_object_of_unknown_type_is_judged_by_the_attribute_name(tmp_path: Path) -> None:
+    # Said plainly in core/code_reach.py: a parameter's type is not fixed by the code, so a study object handed to FI's code as
+    # a parameter whose method shares a name with an attribute of FI's classes (``results``) is not followed by that read.
+    assert ("pkg/model.py", "results") not in _with_fi_function(tmp_path, "untyped")
+    # a name FI's classes do not define is followed on any object, as before
+    assert ("pkg/model.py", "make") in _with_fi_function(tmp_path, "other")
+
+
+def test_in_a_study_file_an_attribute_still_reaches_any_function_of_that_name(tmp_path: Path) -> None:
+    code = _trial_quest(tmp_path)
+    (code / "pkg" / "runner.py").write_text("def go(ctx):\n    return ctx.trial\n", encoding="utf-8")
+    got = code_reach.reached(code, scripts=[], start=[("pkg/runner.py", "go")])
+    assert got is not None and ("simulate.py", "trial") in got

@@ -251,6 +251,40 @@ def test_a_kept_answer_is_reused_only_when_it_was_made_the_same_way(tmp_path) ->
     assert cr.version(root / "code")
 
 
+def test_a_kept_answer_follows_every_file_of_the_study_and_only_a_measured_one_is_kept(tmp_path) -> None:
+    from core.engine import Engine
+
+    engine = _engine(tmp_path)
+    root = _quest(engine)
+    ran: list[str] = []
+    status = ["unchanged"]
+
+    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False) -> Verdict:
+        ran.append(status[0])
+        return Verdict(status[0])
+
+    engine._rerun_one = one  # type: ignore[method-assign,assignment]
+    record = {"issues": {"F-9": dict(ISSUE)}}
+    plain = {**ISSUE, "id": "F-9"}
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged"], "the same files: reused"
+    (root / "inputs").mkdir(exist_ok=True)
+    (root / "inputs" / "table.csv").write_text("a\n1\n", encoding="utf-8")  # the person's file: the old key never saw it
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged", "unchanged"], "a changed inputs/ file asks again"
+    (root / "inputs" / "table.csv").write_text("a\n2\n", encoding="utf-8")
+    (root / "data" / "results").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "results" / "derived.json").write_text("{}", encoding="utf-8")  # what the study delivered: the comparison's base
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged"] * 3, "a changed delivered record asks again"
+    (root / "data" / "results" / "derived.json").write_text('{"a": 1}', encoding="utf-8")
+    status[0] = "could_not"
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    asyncio.run(Engine._rerun_shown(engine, [(plain, "")], record, {}))
+    assert ran == ["unchanged"] * 3 + ["could_not", "could_not"], "a could-not answer is never reused"
+
+
 def test_without_records_every_changed_number_is_left_out_and_the_headline_still_stops(tmp_path, monkeypatch) -> None:
     calls: list[Any] = []
     engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover", "corr_ab"]), calls=calls)
@@ -271,3 +305,50 @@ def test_a_changed_number_no_result_owns_is_also_placed_by_what_the_finding_reac
     engine, record = _setup(tmp_path / "b", monkeypatch, shown=True, verdict=Verdict("changed", metrics=["cover"]), calls=calls2)
     assert _measure(engine, record, ["est_a"]) is None  # nothing unplaced: only what the changed number reaches
     assert "corr_ab" not in _rc(engine.quest_root)["removed_quantities"]
+
+
+def test_a_test_request_that_could_not_be_made_is_undecided_never_not_shown(tmp_path, monkeypatch) -> None:
+    from core import finding_repair
+
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=False, verdict=None, calls=calls)
+
+    async def not_asked(issue: Any, record: Any, state: Any) -> bool:
+        calls.append("demonstrate")
+        raise finding_repair.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._demonstrate_reader_finding = not_asked  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None
+    rc = _rc(engine.quest_root)
+    assert calls == ["demonstrate"]
+    assert rc["removed_quantities"] == ["cover"] and rc["checks"][0]["measured"]["status"] == "could_not"
+    assert rc["checks"][0]["measured"]["why"].startswith("not asked")
+
+
+def test_after_a_test_request_not_made_the_next_pass_decides_as_usual(tmp_path, monkeypatch) -> None:
+    from core import finding_repair
+
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=False, verdict=None, calls=calls)
+    first = engine._demonstrate_reader_finding
+
+    async def not_asked(issue: Any, record: Any, state: Any) -> bool:
+        raise finding_repair.NotAsked("the request could not be made (RuntimeError: no answer)")
+
+    engine._demonstrate_reader_finding = not_asked  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None
+    engine._demonstrate_reader_finding = first  # type: ignore[method-assign,assignment]
+    assert _measure(engine, record, ["est_a"]) is None  # answered now: no test shows it
+    rc = _rc(engine.quest_root)
+    assert rc["removed_quantities"] == [] and rc["kept_differences"][0]["measured"]["status"] == "not_shown"
+
+
+def test_a_rerun_whose_repair_request_was_not_made_is_asked_again_on_the_same_code(tmp_path, monkeypatch) -> None:
+    calls: list[Any] = []
+    engine, record = _setup(tmp_path, monkeypatch, shown=True, verdict=Verdict("could_not", why="not asked: x", mode="not_asked"),
+                            calls=calls)
+    assert _measure(engine, record, ["est_a"]) is None
+    rc = _rc(engine.quest_root)
+    assert rc["checks"][0]["measured"]["status"] == "could_not" and "version" not in rc["checks"][0]["measured"]
+    assert _measure(engine, record, ["est_a"]) is None
+    assert [c for c in calls if c != "demonstrate"] == [("rerun", True, [["cover"]])] * 2, "the same code is asked again"

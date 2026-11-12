@@ -620,6 +620,11 @@ async def test_cross_check_fences_and_flags_its_candidates(tmp_path: Path, monke
         return hits
 
     eng.knowledge.asearch = search  # type: ignore[method-assign]
+    # what is looked up is FI's own record of the results (core/cross_check_items.py): one result with a value
+    from core import cross_check_items as cci
+
+    monkeypatch.setattr("core.engine._cross_check_items.items", lambda **kw: [
+        cci.Item("final_size", "Final size", "final size literature query", "Final size: 0.8.", cci.TO_CHECK, "", None)])
     await eng._node_cross_check({"topic": TOPIC, "analysis": {"key_findings": ["final size 0.8"],
                                                               "next_step": "publish"}})
     _assert_fenced(_prompt(sent, "cross_check"))

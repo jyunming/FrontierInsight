@@ -989,6 +989,29 @@ def _finite(v):
     return _number(v) and math.isfinite(float(v))
 
 
+def _holds_number(v):
+    """Whether a value holds a number anywhere in it (a number, or a list or mapping with one at any depth)."""
+    if isinstance(v, dict):
+        return any(_holds_number(x) for x in v.values())
+    if isinstance(v, (list, tuple)):
+        return any(_holds_number(x) for x in v)
+    return _number(v)
+
+
+def _never_computed(records):
+    """The quantities of a counting role whose function ran but whose record holds no number at any setting: not worked out,
+    whatever status the function returned. ``[{"id", "status": "missing", "why"}]``, the why from the function's own reason."""
+    out = []
+    for ident, rec in records.items():
+        if rec.get("status") != "ok" or rec.get("role") not in COUNTING:
+            continue
+        held = [rec[k] for k in ("value", "by_setting", "by_level") if k in rec]
+        if held and not any(_holds_number(v) for v in held):
+            why = next((str(w) for w in (rec.get("missing") or {}).values() if w), "") or "no setting gave a value for it"
+            out.append({"id": ident, "status": "missing", "why": why})
+    return out
+
+
 def _calculator():
     """FI's formula calculator: FI's own text of core/oracle_forms.py, copied beside this file as fi_core/."""
     if not _CALC:
@@ -1625,7 +1648,7 @@ def _figures(table, quest_root, records=None):
                     # The body is not called: the plan's own figure is drawn from the table and the earlier record
                     outcomes.append(fi_figures.default_figure(spec, table, out_dir, PLAN, records))
                 else:
-                    outcomes += fi_figures.run_figures([spec], PLAN, table, out_dir)
+                    outcomes += fi_figures.run_figures([spec], PLAN, table, out_dir, records)
                 if not only and os.environ.get("FI_FIGURE_FALLBACK") == "1" and outcomes[-1].get("status") in (
                         "failed", "refused", "not_written"):
                     # No repair is left for the body: the plan's own figure is drawn from the table in its place
@@ -1705,7 +1728,8 @@ def run(record_path, quest_root):
     not_computed = [{"id": i, "status": r["status"], "why": r.get("why") or ""} for i, r in records.items() if r["status"] != "ok"]
     not_computed += [{"id": rid, "status": "no_data", "why": "no trial gave a value for it"}
                      for rid in PLAN.RESULTS if rid in out and out[rid] is None]
-    faults = [r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
+    not_computed += _never_computed(records)
+    faults =[r["why"] for r in records.values() if r.get("fi_fault")] + list(figure_faults)
     if not only:  # the run that only draws the figures that failed carries the earlier run's notes
         for name in _UNREAD:
             notes.append("FI could not read back %s from the plan it wrote; the study's value was used" % name)
@@ -1756,7 +1780,7 @@ def main():
         for note in r.get("disclosed") or []:
             sys.stderr.write("%s: %s\\n" % (ident, note))
     for item in document["not_computed"]:
-        if item["status"] == "no_data":
+        if item["status"] in ("no_data", "missing"):
             sys.stderr.write("%s: %s\\n" % (item["id"], item["why"]))
     for text in [document["figures_said"]] + document["notes"] + document["fi_faults"]:
         if text:

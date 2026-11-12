@@ -22,6 +22,16 @@ def missing_abstract(markdown: str) -> bool:
     return True
 
 
+def abstract_of(markdown: str) -> str:
+    """The body of the paper's ``## Abstract`` section, found by its heading (the pattern :func:`missing_abstract` uses), without
+    the keywords line; ``""`` when there is none. The paper's own reviewed text, never a model's summary of the results."""
+    for m in _ABSTRACT_RE.finditer(markdown):
+        body = [ln for ln in m.group("body").splitlines() if ln.strip() and not _KEYWORDS_RE.match(ln)]
+        if body:
+            return "\n".join(ln.rstrip() for ln in body).strip()
+    return ""
+
+
 def with_abstract(markdown: str, abstract: str) -> str:
     """``markdown`` with ``## Abstract`` and ``abstract`` right under the title (at the top when there is no title), and
     the keywords line a scientific paper shows under it, turned from the hidden comment form when that is how they were given."""

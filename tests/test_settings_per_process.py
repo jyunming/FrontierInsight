@@ -491,8 +491,18 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # sha256 of HARNESS_SOURCE (it is part of the keys of FI's search records); it was a0cea43c... on 894a9265. The text
     # includes core/in_run.py whole; commits 2a36c0db and 92494b76 only ADD helpers there (level_first, settle_missing,
     # per_run_names, unplaced; no line removed or changed), so the worker's own text is unchanged and the pin moves on purpose. It moves again for `LevelsRefused` (the type every refusal of a per-value result is raised as, which a case's retry and the repair rule read in place of the message), so the search records keyed on the old text are not matched.
+    # It moves again for `shape_problem` (a number the plan declares one per run that a run returned per value: one rule for
+    # FI and its harness) and for `per_run_names` reading what each run compares wherever the plan wrote it (`of_study`).
+    # It moves again for `search_one_number_names` and `one_number_rule` (a search's objective and limits are one number
+    # per call), added there and nothing else changed (ce17183f...).
+    # It moves again for the recording of the files a run opened (the audit hook between the ``#<audit-begin>`` and
+    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines is still ce17183f...
+    # (the key of a frozen study's search record of an older FI is made from main's own harness text, kept whole in
+    # ``core/legacy_keys/`` and pinned in test_reuse_key.py, not from this one).
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "831539879b828b617986db62e3137e8d6026958d2463d008c5eea4fb53019f9c")
+        "ae98b6e471a6a04c9338787d60dbf1f43004f2f1e1b2a4b874a5bb75414649ef")
+    assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
+        "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 

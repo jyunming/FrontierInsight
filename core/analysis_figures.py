@@ -694,50 +694,13 @@ def _scaffolding(fig: Any, all_axes: list[Any], axes: list[Any], owner: dict[int
     return ok
 
 
-def _gap(v: Any) -> bool:
-    return v is None or (isinstance(v, numbers.Real) and math.isnan(v))
-
-
-def _same_numbers(a: Any, b: Any) -> bool:
-    """Two sequences as stored: numbers equal, a gap equal to a gap, anything else (a category, a numeric string) equal as text."""
-    a, b = list(a), list(b)
-    if len(a) != len(b):
-        return False
-    for u, v in zip(a, b):
-        if _gap(u) or _gap(v):
-            if not (_gap(u) and _gap(v)):
-                return False
-        elif isinstance(u, numbers.Real) and isinstance(v, numbers.Real) and not isinstance(u, bool) and not isinstance(v, bool):
-            if not math.isclose(float(u), float(v), rel_tol=1e-12, abs_tol=1e-300):
-                return False
-        elif str(u) != str(v):
-            return False
-    return True
-
-
-def _drawn_differently(art: Any, entry: dict[str, Any], owned: dict[int, Any], panel_ax: Any) -> bool:
-    """True when the artist a call drew no longer holds what the call recorded (the body changed it, or took it out)."""
-    try:
-        if entry["kind"] == "image":
-            return False  # compared by the caller, which knows which image belongs to which entry
-        if art is None or getattr(art, "axes", None) is None:
-            return True
-        if entry["kind"] == "bars":
-            group = [p for p in owned[id(art)][1] if hasattr(p, "get_height")]
-            return not _same_numbers([p.get_height() for p in group], [float("nan") if y is None else y for y in entry["y"]])
-        return not (_same_numbers(art.get_xdata(orig=True), entry["x"])
-                    and _same_numbers(art.get_ydata(orig=True), [float("nan") if y is None else y for y in entry["y"]]))
-    except Exception:  # noqa: BLE001 -- an artist this check cannot read is not held to the record
-        return False
-
-
 def _audit(handle: Any, fig: Any, axes: list[Any]) -> str:
     """After the body returned, before FI writes labels, legend and limits. Every visible artist of the figure that the drawing
     calls did not create (FI keeps their identities; a tag the body could set itself proves nothing) and that is not
     matplotlib's own scaffolding is the body's: the panel it sits on is a custom drawing, and one that sits on no panel (a
-    ``fig.text``, ``fig.legend``, a suptitle, a colorbar) makes every panel one. A drawing call's own artist whose data the body
-    changed makes its panel one too. Returns a text only for FI's own inconsistency (the record and the calls it keeps disagree)."""
-    from matplotlib.image import AxesImage
+    ``fig.text``, ``fig.legend``, a suptitle, a colorbar) makes every panel one. A drawing call's own artist the body changed in
+    any way (its data, transform, visibility, alpha, clip, path effects, z-order, or took it out) makes its panel one too.
+    Returns a text only for FI's own inconsistency (the record and the calls it keeps disagree)."""
 
     owned = getattr(handle, "_fc_owned", None) or {}
     all_axes, parent = _all_axes(fig)
@@ -767,19 +730,17 @@ def _audit(handle: Any, fig: Any, axes: list[Any]) -> str:
         if len(extra["series"]) != len(rec["series"]) or len(extra["refs"]) != len(rec["refs"]):
             return "panel %d: FI's record holds %d series and %d reference lines but the calls kept %d and %d" % (
                 i + 1, len(rec["series"]), len(rec["refs"]), len(extra["series"]), len(extra["refs"]))
-        images = [a for a, _grp in owned.values() if isinstance(a, AxesImage) and getattr(a, "axes", None) is ax]
-        for (art, _what), entry in zip(extra["series"], rec["series"]):
-            if entry["kind"] == "image":
-                shown = images.pop(0) if images else None
-                if shown is None or not _same_numbers([v for row in shown.get_array().astype(float).filled(float("nan")).tolist() for v in row],
-                                                      [float("nan") if v is None else v for row in entry["z"] for v in row]):
-                    why.setdefault(i, "drawing changed after FI's call")
-            elif _drawn_differently(art, entry, owned, ax):
-                why.setdefault(i, "drawing changed after FI's call")
-        for line, ref in zip(extra["refs"], rec["refs"]):
-            data = line.get_ydata() if ref["axis"] == "y" else line.get_xdata()
-            if getattr(line, "axes", None) is None or not len(data) or not _same_numbers(list(data), [ref["value"]] * len(data)):
-                why.setdefault(i, "drawing changed after FI's call")
+        if (getattr(handle, "_fc_latched", None) or {}).get(i):
+            why.setdefault(i, handle._fc_latched[i])
+    changed = getattr(handle, "changed_artists", None)
+    if callable(changed):
+        # every artist a call drew, compared with the whole state FI left it in (``FigureCalls._drawn_state``): any change the
+        # body made, to any property, makes its panel a custom drawing
+        for home, _art in changed():
+            where = _panel_of(home, axes, parent) if home is not None else None
+            why.setdefault(where, "drawing changed after FI's call")
+    else:  # calls that keep no state of what they drew: FI cannot say the drawing is its own (fail closed)
+        why.setdefault(None, "FI could not compare the drawing with its calls")
     for i in range(len(axes)):
         _ax, rec = handle._panel(i)
         reason = why.get(i) or why.get(None)
@@ -842,9 +803,13 @@ def _checked_line(fid: str, summary: dict[str, Any]) -> str:
     return line
 
 
-def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str) -> list[dict[str, Any]]:
+def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_dir: str, records: Any = None) -> list[dict[str, Any]]:
     """Draw every declared figure from the body ``figure_<id>`` of ``namespace`` (a module, or a dict); a figure's failure is its
-    own and the others are still drawn."""
+    own and the others are still drawn. ``records`` is FI's record of the quantities it derived (``derived.json``'s ``derived``):
+    the table then serves each one derived for every setting by ``table.mean`` and the drawing calls compare a drawn derived
+    quantity with it; without it (an older frame) a derived quantity is not compared, as before."""
+    if records is not None and callable(getattr(table, "set_derived", None)):
+        table.set_derived(records)
     out = []
     for spec in figures or []:
         name = "figure_%s" % spec.get("id")
@@ -945,7 +910,7 @@ def _alternatives(data: dict[str, Any], sign: float) -> list[dict[str, Any]]:
     same: dict[str, str] = {}
     for entry in compared.get("levels") or []:
         if isinstance(entry, dict) and isinstance(entry.get("same_as"), dict):
-            same[level_key(entry.get("level"))] = level_says(entry["same_as"])  # only probes; its best is the first one's
+            same[level_key(entry.get("level"))] = level_says(entry["same_as"])  # only probes: it has no best design of its own
         elif isinstance(entry, dict):
             best = entry.get("best") if isinstance(entry.get("best"), dict) else {}
             recorded[level_key(entry.get("level"))] = best.get("objective") if _number(best.get("objective")) else None
@@ -1012,7 +977,7 @@ def _progress_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
         fig.savefig(os.path.join(out_dir, file))
         out = _outcome(fid, file, "ok")
         none = [a["label"] for a in alternatives if not a["line"] and not a["same_as"]]
-        same = ["%s gave the same results as %s, so it is not drawn" % (a["label"], a["same_as"]) for a in alternatives if a["same_as"]]
+        same = ["%s was not searched on its own (it gave the objective and limits of %s at the designs tried at both), so it is not drawn" % (a["label"], a["same_as"]) for a in alternatives if a["same_as"]]
         notes = (["No design met every limit for: %s." % "; ".join(none)] if none else []) + [s + "." for s in same]
         if notes:
             out["note"] = " ".join(notes)
@@ -1072,56 +1037,138 @@ def _scalar_levels(design: Any) -> dict[str, float]:
     return {str(k): float(v) for k, v in (design or {}).items() if _number(v)} if isinstance(design, dict) else {}
 
 
-def _scan_figure(data: dict[str, Any], out_dir: str) -> dict[str, Any]:
-    """The coarse scan's map: the objective at each scanned design, over the two settings that vary most (one setting: a line)."""
-    fid, file = "search_scan_map", SCAN_FILE
-    _remove(out_dir, file)
-    points = [(_scalar_levels(r["design"]), r["objective"]) for r in data["scan"]]
+SCAN_PANELS = 12  # the most panels one figure of the scan map holds; more combinations are drawn as further figures
+
+
+def _value_text(value: Any) -> str:
+    """A setting's value written so it reads back as the same number: the shortest of 4 to 17 significant figures that does."""
+    if not _number(value):
+        return "none" if value is None else str(value)
+    for digits in range(4, 18):
+        text = "%.*g" % (digits, value)
+        if float(text) == float(value):
+            return text
+    return repr(float(value))
+
+
+def _scan_part_file(k: int) -> str:
+    stem, ext = os.path.splitext(SCAN_FILE)
+    return SCAN_FILE if k == 1 else "%s_%d%s" % (stem, k, ext)
+
+
+def _scan_groups(points: list[tuple[dict[str, float], float, str]], names: list[str]) -> list[dict[str, Any]]:
+    """The scanned points by position (their values of ``names``), in the order first scanned: ``{"at", "levels", "values",
+    "designs"}``; a position that holds several runs holds repeats of one design, or designs that differ only in a part that is
+    not a number (``designs`` counts the distinct designs)."""
+    out: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for levels, value, design in points:
+        at = tuple(levels.get(k) for k in names)
+        group = out.setdefault(at, {"at": at, "levels": levels, "values": [], "designs": []})
+        group["values"].append(value)
+        if design not in group["designs"]:
+            group["designs"].append(design)
+    return list(out.values())
+
+
+def _scan_note_of_groups(groups: list[dict[str, Any]], names: list[str]) -> str:
+    """What the note says of positions that hold more than one run: repeats of one design, and designs the map cannot tell apart."""
+    said = []
+    repeats = [g for g in groups if len(g["values"]) > 1 and len(g["designs"]) == 1]
+    if repeats:
+        said.append("%d design%s %s run more than once; each is one marker at its setting, coloured by the mean of its runs (%s)." % (
+            len(repeats), "" if len(repeats) == 1 else "s", "was" if len(repeats) == 1 else "were", "; ".join(
+                "%s: %d runs, %s to %s" % (", ".join("%s = %s" % (k, _value_text(v)) for k, v in zip(names, g["at"])),
+                                           len(g["values"]), _fmt(min(g["values"])), _fmt(max(g["values"]))) for g in repeats)))
+    hidden = [g for g in groups if len(g["designs"]) > 1]
+    if hidden:
+        said.append("At %d setting%s the scan tried designs that differ only in a part that is not a number, which the map cannot "
+                    "show; each such setting is one marker coloured by their mean (%s)." % (
+                        len(hidden), "" if len(hidden) == 1 else "s", "; ".join(
+                            "%s: %d designs" % (", ".join("%s = %s" % (k, _value_text(v)) for k, v in zip(names, g["at"])),
+                                                len(g["designs"])) for g in hidden)))
+    return " ".join(said)
+
+
+def _scan_figure(data: dict[str, Any], out_dir: str) -> list[dict[str, Any]]:
+    """The coarse scan's map: the objective at each scanned design, over the two settings that vary most (one setting: a line).
+    Every combination of the further settings that vary is its own panel (named above it), so no point hides another; more than
+    ``SCAN_PANELS`` panels are drawn as several figures (``search_scan_map.png``, ``search_scan_map_2.png``, ...), one colour scale
+    for all. Repeat runs of one design are one marker at its setting, coloured by their mean. Returns one outcome per figure."""
+    fid = "search_scan_map"
+    _remove(out_dir, SCAN_FILE)
+    stem, ext = os.path.splitext(SCAN_FILE)
+    try:
+        for name in os.listdir(out_dir):  # the further parts of an earlier run's map go too
+            if name.startswith(stem + "_") and name.endswith(ext) and name[len(stem) + 1:-len(ext)].isdigit():
+                _remove(out_dir, name)
+    except OSError:
+        pass
+    points = [(_scalar_levels(r["design"]), r["objective"], json.dumps(r.get("design"), sort_keys=True, default=str))
+              for r in data["scan"]]
     points = [p for p in points if p[0]]
-    count = {k: len({p[k] for p, _ in points if k in p}) for k in {k for p, _ in points for k in p}}
+    count = {k: len({p[k] for p, _, _ in points if k in p}) for k in {k for p, _, _ in points for k in p}}
     names = sorted((k for k, c in count.items() if c > 1), key=lambda k: (-count[k], k))
     if not points or not names:
-        return _outcome(fid, file, "skipped", "The coarse scan has no setting that changed, so its map is not drawn.")
-    plt, fig, (ax,) = _new_figure(1)
-    note = ""
-    try:
-        if len(names) == 1:
-            pts = sorted((p[names[0]], v) for p, v in points)
+        return [_outcome(fid, SCAN_FILE, "skipped", "The coarse scan has no setting that changed, so its map is not drawn.")]
+    groups = _scan_groups(points, names)
+    note = _scan_note_of_groups(groups, names)
+    if len(names) == 1:
+        plt, fig, (ax,) = _new_figure(1)
+        try:
+            pts = sorted((g["at"][0], sum(g["values"]) / len(g["values"])) for g in groups)
             ax.plot([a for a, _ in pts], [b for _, b in pts], marker="o")
             ax.set_xlabel(names[0])
             ax.set_ylabel("objective")
-        else:
-            x, y = names[0], names[1]
-            more = names[2:]
-            shown = [(p[x], p[y], v, tuple(p.get(k) for k in more)) for p, v in points if x in p and y in p]
-            combos = _distinct(s[3] for s in shown)
-            # Points that differ only in a further setting would land on one position: each combination of the further
-            # settings gets its own marker, named in the legend, so no point hides another.
-            markers = "osD^vP*Xp<>"
-            lows, highs = min(s[2] for s in shown), max(s[2] for s in shown)
+            os.makedirs(out_dir, exist_ok=True)
+            fig.savefig(os.path.join(out_dir, SCAN_FILE))
+            out = _outcome(fid, SCAN_FILE, "ok")
+            if note:
+                out["note"] = note
+            return [out]
+        finally:
+            plt.close(fig)
+    x, y = names[0], names[1]
+    more = names[2:]
+    shown = [g for g in groups if x in g["levels"] and y in g["levels"]]
+    means = [sum(g["values"]) / len(g["values"]) for g in shown]
+    lows, highs = min(means), max(means)
+    combos = _distinct(tuple(g["levels"].get(k) for k in more) for g in shown)
+    if all(_number(c) for combo in combos for c in combo):
+        combos = sorted(combos)
+    parts = [combos[i:i + SCAN_PANELS] for i in range(0, len(combos), SCAN_PANELS)]
+    outcomes = []
+    for k, part in enumerate(parts, 1):
+        file = _scan_part_file(k)
+        plt, fig, axes = _new_figure(len(part))
+        try:
             sc = None
-            for i, combo in enumerate(combos):
-                part = [s for s in shown if s[3] == combo]
-                label = ", ".join("%s = %s" % (k, _fmt(c)) for k, c in zip(more, combo)) if more else None
-                sc = ax.scatter([s[0] for s in part], [s[1] for s in part], c=[s[2] for s in part], s=60, vmin=lows, vmax=highs,
-                                marker=markers[i % len(markers)], label=label)
-            fig.colorbar(sc, ax=ax, label="objective")
-            ax.set_xlabel(x)
-            ax.set_ylabel(y)
+            for ax, combo in zip(axes, part):
+                mine = [(g, m) for g, m in zip(shown, means) if tuple(g["levels"].get(n) for n in more) == combo]
+                sc = ax.scatter([g["levels"][x] for g, _ in mine], [g["levels"][y] for g, _ in mine], c=[m for _, m in mine], s=60,
+                                vmin=lows, vmax=highs, marker="o")
+                if more:
+                    ax.set_title(", ".join("%s = %s" % (n, _value_text(c)) for n, c in zip(more, combo)))
+                ax.set_xlabel(x)
+                ax.set_ylabel(y)
+            fig.colorbar(sc, ax=axes[0] if len(axes) == 1 else list(axes), label="objective")
+            os.makedirs(out_dir, exist_ok=True)
+            fig.savefig(os.path.join(out_dir, file))
+            out = _outcome(fid if k == 1 else "%s_%d" % (fid, k), file, "ok")
+            said = []
             if more:
-                ax.legend(title="also varied", fontsize=7)
-                note = ("The map is drawn over %s and %s; %s also changed, and each of its values has its own marker (named in the "
-                        "legend), so points at one position are told apart by marker.") % (x, y, ", ".join(more))
-                if len(combos) > len(markers):
-                    note += " More than %d combinations share these axes, so some markers repeat and points may overlap." % len(markers)
-        os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, file))
-        out = _outcome(fid, file, "ok")
-        if note:
-            out["note"] = note
-        return out
-    finally:
-        plt.close(fig)
+                said.append("The map is drawn over %s and %s, with one panel for each combination of %s (named above each panel), so "
+                            "every scanned point has its own position." % (x, y, ", ".join(more)))
+            if len(parts) > 1:
+                said.append("This is part %d of %d of the map (%d combinations, at most %d panels a figure)." % (
+                    k, len(parts), len(combos), SCAN_PANELS))
+            if note:
+                said.append(note)
+            if said:
+                out["note"] = " ".join(said)
+            outcomes.append(out)
+        finally:
+            plt.close(fig)
+    return outcomes
 
 
 def search_figures(root: str, out_dir: str) -> list[dict[str, Any]]:
@@ -1135,7 +1182,9 @@ def search_figures(root: str, out_dir: str) -> list[dict[str, Any]]:
             result = draw()
         except Exception as err:
             result = _outcome(fid, file, "fi_fault", "FI's drawing of `%s` stopped with %s: %s." % (file, type(err).__name__, err))
-        if result:
+        if isinstance(result, list):  # the scan map: one outcome for each figure it is drawn as
+            out += result
+        elif result:
             out.append(result)
     return out
 
@@ -1231,6 +1280,126 @@ def _default_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], deri
     return lines
 
 
+def _x_is_result(spec: dict[str, Any], table: Any, derived: Any = None) -> bool:
+    """Whether the figure's ``x`` is a result of the plan (one the table serves, or a quantity the plan derives) and not a setting
+    of the study: the plan then draws one result against another, and the default figure pairs them (``_paired_lines``)."""
+    x_name = str(spec.get("x"))
+    try:
+        if any(x_name in dict(table.setting(k)) for k in table.keys()):
+            return False
+    except Exception:  # noqa: BLE001 -- a table that cannot list its settings: the setting path says what it holds
+        return False
+    declared = [str(d) for d in (getattr(table, "declared", None) or [])]
+    return x_name in declared or (isinstance(derived, dict) and x_name in derived)
+
+
+def _x_points(table: Any, x_name: str, key: str, derived: Any = None) -> dict[str, Any]:
+    """The value of the result on ``x`` at setting ``key``, as ``_default_points`` gives a shown result's, except that a derived
+    quantity whose value for the setting is text (a name, a category) is kept: it is drawn as a category."""
+    if isinstance(derived, dict) and x_name in derived:
+        record = derived[x_name]
+        if isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("by_setting"), dict):
+            got = record["by_setting"].get(key)
+            if isinstance(got, str) and got.strip():
+                return {"": got}
+        return _derived_points(record, key)
+    return _default_points(table, x_name, key, derived)
+
+
+def _pairs(table: Any, x_name: str, rid: str, key: str, derived: Any = None) -> list[tuple[Any, float, str]]:
+    """``(x, y, level compared inside the runs or "")`` of the points of result ``rid`` against the result ``x_name`` at setting
+    ``key``. Where the record says the trial each value came from, one point for each trial that gave both, paired by the
+    record's trial numbers (``table.paired``), never by position. Where it does not (a result recorded for each value compared
+    inside the runs, a derived quantity, a record without trial numbers), one point of the two values FI holds for the setting
+    (for each compared value): the same setting, and the same compared value, never two of them."""
+    from_trials = not (isinstance(derived, dict) and (x_name in derived or rid in derived))
+    if from_trials:
+        try:
+            from_trials = bool(table.trials(x_name, key)) and bool(table.trials(rid, key))
+        except Exception:  # noqa: BLE001 -- recorded for each compared value, or a table without trial numbers
+            from_trials = False
+    if from_trials:
+        try:
+            xs, ys = table.paired(x_name, rid, key)
+        except Exception:  # noqa: BLE001
+            xs, ys = [], []
+        return [(a, float(b), "") for a, b in zip(xs, ys) if _plain_number(a) and _plain_number(b)]
+    xp = _x_points(table, x_name, key, derived)
+    if not xp:  # no value on x here: the shown result is not read, so a read that gives no point is not counted as drawn
+        return []
+    yp = _default_points(table, rid, key, derived)
+    return [(xp[level], yp[level], level) for level in xp if level in yp]
+
+
+def _paired_lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None
+                  ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
+    """The point clouds of a default figure whose ``x`` is a result: for each result in ``shows`` (and each value of the
+    ``series`` setting, and each value compared inside the runs that a result is recorded for), the points ``_pairs`` gives at
+    every setting that holds ``fixed`` (the panel's setting), in the shape ``_default_lines`` gives. No other setting is held:
+    each point is one trial (or one setting), so the cloud is every trial the study ran there."""
+    x_name, s_name = str(spec.get("x")), spec.get("series")
+    names = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
+    cells = {k: dict(table.setting(k)) for k in table.keys()}
+    values = _distinct(c[str(s_name)] for c in cells.values() if str(s_name) in c) if s_name else [None]
+    by_compared = False  # the series is a factor compared inside the runs: only a result recorded for each of its values is drawn
+    if s_name and not values:
+        compared = getattr(table, "compared", None)
+        if callable(compared) and s_name in compared():
+            s_name, values, by_compared = None, [None], True
+    # the settings of each series value, in one pass over the settings (never one pass for each value)
+    of_value: dict[Any, list[str]] = {_freeze(v): [] for v in values}
+    for k, cell in cells.items():
+        if any(cell.get(a) != v for a, v in fixed.items()) or (s_name and str(s_name) not in cell):
+            continue
+        group = of_value.get(_freeze(cell.get(str(s_name)) if s_name else None))
+        if group is not None:
+            group.append(k)
+    lines = []
+    for rid in (str(r) for r in spec["shows"]):
+        for value in values:
+            by_level: dict[str, list[tuple[Any, float]]] = {}
+            for k in of_value[_freeze(value)]:
+                for x, y, level in _pairs(table, x_name, rid, k, derived):
+                    by_level.setdefault(level, []).append((x, y))
+            for level, points in by_level.items():
+                if by_compared and not level:
+                    continue
+                tail = (["%s = %s" % (s_name, value)] if s_name else []) + ([level] if level else [])
+                lines.append((", ".join([str(names.get(rid) or rid)] + tail), [p[0] for p in points], [p[1] for p in points], rid,
+                              ", ".join([rid] + tail), value if s_name else None, level))
+    return lines
+
+
+def _only_drawn(table: Any, spec: dict[str, Any], drawn: set[str]) -> None:
+    """A shown result counts as drawn exactly when FI drew points of it (``drawn``): a read of it that gave a value but no point
+    against the result on x (a value at a setting where x has none) is not a drawing of it, and a quantity FI drew from its
+    derived record (which no read of the table counts) is."""
+    gave = getattr(table, "gave_values", None)
+    if isinstance(gave, set):
+        shows = [str(r) for r in spec.get("shows") or []]
+        gave.difference_update(r for r in shows if r not in drawn)
+        gave.update(r for r in shows if r in drawn)
+
+
+def _holds_any(table: Any, name: str, derived: Any = None) -> bool:
+    """Whether FI holds any value of ``name`` at any setting (a trial's value, a value for a compared value, or a derived one)."""
+    for key in table.keys():
+        if _x_points(table, name, key, derived):
+            return True
+        try:
+            if table.values(name, key):
+                return True
+        except Exception:  # noqa: BLE001 -- recorded for each compared value (read above), or not at all
+            continue
+    return False
+
+
+def _lines(spec: dict[str, Any], table: Any, fixed: dict[str, Any], derived: Any = None, x_result: bool = False
+           ) -> list[tuple[str, list[Any], list[float], str, str, Any, str]]:
+    """The lines of the default figure: along a setting (``_default_lines``), or the point clouds against a result (``_paired_lines``)."""
+    return (_paired_lines if x_result else _default_lines)(spec, table, fixed, derived)
+
+
 def _grid_order(name: str, values: list[Any], spec: dict[str, Any], compared: Any) -> list[Any]:
     """The values of setting ``name`` in the plan's order: as the plan lists them for what a run compares or for the figure's own
     settings; any other (the plan's grid is not carried) ascending, numbers first. Never in the order of the table's rows."""
@@ -1302,8 +1471,10 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
     call record is marked ``fallback`` and holds no custom drawing; ``namespace`` is the carried plan (``COMPARED``, ``PARTS``,
     ``DERIVED``). A result the plan derives is drawn from ``derived``, FI's record of the derived values (this run's, or in the
     run that only draws the figures that failed, the earlier run's); a line FI holds no value for is left out and said on stderr,
-    never made up. The drawing is lines only: no bars and no error bars. A plan that declares no ``shows`` or no ``x``, or a table that holds no value to draw, gives no default: the
-    outcome is ``dropped`` and says why, and no file is kept."""
+    never made up. The drawing is lines only: no bars and no error bars. A plan whose ``x`` is a result and not a setting (one result
+    against another) gets each trial's paired points instead (``_paired_lines``, drawn with ``fig.points``): no setting is held, a
+    text value of a derived ``x`` is a category, and the outcome is marked ``paired``. A plan that declares no ``shows`` or no ``x``,
+    or a table that holds no value to draw, gives no default: the outcome is ``dropped`` and says why, and no file is kept."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
     _remove(out_dir, file)
     _remove_calls(file)
@@ -1321,16 +1492,22 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         if wanted > 1 and panel_by:
             held = [{panel_by: v} for v in list(settings[panel_by])[:wanted]]
         by_panel = panel_by if len(held) > 1 else None
-        hold = _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, namespace, derived)
+        x_result = _x_is_result(spec, table, derived)  # one result against another: each trial's pair, no setting held
+        hold = {} if x_result else _default_hold(spec, table, held, {a for a in (x_name, s_name, by_panel) if a}, namespace, derived)
         labels = spec.get("labels") if isinstance(spec.get("labels"), dict) else {}
         reset = getattr(table, "reset_reads", None)
         if callable(reset):
             reset()
-        drawn = [_default_lines(spec, table, {**one, **hold}, derived) for one in held]
+        drawn = [_lines(spec, table, {**one, **hold}, derived, x_result) for one in held]
         for rid in (str(r) for r in shows):
             if isinstance(derived, dict) and rid in derived and not any(line[3] == rid for lines in drawn for line in lines):
-                sys.stderr.write("fi: the default figure `%s` leaves out `%s`: FI holds no value of it for each setting along `%s`\n" % (
-                    fid, rid, x_name))
+                sys.stderr.write("fi: the default figure `%s` leaves out `%s`: FI holds no value of it for each setting %s `%s`\n" % (
+                    fid, rid, "beside" if x_result else "along", x_name))
+        if not any(drawn) and x_result:
+            none = [r for r in [x_name] + [str(r) for r in shows] if not _holds_any(table, r, derived)]
+            why = ("no trial gave a value of %s" % ", ".join("`%s`" % r for r in none) if none else
+                   "no trial (or setting) of the table gives both `%s` and %s" % (x_name, ", ".join("`%s`" % r for r in shows)))
+            return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: %s." % (fid, why)), fallback=True)
         if not any(drawn):
             return dict(_outcome(fid, file, "dropped", "Figure `%s` is not drawn: the table holds no value of %s along `%s`." % (
                 fid, ", ".join("`%s`" % r for r in shows), spec["x"])), fallback=True)
@@ -1340,14 +1517,16 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
             note = "Figure `%s` has %d panel(s) instead of the %d the plan asks for: the table gives no more settings to show one on each." % (
                 fid, len(held), wanted)
         if _frame_has_calls():
-            return _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note, derived)
+            out = _default_with_calls(dict(spec, panels=len(held)), table, out_dir, namespace, held, hold, drawn, note, derived, x_result)
+            return dict(out, paired=True) if x_result and out.get("status") == "ok" else out
         plt, fig, axes = _new_figure(len(held))
         record = []
         for index, (one, lines) in enumerate(zip(held, drawn)):
             ax = axes[index]
             cats = _distinct(v for _l, xs, _y, _r, _i, _v, _c in lines for v in xs if not _plain_number(v))
             for label, xs, ys, _rid, _sid, _value, _lvl in lines:
-                ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label)
+                ax.plot([cats.index(v) if v in cats else v for v in xs], ys, marker="o", label=label,
+                        **({"linestyle": "none"} if x_result else {}))  # against a result: the trials' points, not a line
             if cats:
                 ax.set_xticks(range(len(cats)), [str(v) for v in cats])
             ax.set_xlabel(str(labels.get(x_name) or x_name))
@@ -1362,9 +1541,12 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
                 record.append({"panel": index + 1, "settings": one, "title": title})
         os.makedirs(out_dir, exist_ok=True)
         fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
+        if x_result:
+            _only_drawn(table, spec, {line[3] for lines in drawn for line in lines})
         declared = _declared_record(spec, table, out_dir, file)
         out = dict(_outcome(fid, file, "ok", note), fallback=True, **({"panels": record} if record else {}),
-                   **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}))
+                   **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}),
+                   **({"paired": True} if x_result else {}))
         if note:
             out["note"] = note
         return out
@@ -1382,7 +1564,7 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
 
 def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespace: Any, held: list[dict[str, Any]],
                         hold: dict[str, Any], drawn: list[list[tuple[str, list[Any], list[float], str, str, Any, str]]], note: str,
-                        derived: Any = None) -> dict[str, Any]:
+                        derived: Any = None, x_result: bool = False) -> dict[str, Any]:
     """Draw the default figure through ``fig.line`` as a figure body would, with the plan marked ``fallback`` so the call record is.
     A figure whose plan draws one curve per value of a setting passes that value as each line's series, exactly as a body does, so
     every curve is a level of the setting: the legend condenses and the colours run along the setting's values like a body's. A line
@@ -1403,17 +1585,29 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
                 plan["labels"][sid] = label
 
     def body(fig: Any, tbl: Any) -> None:
+        points_of: set[str] = set()
         for index, one in enumerate(held):
-            lines = _default_lines(spec, tbl, {**one, **hold}, derived)  # read again: the reads are recorded from the start of the body
+            lines = _lines(spec, tbl, {**one, **hold}, derived, x_result)  # read again: the reads are recorded from the start of the body
+            points_of.update(line[3] for line in lines)
+            if {**one, **hold}:  # before the lines: the name check of each line reads the settings its panel holds
+                fig._panel(index)[1]["hold"] = {**one, **hold}
             for _label, xs, ys, rid, sid, value, level in lines:
                 name = value if as_levels else sid if (level or mixed) else rid
                 if isinstance(derived, dict) and rid in derived and isinstance(getattr(tbl, "gave_values", None), set):
                     tbl.gave_values.add(rid)  # FI read this value from its derived record, not from the table
+                if x_result:  # against a result: the points of each trial, the x named as the result it is
+                    fig.points(index, name, (str(spec["x"]), xs), ys, rid)
+                    continue
                 for art in fig.line(index, name, xs, ys, rid):
                     art.set_marker("o")
+                snap = getattr(fig, "_snap_again", None)
+                if callable(snap):
+                    snap(fig.axes[index])  # the marker is FI's own styling of its line, not a change of a body's
             if {**one, **hold}:
                 fig._panel(index)[1]["hold"] = {**one, **hold}  # FI's values from its table: `finish` titles the panel from them
                 fig.declared[index] = {**one, **hold}
+        if x_result:
+            _only_drawn(tbl, spec, points_of)
 
     out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan)  # the lines above are read with the plan's own series
     if out.get("status") != "ok":

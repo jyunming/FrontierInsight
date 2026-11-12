@@ -8,9 +8,10 @@
   "group"
  ],
  "x": "time",
+ "series": "group",
  "series_ids": [
-  "group_a",
-  "group_b"
+  "survival@group:a",
+  "survival@group:b"
  ],
  "references": {},
  "labels": {
@@ -19,8 +20,7 @@
    "scale": "linear"
   },
   "time": "Time",
-  "group_a": "Group A",
-  "group_b": "Group B"
+  "group": "Group"
  },
  "figure": {
   "id": "survival",
@@ -29,8 +29,8 @@
  },
  "plan": {
   "series": [
-   "group_a",
-   "group_b"
+   "survival@group:a",
+   "survival@group:b"
   ],
   "grid": [
    0,
@@ -48,25 +48,25 @@
   {
    "claim": "drawn",
    "args": {
-    "series": "group_a"
+    "series": "survival@group:a"
    }
   },
   {
    "claim": "steps",
    "args": {
-    "series": "group_a"
+    "series": "survival@group:a"
    }
   },
   {
    "claim": "steps",
    "args": {
-    "series": "group_b"
+    "series": "survival@group:b"
    }
   },
   {
    "claim": "value_at",
    "args": {
-    "series": "group_b",
+    "series": "survival@group:b",
     "x": "8"
    }
   },
@@ -79,13 +79,13 @@
   {
    "claim": "band",
    "args": {
-    "series": "group_b"
+    "series": "survival@group:b"
    }
   },
   {
    "claim": "range",
    "args": {
-    "series": "group_a",
+    "series": "survival@group:a",
     "axis": "y"
    }
   }

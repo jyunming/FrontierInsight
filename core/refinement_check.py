@@ -355,7 +355,7 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> list[str
     record = read(quest_root)
     if not record:
         return ["the plan's numerical settings were not run again at finer values (no record of FI's refinement check)"]
-    if record.get("code_sha256") != _hidden.code_sha(quest_root):
+    if not _hidden.same_code(record.get("code_sha256"), quest_root):  # main's rule for a record an older FI wrote
         return ["FI's refinement check ran on other code than the code as it is now"]
     if record.get("key") != key(protocol):
         return ["FI's refinement check ran on other settings than the plan's as they are now"]

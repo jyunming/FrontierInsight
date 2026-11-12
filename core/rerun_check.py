@@ -177,6 +177,121 @@ def result_files(root: Path | str, derived: str = "data/results/derived.json") -
     return {p.name for p in folder.glob("*.json")} - {Path(derived).name} if folder.is_dir() else set()
 
 
+def setting_of(key: str) -> dict[str, str] | None:
+    """The setting FI's name of it stands for (``"a=1,b=[1;2]"`` -> ``{"a": "1", "b": "[1;2]"}``, as
+    ``trial_runner.cell_key`` writes it; ``""`` is no setting at all). ``None`` for a name FI cannot read as one: a part
+    without exactly one ``=``, an empty name, or a name given twice. Nothing is dropped to make a name readable."""
+    if key == "":
+        return {}
+    out: dict[str, str] = {}
+    for part in key.split(","):
+        name, eq, value = part.partition("=")
+        if not eq or not name or "=" in value or name in out:
+            return None
+        out[name] = value
+    return out
+
+
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+
+
+def _grain(rec: Any) -> tuple[frozenset[str], list[tuple[str | None, dict[str, str], float]]] | None:
+    """The one grain of settings a result of FI's record is given at, and its numbers: ``(setting names, [(key in
+    ``by_setting`` or None for ``value``, setting, number)])``. ``None`` when the record holds no single grain FI can read:
+    a result not obtained, a number and settings at once, settings of two grains, a name FI cannot read as a setting, or a
+    setting given as anything but a number or nothing."""
+    if not isinstance(rec, dict) or rec.get("status", "ok") != "ok":
+        return None
+    by = rec.get("by_setting")
+    if rec.get("value") is not None:
+        if by or not _number(rec["value"]):
+            return None
+        return frozenset(), [(None, {}, float(rec["value"]))]
+    if not isinstance(by, dict) or not by:
+        return None
+    names: frozenset[str] | None = None
+    rows: list[tuple[str | None, dict[str, str], float]] = []
+    for k, v in by.items():
+        s = setting_of(str(k))
+        if s is None or (names is not None and frozenset(s) != names):
+            return None
+        names = frozenset(s)
+        if _number(v):
+            rows.append((str(k), s, float(v)))
+        elif v is not None:
+            return None
+    return names, rows
+
+
+def grid_of(trials: Any) -> list[dict[str, str]] | None:
+    """The settings of the frozen grid, from FI's record of the trials (``raw/trials.json``, each cell's ``key``); ``None``
+    when the record lists none or holds a name FI cannot read as a setting."""
+    cells = (trials.get("cells") if isinstance(trials, dict) else None) or []
+    grid = [setting_of(str(c.get("key"))) for c in cells if isinstance(c, dict) and c.get("key") is not None]
+    return None if not grid or any(g is None for g in grid) else grid  # type: ignore[return-value]
+
+
+def regrained(base_doc: Any, new_doc: Any, grid: list[dict[str, str]] | None) -> dict[str, float]:
+    """The repaired numbers of a result the repair gives at another grain of settings, under the delivered keys, so that
+    :func:`compare` judges each delivered number of each result at each setting (``{key of results_of: number}``). FI's own
+    record (``derived.json``: ``value`` or ``by_setting``) is read, never the paths of other files. A result is mapped only
+    when every delivered number of it is covered:
+
+    * the repaired settings are coarser (their names a part of the delivered ones): each delivered number maps to the one
+      repaired number with the same values on the repaired names;
+    * the repaired settings are finer: every setting of the frozen ``grid`` that restricts to the delivered one must be there,
+      and the delivered number is compared with every repaired number that restricts to it, settings the grid does not hold
+      included, through the one farthest from it (so one that differs is a change).
+
+    Same names, unrelated names, a setting missing, two grains in one record or a name FI cannot read: nothing is mapped,
+    and a delivered key the repaired record lacks stays "no number" as before."""
+    base = base_doc.get("derived") if isinstance(base_doc, dict) else None
+    new = new_doc.get("derived") if isinstance(new_doc, dict) else None
+    if not isinstance(base, dict) or not isinstance(new, dict):
+        return {}
+    out: dict[str, float] = {}
+    for rid, rec in base.items():
+        old, got = _grain(rec), _grain(new.get(rid))
+        if old is None or got is None or old[0] == got[0]:
+            continue
+        on, nn = old[0], got[0]
+        for key, s, v in old[1]:
+            if nn < on:
+                cover = [w for _k, t, w in got[1] if all(t[x] == s[x] for x in nn)]
+                if len(cover) != 1:
+                    continue
+            elif on < nn:
+                if grid is None:
+                    continue
+                want = {frozenset((x, g[x]) for x in nn) for g in grid if nn <= set(g) and all(g[x] == s[x] for x in on)}
+                have = {frozenset(t.items()): w for _k, t, w in got[1] if all(t[x] == s[x] for x in on)}
+                if not want or not want <= set(have):
+                    continue
+                cover = list(have.values())
+            else:
+                continue
+            out[f"derived/derived/{rid}" + ("" if key is None else f"/by_setting/{key}")] = max(cover, key=lambda w: abs(w - v))
+    return out
+def result_names(root: Path | str, derived: str = "data/results/derived.json") -> list[str]:
+    """The result files, relative to ``root``, that a run of the study must write for a rerun to have written results: the
+    ones the delivered run was read from. FI's record of the analysis (``derived``) when the delivered run has it; else every
+    result file the delivered run left (an older study writes its own, ``result.json`` or ``results.json``, and FI reads
+    them all in :func:`results_of`). Only when the delivered run holds no result file at all does the record's own name
+    stand in (an added fallback: FI has no record of another name)."""
+    root = Path(root)
+    if (root / derived).is_file():
+        return [derived]
+    folder = Path(derived).parent
+    names = sorted(f"{folder.as_posix()}/{n}" for n in result_files(root, derived))
+    return names or [derived]
+
+
+def wrote_results(out: Path | str, names: list[str]) -> bool:
+    """Whether the run in ``out`` wrote a result file of ``names`` (:func:`result_names`)."""
+    return any((Path(out) / n).is_file() for n in names)
+
+
 def _values(rec: Any) -> list[float]:
     vs = rec.get("values") if isinstance(rec, dict) else rec
     return [float(v) for v in vs or [] if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))]
@@ -431,15 +546,94 @@ async def _run(executor: Any, python: Path | str, argv: list[str], cwd: Path, ti
     return await executor.execute([str(python), "-B", *argv], cwd=cwd, timeout_s=int(timeout_s), env=env)
 
 
+#: How often a rerun that is still going says where it is (the main run's "still running" line uses 30 s too).
+PROGRESS_EVERY_S = 30.0
+_MARK = "_fi_rerun_progress.txt"
+#: Runs the study's own ``run.py`` unchanged and notes each setting (or design of the search) it finishes in ``_MARK`` beside it,
+#: with the number of settings first when the study's grid gives it; ``run.py`` is not edited (its text is part of what the
+#: trials' cache key hashes). A note that cannot be written is skipped: the line then says only that the study is running.
+_WRAPPER = r'''import os, runpy, subprocess, sys
+here = os.path.dirname(os.path.abspath(__file__))
+mark = os.path.join(here, "_fi_rerun_progress.txt")
+run = os.path.join(here, "run.py")
+try:
+    import json
+    study = json.load(open(os.path.join(here, "study.json"), encoding="utf-8"))
+    if study.get("entry") and not study.get("optimisation") and not study.get("sub_studies"):
+        n = 1
+        for values in (study.get("grid") or {}).values():
+            n *= len(values)
+        print("total=%d" % n, file=open(mark, "a"))
+except BaseException:
+    pass
+_call = subprocess.call
+def _noted(args, *a, **k):
+    r = _call(args, *a, **k)
+    try:
+        for word, tag in (("--cell", "c"), ("--evaluate", "e")):
+            if word in args:
+                print(tag, file=open(mark, "a"))
+    except BaseException:
+        pass
+    return r
+subprocess.call = _noted
+sys.argv = ["run.py"] + sys.argv[1:]
+runpy.run_path(run, run_name="__main__")
+'''
+
+
+def progress_of(copy: Path, elapsed_s: float) -> str:
+    """Where a rerun of the whole study is, in the words of the main run's "still running" line (core/run_estimate.py:
+    ``progress_line``): how many settings are done and about how long is left; empty when nothing was noted."""
+    try:
+        notes = (copy / _MARK).read_text(encoding="utf-8").split()
+    except OSError:
+        return ""
+    total = next((int(n[6:]) for n in notes if n.startswith("total=") and n[6:].isdigit()), 0)
+    done = notes.count("c")
+    designs = notes.count("e")
+    if total > 0:
+        from . import run_estimate as _estimate
+
+        return _estimate.progress_line(min(done, total), total, min(done, total), total, elapsed_s)
+    bits = ([f"{done} setting{'s' if done != 1 else ''} done"] if done else []) +            ([f"{designs} design{'s' if designs != 1 else ''} tried"] if designs else [])
+    return ", ".join(bits)
+
+
+async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
+    """Await ``task``; every ``PROGRESS_EVERY_S`` seconds say where the rerun is, as the main run does."""
+    from .run_estimate import plain_duration
+
+    began = time.monotonic()
+    who = f"the rerun of finding {finding}" if finding else "the rerun of the study with a repair"
+    try:
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=PROGRESS_EVERY_S)
+            if done:
+                return task.result()
+            try:
+                where = progress_of(copy, time.monotonic() - began)
+                say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {where}" if where else ""))
+            except Exception:  # noqa: BLE001 - a line about progress never stops the rerun
+                pass
+    finally:
+        if not task.done():  # the caller was cancelled: the study's process is stopped with it, as when it is awaited directly
+            task.cancel()
+            await asyncio.wait({task})  # its clean-up (the process tree) is finished before the cancel goes on
+
+
 async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
-                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None) -> tuple[str, Path | None, str, float, bool]:
+                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None, *, say: Any = None,
+                   finding: str = "", derived: str = "data/results/derived.json") -> tuple[str, Path | None, str, float, bool]:
     """Run the study of a copy of ``code/``: ``(mode, folder holding data/ and raw/ it wrote or None, why not, seconds, crashed)``.
     Only the analysis, on the recorded trials, when the changed ``files`` are all analysis files; else the study's own entry
     (``run.py``). A run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends
-    some studies that way)."""
+    some studies that way). The run wrote results when it wrote what the delivered run's numbers are read from
+    (:func:`result_names`), not a file name this module fixes: an older study writes ``result.json``."""
     began = time.monotonic()
     quest_root = Path(quest_root)
     raw_trials = Path(results_root or quest_root) / "raw" / "trials.json"
+    names = result_names(results_root or quest_root, derived)
     analysis_only = bool(files) and all(Path(f).name in ANALYSIS_FILES and "/" not in f for f in files) and raw_trials.is_file()
     if analysis_only:
         mode = "analysis only"
@@ -449,14 +643,26 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         shutil.copytree(copy, out / "code", ignore=_COPY_SKIP)
         env = {**(env or {}), "FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw", "FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}
         ran = await _run(executor, python, ["code/experiment.py"], out, max(1, int(timeout_s)), env)
-        wrote = (out / "data/results/derived.json").is_file()
+        wrote = wrote_results(out, names)
     else:
         mode = "whole study"
         out = copy / "output"
         if not (copy / "run.py").is_file():
             return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
-        ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
-        wrote = (out / "data/results/derived.json").is_file() and (out / "raw/trials.json").is_file()
+        wrapped = False
+        if say is not None:
+            try:
+                (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
+                (copy / _MARK).unlink(missing_ok=True)
+                wrapped = True
+            except OSError:  # no note of progress then: the study itself still runs
+                pass
+        if not wrapped:
+            ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
+        else:
+            ran = await _say_while(asyncio.ensure_future(
+                _run(executor, python, ["_fi_rerun_run.py"], copy, max(1, int(timeout_s)), env)), copy, say, finding)
+        wrote = wrote_results(out, names) and (out / "raw/trials.json").is_file()
     secs = time.monotonic() - began
     if getattr(ran, "timed_out", False):
         return mode, None, f"the repaired study did not finish within {int(timeout_s)} s", secs, False
@@ -496,25 +702,71 @@ def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
 
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json", disputed: list[str] | None = None) -> Verdict:
+                derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "") -> Verdict:
+    """As :func:`_judge`; the repaired files the gate judged (run or not), its verdict and the result record the rerun wrote,
+    if any, are then kept in ``code/``'s own git history under ``refs/fi/rerun/<finding>``
+    (:func:`core.code_project.keep_rerun`), so a later case can be replayed on the very repair the gate judged. Keeping it
+    never changes the verdict."""
+    seen: dict[str, Any] = {}
+    verdict = await _judge(executor, python, quest_root, copy, protocol, timeout_s, env, source=source, results_root=results_root,
+                           derived=derived, disputed=disputed, finding=finding, seen=seen)
+    if seen.get("files"):
+        from . import code_project as _project
+
+        extras = {"verdict.json": json.dumps(verdict.record(), indent=1)}
+        if isinstance(seen.get("derived"), str):
+            extras["derived.json"] = seen["derived"]
+        try:
+            await asyncio.to_thread(_project.keep_rerun, Path(quest_root), finding, seen["files"],
+                                    f"the code a rerun of {finding or 'a finding'} ran: {verdict.status}", extras=extras, log=_LOG)
+        except Exception as exc:  # noqa: BLE001 - a record of the run, never part of the answer
+            _LOG.warning("the code of a rerun could not be kept (%r)", exc)
+    return verdict
+
+
+#: A result record larger than this is not kept with the rerun's code (its numbers are in the verdict's keys already).
+KEEP_DERIVED_BYTES = 4_000_000
+
+
+async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
+                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
+                 derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "",
+                 seen: dict[str, Any] | None = None) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
-    delivered (``results_root``, the quest folder by default). ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
+    delivered (``results_root``, the quest folder by default). ``finding``: the id of the finding the repair is for; while the whole study runs, the quest's run.log says
+    every 30 s which finding is being rerun, how many settings are done and about how long is left. ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
     unwritten, or whose rerun never compared a disputed quantity, is "could not rerun", never "unchanged"."""
     changed = await asyncio.to_thread(changed_files, quest_root, copy)
     if not changed:
         return Verdict("could_not", "the repair changed no file", source=source)
     files = sorted(changed)
+    if seen is not None:
+        seen["files"] = {rel: text for rel, (_old, text) in changed.items()}
     if timeout_s is None:
         return Verdict("could_not", "FI has no record of how long the study takes, so a rerun cannot be bounded", source=source, files=files)
     work = Path(tempfile.mkdtemp(prefix="fi_rerun_"))
     try:
-        mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root)
+        logger = logging.getLogger(f"frontier_insight.{Path(quest_root).name}")  # the quest's own log, when it has one
+        if not logger.handlers:
+            logger = _LOG
+        mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root,
+                                                       say=lambda line: logger.info("[evidence_gate] %s", line), finding=finding,
+                                                       derived=derived)
         if out is None:
             return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed)
         base_root = Path(results_root or quest_root)
         base = await asyncio.to_thread(results_of, base_root, derived)
         delivered = dict(base)  # every delivered number, before a file the repaired run did not write leaves the comparison
         new = await asyncio.to_thread(results_of, out)
+        # a result the repair gives at another grain of settings is compared at each delivered setting (FI's own record)
+        new_doc = await asyncio.to_thread(_json, out / derived)
+        grid = grid_of(await asyncio.to_thread(_json, base_root / "raw" / "trials.json"))
+        for k, v in regrained(await asyncio.to_thread(_json, base_root / derived), new_doc, grid).items():
+            new.setdefault(k, v)
+        if seen is not None and new_doc is not None:
+            text = json.dumps(new_doc, indent=1)
+            if len(text) <= KEEP_DERIVED_BYTES:
+                seen["derived"] = text
         # a result file the repaired run did not write is not compared (an analysis-only rerun writes only derived.json)
         unwritten = await asyncio.to_thread(result_files, base_root, derived)
         unwritten -= await asyncio.to_thread(result_files, out)

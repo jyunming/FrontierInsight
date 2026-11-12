@@ -915,7 +915,43 @@ def fingerprint(quest_root: Path, *, protocol_sha256: str | None = None,
     }
     if design_sha256:
         out["design_sha256"] = design_sha256
+    # Rule 2 (core/reuse_key.py): the person's files in ``inputs/`` are part of the version too. A freeze made by rule 1 has
+    # no such entry and is compared by rule 1 (:func:`_compared_keys`).
+    out["inputs_sha256"] = _inputs_sha(root)
+    out["fingerprint_rule"] = FINGERPRINT_RULE
     return out
+
+
+#: Which rule wrote a fingerprint: 2 adds ``inputs/``.
+FINGERPRINT_RULE = 2
+
+
+def _inputs_sha(root: Path) -> str | None:
+    from . import reuse_key as _reuse_key
+
+    folder = root / "inputs"
+    if not folder.is_dir():
+        return None
+    # The files this module splits (exploration's part, then the held-back part) are in place of one another by design: they
+    # are the data it manages, not a change to the version.
+    record = load(root)
+    managed = {shown(info) for info in (record or {}).get("files") or [] if isinstance(info, dict) and info.get("file")}
+    found: dict[str, str] = {}
+    for path in sorted(p for p in folder.rglob("*") if p.is_file() and f"inputs/{p.relative_to(folder).as_posix()}" not in managed):
+        try:
+            found[path.relative_to(folder).as_posix()] = _reuse_key.digest(path)
+        except OSError:
+            found[path.relative_to(folder).as_posix()] = ""
+    return _sha(json.dumps(found, sort_keys=True).encode("utf-8")) if found else None
+
+
+def _compared_keys(frozen: dict[str, Any], data_quest: bool) -> tuple[tuple[str, str], ...]:
+    """The fingerprint entries that decide "the same version" for one freeze: the ones its own rule wrote."""
+    keys: tuple[tuple[str, str], ...] = (("protocol_sha256", "protocol"),) if data_quest else (
+        ("code_sha256", "code"), ("protocol_sha256", "protocol"))
+    if not data_quest and int(frozen.get("fingerprint_rule") or 1) >= 2:
+        keys += (("inputs_sha256", "inputs"),)
+    return keys
 
 
 def _code_digest(path: Path) -> str:
@@ -1012,8 +1048,7 @@ def new_candidate(quest_root: Path, *, design_sha256: str | None = None, key: by
         return []  # a record from before versions were counted: it goes on as it did
     now = fingerprint(root, design_sha256=design_sha256)
     # A data quest's version is its design and protocol: what it reads the data with (its code/ is not what ran).
-    compared = (("protocol_sha256", "protocol"),) if record.get("data_quest") else (
-        ("code_sha256", "code"), ("protocol_sha256", "protocol"))
+    compared = _compared_keys(frozen, bool(record.get("data_quest")))
     changed = [what for key_, what in compared if now.get(key_) != frozen.get(key_)]
     if record.get("data_quest") and design_sha256 and record.get("design_sha256") \
             and design_sha256 != record["design_sha256"]:
@@ -1214,8 +1249,7 @@ def record_confirm(quest_root: Path, result: Any, *, design_sha256: str | None =
         drifted: list[str] = []
         if frozen_at is not None:
             now = fingerprint(quest_root)
-            drifted = [what for key_, what in ((("protocol_sha256", "protocol"),) if record.get("data_quest") else
-                                               (("code_sha256", "code"), ("protocol_sha256", "protocol")))
+            drifted = [what for key_, what in _compared_keys(frozen_at, bool(record.get("data_quest")))
                        if now.get(key_) != frozen_at.get(key_)]
         if drifted and not replayed and not redesigned:
             # Changed during the confirm run itself (a known-answer check's repair, say): what ran is not the version

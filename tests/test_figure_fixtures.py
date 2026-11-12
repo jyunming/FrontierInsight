@@ -77,9 +77,14 @@ class _Host(frame_figure.FigureCalls):
         self.table = table
         self.x = contract["x"]
         self.settings = contract["settings"]
+        self.series = contract.get("series")  # the setting the figure draws one curve per level of
         self.series_ids = contract["series_ids"]
         self.references = contract["references"]
         self.labels = contract["labels"]
+
+    def panel(self, which, **settings):
+        """The production ``fig.panel`` in short: the settings the panel holds go into its call record (no grid check here)."""
+        self._panel(which)[1]["hold"] = dict(settings)
 
 
 class _Shifted:
@@ -302,17 +307,17 @@ def _check_shifted_values_are_withheld(name, tmp_path, *, kept_shape):
 def test_spectra_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the 95% error bars, which are checked against the table too, are withdrawn."""
     honest, bad = _check_shifted_values_are_withheld(
-        "spectra", tmp_path, kept_shape=[("drawn", {"series": "sample_a"}), ("crossing", {"a": "sample_a"})])
+        "spectra", tmp_path, kept_shape=[("drawn", {"series": "signal@sample:a"}), ("crossing", {"a": "signal@sample:a"})])
     assert [o for o in honest if o["claim"] == "errorbars"] and not [o for o in bad if o["claim"] == "errorbars"]
 
 
 def test_map_own_mutation_caught(tmp_path):
-    _check_shifted_values_are_withheld("map", tmp_path, kept_shape=[("drawn", {"series": "row_0"}), ("trend", {"series": "row_0"})])
+    _check_shifted_values_are_withheld("map", tmp_path, kept_shape=[("drawn", {"series": "load@row:0"}), ("trend", {"series": "load@row:0"})])
 
 
 def test_survival_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the 95% band, whose edges are checked against the table's interval, is withdrawn."""
-    honest, bad = _check_shifted_values_are_withheld("survival", tmp_path, kept_shape=[("drawn", {"series": "group_a"})])
+    honest, bad = _check_shifted_values_are_withheld("survival", tmp_path, kept_shape=[("drawn", {"series": "survival@group:a"})])
     assert [o for o in honest if o["claim"] == "band"] and not [o for o in bad if o["claim"] == "band"]
 
 
@@ -326,7 +331,7 @@ def test_a_heat_map_whose_values_are_not_the_tables_is_named_neutrally(tmp_path)
 
 def test_bars_heatmap_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the standard-deviation bars, checked against the table, are withdrawn."""
-    honest, bad = _check_shifted_values_are_withheld("bars_heatmap", tmp_path, kept_shape=[("drawn", {"series": "treated"})])
+    honest, bad = _check_shifted_values_are_withheld("bars_heatmap", tmp_path, kept_shape=[("drawn", {"series": "growth@arm:treated"})])
     assert [o for o in honest if o["claim"] == "errorbars"] and not [o for o in bad if o["claim"] == "errorbars"]
 
 
@@ -353,22 +358,22 @@ def _survival_band(tmp_path, widen):
     times = sorted({host.table.setting(k)["time"] for k in host.table.keys()})
     keys = [host.table.at(time=t, group="b")[0] for t in times]
     means = [host.table.mean("survival", k) for k in keys]
-    host.line(0, "group_b", times, means, "survival", step=True)
+    host.line(0, "b", times, means, "survival", step=True)
     if widen:
         lo, hi = [m - 0.3 for m in means], [m + 0.3 for m in means]  # not the table's interval
     else:
         lo, hi = [host.table.interval("survival", k)[0] for k in keys], [host.table.interval("survival", k)[1] for k in keys]
-    host.band(0, "group_b", times, lo, hi, "survival", "ci95")
+    host.band(0, "b", times, lo, hi, "survival", "ci95")
     host.write(tmp_path / ".fi" / "figure_records" / "survival.png")
     return figure_claims.load_calls(tmp_path, "survival")
 
 
 def test_a_band_that_is_not_the_tables_interval_states_no_meaning(tmp_path):
     calls = _survival_band(tmp_path, widen=True)
-    assert figure_claims.evaluate(calls, "band", {"series": "group_b", "panel": "1"}) is None
+    assert figure_claims.evaluate(calls, "band", {"series": "survival@group:b", "panel": "1"}) is None
 
 
 def test_a_band_that_is_the_tables_interval_keeps_its_meaning(tmp_path):
     calls = _survival_band(tmp_path, widen=False)
-    got = figure_claims.evaluate(calls, "band", {"series": "group_b", "panel": "1"})
+    got = figure_claims.evaluate(calls, "band", {"series": "survival@group:b", "panel": "1"})
     assert got is not None and "95% confidence interval" in got[0]

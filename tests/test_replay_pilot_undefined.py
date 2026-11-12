@@ -294,6 +294,42 @@ async def test_an_honest_record_with_some_undefined_values_goes_on_and_is_record
 
 
 @pytest.mark.asyncio
+async def test_a_pilot_reading_an_older_fi_made_of_the_same_code_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older FI (main) keyed the pilot's reading with its own hash of ``code/``: on the same code it is reused and its
+    extra trials are not run again; a key no rule gives for this code is read again."""
+    from core import hidden_check
+
+    record = _honest(_record())
+    eng, runner, ex = _engine_and_runner(tmp_path, record)
+    state = {"iteration": 0, "exec_reflect_iter": 0}
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    pilot = est.read_pilot_record(eng.quest_root)
+    assert pilot["outcome"] == "passed"
+    old = hidden_check.main_code_sha(eng.quest_root)
+    assert old and old != hidden_check.code_sha(eng.quest_root)
+    kinds = pilot["code_key"].partition("|")[2]
+    seen: list[float] = []
+    real = est.pilot
+
+    async def watching(*a: Any, **kw: Any) -> Any:
+        seen.append(float(kw["budget_s"]))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(est, "pilot", watching)
+    grid, runs, thresholds = eng._grid_and_runs(state)
+    probes, _why = await est.measure(ex, "python", eng.quest_root, runner.simulate, grid, runs=runs, deterministic=False,
+                                     limit_s=8 * 3600, budget_s=600)
+    est.write_pilot_record(eng.quest_root, {**pilot, "code_key": f"{old}|{kinds}"})
+    assert await eng._pilot_gate(state, runner, "python", None, grid, probes, thresholds, 8 * 3600, 600.0) is None
+    assert seen == [], "the older FI's reading of the same code is reused"
+    est.write_pilot_record(eng.quest_root, {**pilot, "code_key": f"{'0' * 64}|{kinds}"})
+    assert await eng._pilot_gate(state, runner, "python", None, grid, probes, thresholds, 8 * 3600, 600.0) is None
+    assert len(seen) == 1, "a reading keyed by no rule for this code is made again"
+
+
+@pytest.mark.asyncio
 async def test_the_confirmation_is_made_once_per_version_of_the_code_and_counts_against_the_sizing_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

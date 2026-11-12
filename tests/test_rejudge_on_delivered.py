@@ -26,7 +26,12 @@ PROTOCOL: dict[str, Any] = {
         {"name": "gain_at_ten", "case": {"size": 10}, "measure": "mean(gain)", "expected": 0.2, "tolerance": 0.02},
         {"name": "hit_at_forty", "case": {"size": 40}, "measure": "mean(hit)", "expected": 0.5, "tolerance": 0.02},
         {"name": "hit_close", "case": {"size": 10}, "measure": "mean(hit)", "expected": 0.51, "tolerance": 0.01},
+        # a case that also spells out a fixed value of the protocol (a constant and a threshold) at the protocol's value
+        {"name": "hit_fixed", "case": {"size": 10, "depth": 3, "cutoff": 0.05}, "measure": "mean(hit)", "expected": 0.5,
+         "tolerance": 0.02},
     ],
+    "constants": {"depth": 3},
+    "thresholds": {"cutoff": 0.05},
 }
 N_GATE, N_DELIVERED = 100, 4000
 
@@ -89,7 +94,7 @@ def _judged(record: dict[str, Any], name: str) -> dict[str, Any]:
 def test_a_check_undecided_for_time_whose_case_is_a_delivered_setting_becomes_a_pass() -> None:
     oracle = _oracle("hit_at_ten")
     record = _record(_undecided(oracle))
-    new, names = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    new, names, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
     assert names == ["hit_at_ten"]
     j = _judged(new, "hit_at_ten")
     assert j["passed_by_engine"] is True and not j.get("undecided")
@@ -116,7 +121,7 @@ def test_the_record_given_is_not_changed() -> None:
 def test_a_planted_wrong_expected_value_is_a_fail_and_stays_a_failure() -> None:
     oracle = _oracle("hit_at_ten", expected=0.6)  # the delivered mean is 0.5
     record = _record(_undecided(oracle))
-    new, names = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    new, names, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
     assert names == ["hit_at_ten"]
     assert _judged(new, "hit_at_ten")["passed_by_engine"] is False
     assert new["status"] == ac.WENT_ON
@@ -130,56 +135,56 @@ def test_a_planted_wrong_expected_value_is_a_fail_and_stays_a_failure() -> None:
 def test_a_case_that_is_not_a_setting_of_the_delivered_run_stays_undecided() -> None:
     oracle = _oracle("hit_at_forty")
     record = _record(_undecided(oracle))
-    new, names = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)  # the run only held size 10
+    new, names, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)  # the run only held size 10
     assert (new, names) == (None, [])
     # a setting that holds more than the case names is not the case either
     wider = _trials(10)
     wider["cells"][0]["cell"] = {"size": 10, "shape": "flat"}
     assert oc.rejudge_on_delivered(_record(_undecided(_oracle("hit_at_ten"))), wider, _protocol(_oracle("hit_at_ten")),
-                                   VERSION) == (None, [])
+                                   VERSION) == (None, [], [])
 
 
 def test_a_check_undecided_for_another_reason_is_not_touched() -> None:
     oracle = _oracle("hit_at_ten")
     for why in ("most_trials", "failed_trials"):
         record = _record(_undecided(oracle, why=why))
-        assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [])
+        assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
 
 
 def test_code_that_changed_since_the_gate_leaves_the_check_undecided() -> None:
     oracle = _oracle("hit_at_ten")
     record = _record(_undecided(oracle, version="code-v0"))
-    assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
 
 
 def test_a_check_changed_since_the_gate_leaves_it_undecided() -> None:
     gate_oracle = _oracle("hit_at_ten")
     record = _record(_undecided(gate_oracle))
     assert oc.rejudge_on_delivered(record, _trials(10), _protocol(_oracle("hit_at_ten", expected=0.5001)),
-                                   VERSION) == (None, [])
+                                   VERSION) == (None, [], [])
 
 
 def test_a_delivered_run_with_no_more_trials_or_with_failed_trials_decides_nothing() -> None:
     oracle = _oracle("hit_at_ten")
     record = _record(_undecided(oracle))
-    assert oc.rejudge_on_delivered(record, _trials(10, n=N_GATE), _protocol(oracle), VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(record, _trials(10, n=N_GATE), _protocol(oracle), VERSION) == (None, [], [])
     failing = {"cells": [_cell(10, failed=3)]}
-    assert oc.rejudge_on_delivered(record, failing, _protocol(oracle), VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(record, failing, _protocol(oracle), VERSION) == (None, [], [])
 
 
 def test_a_measure_that_is_not_a_declared_mean_is_not_read_from_the_trials() -> None:
     oracle = _oracle("hit_at_ten")
     protocol = {**_protocol(oracle), "metrics": PROTOCOL["metrics"][1:]}  # "hit" is not declared
     record = _record(_undecided(oracle))
-    assert oc.rejudge_on_delivered(record, _trials(10), protocol, VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(record, _trials(10), protocol, VERSION) == (None, [], [])
 
 
 def test_a_check_the_delivered_trials_still_cannot_decide_stays_undecided_and_the_others_are_judged() -> None:
     close, clear = _oracle("hit_close"), _oracle("gain_at_ten")
     record = _record(_undecided(close), _undecided(clear))
-    new, names = oc.rejudge_on_delivered(record, _trials(10), _protocol(close, clear), VERSION)
-    assert names == ["gain_at_ten"]
-    assert _judged(new, "hit_close").get("undecided") is True and _judged(new, "hit_close")["mc"]["why"] == "time"
+    new, names, reworded = oc.rejudge_on_delivered(record, _trials(10), _protocol(close, clear), VERSION)
+    assert names == ["gain_at_ten"] and reworded == ["hit_close"]
+    assert _judged(new, "hit_close").get("undecided") is True and _judged(new, "hit_close")["mc"]["why"] == "delivered"
     assert _judged(new, "gain_at_ten")["passed_by_engine"] is True
     assert new["status"] == ac.WENT_ON and [e["name"] for e in new["went_on"]] == ["hit_close"]
     assert "gain_at_ten" not in new["summary"] and "hit_close" in new["summary"]
@@ -191,9 +196,9 @@ def test_a_record_that_went_on_with_nothing_or_stopped_is_left_alone() -> None:
     oracle = _oracle("hit_at_ten")
     for status in ("ok", "stopped", "warned"):
         record = {**_record(_undecided(oracle)), "status": status}
-        assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [])
-    assert oc.rejudge_on_delivered(None, _trials(10), _protocol(oracle), VERSION) == (None, [])
-    assert oc.rejudge_on_delivered(_record(_undecided(oracle)), None, _protocol(oracle), VERSION) == (None, [])
+        assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
+    assert oc.rejudge_on_delivered(None, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
+    assert oc.rejudge_on_delivered(_record(_undecided(oracle)), None, _protocol(oracle), VERSION) == (None, [], [])
 
 
 def test_a_delivered_run_with_a_longer_list_compared_inside_each_run_stays_undecided() -> None:
@@ -201,25 +206,25 @@ def test_a_delivered_run_with_a_longer_list_compared_inside_each_run_stays_undec
     gate = {**PROTOCOL, "in_each_run": {"level": [1, 2]}}
     record = _record(_undecided(oracle, basis=oc.trial_basis(gate)))
     # the same list: judged again (the control that shows the test can see a re-judgment)
-    new, names = oc.rejudge_on_delivered(record, _trials(10), gate, VERSION)
+    new, names, _ = oc.rejudge_on_delivered(record, _trials(10), gate, VERSION)
     assert names == ["hit_at_ten"]
     # the person extended the list for the main run: the same setting is not the same trials
     extended = {**PROTOCOL, "in_each_run": {"level": [1, 2, 3]}}
-    assert oc.rejudge_on_delivered(record, _trials(10), extended, VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(record, _trials(10), extended, VERSION) == (None, [], [])
 
 
 def test_an_entry_the_gate_wrote_without_the_trial_basis_is_never_judged_again() -> None:
     oracle = _oracle("hit_at_ten")
     judged, entry = _undecided(oracle)
     entry.pop("trial_basis")
-    assert oc.rejudge_on_delivered(_record((judged, entry)), _trials(10), _protocol(oracle), VERSION) == (None, [])
+    assert oc.rejudge_on_delivered(_record((judged, entry)), _trials(10), _protocol(oracle), VERSION) == (None, [], [])
 
 
 def test_the_check_keeps_only_the_delivered_measurement() -> None:
     oracle = _oracle("hit_at_ten")
     record = _record(_undecided(oracle))
     record["attempts"][-1]["checks"][0]["returned"] = {"hit": 0.48, "gain": 0.19, "n_trials": 100.0}
-    new, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    new, _, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
     check = new["attempts"][-1]["checks"][0]
     cell = _cell(10)
     assert check["returned"]["n_trials"] == float(N_DELIVERED)
@@ -276,3 +281,120 @@ def test_the_node_that_runs_the_study_makes_the_call_through_that_condition() ->
     source = inspect.getsource(Engine._node_execute_steps)
     assert "_rejudges_oracles_after(manifest_status, failed_script)" in source
     assert "_rejudge_oracles_on_delivered_run(state, seed_path)" in source
+
+
+def test_a_case_that_names_a_constant_and_a_threshold_at_the_protocol_values_is_a_delivered_setting() -> None:
+    # The delivered cells hold only the grid's own settings; the protocol's constant and threshold are handed to the code
+    # by FI in every run, so a case that spells them out at the protocol's values names the same trials (backlog -385).
+    oracle = _oracle("hit_fixed")
+    record = _record(_undecided(oracle))
+    new, names, reworded = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    assert names == ["hit_fixed"] and reworded == []
+    assert _judged(new, "hit_fixed")["passed_by_engine"] is True and new["status"] == "ok"
+    assert oc.case_names_cell(PROTOCOL, oracle["case"], {"size": 10}) is True
+    assert oc.case_names_cell(PROTOCOL, oracle["case"], {"size": 10.0}) is True  # numbers compared as numbers
+    assert oc.case_names_cell(PROTOCOL, oracle["case"], {"size": 40}) is False
+
+
+def test_a_case_naming_a_constant_or_threshold_at_another_value_is_not_judged_again() -> None:
+    for changed in ({"depth": 4}, {"cutoff": 0.01}):
+        oracle = _oracle("hit_fixed", case={"size": 10, "depth": 3, "cutoff": 0.05, **changed})
+        record = _record(_undecided(oracle))
+        assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [], []), changed
+        assert oc.case_names_cell(PROTOCOL, oracle["case"], {"size": 10}) is False
+
+
+def test_a_case_naming_a_key_that_is_neither_a_cell_setting_nor_a_fixed_value_is_not_judged_again() -> None:
+    oracle = _oracle("hit_fixed", case={"size": 10, "shape": "flat"})
+    record = _record(_undecided(oracle))
+    assert oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
+    # a cell key the case does not name is not the case either
+    assert oc.case_names_cell(PROTOCOL, {"depth": 3}, {"size": 10}) is False
+
+
+def test_a_planted_wrong_expected_value_on_a_case_with_fixed_values_is_a_fail() -> None:
+    oracle = _oracle("hit_fixed", expected=0.6)
+    record = _record(_undecided(oracle))
+    new, names, _ = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    assert names == ["hit_fixed"] and _judged(new, "hit_fixed")["passed_by_engine"] is False
+    assert new["status"] == ac.WENT_ON and "FAILED" in ac.failing_disclosure(new)
+
+
+def test_a_check_still_not_decided_on_the_delivered_run_says_the_delivered_trials_everywhere() -> None:
+    oracle = _oracle("hit_close")
+    record = _record(_undecided(oracle))
+    assert "in the time it had" in record["summary"]  # the gate's words, before
+    new, names, reworded = oc.rejudge_on_delivered(record, _trials(10), _protocol(oracle), VERSION)
+    assert names == [] and reworded == ["hit_close"]
+    j = _judged(new, "hit_close")
+    assert j.get("undecided") is True and j["passed_by_engine"] is None and j["judged_on"] == oc.DELIVERED_RUN
+    assert j["mc"]["trials"] == N_DELIVERED and j["mc"]["why"] == "delivered" and j["mc"]["verdict"] == "undecided"
+    check = new["attempts"][-1]["checks"][0]
+    assert check["mc"]["trials"] == N_DELIVERED and check["returned"]["n_trials"] == float(N_DELIVERED)
+    (entry,) = new["went_on"]
+    assert entry["undecided"] is True and str(N_DELIVERED) in entry["undecided_words"]
+    assert "delivered run" in entry["undecided_words"] and "delivered run" in entry["mc_words"]
+    # every copy of the words: no sentence still gives the side run's count or its reason
+    texts = [new["summary"], ac.failing_disclosure(new), *new["problems"], *new["attempts"][-1]["problems"],
+             entry["undecided_words"], entry["mc_words"], oc.analysis_note(oc.last_judged(new))]
+    for text in texts:
+        assert "in the time it had" not in text and f"{N_GATE} trials" not in text, text
+    assert str(N_DELIVERED) in new["summary"] and any(str(N_DELIVERED) in p for p in new["problems"])
+    # still a check the quest went on with as not decided: set aside, its triage row kept, the status unchanged
+    assert new["status"] == ac.WENT_ON and list(new["set_aside"]) == ["hit_close"]
+    (row,) = [t for t in new["attempts"][-1]["triage"] if t["kind"] == "trials"]
+    assert row["check"] == "hit_close" and row["trials"] == N_DELIVERED and str(N_DELIVERED) in row["cause"]["text"]
+    assert str(N_DELIVERED) in new["set_aside"]["hit_close"] and "delivered run" in new["set_aside"]["hit_close"]
+
+    def strings(o: Any) -> list[str]:
+        if isinstance(o, dict):
+            return [s for v in o.values() for s in strings(v)]
+        if isinstance(o, list):
+            return [s for v in o for s in strings(v)]
+        return [o] if isinstance(o, str) else []
+
+    # nowhere in the record (the record given carries the gate's words in its summary and problems)
+    assert not [s for s in strings(new) if "in the time it had" in s]
+    assert "not decided" in ac.failing_disclosure(new)
+
+
+def test_a_check_reworded_on_the_delivered_run_is_judged_again_after_a_longer_run() -> None:
+    oracle = _oracle("hit_close")
+    first, _, _ = oc.rejudge_on_delivered(_record(_undecided(oracle)), _trials(10), _protocol(oracle), VERSION)
+    # the same delivered run read again changes nothing
+    assert oc.rejudge_on_delivered(first, _trials(10), _protocol(oracle), VERSION) == (None, [], [])
+    # a longer run (more trials than the delivered look had) is read again: decided or reworded, never left as it was
+    longer = _trials(10, n=4 * N_DELIVERED)
+    new, names, reworded = oc.rejudge_on_delivered(first, longer, _protocol(oracle), VERSION)
+    assert new is not None and (names or reworded) == ["hit_close"]
+    assert _judged(new, "hit_close")["mc"]["trials"] == 4 * N_DELIVERED
+
+
+def test_the_engine_keeps_a_reworded_check_not_decided(tmp_path: Any) -> None:
+    import asyncio
+    import json
+    import logging
+    import types
+
+    from core.engine import Engine
+
+    oracle = _oracle("hit_close")
+    root = tmp_path / "quest"
+    (root / "needs").mkdir(parents=True)
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps(_trials(10)), encoding="utf-8")
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(_record(_undecided(oracle))), encoding="utf-8")
+    written: list[dict[str, Any]] = []
+    stub = types.SimpleNamespace(
+        quest_root=root, _log=logging.getLogger("test"), _oracle_undecided={"hit_close"},
+        _oracle_set_aside={"hit_close": "not decided"}, _protocol_block=lambda _state: _protocol(oracle),
+        _measuring_code_version=lambda _seed: VERSION,
+        _oracle_record_read=lambda: json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8")),
+        _oracle_record=lambda payload: written.append(payload))
+    names = asyncio.run(Engine._rejudge_oracles_on_delivered_run(stub, {}, root / "code" / "simulate.py"))
+    assert names == []
+    assert written and written[0]["status"] == ac.WENT_ON  # the words are rewritten on disk
+    # still not decided and set aside; only its reason now names the delivered trials
+    assert stub._oracle_undecided == {"hit_close"} and list(stub._oracle_set_aside) == ["hit_close"]
+    assert stub._oracle_set_aside["hit_close"] == written[0]["set_aside"]["hit_close"]
+    assert str(N_DELIVERED) in stub._oracle_set_aside["hit_close"]

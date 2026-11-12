@@ -6,3 +6,4 @@ vscode-frontier-insight/** text=auto eol=lf
 *.ico binary
 *.woff binary
 *.woff2 binary
+core/legacy_keys/** -text

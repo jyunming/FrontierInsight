@@ -153,23 +153,44 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
     return None, "its case has no step size and no setting the study's grid sweeps, so FI has no safe setting to move"
 
 
-#: What under ``code/`` does not compute the simulation's numbers: a change to it does not call for the check again.
-#: The same files ``Engine._simulation_sources`` does not read as the simulation, and FI's figure redraws (written
-#: after every run).
-_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
-                       "replot_layout.py", "run.py", "submit.py", "fi_search.py")
-_NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
-# The project files FI writes into code/ itself after the run (core/code_project.py): its own record of the study, not the
-# simulation, so writing them never makes a check of the simulation look as if it ran on other code.
-_FI_PROJECT_FILES = (_code_project.README, _code_project.REQUIREMENTS, _code_project.RUN, _code_project.STUDY,
-                     _code_project.SEARCH)
+_FI_WRITTEN = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json", "replot_layout.py",
+               "run.py", "submit.py", "fi_search.py", "README.md", "requirements.txt", "study.json")
 
 
 def code_sha(quest_root: Path) -> str:
     """One hash of the simulation's code as it is now: simulate.py and every other file under ``code/`` it may use
     (the model's package, a parameter file), not the analysis, the notes (``*.md``), git's own or the project files FI
     writes itself (``requirements.txt``, ``study.json``); ``""`` when there is
-    no simulate.py."""
+    no simulate.py. The files are the simulation part of the quest (core/reuse_key.py), the list the trials and the search
+    use: the analysis does not count, ``inputs/`` and ``data/`` do. A file FI cannot read gives ``""`` (nothing is reused)."""
+    if not (Path(quest_root) / _SIMULATE).is_file():
+        return ""
+    from . import reuse_key as _reuse_key
+
+    found = _reuse_key.files(quest_root, "simulation")
+    if not found.complete:
+        return ""
+    # What FI itself writes into code/ after a run (its project files, its figure redraws) is not the simulation: a check made
+    # before it was written must not look as if it ran on other code.
+    own = {f"code/{name}" for name in _FI_WRITTEN}
+    # The rule's name leads what is hashed, so a value made by this rule never equals one made by main's
+    # (:func:`main_code_sha`): a record is read by the rule it was made with (:func:`same_code`). A new rule changes it.
+    return _reuse_key.digest_text("r2|" + json.dumps({k: v for k, v in found.digests.items() if k not in own}, sort_keys=True))
+
+
+#: Main's rule (before the simulation part of core/reuse_key.py was used): what under ``code/`` does not compute the
+#: simulation's numbers, FI's figure redraws and the project files FI writes into ``code/`` itself (core/code_project.py).
+_MAIN_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
+                            "replot_layout.py", "run.py", "submit.py", "fi_search.py")
+_MAIN_NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
+_MAIN_FI_PROJECT_FILES = (_code_project.README, _code_project.REQUIREMENTS, _code_project.RUN, _code_project.STUDY,
+                          _code_project.SEARCH)
+
+
+def main_code_sha(quest_root: Path) -> str:
+    """The hash an older FI (main) wrote into its check records: every file under ``code/`` but the analysis, the notes
+    (``*.md``), git's own and FI's project files, without ``inputs/`` or ``data/``; ``""`` when there is no simulate.py
+    or a file cannot be read. Kept only to read those records (:func:`same_code`); nothing new is written with it."""
     code = Path(quest_root) / "code"
     if not (Path(quest_root) / _SIMULATE).is_file():
         return ""
@@ -177,9 +198,9 @@ def code_sha(quest_root: Path) -> str:
     for path in sorted(p for p in code.rglob("*") if p.is_file()):
         rel = path.relative_to(code)
         # FI's own scripts are named only at the top of code/: a file of the model's package with such a name is code.
-        if ((len(rel.parts) == 1 and (path.name in _NOT_THE_SIMULATION or path.name in _FI_PROJECT_FILES))
+        if ((len(rel.parts) == 1 and (path.name in _MAIN_NOT_THE_SIMULATION or path.name in _MAIN_FI_PROJECT_FILES))
                 or path.suffix.lower() == ".md"
-                or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
+                or any(part in _MAIN_NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
             digest.update(rel.as_posix().encode("utf-8") + b"\0")
@@ -190,6 +211,35 @@ def code_sha(quest_root: Path) -> str:
         except OSError:
             return ""
     return digest.hexdigest()
+
+
+class CodeNow:
+    """The simulation's code as it is now, hashed by each rule a record may have been made with (each at most once)."""
+
+    def __init__(self, quest_root: Path, current: str | None = None) -> None:
+        self.quest_root = Path(quest_root)
+        self.current = code_sha(self.quest_root) if current is None else current
+        self._main: str | None = None
+
+    def same(self, stored: Any) -> bool:
+        """Whether ``stored`` (a record's ``code_sha256``) names this code, by the rule it was made with: this FI's
+        (:func:`code_sha`) or, for a record an older FI wrote, main's (:func:`main_code_sha`). A value matches one rule
+        only, since this rule's hashed text starts with its name. A main-written record keeps main's coverage: a change
+        under ``inputs/`` or ``data/`` alone does not make it stale (main never hashed them)."""
+        if not isinstance(stored, str):
+            return False
+        if stored == self.current:
+            return True
+        if not stored:
+            return False
+        if self._main is None:
+            self._main = main_code_sha(self.quest_root)
+        return bool(self._main) and stored == self._main
+
+
+def same_code(stored: Any, quest_root: Path) -> bool:
+    """:meth:`CodeNow.same` for one record."""
+    return CodeNow(quest_root).same(stored)
 
 
 def checks_key(protocol: dict[str, Any] | None) -> str:
@@ -242,7 +292,8 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
     simulate = quest_root / _SIMULATE
     sha, key = code_sha(quest_root), checks_key(protocol)
     kept = load(quest_root)
-    if (kept and sha and trusted_sha and record_sha(quest_root) == trusted_sha and kept.get("code_sha256") == sha
+    if (kept and sha and trusted_sha and record_sha(quest_root) == trusted_sha
+            and CodeNow(quest_root, sha).same(kept.get("code_sha256"))
             and kept.get("checks_key") == key and kept.get("status") in ("passed", "failed", "not_covered")):
         return kept
     chosen = candidates(protocol)
@@ -313,9 +364,11 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
     if not chosen or _optimise.block_of(protocol) is not None:
         return []
     written = [w for w in written or [] if isinstance(w, dict)]
-    sha, key = code_sha(quest_root), checks_key(protocol)
+    now, key = CodeNow(quest_root), checks_key(protocol)
+    sha = now.current
     gaps: list[str] = []
-    if any(w.get("status") == "failed" and sha and w.get("code_sha256") == sha and w.get("checks_key") == key
+    # Each record and trace event is read by the rule it was made with (main's, for one an older FI wrote).
+    if any(w.get("status") == "failed" and sha and w.get("checks_key") == key and now.same(w.get("code_sha256"))
            for w in written[:-1]):
         gaps.append("an earlier run of this same code failed a check at a setting the code never saw (see the quest's "
                     "trace, event `hidden_check`); FI checks again after the code is changed and run")
@@ -331,7 +384,7 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
     if record.get("status") == "not_run":
         return [*gaps, "FI could not run the checks at a setting the code never saw: "
                        f"{record.get('reason') or 'no reason given'}"]
-    if record.get("code_sha256") != sha or record.get("checks_key") != key:
+    if not now.same(record.get("code_sha256")) or record.get("checks_key") != key:
         return [*gaps, "the simulation or its checks changed after FI ran them at a setting the code never saw (run "
                        "the experiment again so FI checks them as they are)"]
     done = {str(c.get("name")) for c in record.get("cases") or [] if isinstance(c, dict)}

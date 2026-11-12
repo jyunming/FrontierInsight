@@ -84,23 +84,27 @@ def test_a_shifted_line_keeps_its_shape_claims_without_a_y_number(tmp_path):
             assert not any(y in o["text"] for y in ys if "." in y), o["text"]
 
 
-def test_a_real_table_value_of_another_slice_is_a_known_gap(tmp_path):
-    # No option catches these (a y that is a real value of another setting at the same x): the values still pass the check.
-    calls, offers = _draw("bars_heatmap", tmp_path,
+def test_a_real_table_value_of_another_slice_is_named_neutrally(tmp_path):
+    # A y that is a real value of the table, but at another setting than the one the panel and the legend show (another dose than
+    # the panel holds; another row than the curve's level), is not that curve's value: it keeps a neutral name. The other curve,
+    # drawn at its own settings, keeps its name and its values.
+    (tmp_path / "bars").mkdir()
+    (tmp_path / "map").mkdir()
+    calls, offers = _draw("bars_heatmap", tmp_path / "bars",
                           'keys = [table.at(method=m, arm=arm, dose=2)[0] for m in methods]',
                           'keys = [table.at(method=m, arm=arm, dose=(3 if arm == "treated" else 2))[0] for m in methods]')
-    assert set(_whats(calls).values()) == {"growth"}
-    assert _states_values(offers)
-    calls, offers = _draw("map", tmp_path, 'table.at(col=c, row=r)[0]) for c in cols]',
+    assert _whats(calls) == {"growth@arm:treated": "other", "growth@arm:control": "growth"}
+    assert _states_values(offers) and not [o for o in _states_values(offers) if o["args"].get("series") == "growth@arm:treated"]
+    calls, offers = _draw("map", tmp_path / "map", 'table.at(col=c, row=r)[0]) for c in cols]',
                           'table.at(col=c, row=(1 if r == 2 else r))[0]) for c in cols]')
-    assert set(_whats(calls, 1).values()) == {"load"}
-    assert _states_values(offers, "2")
+    assert _whats(calls, 1) == {"load@row:0": "load", "load@row:2": "other"}
+    assert _states_values(offers, "2") and not [o for o in _states_values(offers, "2") if o["args"].get("series") == "load@row:2"]
 
 
 def test_an_honestly_drawn_sd_with_its_form_keeps_its_value_claims(tmp_path):
     sd = MEANS_SIGNAL.replace("table.mean", "table.sd")
-    old = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
-    new = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95", form="sd")'
+    old = 'fig.line(0, sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
+    new = 'fig.line(0, sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95", form="sd")'
     both = tmp_path / "g"
     both.mkdir()
     contract = json.loads((FIXTURES / "spectra" / "contract.json").read_text(encoding="utf-8"))
@@ -125,32 +129,32 @@ def test_the_same_sd_without_a_form_loses_its_value_claims_and_does_not_stop(tmp
 
 
 def test_a_flagged_series_stays_flagged_when_an_honest_one_is_drawn_after_it(tmp_path):
-    old = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
+    old = 'fig.line(0, sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
     new = ('means = [m + 0.3 for m in means] if sample == "a" else means\n'
-           '        fig.line(0, "sample_" + sample, waves, means, "signal")')
+           '        fig.line(0, sample, waves, means, "signal")')
     calls, offers = _draw("spectra", tmp_path, old, new)
-    assert _whats(calls) == {"sample_a": "other", "sample_b": "signal"}
+    assert _whats(calls) == {"signal@sample:a": "other", "signal@sample:b": "signal"}
     assert calls["panels"][0]["y"]["what"] == "other / signal"  # the panel's axis names both; the claims follow each series
     by = {(o["claim"], o["args"].get("series")) for o in offers}
-    assert ("value_at", "sample_b") in by and ("trend", "sample_b") in by
-    assert not [o for o in offers if o["args"].get("series") == "sample_a" and o["claim"] in VALUE_CLAIMS]
+    assert ("value_at", "signal@sample:b") in by and ("trend", "signal@sample:b") in by
+    assert not [o for o in offers if o["args"].get("series") == "signal@sample:a" and o["claim"] in VALUE_CLAIMS]
     # the shape claims stay, and name no y number
-    assert ("trend", "sample_a") in by and ("trend", "sample_b") in by
+    assert ("trend", "signal@sample:a") in by and ("trend", "signal@sample:b") in by
     assert [o for o in offers if o["claim"] in ("order", "crossing")]
     ys = {"%.3g" % y for e in calls["panels"][0]["series"] for y in e["y"] if y is not None}
     for o in offers:  # a shape claim quotes no y value: its text holds only the x positions and names
         if o["claim"] in SHAPE_CLAIMS:
             assert not any(("%s" % y) in o["text"] for y in ys if "." in y), o["text"]
-    assert not [o for o in offers if o["claim"] == "range" and o["args"].get("axis") == "y" and o["args"].get("series") == "sample_a"]
+    assert not [o for o in offers if o["claim"] == "range" and o["args"].get("axis") == "y" and o["args"].get("series") == "signal@sample:a"]
 
 
 # ---- fix round 2: what FI cannot compare is flagged, never kept ---------------------------------------------------------
 
-LINE_CALL = 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
-UNEVEN = ('fig.line(0, "sample_" + sample, waves, means, "signal", yerr=([h / 2 for h in halves], [h * 2 for h in halves]), '
+LINE_CALL = 'fig.line(0, sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")'
+UNEVEN = ('fig.line(0, sample, waves, means, "signal", yerr=([h / 2 for h in halves], [h * 2 for h in halves]), '
           'yerr_meaning="range")')
 
-HONEST_RANGE = ('fig.line(0, "sample_" + sample, waves, means, "signal", yerr=([m - min(table.values("signal", k)) for m, k in zip(means, keys)], '
+HONEST_RANGE = ('fig.line(0, sample, waves, means, "signal", yerr=([m - min(table.values("signal", k)) for m, k in zip(means, keys)], '
                 '[max(table.values("signal", k)) - m for m, k in zip(means, keys)]), yerr_meaning="range")')
 
 
@@ -181,8 +185,8 @@ def test_a_series_whose_x_is_a_result_is_flagged(tmp_path):
     cells = json.loads((folder / "trials.json").read_text(encoding="utf-8"))["cells"]
     host = _Host(contract, _Table(cells, contract["results"]))
     means = [host.table.mean("signal", k) for k in host.table.at(sample="a")]
-    host.line(0, "sample_a", ("signal", means), means, "signal")
-    host.line(0, "sample_b", ("signal", means), means, "signal")
+    host.line(0, "a", ("signal", means), means, "signal")
+    host.line(0, "b", ("signal", means), means, "signal")
     host.write(tmp_path / ".fi" / "figure_records" / "spectra.png")
     calls = figure_claims.load_calls(tmp_path, "spectra")
     assert set(_whats(calls).values()) == {"other"} and calls["panels"][0]["raw"] is False
@@ -200,8 +204,8 @@ def test_a_derived_quantity_and_a_missing_table_are_flagged(tmp_path):
         if not table:
             host.table = None  # nothing to compare with
             host.derived_ids = ["signal"]
-        host.line(0, "sample_a", waves, [1.0, 2.0], derived)
-        host.line(0, "sample_b", waves, [2.0, 1.0], derived)
+        host.line(0, "a", waves, [1.0, 2.0], derived)
+        host.line(0, "b", waves, [2.0, 1.0], derived)
         host.write(tmp_path / derived / ".fi" / "figure_records" / "spectra.png")
         calls = figure_claims.load_calls(tmp_path / derived, "spectra")
         assert set(_whats(calls).values()) == {"other"}, derived
@@ -211,6 +215,6 @@ def test_a_derived_quantity_and_a_missing_table_are_flagged(tmp_path):
 
 
 def test_a_series_with_no_finite_y_to_check_is_flagged(tmp_path):
-    calls, offers = _draw("spectra", tmp_path, 'fig.line(0, "sample_" + sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")',
-                          'fig.line(0, "sample_" + sample, waves, [None] * len(waves), "signal")')
+    calls, offers = _draw("spectra", tmp_path, 'fig.line(0, sample, waves, means, "signal", yerr=halves, yerr_meaning="ci95")',
+                          'fig.line(0, sample, waves, [None] * len(waves), "signal")')
     assert set(_whats(calls).values()) == {"other"}

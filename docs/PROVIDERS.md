@@ -111,6 +111,19 @@ A model can also *describe* running a command it never ran — in one check
 Haiku wrote out an `echo hello` result while claude's event stream held no tool
 call — so a CLI answer is text, not evidence that anything was executed.
 
+**`claude_cli` bills the account its environment names.** With no `ANTHROPIC_API_KEY`
+set, the Claude CLI uses your Claude subscription. With `ANTHROPIC_API_KEY` set
+(by your shell, or by a `.env` file FI loads at launch) it bills that API account
+instead, and a quest then stops when the API balance is empty although your
+subscription still has room. FI does not remove the key or change which account is
+used; it says which one at the start of the quest, in `run.log` and on the console
+("the Claude CLI will bill the API account (ANTHROPIC_API_KEY is set)" or "the
+Claude CLI will use your Claude subscription"), and the key itself is never
+printed. When the CLI reports an empty balance (`Credit balance is too low`), the
+stop says that the API account's balance is empty, not that a usage limit was
+reached, and that removing `ANTHROPIC_API_KEY` (from the environment and from any
+`.env` file) makes the CLI use your subscription.
+
 **`claude_cli` runs without the prompt cache.** By default Claude Code stores every
 prompt in a one-hour cache, which is billed at twice the normal input price, and
 FI's calls almost never send the same prompt again: over 49 Sonnet quests, 45.5M
@@ -569,7 +582,7 @@ a rewrite. With Copilot Pro (~300 premium requests/month) that is about
 | `gemini` | `GEMINI_API_KEY` | Google AI Studio key |
 | `ollama` | none | local |
 | `vllm` | none | local |
-| CLI providers (`claude_cli`, `codex_cli`, `gemini_cli`) | none — OAuth via the CLI's own login | reused from the CLI's keychain |
+| CLI providers (`claude_cli`, `codex_cli`, `gemini_cli`) | none — OAuth via the CLI's own login (for `claude_cli`, an `ANTHROPIC_API_KEY` in the environment makes it bill that API account instead; see above) | reused from the CLI's keychain |
 | `vscode_extension` | none — uses VSCode's auth | reused from VSCode's Copilot Chat sign-in |
 
 ## Provider warnings at engine init
