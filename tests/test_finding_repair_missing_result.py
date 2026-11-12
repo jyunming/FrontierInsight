@@ -61,18 +61,24 @@ def test_a_missing_result_may_be_listed_in_a_table_the_file_has(tmp_path: Path) 
     assert 'DERIVED["spread_width"]' in text and "def derive_spread_width" in text
 
 
-def test_a_repair_that_also_changes_another_result_is_still_refused(tmp_path: Path) -> None:
+def test_a_repair_that_also_changes_another_result_keeps_only_the_missing_result(tmp_path: Path) -> None:
+    """What a repair changes beyond the finding is put back (the scope rule keeps the part the finding is about), so the
+    missing result is listed and nothing else of the file is what the reply made it."""
     listed = 'DERIVED["spread_width"] = {"by": "derive_spread_width"}\n'
-    other_entry = (TABLE + NEW_FN + listed).replace('"mean_y": {"by": "derive_mean_y"}', '"mean_y": {"by": "derive_spread_width"}')
-    other_value = (TABLE + NEW_FN + listed).replace("LIMIT = 3", "LIMIT = 9")
-    other_key = TABLE + NEW_FN + listed + 'DERIVED["mean_z"] = {"by": "derive_mean_y"}\n'
-    other_fn = (TABLE + NEW_FN + listed).replace("sum(r[\"y\"] for r in rows) / len(rows)", "0.0")
-    run = _run(tmp_path, [_block("# file: spring.py\n" + t) for t in (other_entry, other_value, other_key, other_fn)])
-    assert run.go() == []
-    repairs = run.record["issues"]["F-1"]["repairs"]
-    assert [r["outcome"] for r in repairs] == ["rejected"] * 3, repairs
-    assert all("does not speak of" in r["why"] or "may change one existing function" in r["why"] for r in repairs)
-    assert "spread_width" not in (run.code / "spring.py").read_text(encoding="utf-8")
+    whole = TABLE + NEW_FN + listed
+    replies = {
+        "another entry": whole.replace('"mean_y": {"by": "derive_mean_y"}', '"mean_y": {"by": "derive_spread_width"}'),
+        "another value": whole.replace("LIMIT = 3", "LIMIT = 9"),
+        "another key": whole + 'DERIVED["mean_z"] = {"by": "derive_mean_y"}\n',
+    }
+    for name, reply in replies.items():
+        root = tmp_path / name.replace(" ", "_")
+        root.mkdir()
+        run = _run(root, [_block("# file: spring.py\n" + reply)])
+        assert run.go() == ["spring.py"], name
+        text = (run.code / "spring.py").read_text(encoding="utf-8")
+        assert 'DERIVED["spread_width"]' in text, name
+        assert '"mean_y": {"by": "derive_mean_y"}' in text and "LIMIT = 3" in text and "mean_z" not in text, name
 
 
 def test_the_new_entry_rule_is_only_for_a_finding_of_a_missing_result() -> None:
