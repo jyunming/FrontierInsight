@@ -12,6 +12,8 @@ from __future__ import annotations
 import string
 from pathlib import Path
 
+import pytest
+
 from core import finding_repair as fr
 from tests.test_finding_repair import Run, _block
 
@@ -170,23 +172,40 @@ def test_a_repair_that_also_changes_another_result_in_the_small_run_is_refused(t
     assert (run.code / "spring.py").read_text(encoding="utf-8") == TABLE, "the code is left as it was"
 
 
-def test_a_repair_after_which_the_small_run_gives_no_values_is_not_taken_for_unchanged(tmp_path: Path) -> None:
-    """The small run gave values before the repair and none on the repaired code: nothing was compared, and "nothing
-    differs" was read as "nothing changed", so the repair was accepted."""
+@pytest.mark.parametrize("after", [None, {}, {"x=2": {"mean_y": [3.0]}}], ids=["no record", "no setting", "another setting"])
+def test_a_repair_after_which_the_small_run_gives_no_values_is_not_taken_for_unchanged(tmp_path: Path, after) -> None:
+    """The small run gave values before the repair and, on the repaired code, none in any setting it ran before (no
+    record, a record with no setting, values only in another setting): nothing was compared, and "nothing differs" was
+    read as "nothing changed", so the repair was accepted."""
     run = _run_with_small(tmp_path, TABLE + NEW_FN + LISTED)
     before = _small_values_of(run.code)
     asked = []
 
     async def values() -> dict | None:
         asked.append(1)
-        return (await before()) if len(asked) == 1 else None
+        return (await before()) if len(asked) == 1 else after
 
     run.env.small_values = values
     run.go()
     repairs = run.record["issues"]["F-1"]["repairs"]
     assert repairs and all(r["outcome"] != "accepted" for r in repairs), repairs
-    assert "gives none on the repaired code" in " ".join(str(r.get("reason") or r.get("why") or r) for r in repairs)
+    assert "gives none in the same settings" in " ".join(str(r.get("reason") or r.get("why") or r) for r in repairs)
     assert (run.code / "spring.py").read_text(encoding="utf-8") == TABLE, "the code is left as it was"
+
+
+def test_a_small_run_that_held_no_value_before_the_repair_has_nothing_to_keep(tmp_path: Path) -> None:
+    """A setting ran and returned no result before the repair: there is no value to hold the repair to, so a small run
+    with nothing to read after it is no reason to refuse (it was, as "gives none")."""
+    run = _run_with_small(tmp_path, TABLE + NEW_FN + LISTED)
+    asked = []
+
+    async def values() -> dict | None:
+        asked.append(1)
+        return {"x=1": {}} if len(asked) == 1 else None
+
+    run.env.small_values = values
+    assert run.go() == ["spring.py"]
+    assert [r["outcome"] for r in run.record["issues"]["F-1"]["repairs"]] == ["accepted"]
 
 
 def test_a_repair_that_only_adds_the_missing_result_is_accepted_with_the_small_run(tmp_path: Path) -> None:
