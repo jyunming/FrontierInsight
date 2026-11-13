@@ -735,6 +735,11 @@ def test_only_the_line_that_named_the_failure_is_read_for_a_block() -> None:
                        "authentication_failed", "Not logged in")
     assert isinstance(err, ProviderLimitError)
     assert isinstance(_cli_failure(f"claude exited rc=1 ({GATEWAY_PAGE}): ", "authentication_failed"), ProviderLimitError)
+    # and a sign-in hint in stderr does not undo a block the naming line shows
+    from core.provider import _CliBlockedError
+
+    assert isinstance(_cli_failure(f"claude exited rc=1 ({GATEWAY_PAGE}): tip: run '/login' to switch accounts",
+                                   "authentication_failed", GATEWAY_PAGE), _CliBlockedError)
 
 
 @pytest.mark.asyncio

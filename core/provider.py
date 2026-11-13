@@ -2371,8 +2371,7 @@ def _cli_failure(message: str, account_error: str = "", said: str = "") -> "_Cli
     ``authentication_failed`` pauses the run too, except when ``said`` (the text of the stream line that named it, never
     stderr or another line) quotes an HTTP answer the service did not write (:func:`_answered_before_the_service`) and
     is not a refused sign-in by the text rules: that is a :class:`_CliBlockedError` (retried after long waits)."""
-    if (account_error == "authentication_failed" and _answered_before_the_service(said)
-            and not _cli_fatal(said) and not _cli_fatal(message)):
+    if account_error == "authentication_failed" and _answered_before_the_service(said) and not _cli_fatal(said):
         return _CliBlockedError(f"{message} [the CLI named it: {account_error}; the answer is not the service's own]")
     if account_error:
         return ProviderLimitError(f"{message} [the CLI named it: {account_error}]")
