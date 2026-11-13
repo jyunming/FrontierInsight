@@ -394,6 +394,19 @@ def search_in_each_run(p: dict[str, Any]) -> dict[str, Any]:
     return inside if isinstance(inside, dict) else {}
 
 
+def settings_between_runs(p: dict[str, Any]) -> tuple[Any, Any]:
+    """``(grid, sub_studies)``: the settings the runs of the study differ in, each with its values, and the parts that
+    divide them, where the plan wrote them. A measurement: ``protocol.grid`` and ``protocol.sub_studies``. A search for the
+    best design: the coarse scan it runs first (``protocol.optimisation.grid`` and ``.sub_studies``), whose settings FI
+    runs and records one by one as it does a measurement's (core/optimise_search.py ``scan_grid``); a search that
+    writes no scan is read as a measurement is (as ``search_in_each_run`` reads its other part). As written: nothing is
+    checked here."""
+    block = p.get("optimisation")
+    if isinstance(block, dict) and isinstance(block.get("grid"), dict):
+        return block["grid"], block.get("sub_studies")
+    return p.get("grid"), p.get("sub_studies")
+
+
 def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 left_out: dict[str, str] | None = None) -> StudyContract:
     """The contract a plan's design block gives, by fixed rules (no model, no guess); see the module docstring.
@@ -409,9 +422,10 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
 
     fixed = {**_mapping(p.get("constants"), gaps, "the constants"),
              **_mapping(p.get("thresholds"), gaps, "the thresholds")}
+    grid, parts = settings_between_runs(p)
     settings = _first_valid(Settings, {
-        "compared": {k: _values(v) for k, v in _mapping(p.get("grid"), gaps, "the grid").items()},
-        "sub_studies": _rows(p.get("sub_studies"), gaps, "the sub-studies"),
+        "compared": {k: _values(v) for k, v in _mapping(grid, gaps, "the grid").items()},
+        "sub_studies": _rows(parts, gaps, "the sub-studies"),
         "in_each_run": {k: _values(v) for k, v in _mapping(search_in_each_run(p) or p.get("in_each_run"), gaps,
                                                             "in_each_run").items()},
         "numerical": _mapping(p.get("numerical_settings"), gaps, "the numerical settings"), "fixed": fixed},
@@ -697,8 +711,7 @@ def varied_settings(protocol: Any) -> list[str]:
     """The settings whose values change between the runs of a study: the grid and what each run goes through."""
     p = protocol if isinstance(protocol, dict) else {}
     out: list[str] = []
-    for key in ("grid", "in_each_run"):
-        block = p.get(key)
+    for block in (settings_between_runs(p)[0], search_in_each_run(p) or p.get("in_each_run")):
         out += [str(k) for k in block if str(k) not in out] if isinstance(block, dict) else []
     return out
 
@@ -711,10 +724,12 @@ def _declared_names(protocol: dict[str, Any]) -> set[str]:
         for m in protocol.get(key) if isinstance(protocol.get(key), list) else []:
             if isinstance(m, dict) and _ident(m.get("id")):
                 names.update(metric_spec.result_forms(str(m["id"]).strip()))
-    for key in ("grid", "in_each_run", "numerical_settings", "constants", "thresholds"):
-        if isinstance(protocol.get(key), dict):
-            names.update(str(k) for k in protocol[key])
-    for sub in protocol.get("sub_studies") if isinstance(protocol.get("sub_studies"), list) else []:
+    grid, parts = settings_between_runs(protocol)
+    for block in (grid, search_in_each_run(protocol) or protocol.get("in_each_run"), protocol.get("numerical_settings"),
+                  protocol.get("constants"), protocol.get("thresholds")):
+        if isinstance(block, dict):
+            names.update(str(k) for k in block)
+    for sub in parts if isinstance(parts, list) else []:
         if isinstance(sub, dict) and _ident(sub.get("name")):
             names.add(str(sub["name"]).strip())
     for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
@@ -879,7 +894,7 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
         if not isinstance(items, list):
             return ["`comparisons` must be a list (empty when the study compares nothing between settings)"]
         names = set(declared) | {str(x) for x in value.get("_derived", ())}
-        grid = p.get("grid") if isinstance(p.get("grid"), dict) else {}
+        grid = settings_between_runs(p)[0] if isinstance(settings_between_runs(p)[0], dict) else {}
         seen: set[tuple[str, str]] = set()
         for i, c in enumerate(items, 1):
             if not isinstance(c, dict):
