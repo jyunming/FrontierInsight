@@ -15,7 +15,7 @@ function or method called ``f``. A function nested in another is a function of i
 it by name, and it can only run when the function it sits in runs (a nested function is unreached when that function is
 unreached or never writes its name). Every doubt
 counts as reached: a file that does not parse, a name computed at run time
-(``getattr`` with a computed name, ``globals()`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
+(``getattr`` with a computed name, ``globals()`` or a function's ``__globals__`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
 function reached, so this can only ever spare a finding about code that is plainly never run.
 
 Two computed ``getattr`` calls are read more closely than that. ``getattr(m, name)`` on an imported module ``m`` of the
@@ -373,6 +373,8 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
                 elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                     reach(m, node.id)
                 elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                    if node.attr == "__globals__":
+                        return None  # a function's module scope handed on: any name may be looked up in it, as with globals()
                     owner = node.value
                     if isinstance(owner, ast.Name) and owner.id in m.imports and owner.id not in m.functions:
                         module, name = m.imports[owner.id]

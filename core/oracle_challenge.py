@@ -69,7 +69,8 @@ def without_measured(text: Any, measured: float | None) -> str:
 def without_numbers(text: Any) -> str:
     """``text`` with every number in it taken out. The step a repair disputes is written by a model that saw what the
     simulation measured, and it may write that value at any rounding, so no number of its own reaches a blind model:
-    the argument stays in its words, and the value it claims is carried by its formula, which FI computes."""
+    the argument stays in its words, and the value it claims is carried by its formula, which FI computes. A digit that is
+    part of a name (``rk4``, ``N80``, ``x_0``) is the name's and is kept; a value spelled in words is not recognised."""
     return _NUMBER_RE.sub("(a value not shown)", " ".join(str(text or "").split()))
 
 

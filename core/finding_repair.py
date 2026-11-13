@@ -2395,7 +2395,11 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
         if held and values_before:
-            moved = _small.changed_results(values_before, await env.small_values() or {})  # type: ignore[misc]
+            values_after = await env.small_values()  # type: ignore[misc]
+            if values_after is None:  # nothing to compare with is not "unchanged"
+                raise _Rejected("FI's small run gave values before this repair and gives none on the repaired code, so it "
+                                "cannot show that the results the finding is not about kept theirs")
+            moved = _small.changed_results(values_before, values_after)
             if moved:
                 raise _Rejected("it changed " + ", ".join(f"`{n}`" for n in moved[:4]) + " in FI's small run, which the "
                                 "finding is not about (the finding is that " + ", ".join(f"`{n}`" for n in absent[:4])

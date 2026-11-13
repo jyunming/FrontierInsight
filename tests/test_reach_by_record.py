@@ -8,7 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from core import call_record, code_reach
-from tests.test_call_record_of_runs import _check_run, _quest
+from tests.test_call_record_of_runs import SIM, _check_run, _quest
+
+#: The same study with the step called by its name: nothing in it is looked up at run time, so what nothing names is unreached.
+PLAIN = {"simulate.py": SIM.replace("    return dispatch.__globals__[name]()", "    return lookup_step()")}
+assert PLAIN["simulate.py"] != SIM
 
 
 # ---- what code_reach makes of it -----------------------------------------------------------------------------------------
@@ -19,7 +23,7 @@ def _verdict(root: Path, function: str, file: str = "simulate.py", record="load"
 
 
 def test_a_nested_inner_function_that_ran_is_reached_and_one_that_never_runs_is_not(tmp_path: Path) -> None:
-    root = _quest(tmp_path)
+    root = _quest(tmp_path, PLAIN)
     _check_run(root)
     assert _verdict(root, "tally.square") == code_reach.RAN
     assert _verdict(root, "tally.<locals>.square") == code_reach.RAN
@@ -39,15 +43,20 @@ def test_a_function_only_used_where_the_small_run_did_not_go_is_cannot_tell(tmp_
 
 
 def test_a_function_called_by_a_name_chosen_at_run_time_is_reached_by_the_record_not_by_reading(tmp_path: Path) -> None:
+    """The step is looked up in the function's own module scope (``dispatch.__globals__[name]``): reading the code cannot
+    say which function that is, so nothing in the study is called unreached, and only the record says the step ran."""
     root = _quest(tmp_path)
-    assert _verdict(root, "lookup_step", record=None) == code_reach.UNREACHED  # nothing writes its name as a call
+    assert code_reach.reached(root / "code", scripts=["experiment.py"], harness="simulate.py") is None
+    assert _verdict(root, "lookup_step", record=None) == code_reach.CANNOT_TELL
+    assert _verdict(root, "Box.grow", record=None) == code_reach.CANNOT_TELL
+    assert not code_reach.never_run_in(root)("simulate.py", "lookup_step")
     _check_run(root)
     assert _verdict(root, "lookup_step") == code_reach.RAN
     assert not code_reach.never_run_in(root)("simulate.py", "lookup_step")
 
 
 def test_without_a_record_nothing_is_called_ran_and_a_function_never_named_is_still_unreached(tmp_path: Path) -> None:
-    root = _quest(tmp_path)
+    root = _quest(tmp_path, PLAIN)
     assert call_record.load(root) is None
     assert _verdict(root, "Box.grow") == code_reach.UNREACHED
     assert _verdict(root, "tally.square") == code_reach.CANNOT_TELL  # named in the body of a function that runs

@@ -234,8 +234,12 @@ def test_the_step_a_blind_model_reads_carries_no_number_however_the_measurement_
     for measured in (0.10355, None):
         taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": said}, measured=measured)
         assert taken is not None
-        assert not any(ch._NUMBER_RE.search(part) for part in taken["step"].split("(a value not shown)")), taken["step"]
+        assert not any(c.isdigit() for c in taken["step"]), taken["step"]   # read from the text, not by the rule under test
         assert "the plan's second term is wrong" in taken["step"]
+    # every way a value is written goes; a digit that is part of a name is the name's and stays
+    assert ch.without_numbers("rk4 at N80 gives 0.5s and x_0=1e-3, about 10% of 1/8 (-0.25)") == (
+        "rk4 at N80 gives (a value not shown)s and x_0=(a value not shown), about (a value not shown)% of "
+        "(a value not shown)/(a value not shown) ((a value not shown))")
     assert ch.without_measured("the check expects 0.10 at 4 runs", 0.10355) == "the check expects 0.10 at 4 runs"
 
 

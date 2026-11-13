@@ -170,6 +170,25 @@ def test_a_repair_that_also_changes_another_result_in_the_small_run_is_refused(t
     assert (run.code / "spring.py").read_text(encoding="utf-8") == TABLE, "the code is left as it was"
 
 
+def test_a_repair_after_which_the_small_run_gives_no_values_is_not_taken_for_unchanged(tmp_path: Path) -> None:
+    """The small run gave values before the repair and none on the repaired code: nothing was compared, and "nothing
+    differs" was read as "nothing changed", so the repair was accepted."""
+    run = _run_with_small(tmp_path, TABLE + NEW_FN + LISTED)
+    before = _small_values_of(run.code)
+    asked = []
+
+    async def values() -> dict | None:
+        asked.append(1)
+        return (await before()) if len(asked) == 1 else None
+
+    run.env.small_values = values
+    run.go()
+    repairs = run.record["issues"]["F-1"]["repairs"]
+    assert repairs and all(r["outcome"] != "accepted" for r in repairs), repairs
+    assert "gives none on the repaired code" in " ".join(str(r.get("reason") or r.get("why") or r) for r in repairs)
+    assert (run.code / "spring.py").read_text(encoding="utf-8") == TABLE, "the code is left as it was"
+
+
 def test_a_repair_that_only_adds_the_missing_result_is_accepted_with_the_small_run(tmp_path: Path) -> None:
     run = _run_with_small(tmp_path, TABLE + NEW_FN + LISTED)
     assert run.go() == ["spring.py"]
