@@ -69,8 +69,9 @@ TASK = {
 
 
 def _stop_detail(run_dir: Path) -> str:
-    """What a stopped run wrote about its stop: the stop file in full and the end of its log. An outcome keeps only the
-    stop's first line, and a stop that comes and goes between runs of this file cannot be found from that line."""
+    """What a stopped run wrote about its stop: its stop files (each up to 6,000 characters), the last traceback of its
+    log and the end of that log. An outcome keeps only the stop's first line, and a stop that comes and goes
+    between runs of this file cannot be found from that line."""
     try:
         quest = runner.quest_root(run_dir)
     except FileNotFoundError as exc:
