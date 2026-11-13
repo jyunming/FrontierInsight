@@ -508,9 +508,9 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # keeping dicts with text keys and complex numbers and arrays, and only for that. It was ba2e9f8d..., and the text
     # without the audit lines was f6c6ebe3...
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "2f1b7c9c82e2a007cf3cfe6294737ca2365e17f453b85edb6f796a2fc1a28b88")
+        "b4fb608d2027c6719235ee562245744e6c4423f172cc38d9e0d96ad9356d503e")
     assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
-        "4501b4dd9f2ce575b077df42e4c617031cdfa9e49cace6a08ed2116ef510fcc8")
+        "98dba93062aec27688e4cc886e9e2cae9c3068b46b227ddf249ed120cbd0a3e6")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 

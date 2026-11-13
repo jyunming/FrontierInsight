@@ -124,9 +124,10 @@ def _fi_capture(cfg):
         # {"__complex__": [re, im]}, which the comparison script turns back into a complex number; a study's own dict with
         # only that key could not be told from one, so a call that holds it is not kept).
         if np is not None and isinstance(x, np.ndarray):
-            if x.dtype.kind not in "biufc" or x.size > left[0]:
+            numbers = x.size * (2 if x.dtype.kind == "c" else 1)  # a complex number is kept as two
+            if x.dtype.kind not in "biufc" or numbers > left[0]:
                 raise TypeError("not plain data")
-            left[0] -= x.size
+            left[0] -= numbers
             # An array is kept whole, whatever its values (a NaN marks "no value here" in many studies); only a complex
             # one is rewritten, number by number.
             return cplx(x.tolist()) if x.dtype.kind == "c" else x.tolist()

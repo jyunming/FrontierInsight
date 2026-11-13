@@ -238,6 +238,39 @@ def test_a_dict_spelled_like_fis_complex_number_is_not_recorded(tmp_path: Path) 
     assert si.read_captured(tmp_path)["called_at"].get("keyed") == [0], "it was called; FI says so"
 
 
+SIZED_MODEL = '''import numpy as np
+
+
+def total(values):
+    return float(np.abs(np.asarray(values)).sum())
+
+
+def total_wide(values):
+    return float(np.abs(np.asarray(values)).sum())
+'''
+
+SIZED_SIMULATE = '''import numpy as np
+from pkg import model
+
+
+def run_cell(cell):
+    return {"v": model.total(np.ones(3) * (1 + 1j)) + model.total_wide(np.ones(4) * (1 + 1j))}
+'''
+
+
+def test_a_complex_array_counts_two_numbers_for_each_element_against_the_size_limit(tmp_path: Path, monkeypatch) -> None:
+    """A complex number is kept as two numbers, so an array of them takes twice its length of what one call may hold."""
+    monkeypatch.setattr(si, "CAPTURE_ELEMENTS", 6)
+    (tmp_path / "code" / "pkg").mkdir(parents=True)
+    (tmp_path / "code" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "code" / "pkg" / "model.py").write_text(SIZED_MODEL, encoding="utf-8")
+    (tmp_path / "code" / "simulate.py").write_text(SIZED_SIMULATE, encoding="utf-8")
+    got = asyncio.run(si.capture_inputs(_run(tmp_path), tmp_path, "pkg", ["total", "total_wide"], [{"gap": 3.0}],
+                                        deterministic=True))
+    assert len(got["total"][0]["values"]) == 3, "three complex numbers are six numbers: within the limit"
+    assert "total_wide" not in got, "four complex numbers are eight numbers: over the limit, the call is not kept"
+
+
 PACKAGE_MODEL = '''import numpy as np
 
 
