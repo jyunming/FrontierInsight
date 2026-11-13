@@ -656,3 +656,22 @@ def test_the_timeout_mark_is_read_through_a_wrapped_error() -> None:
     except RuntimeError as outer:
         f = ck.classify(outer, node="write", provider="ollama", model="m")
     assert f.kind == "setup" and "(600 s)" in f.say
+
+
+def test_a_cli_call_refused_before_the_service_is_a_passing_problem_not_a_sign_in_to_renew() -> None:
+    from core.provider import _cli_failure
+
+    page = "Failed to authenticate. API Error: 403 Attention Required! | A Gateway"
+    said = f"claude exited rc=1 (stream error: {page}): "
+    blocked = ck.classify(_cli_failure(said, "authentication_failed", page), node="code_review",
+                                  provider="claude_cli", model="some-model", retries=3)
+    assert blocked.kind == "transient" and "sign" not in blocked.say.lower() and "login" not in blocked.do
+    # known positive: the same kind with the service's own refusal still says to sign in again
+    refused = ck.classify(
+        _cli_failure('claude exited rc=1 (stream error: Failed to authenticate. API Error: 401 {"type":"error"}): ',
+                     "authentication_failed"), node="code_review", provider="claude_cli", model="some-model")
+    assert refused.kind == "setup" and "/login" in refused.do
+    # a refused sign-in that was raised while handling a blocked call is still a sign-in to renew
+    outer = _cli_failure("claude exited rc=1 (stream error: Not logged in. Please run /login): ", "authentication_failed")
+    outer.__cause__ = _cli_failure(said, "authentication_failed", page)
+    assert ck.classify(outer, provider="claude_cli", model="some-model").kind == "setup"

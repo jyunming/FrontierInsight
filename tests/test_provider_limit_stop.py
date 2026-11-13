@@ -481,3 +481,31 @@ async def test_an_ensemble_whose_members_all_meet_the_limit_stops_with_the_limit
     assert isinstance(caught.value.__cause__, ProviderLimitError)
     got = crash_kind.classify(caught.value, provider="codex_cli", model="gpt-x")
     assert got.kind == "setup" and "Nov 4th, 2026 10:49 AM" in got.do
+
+
+@pytest.mark.asyncio
+async def test_a_block_that_outlasts_the_retries_is_a_stop_that_says_so_and_keeps_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call refused before the service, still refused after the client's own long retries: the step is not kept (no
+    check is skipped on a call never answered) and the sentence names neither a usage limit nor a sign-in to renew."""
+    from core.provider import _cli_failure
+
+    page = "Failed to authenticate. API Error: 403 Attention Required! | A Gateway"
+
+    class _Blocked:
+        async def chat(self, messages: Any, **kw: Any) -> str:
+            raise _cli_failure(f"claude exited rc=1 (stream error: {page}): ", "authentication_failed", page)
+
+    eng = _engine(tmp_path, monkeypatch, _Blocked())
+
+    async def step(state: Any) -> dict[str, Any]:
+        try:
+            await fr._ask(_Env(eng), "p", "code", "test")  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 -- a step that would go on without its check
+            pass
+        return {"decided": "went on"}
+
+    with pytest.raises(ModelUnavailable) as caught:
+        await eng._audited("execute", step)({})
+    say = str(caught.value)
+    assert "refused on the way to its service" in say and "Nothing the current step decided was kept" in say
+    assert "usage limit was reached" not in say and "/login" not in say and "--resume" in say and eng.quest_id in say

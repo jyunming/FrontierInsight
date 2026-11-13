@@ -213,6 +213,7 @@ from .provider import (
     ProxySupervisor,
     append_cost_row,
     billing_stop,
+    blocked_stop,
     claude_cli_account_line,
     missing_step_api_keys,
     model_for_node,
@@ -2347,6 +2348,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMix
         empty = billing_stop(limit, name) if limit is not None else None
         if empty:  # an empty balance is not a usage limit: no wait brings it back
             return f"{empty[0]}. Nothing the current step decided was kept. {empty[1]}, then resume with: {resume}"
+        blocked = blocked_stop(limit) if limit is not None else None
+        if blocked:  # refused before the service: not a usage limit and not a sign-in
+            return f"{blocked[0]}. Nothing the current step decided was kept. {blocked[1]}: {resume}"
         return (f"The model provider's usage limit was reached{f' ({who})' if who else ''}. Nothing the current step decided "
                 f"was kept. " + (f"Resume after {when} with: {resume}" if when else
                                  f"Resume with: {resume} once the limit has reset"))

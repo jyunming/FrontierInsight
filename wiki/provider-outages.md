@@ -13,6 +13,6 @@ A model provider's server that is down for a few minutes should not end a quest.
 
 While FI waits it gives back its slot in the concurrent-call limit, so other quests can use it. Each wait writes one line to `run.log`, for example "attempt 2 of 6: the provider's server is down or busy (HTTP 521) … trying again in 21s".
 
-There is no setting for this. For a longer outage, configure `provider.fallback`. It behaves the same from the CLI, the web page and VS Code, because it is part of the connection. CLI providers (4 tries, 30–90 s apart on a capacity error) and the VS Code chat model (6 tries) have their own retry rules.
+There is no setting for this. For a longer outage, configure `provider.fallback`. It behaves the same from the CLI, the web page and VS Code, because it is part of the connection. CLI providers (4 tries, 30–90 s apart on a capacity error; 3–5 minutes apart when the Claude CLI's call was refused by a page in front of the model's service, which the CLI names `authentication_failed` although the account was never asked: a refused sign-in or an empty balance is still not retried) and the VS Code chat model (6 tries) have their own retry rules.
 
 Related: [[model-reasoning-trace|Model reasoning trace]] (what the model returned on the call that finally answered), [[pauses|Pauses]].
