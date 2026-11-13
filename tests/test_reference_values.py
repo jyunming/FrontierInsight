@@ -752,8 +752,18 @@ def test_a_search_plans_reference_that_names_no_setting_of_the_scan_is_still_ref
 
 
 def test_a_grid_beside_a_search_block_is_not_the_studys_settings() -> None:
-    # A grid beside the block is never run (the engine removes it when it takes the block): a reference cannot use it.
+    # A grid left beside the block is not what runs: the plan check refuses a plan that gives both, and its repair moves
+    # the sweep into the block as the scan, where a reference reads it (the test below). Left beside, it is not read.
     protocol = _search_protocol({"formula": "gain * depth"}, grid={"depth": [1, 2]})
     assert list(rv.study_axes(protocol)) == ["speed", "shape"]
     assert "its formula uses depth" in rv.problems(protocol)[0]
     assert list(rv.grid_axes(protocol)) == ["depth"]  # the tables of results read the top-level grid as written
+
+
+def test_a_sweep_the_plans_repair_moves_into_the_search_block_is_what_a_reference_reads() -> None:
+    protocol = _search_protocol({"formula": "gain * depth"}, grid={"depth": [1, 2]})
+    del protocol["optimisation"]["grid"], protocol["optimisation"]["sub_studies"]
+    moved = {**protocol, "optimisation": {**protocol["optimisation"], "grid": protocol["grid"]}}  # what the repair does
+    del moved["grid"]
+    assert list(rv.study_axes(moved)) == ["depth"] and rv.problems(moved) == []
+    assert rv.grid_settings(moved) == [{"depth": 1}, {"depth": 2}]
