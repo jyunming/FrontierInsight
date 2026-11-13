@@ -44,6 +44,7 @@ from . import code_findings as _issues
 from . import function_steps as _steps
 from . import optimise as _optimise
 from . import skeleton as _skeleton
+from . import small_run as _small
 from . import trial_runner as _trials
 from .provider import ProviderUnusable
 
@@ -1308,6 +1309,19 @@ def _containers(source: str, quantities: set[str]) -> set[str]:
     return found
 
 
+def _registries(source: str) -> set[str]:
+    """The module-level names ``source`` binds to a non-empty dict literal whose keys are all plain strings (a table of
+    named entries: the roles, kinds or derived results a frame lists). A result the code lacks has no entry anywhere yet,
+    so :func:`_containers` finds no home for it; these are the tables it may be listed in."""
+    found: set[str] = set()
+    for where, _d, node in _frame_assigns(source):
+        targets, value = _targets(node), _dict_value(node)
+        if (where == "" and len(targets) == 1 and isinstance(targets[0], ast.Name) and value is not None and value.keys
+                and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in value.keys)):
+            found.add(targets[0].id)
+    return found
+
+
 def _adds_quantity_entry(node: ast.stmt, quantities: set[str], bound: set[str]) -> bool:
     """Whether an added statement is a set of the finding's quantity entry (``name["quantity"] = ...``, ``+=``,
     annotated) of a name that already holds an entry of that quantity (``bound``: :func:`_containers`). The value
@@ -1412,6 +1426,10 @@ def unspoken_frame_changes(old: str, new: str, issue: dict[str, Any]) -> list[st
         if found is None or not changes_only_quantity_entries(found[2], twin[2] if twin else None, quantities):
             out.append(text)
     bound = _containers(old, quantities)
+    if issue.get("kind") == "quantity":
+        # A finding that a result is missing: the one change that lists it is its own entry in a table of named entries
+        # the code has (nothing else of the table changes: every other statement is held to the rules above).
+        bound |= _registries(old)
     for where, dump, node in news:  # what is added and is no replacement of a statement that went
         if not _adds_quantity_entry(node, quantities, bound):
             out.append(f"{where or 'the module'}: added {dump[:60]}")
@@ -1673,6 +1691,14 @@ class Env:
     #: FI's small run of the simulation on the code as it is: ``""`` when it ran, else why not (a repair that breaks it is
     #: not kept); ``None`` when there is none to make.
     small_run: Callable[[], Awaitable[str]] | None = None
+    #: What FI's small run gives for each result on the code as it is, ``{setting: {result: [value of each trial]}}`` (the
+    #: run is made when the code changed since its record); ``None`` when there is no small run. A repair of a finding that a
+    #: result is missing may not change the values of the results the small run gave before it (:func:`core.small_run.changed_results`).
+    small_values: Callable[[], Awaitable[dict[str, dict[str, list[Any]]] | None]] | None = None
+    #: The results the plan declares each run returns that no trial of FI's small run returned, on the code as it is
+    #: (:func:`core.small_run.missing_outputs`); ``None`` when there is no small run or it did not run. This record, never a
+    #: finding's words, says that a result is missing.
+    small_missing: Callable[[], Awaitable[list[str] | None]] | None = None
     #: The analysis gate on the code as it is (core/pipeline_gate.py): ``""`` when the analysis still runs from start to end on
     #: the recorded results, else why not (the repair is not kept); ``None`` when there is no gate.
     gate: Callable[[], Awaitable[str]] | None = None
@@ -2233,7 +2259,7 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     call it directly, in any file of the code, to pass them on (:func:`params_kept`, :func:`direct_callers`); a repair of a
     whole file may move statements that run when the file is imported under an ``if __name__ == "__main__":`` block
     (:func:`without_main_guard`). It is accepted only when the finding's own test passes, every check that passed before
-    still passes, no static check finds more faults, and FI's small run of the simulation still runs (``env.small_run``)."""
+    still passes, no static check finds more faults, and FI's small run of the simulation still runs when it ran before the repair (``env.small_run``)."""
     path = env.code / rel
     old = _read(path)
     scope = scope_function(issue, old)
@@ -2263,7 +2289,8 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         prompt = env.prompts["code_review_repair"].substitute(
             topic=env.topic or "(not stated)", equations=env.equations, finding=finding_block(issue, env.scrub),
             test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
-            package=env.package or "(none)", how=how, problem=problem)
+            package=env.package or "(none)", how=how, problem=problem,
+            declared=declared_block(env.root))
         if framed:  # the handling of the pilot and the seed is in FI's frame, which a repair keeps as it is
             prompt = prompt.replace(", the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line.",
                                     " and the frame.")
@@ -2334,6 +2361,19 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
     if env.baseline_response is None:
         env.baseline_response = await _measure_behaviour(env, "design_response")
     env.measured = {}
+    # A finding that a result is missing, by FI's own record: its small run of the code as it is got no value of a result
+    # the plan declares each run returns, and the finding names that result. Only then are the other results held to the
+    # values they had. A finding about a result the code already returns is about that result's value, which its repair
+    # must change, and with it every result computed from it.
+    own = _quantity_keys(issue)
+    absent: list[str] = []
+    if env.small_values is not None and env.small_missing is not None and issue.get("kind") == "quantity" and own:
+        absent = [n for n in (await env.small_missing()) or [] if _issues.norm(n) in own]
+    held = bool(absent)
+    values_before = (await env.small_values()) if held else None  # type: ignore[misc]
+    # The small run on the code as it is: a repair answers for the run only when the run was good before it. A run that
+    # already failed stays the small run's own finding, whatever this repair does.
+    ran_before = env.small_run is None or not await env.small_run()
     answers: dict[str, dict[str, Any]] | None = None
     response: dict[str, Any] | None = None
 
@@ -2350,10 +2390,21 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         more = worse_static(env.baseline_static, env.static())
         if more:
             raise _Rejected("it added faults to the static checks: " + ", ".join(more))
-        if env.small_run is not None:
+        if env.small_run is not None and ran_before:
             stopped = await env.small_run()
             if stopped:
                 raise _Rejected("FI's small run of the simulation no longer runs: " + stopped)
+        kept = {key for key, names in (values_before or {}).items() if names}  # the settings that hold a value to keep
+        if held and kept:
+            values_after = (await env.small_values()) or {}  # type: ignore[misc]
+            if not kept & set(values_after):  # nothing to compare with is not "unchanged"
+                raise _Rejected("FI's small run gave values before this repair and gives none in the same settings on the "
+                                "repaired code, so it cannot show that the results the finding is not about kept theirs")
+            moved = _small.changed_results(values_before, values_after)
+            if moved:
+                raise _Rejected("it changed " + ", ".join(f"`{n}`" for n in moved[:4]) + " in FI's small run, which the "
+                                "finding is not about (the finding is that " + ", ".join(f"`{n}`" for n in absent[:4])
+                                + " is missing)")
         if env.gate is not None:
             if refused := await env.gate():
                 raise _Rejected(refused)

@@ -788,17 +788,20 @@ def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
-def observations(probes: list[Probe]) -> list[tuple[dict[str, Any], dict[str, float]]]:
+def observations(probes: list[Probe],
+                 in_each_run: dict[str, list[Any]] | None = None) -> list[tuple[dict[str, Any], dict[str, float]]]:
     """Every pilot trial as ``(its setting, what it returned)``. A run that compared values inside it is its setting's
-    numbers per run, and one observation per value with that value's numbers (its setting names the value too)."""
+    numbers per run, and one observation per value with that value's numbers (its setting names the value too, read from
+    ``in_each_run``, what the plan has each run compare, before the key's own text)."""
     out: list[tuple[dict[str, Any], dict[str, float]]] = []
+    levels = _in_run.level_cells(in_each_run)
     for p in probes:
         for t in p.trials:
             per_run, per_level = _in_run.split(t)
             if per_run or not per_level:  # a run that gives numbers per value only has nothing per run
                 out.append((dict(p.cell), dict(per_run)))
             for lk, named in per_level.items():
-                out.append(({**p.cell, **_in_run.parse_level_key(lk)}, dict(named)))
+                out.append(({**p.cell, **_in_run.parse_level_key(lk, levels)}, dict(named)))
     return out
 
 
@@ -1003,7 +1006,7 @@ async def entry_returns_study(
                               timeout_s=timeout_s, env=env, thresholds=thresholds, in_each_run=in_each_run)
     if values is None:
         return ""
-    returned = {n for _c, v in observations([Probe(None, None, dict(cell), 0.0, trials=[values])]) for n in v}
+    returned = {n for _c, v in observations([Probe(None, None, dict(cell), 0.0, trials=[values])], in_each_run) for n in v}
     # A metric is returned as its id, or as the counts or values it is estimated from (core/metric_spec.py::result_forms).
     if returned & {form for n in wanted for form in _metric_spec.result_forms(n)}:
         return ""
@@ -1020,7 +1023,7 @@ async def pilot(
     """Read what the timed trials returned (:func:`pilot_problems`). When a metric looks undefined everywhere, the settings with
     few values are first tried in every combination, one trial each, within ``budget_s``: a metric that applies to only some
     of the settings has a value there. If they cannot all be tried, the metric is left alone (nothing is claimed)."""
-    obs = observations(probes)
+    obs = observations(probes, in_each_run)
     axes = {name for name, _v in axes_of(grid)}
     try:
         source = (Path(quest_root) / str(module)).read_text(encoding="utf-8", errors="replace")
@@ -1044,7 +1047,7 @@ async def pilot(
             if values is None:
                 reached = False
                 continue
-            obs.extend(observations([Probe(None, None, dict(cell), 0.0, trials=[values])]))
+            obs.extend(observations([Probe(None, None, dict(cell), 0.0, trials=[values])], in_each_run))
         if whole and reached:
             tried_all = (f"; FI also tried every value of every setting and every combination of the settings that take few "
                          f"values ({_setting_count(obs, tuple(in_each_run or ()))} settings in all)")

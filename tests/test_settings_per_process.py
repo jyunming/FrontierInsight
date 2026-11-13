@@ -496,13 +496,18 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # It moves again for `search_one_number_names` and `one_number_rule` (a search's objective and limits are one number
     # per call), added there and nothing else changed (ce17183f...).
     # It moves again for the recording of the files a run opened (the audit hook between the ``#<audit-begin>`` and
-    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines is still ce17183f...
+    # ``#<audit-end>`` lines of the body), and only for that: the text without those lines was still ce17183f...
     # (the key of a frozen study's search record of an older FI is made from main's own harness text, kept whole in
     # ``core/legacy_keys/`` and pinned in test_reuse_key.py, not from this one).
+    # It moves again for a returned key being read against FI's own list of what each run compares, in core/in_run.py and
+    # nowhere else: `_level_of` reads a key as the text value of the one compared setting, exactly, before taking it
+    # apart as ``factor=value`` (a text value may hold an equals sign itself), and a part of a recorded key is a setting
+    # only when the run has that setting (`axes_of_key` with the names FI holds, `parse_level_key` with its levels;
+    # `_names`, `_value_of` added). It was ae98b6e4..., and the text without the audit lines was ce17183f...
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "ae98b6e471a6a04c9338787d60dbf1f43004f2f1e1b2a4b874a5bb75414649ef")
+        "ba2e9f8da5f8f901ef6ebe6fa29d9ec905d8a4f6490aca5639d95cdc905f3d0a")
     assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
-        "ce17183f5369dcf349c270de63a8c05a82efa53a9f0114cdf9c90703d90a4bb9")
+        "f6c6ebe3fa94cd4a1617df3a20b15789d6fa95587f28d9db9d6cb140c61cf32e")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 

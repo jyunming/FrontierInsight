@@ -265,14 +265,22 @@ def sub_levels(levels, axes):
     return [dict(zip([n for n, _v in chosen], combo)) for combo in itertools.product(*[v for _n, v in chosen])] if chosen else []
 
 
-def axes_of_key(key):
+def axes_of_key(key, known=None):
     """The factor names a returned key names (``("pitch", "gap")`` for ``"gap=80,pitch=74"``, in the order it wrote them),
-    or ``None`` when the key is not written ``factor=value[,factor=value]``."""
+    or ``None`` when the key is not written ``factor=value[,factor=value]``. With ``known`` (the names of what each run
+    compares, FI's own list) a part of the key names a factor only when it is one of them: a text value may itself hold a
+    comma and an equals sign (``"a = 1, b = 2"``), and its second half was taken for a factor ``b`` the run does not have."""
     text = str(key).strip()
     if "=" not in text:
         return None
-    names = tuple(part.partition("=")[0].strip() for part in text.split(",") if "=" in part)
-    return names if len(set(names)) == len(names) else None  # one factor named twice is not a level
+    names = tuple(n for n in (part.partition("=")[0].strip() for part in text.split(",") if "=" in part)
+                  if known is None or n in known)
+    return names if names and len(set(names)) == len(names) else None  # one factor named twice is not a level
+
+
+def _names(levels):
+    """The names of what each run compares, for :func:`axes_of_key`; ``None`` when there are none at hand."""
+    return {n for n, _v in factors_of(levels)} or None
 
 
 def _level_of(key, levels):
@@ -286,6 +294,15 @@ def _level_of(key, levels):
         # cannot be split back into its pairs, and every key of every level was refused.
         if text == level_key(level):
             return level
+    first = next(iter(levels), None)
+    if isinstance(key, str) and first is not None and len(first) == 1:
+        # Then the value alone, exactly as the run was given it: a text value may hold an equals sign itself
+        # ("rate = a/b"), and taking it apart as ``factor=value`` refused the very value the run was given.
+        for level in levels:
+            if len(level) == 1:
+                (only,) = level.values()
+                if isinstance(only, str) and text == only:
+                    return level
     pairs = {}
     if "=" in text:
         for part in text.split(","):
@@ -506,11 +523,12 @@ def record_levels(levels, rows):
     them for a number per combination, ``pitch`` alone for a number that varies over just that), every combination of
     their values, the full set first. ``rows`` are the run's trials (only the ones that ended well count)."""
     used = []
+    known = _names(levels)
     for row in rows:
         if not (row.get("status") == "ok" if "status" in row else row.get("ok")):
             continue
         for lk in split(row.get("values"))[1]:
-            axes = axes_of_key(lk)
+            axes = axes_of_key(lk, known)
             if axes is not None and set(axes) not in used:
                 used.append(set(axes))
     names = [n for n, _v in factors_of(levels)]
@@ -532,12 +550,13 @@ def settle_missing(rows, levels):
     if not levels:
         return rows
     keyed = {}
+    known = _names(levels)
     for row in rows:
         if not (row.get("status") == "ok" if "status" in row else row.get("ok")):
             continue
         for name, v in (row.get("values") or {}).items():
             if isinstance(v, dict) and v:
-                axes = axes_of_key(next(iter(v)))
+                axes = axes_of_key(next(iter(v)), known)
                 if axes is not None:
                     keyed.setdefault(name, set()).add(frozenset(axes))
     where = {}
@@ -636,9 +655,10 @@ def for_case(values, levels, named):
     only some of the factors (keyed ``pitch=74``) is read at the values of those, whatever the case says of the others."""
     matching = levels_named(named, levels) if named else list(levels or [])
     out = {}
+    known = _names(levels)
     for name, v in (values or {}).items():
         if isinstance(v, dict):
-            axes = axes_of_key(next(iter(v), ""))
+            axes = axes_of_key(next(iter(v), ""), known)
             keys = []
             for lv in matching:
                 lk = level_key({n: lv[n] for n in lv if axes is None or n in axes})
@@ -760,18 +780,24 @@ def of_study(protocol):
     return of(protocol)
 
 
-def parse_level_key(text):
+def _value_of(raw):
+    """A value as a level's key writes it: one that reads as a number is that number, any other is its text."""
+    try:
+        number = float(raw)
+        return number if math.isfinite(number) else raw.strip()  # "nan" and "inf" are names
+    except ValueError:
+        return raw.strip()
+
+
+def parse_level_key(text, levels=None):
     """``{"temperature_K": 290.2, "procedure": "bh"}`` from a level's key (:func:`level_key`): a value that reads as a
-    number is that number, any other is its text."""
-    out = {}
-    for part in str(text).split(","):
-        name, _, raw = part.partition("=")
-        try:
-            number = float(raw)
-            out[name.strip()] = number if math.isfinite(number) else raw.strip()  # "nan" and "inf" are names
-        except ValueError:
-            out[name.strip()] = raw.strip()
-    return out
+    number is that number, any other is its text. With ``levels`` (what each run compares, FI's own list) the key is read
+    as the level it names there first: a text value may itself hold a comma or an equals sign, and the key's text alone
+    cannot be split back into its values."""
+    level = _level_of(text, levels) if levels else None
+    if level is not None:
+        return {name: _value_of(fmt(value)) for name, value in level.items()}
+    return {name.strip(): _value_of(raw) for name, _, raw in (part.partition("=") for part in str(text).split(","))}
 
 
 def groups(cells):
