@@ -9,7 +9,9 @@ evaluates again, through the same harness and in a process of its own for each d
 1. **Refinement**: the best designs of the search (the best of each starting point, up to
    :data:`core.optimisation_plan.CHECK_CANDIDATES`) and the baseline, at each finer level of the numerical settings (the
    plan's ``check`` values, or FI's fixed rule: half, then a quarter of the search value; which one is recorded). The
-   best design is chosen at the finest level, not at the search's; each design's numerical error is estimated from how
+   best design is chosen at the finest level, not at the search's: the best there of these designs that meets every
+   limit (when nothing the search found beat the baseline, the baseline is the search's best design and is one of them,
+   the first of equals: reported, it is the design that is nudged); each design's numerical error is estimated from how
    its value changes from level to level (Roache's grid-convergence index: a safety factor of 1.25 and the observed order
    with three levels or more, 3 with two).
 2. **Limits**: every limit is checked at the finest level (with the plan's ``constraint_margin``). When the search's best
@@ -399,7 +401,7 @@ def check(block: dict[str, Any], search_record: dict[str, Any], rows: list[dict[
                                        for item, level in every])
         finally:
             pending.clear()
-        chosen = _choose(cands, finest, limits, margin, sign)
+        chosen = _choose(_reportable(base, cands, search_record, space), finest, limits, margin, sign)
         if chosen is not None:
             try:
                 yield from _probe(space, chosen, finest, evaluate, probes, ask_together, has_answer)
@@ -455,6 +457,17 @@ def _choose(entries: list[dict[str, Any]], level: int, limits: list[tuple[str, s
     if not ok:
         return None
     return min(ok, key=lambda e: sign * e["levels"][level]["objective"])
+
+
+def _reportable(base: dict[str, Any], cands: list[dict[str, Any]], search_record: dict[str, Any],
+                space: Any) -> list[dict[str, Any]]:
+    """The designs the check may report, the search's own best first (:func:`_choose` keeps the first of equals): the
+    best designs the search found, and before them the baseline when the search's best IS the baseline. Nothing beat it
+    then, so it is the design the search reports; :func:`candidates` leaves it out because it is evaluated anyway."""
+    best = search_record.get("best") if isinstance(search_record.get("best"), dict) else None
+    if best is not None and space.key(space.canonical(best["design"])) == space.key(base["design"]):
+        return [base, *cands]
+    return cands
 
 
 def _store(slots: list, level: int) -> Callable:
@@ -601,13 +614,14 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     measured_all = all(all(j is not None for j in x["levels"]) for x in [base, *cands])
     base_final = at(base)
     base_ok = bool(base_final and base_final.get("status") == "ok")
-    chosen = _choose(cands, finest, limits, margin, sign) if measured_all else None
-    ran_finest = [c for c in cands if (at(c) or {}).get("status") == "ok"]
-    # The search's own best, when it is one of the candidates (it is not when nothing beat the baseline).
-    first = (cands[0] if cands and search_best is not None and space.key(cands[0]["design"]) ==
+    pool = _reportable(base, cands, search_record, space)
+    baseline_was_best = bool(pool) and pool[0] is base
+    chosen = _choose(pool, finest, limits, margin, sign) if measured_all else None
+    ran_finest = [c for c in pool if (at(c) or {}).get("status") == "ok"]
+    # The search's own best: the baseline when nothing beat it, else the first of the candidates when it is that one.
+    first = (base if baseline_was_best else
+             cands[0] if cands and search_best is not None and space.key(cands[0]["design"]) ==
              space.key(space.canonical(search_best["design"])) else None)
-    baseline_was_best = search_best is not None and space.key(space.canonical(search_best["design"])) == space.key(
-        base["design"])
 
     # --- 1. refinement
     if not measured_all:
@@ -651,7 +665,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         checks["constraints"] = {"status": NOT_CHECKED, "says": "not every design was evaluated at the finest settings"}
     elif not limits:
         checks["constraints"] = {"status": PASSED, "says": "the plan sets no limit"}
-    elif cands and not ran_finest:
+    elif pool and not ran_finest:
         checks["constraints"] = {"status": NOT_CHECKED, "says": "none of the best designs could be evaluated at the "
                                                                 "finest settings"}
     elif broke:
@@ -664,7 +678,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             {"quantity": n, "limit": f"{o} {_fmt(b)}", "value": v} for n, o, b, _c, v in broke],
             "says": f"the best design the search found breaks the limit on {name} at finer settings ({_fmt(value)}{c_u} "
                     f"against a limit of {_o(op)} {_fmt(bound)}{c_u}{margin_text}){tail}"}
-    elif chosen is None and cands:
+    elif chosen is None and pool:
         checks["constraints"] = {"status": FAILED, "says": "none of the best designs meets every limit at the finest "
                                                            "settings"}
     else:
@@ -676,7 +690,35 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     # --- 3. better than the baseline
     improvement: dict[str, Any] | None = None
     search_base_value = (search_record.get("baseline") or {}).get("objective")
-    if chosen is not None and base_ok:
+    if chosen is base and base_ok:
+        # Nothing the search found beat the baseline, and nothing it found is better at the finest settings: the design
+        # reported is the baseline, so there is no improvement to measure (and no gap of another design to print).
+        e_base = err(base)
+        threshold, threshold_info = _threshold(block, base_final["objective"])
+        improvement = {"value": 0.0, "search": 0.0, "unit": unit, "relative": 0.0 if base_final["objective"] else None,
+                       "numerical_error": None, "numerical_error_best": e_base if named else None,
+                       "numerical_error_baseline": e_base if named else None, "threshold": threshold_info,
+                       "bar": threshold, "rule": "plan" if threshold is not None else "rule", "interval": None,
+                       "shown": False, "beyond_numerical_error": None}
+        other = _choose(cands, finest, limits, margin, sign)
+        if not cands:
+            says = "the search found no design other than the baseline that meets every limit, so nothing improves on it"
+        elif other is None:
+            says = ("the search found no design better than the baseline (the other designs it found could not be "
+                    "evaluated at the finest settings or break a limit there)")
+        else:
+            mean = " on average" if noisy else ""
+            # Only a design that ran at the finest settings within every limit was compared: the others are counted.
+            compared = sum(1 for c in cands if _meets(at(c), limits, margin))
+            none = ("none is" if compared == len(cands) else
+                    f"none of the {compared} other design(s) that could be compared there is")
+            rest = (f"; {len(cands) - compared} other design(s) could not be evaluated there or break a limit there"
+                    if compared < len(cands) else "")
+            says = (f"the search found no design better than the baseline, and {none} better at the finest settings (the "
+                    f"best other design found gives {_fmt(at(other)['objective'])}{u}{mean} there, the baseline "
+                    f"{_fmt(base_final['objective'])}{u}{rest})")
+        checks["improvement"] = {"status": FAILED, "says": says}
+    elif chosen is not None and base_ok:
         base_value, best_value = base_final["objective"], at(chosen)["objective"]
         value = sign * (base_value - best_value)
         # The same design at the search's settings (not the search's best, when another one is reported).
@@ -753,7 +795,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     elif not measured_all or not base_ok:
         checks["improvement"] = {"status": NOT_CHECKED, "says": "the baseline and the best design were not both "
                                                                 "evaluated at the finest settings"}
-    elif cands and not ran_finest:
+    elif pool and not ran_finest:
         checks["improvement"] = {"status": NOT_CHECKED, "says": "none of the best designs could be evaluated at the "
                                                                 "finest settings"}
     elif not cands:
@@ -785,7 +827,19 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                 continue
             (flat if diff <= tol else worse).append((other, diff))
         agreeing = len(chosen.get("also_found_by") or [])
-        if worse:
+        if worse and chosen is base and not flat:
+            # The baseline is reported: the other starts' designs are worse than it, which is no disagreement. One that
+            # could not be compared at the finest settings is counted, and the check is then not a pass.
+            left_out = sum(1 for c in cands if not _meets(at(c), limits, margin))
+            checks["starts"] = ({"status": PASSED, "says": (
+                                    f"none of the {len(cands)} other design(s) checked at the finest settings, the best "
+                                    "of other starting points, is better than the baseline")}
+                                if not left_out else
+                                {"status": NOT_CHECKED, "says": (
+                                    "the other starting points' designs that could be compared are not better than the "
+                                    f"baseline, but {left_out} of them could not be evaluated at the finest settings or "
+                                    "break a limit there")})
+        elif worse and chosen is not base:
             other, diff = worse[0]
             checks["starts"] = {"status": FAILED, "says": (
                 f"the starting points found different designs: another start's best ({_describe(other['design'])}) is "
@@ -914,10 +968,10 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     imp_status = (checks.get("improvement") or {}).get("status")
     if not measured_all or not base_ok:
         verdict, reason = "unverified", (checks["refinement"]["says"])
-    elif cands and not ran_finest:
+    elif pool and not ran_finest:
         # The best designs did not run at the finest settings: nothing is known about their limits.
         verdict, reason = "unverified", checks["refinement"]["says"]
-    elif cands and chosen is None:
+    elif pool and chosen is None:
         verdict, reason = "infeasible", checks["constraints"]["says"]
     elif imp_status == FAILED:
         verdict, reason = "improvement_not_shown", checks["improvement"]["says"]
@@ -939,7 +993,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     # The best design WAS evaluated at the finer settings, but a part of the check could not be done.
     partly = verdict == "unverified" and chosen is not None and base_ok and named and all(
         (j or {}).get("status") == "ok" for x in (base, chosen) for j in x["levels"])
-    if reason.startswith("the improvement over the baseline"):
+    if reason.startswith(("the improvement over the baseline", "the search found no design")):
         says = reason[0].upper() + reason[1:] + "."  # the check's own sentence already says it
     elif partly:
         says = ("The best design was checked at finer numerical settings, but not every part of the check could be "

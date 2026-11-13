@@ -798,3 +798,125 @@ def test_the_elements_of_an_array_at_an_edge_or_without_effect_are_said_once_wit
     assert "lower edge of the range allowed for 3 of the 6 elements of w that were nudged" in hood["says"]
     assert "nudging 1 of the 6 elements of w that were nudged changes nothing" in hood["says"]
     assert hood["says"].count("elements of w") == 2
+
+
+# --- the search's best is the baseline ---------------------------------------------------------------------------------
+
+
+def _nothing_beat_the_baseline(other_at_finer: tuple[float, float]) -> tuple[dict[str, Any], dict[str, Any], list, Any]:
+    """A search in which nothing beat the baseline (x = 0): another design (x = 1) was the best of the rest, and a
+    second start ended at x = 2. ``other_at_finer``: what x = 1 gives at the two finer levels."""
+    block = _block()
+
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        if cell["y"] != 0.0:
+            return {"f": 20.0}  # a nudge of y
+        if cell["x"] == 0.0:
+            return {"f": 5.0 + cell["mesh"]}  # the baseline's own value moves with the mesh
+        if cell["x"] == 1.0:
+            return {"f": {0.2: other_at_finer[0], 0.1: other_at_finer[1]}[cell["mesh"]]}
+        if cell["x"] == 2.0:
+            return {"f": 60.0}
+        return {"f": 20.0}  # a nudge of x
+
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.4, {}), (0, {"x": 1.0, "y": 0.0}, 8.0, {}),
+                                 (1, {"x": 2.0, "y": 0.0}, 8.5, {})])
+    assert record["best"]["design"] == {"x": 0.0, "y": 0.0}
+    return block, record, rows, sim
+
+
+def test_when_nothing_beat_the_baseline_the_design_reported_is_the_baseline() -> None:
+    # The real case: the best other design stopped giving a usable value at the finest settings (9 -> 50), and the check
+    # reported it as "the best design", 44.9 K worse than the baseline, with a numerical error of several hundred.
+    block, record, rows, sim = _nothing_beat_the_baseline((9.0, 50.0))
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["verdict"] == "improvement_not_shown"
+    best = check["best"]
+    assert best["design"] == {"x": 0.0, "y": 0.0} and best["replaces_search_best"] is False
+    assert best["objective"] == {"search": 5.4, "check": [pytest.approx(5.2), pytest.approx(5.1)]}
+    assert best["numerical_error"] is not None  # the baseline's own, from its three values
+    imp = check["improvement"]
+    assert imp["value"] == 0.0 and imp["numerical_error"] is None and imp["shown"] is False
+    assert check["says"] == ("The search found no design better than the baseline, and none is better at the finest "
+                             "settings (the best other design found gives 50 K there, the baseline 5.1 K).")
+    assert check["checks"]["improvement"]["status"] == "failed"
+    assert "worse than the baseline" not in json.dumps(check["checks"])
+    # The nudges are around the baseline (every one of them is worse here), and the other starts are no disagreement.
+    assert check["checks"]["neighbourhood"]["status"] == "passed", check["checks"]["neighbourhood"]
+    assert check["checks"]["starts"]["status"] == "passed"
+    assert "may not be the best there is" not in check["checks"]["starts"]["says"]
+    # The other designs are still in the record, with their values at the finer levels.
+    assert [c["design"]["x"] for c in check["candidates"]] == [1.0, 2.0]
+    # The paper's table: one design in both columns at every level, and no gap of another design.
+    from core import best_design_report as report
+
+    table = report._objective_rows(record, check, "f", "K")
+    assert table[-1].endswith("| 5.1 | 5.1 | 0 K |") and "±" not in "".join(table)
+
+
+def test_when_nothing_beat_the_baseline_a_design_that_is_better_at_the_finest_settings_is_the_one_reported() -> None:
+    block, record, rows, sim = _nothing_beat_the_baseline((4.0, 3.0))
+    check = oc.check_sync(block, record, rows, sim)
+    best = check["best"]
+    assert best["design"] == {"x": 1.0, "y": 0.0} and best["replaces_search_best"] is True
+    assert "another of the search's best designs (x = 1, y = 0) is better than the one the search chose" in (
+        check["checks"]["refinement"]["says"])
+    assert "not the one the search chose (x = 0, y = 0), which is not as good there" in check["says"]
+    imp = check["improvement"]
+    assert imp["value"] == pytest.approx(2.1) and imp["search"] == pytest.approx(-2.6)
+
+
+def test_when_nothing_beat_the_baseline_a_design_as_good_at_the_finest_settings_does_not_replace_it() -> None:
+    block, record, rows, sim = _nothing_beat_the_baseline((5.2, 5.1))
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    assert check["improvement"]["value"] == 0.0
+
+
+def test_when_the_baseline_is_reported_a_design_that_could_not_be_compared_is_counted_not_called_worse() -> None:
+    # The second start's design (x = 2) gives no value at the finest level: nothing is known about it there.
+    block, record, rows, sim = _nothing_beat_the_baseline((9.0, 9.2))
+
+    def failing(cell: dict[str, Any]) -> dict[str, float]:
+        if cell["x"] == 2.0 and cell["mesh"] == 0.1:
+            raise ValueError("no value at this mesh")
+        return sim(cell)
+
+    check = oc.check_sync(block, record, rows, failing)
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    assert check["checks"]["improvement"]["says"] == (
+        "the search found no design better than the baseline, and none of the 1 other design(s) that could be compared "
+        "there is better at the finest settings (the best other design found gives 9.2 K there, the baseline 5.1 K; 1 "
+        "other design(s) could not be evaluated there or break a limit there)")
+    starts = check["checks"]["starts"]
+    assert starts["status"] == "not_checked" and "1 of them could not be evaluated" in starts["says"]
+
+
+def test_when_the_baseline_is_reported_other_starts_that_are_worse_are_no_disagreement() -> None:
+    block, record, rows, sim = _nothing_beat_the_baseline((9.0, 9.2))
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    assert check["checks"]["starts"] == {"status": "passed", "says": (
+        "none of the 2 other design(s) checked at the finest settings, the best of other starting points, is better than "
+        "the baseline")}
+
+
+def test_when_the_baseline_is_reported_a_design_as_good_from_another_start_is_still_said() -> None:
+    # x = 1 is as good as the baseline at the finer levels (not better: the baseline stays), x = 2 is far worse.
+    block, record, rows, sim = _nothing_beat_the_baseline((5.2, 5.1))
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    starts = check["checks"]["starts"]
+    assert starts["status"] == "passed" and "that is as good within the numerical error" in starts["says"]
+
+
+def test_a_search_that_found_only_the_baseline_reports_the_baseline_at_the_finer_settings() -> None:
+    block = _block()
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.4, {})])
+    check = oc.check_sync(block, record, rows, lambda cell: {"f": 5.0 + cell["mesh"] + abs(cell["x"]) + abs(cell["y"])})
+    assert check["verdict"] == "improvement_not_shown"
+    assert check["says"] == ("The search found no design other than the baseline that meets every limit, so nothing "
+                             "improves on it.")
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    assert check["best"]["objective"]["check"] == [pytest.approx(5.2), pytest.approx(5.1)]
+    assert check["checks"]["neighbourhood"]["status"] == "passed", check["checks"]["neighbourhood"]

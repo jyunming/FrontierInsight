@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-13 — the design reported when nothing beat the baseline
+
+Updated by hand: [[study-types|Study types]] (the check of the best design: when the search's best is the baseline, the baseline is one of the designs that may be reported; the one reported and nudged is the best at the finest settings that meets every limit).
+
+Sources: core/optimum_check.py.
+
 ## 2026-11-13 — the coarse scan of a search gives the study its settings
 
 Page updated: [[study-types|Study types]] (the settings of a search's coarse scan, and the parts it is divided into, are the study's settings for what FI asks the plan after the first plan call: what a result may change with, what is compared across what, what a planned figure is drawn along).
