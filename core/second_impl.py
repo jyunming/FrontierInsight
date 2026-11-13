@@ -218,8 +218,14 @@ def _is_num(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _numbers_only(v: list[Any]) -> bool:
+    return all(_is_num(x) or (isinstance(x, list) and _numbers_only(x)) for x in v)
+
+
 def _is_array(v: Any) -> bool:
-    return isinstance(v, list) and bool(v) and all(_is_num(x) or isinstance(x, list) for x in v)
+    """A list of numbers, nested to any depth. A list that holds anything else further down (a complex number as FI
+    records it, a dict, text) is not one: it is handed to both versions as it was recorded, never rescaled."""
+    return isinstance(v, list) and bool(v) and _numbers_only(v)
 
 
 def _scale(v: Any, f: float) -> Any:
@@ -277,8 +283,8 @@ def domain_of(spec: _fs.Spec, protocol: dict[str, Any] | None, base: dict[str, A
 def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, limit: int = MAX_INPUTS,
                  defined: Callable[[dict[str, Any]], bool] | None = None) -> list[dict[str, Any]]:
     """The inputs both versions are called with: the example inputs; every scalar at x0.5, x2 and x0.9; arrays rescaled and
-    shifted; the edges of a known range. Deterministic; duplicates dropped; at most ``limit``. Strings and booleans are
-    kept as they are. A function with only such inputs is called on the example alone. ``defined`` (:func:`domain_of`):
+    shifted; the edges of a known range. Deterministic; duplicates dropped; at most ``limit``. Strings, booleans, dicts and
+    complex values are kept as they are. A function with only such inputs is called on the example alone. ``defined`` (:func:`domain_of`):
     a case outside the function's domain is left out (the example itself always stays), so the scaled copies of the
     example never ask a function a question its own formula cannot answer."""
     out: list[dict[str, Any]] = []
@@ -298,7 +304,8 @@ def build_inputs(base: dict[str, Any], ranges: dict[str, Any] | None = None, lim
             add({k: (_scale(v, f) if k in scalars else v) for k, v in base.items()})
     if arrays:
         add({k: (_scale(v, 2.0) if k in arrays else v) for k, v in base.items()})
-        sizes = [max(abs(x) for x in _flat(base[k])) or 1.0 for k in arrays]
+        # An array's size is its largest finite number; one with none (empty, or no finite value) counts as 1.
+        sizes = [max((abs(x) for x in _flat(base[k]) if math.isfinite(x)), default=0.0) or 1.0 for k in arrays]
         d = 0.1 * max(sizes)
         add({k: (_shift(v, d) if k in arrays else v) for k, v in base.items()})
     edges = {k: r for k, r in (ranges or {}).items()
@@ -376,7 +383,8 @@ async def capture_inputs(run: Callable[[list[str]], Awaitable[Any]], quest_root:
     """FI runs the simulation at each of ``cells`` in turn (settings of the plan; each part of a study takes other paths
     through the code) through its own trial harness, with each of ``names`` (functions of the package's model) recording
     the distinct calls it gets, each argument by its parameter's name, kept only when every argument is plain data
-    (numbers, text, real arrays of at most :data:`CAPTURE_ELEMENTS` numbers); it stops once every function has
+    (numbers, text, lists, dicts with text keys, real or complex arrays of at most :data:`CAPTURE_ELEMENTS` numbers; a
+    function, an object or a dict with other keys is not); it stops once every function has
     :data:`CAPTURE_CALLS` calls. ``run(argv)`` runs ``python <argv>`` from the quest folder. Saved in :data:`CAPTURED`;
     ``{}`` when no run could be made. Never an expected value: only what each function is given. ``kinds``: what each cell
     is for (``"scan"`` unless it says ``"search"``: a search's baseline design), told to the code beside the cell."""
@@ -945,14 +953,25 @@ def compare_shared(a: Any, b: Any, rel: float = REL, path: str = "", abs_tol: fl
     return 1, not same(a, b, rel, abs_tol), [], []
 
 
+def _recorded_complex(value: Any) -> complex | None:
+    """The complex number a recorded input stands for (``{"__complex__": [re, im]}``, as the trial harness writes it)."""
+    pair = value.get("__complex__") if isinstance(value, dict) and len(value) == 1 else None
+    if isinstance(pair, list) and len(pair) == 2 and all(_is_num(x) for x in pair):
+        return complex(pair[0], pair[1])
+    return None
+
+
 def short(value: Any, limit: int = 120) -> str:
-    """A result in few characters for a sentence or a prompt."""
+    """A result in few characters for a sentence or a prompt. A complex number FI recorded is shown as the number."""
     if isinstance(value, float):
         return f"{value:.6g}"
     if isinstance(value, list):
         shown = ", ".join(short(v, 30) for v in value[:6]) + (f", ... ({len(value)} values)" if len(value) > 6 else "")
         return "[" + shown + "]"
     if isinstance(value, dict):
+        z = _recorded_complex(value)
+        if z is not None:
+            return f"{z:.6g}"
         return "{" + ", ".join(f"{k}: {short(v, 30)}" for k, v in list(value.items())[:4]) + "}"
     return str(value)[:limit]
 
@@ -1058,13 +1077,29 @@ def enc(x):
 
 
 def dec_in(v):
+    # A recorded input as the function was given it. A list that is an array of numbers or of text is an array, as it
+    # always was; one that is not (rows of unequal length, a list of dicts) stays the list it was.
+    v = plain_in(v)
+    if isinstance(v, list) and np is not None:
+        try:
+            arr = np.array(v)
+            if arr.dtype != object:
+                return arr
+        except Exception:
+            pass
+    return v
+
+
+def plain_in(v):
+    # A complex number back from {"__complex__": [re, im]}; a dict's values each read as an input; lists kept lists.
+    if isinstance(v, dict):
+        pair = v.get("__complex__") if len(v) == 1 else None
+        if (isinstance(pair, list) and len(pair) == 2
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in pair)):
+            return complex(pair[0], pair[1])
+        return {k: dec_in(x) for k, x in v.items()}
     if isinstance(v, list):
-        if np is not None:
-            try:
-                return np.array(v)
-            except Exception:
-                pass
-        return list(v)
+        return [plain_in(x) for x in v]
     return v
 
 

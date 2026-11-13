@@ -98,7 +98,8 @@ def _number(v):
 def _fi_capture(cfg):
     # What each named function of the model's package is called with when the simulation runs (core/second_impl.py):
     # the first few distinct calls, each argument by its parameter's name, kept only when every argument is plain data
-    # (numbers, text, real arrays up to a size). The functions themselves are called as they are.
+    # (numbers, text, lists, dicts with text keys, real or complex arrays up to a size). The functions themselves are
+    # called as they are.
     import functools, importlib, inspect
     try:
         import numpy as np
@@ -115,12 +116,21 @@ def _fi_capture(cfg):
     # ``returned``: for each function that returned a dict, every key it returned.
     returned = {}
 
+    def cplx(v):
+        return [cplx(i) for i in v] if isinstance(v, list) else {"__complex__": [v.real, v.imag]}
+
     def conv(x, left):
+        # Plain data as JSON: numbers, text, flags, lists, dicts with text keys, real or complex arrays (a complex number is
+        # {"__complex__": [re, im]}, which the comparison script turns back into a complex number; a study's own dict with
+        # only that key could not be told from one, so a call that holds it is not kept).
         if np is not None and isinstance(x, np.ndarray):
-            if x.dtype.kind not in "biuf" or x.size > left[0]:
+            numbers = x.size * (2 if x.dtype.kind == "c" else 1)  # a complex number is kept as two
+            if x.dtype.kind not in "biufc" or numbers > left[0]:
                 raise TypeError("not plain data")
-            left[0] -= x.size
-            return x.tolist()
+            left[0] -= numbers
+            # An array is kept whole, whatever its values (a NaN marks "no value here" in many studies); only a complex
+            # one is rewritten, number by number.
+            return cplx(x.tolist()) if x.dtype.kind == "c" else x.tolist()
         if np is not None and isinstance(x, np.generic):
             x = x.item()
         if x is None or isinstance(x, (bool, str)):
@@ -131,11 +141,20 @@ def _fi_capture(cfg):
             if not math.isfinite(x):
                 raise TypeError("not finite")
             return x
+        if isinstance(x, complex):
+            if not (math.isfinite(x.real) and math.isfinite(x.imag)):
+                raise TypeError("not finite")
+            return {"__complex__": [x.real, x.imag]}
         if isinstance(x, (list, tuple)):
             left[0] -= len(x)
             if left[0] < 0:
                 raise TypeError("too large")
             return [conv(i, left) for i in x]
+        if isinstance(x, dict):
+            left[0] -= len(x)
+            if left[0] < 0 or not all(isinstance(k, str) for k in x) or set(x) == {"__complex__"}:
+                raise TypeError("too large, not text keys, or FI's own spelling of a complex number")
+            return {k: conv(v, left) for k, v in x.items()}
         raise TypeError("not plain data")
 
     # Each number is changed by its own share (scale times the next of these, in turn): a share common to all of them

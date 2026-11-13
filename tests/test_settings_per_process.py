@@ -504,10 +504,13 @@ def test_the_one_setting_worker_is_the_text_it_was_before_sharing_existed() -> N
     # apart as ``factor=value`` (a text value may hold an equals sign itself), and a part of a recorded key is a setting
     # only when the run has that setting (`axes_of_key` with the names FI holds, `parse_level_key` with its levels;
     # `_names`, `_value_of` added). It was ae98b6e4..., and the text without the audit lines was ce17183f...
+    # It moves again for the recording of what a checked function is called with (`_fi_capture` in the harness body)
+    # keeping dicts with text keys and complex numbers and arrays, and only for that. It was ba2e9f8d..., and the text
+    # without the audit lines was f6c6ebe3...
     assert hashlib.sha256(trial_runner.HARNESS_SOURCE.encode("utf-8")).hexdigest() == (
-        "ba2e9f8da5f8f901ef6ebe6fa29d9ec905d8a4f6490aca5639d95cdc905f3d0a")
+        "b4fb608d2027c6719235ee562245744e6c4423f172cc38d9e0d96ad9356d503e")
     assert hashlib.sha256(trial_runner._without_audit(trial_runner.HARNESS_SOURCE).encode("utf-8")).hexdigest() == (
-        "f6c6ebe3fa94cd4a1617df3a20b15789d6fa95587f28d9db9d6cb140c61cf32e")
+        "98dba93062aec27688e4cc886e9e2cae9c3068b46b227ddf249ed120cbd0a3e6")
     assert trial_runner.GROUP_HARNESS_SOURCE != trial_runner.HARNESS_SOURCE and "members" in trial_runner.GROUP_HARNESS_SOURCE
 
 
