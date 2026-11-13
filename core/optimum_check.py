@@ -832,8 +832,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             # could not be compared at the finest settings is counted, and the check is then not a pass.
             left_out = sum(1 for c in cands if not _meets(at(c), limits, margin))
             checks["starts"] = ({"status": PASSED, "says": (
-                                    f"none of the {len(cands)} other design(s) checked at the finest settings, the best "
-                                    "of other starting points, is better than the baseline")}
+                                    f"none of the {len(cands)} other design(s) checked at the finest settings (the "
+                                    "best of each starting point) is better than the baseline")}
                                 if not left_out else
                                 {"status": NOT_CHECKED, "says": (
                                     "the other starting points' designs that could be compared are not better than the "

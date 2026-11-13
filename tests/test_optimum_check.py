@@ -897,7 +897,7 @@ def test_when_the_baseline_is_reported_other_starts_that_are_worse_are_no_disagr
     check = oc.check_sync(block, record, rows, sim)
     assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
     assert check["checks"]["starts"] == {"status": "passed", "says": (
-        "none of the 2 other design(s) checked at the finest settings, the best of other starting points, is better than "
+        "none of the 2 other design(s) checked at the finest settings (the best of each starting point) is better than "
         "the baseline")}
 
 
@@ -908,6 +908,43 @@ def test_when_the_baseline_is_reported_a_design_as_good_from_another_start_is_st
     assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
     starts = check["checks"]["starts"]
     assert starts["status"] == "passed" and "that is as good within the numerical error" in starts["says"]
+
+
+def test_when_the_baseline_is_reported_and_every_other_design_failed_the_improvement_is_not_shown() -> None:
+    # Before, the check was "unverified" here: it had no design to report. The baseline ran at every level, so what
+    # the search reports was checked; what could not be compared is said.
+    block, record, rows, sim = _nothing_beat_the_baseline((9.0, 9.2))
+
+    def failing(cell: dict[str, Any]) -> dict[str, float]:
+        if cell["x"] in (1.0, 2.0) and cell["mesh"] == 0.1:
+            raise ValueError("no value at this mesh")
+        return sim(cell)
+
+    check = oc.check_sync(block, record, rows, failing)
+    assert check["verdict"] == "improvement_not_shown"
+    assert check["best"]["design"] == {"x": 0.0, "y": 0.0}
+    assert check["says"] == ("The search found no design better than the baseline (the other designs it found could not "
+                             "be evaluated at the finest settings or break a limit there).")
+    assert check["checks"]["refinement"]["status"] == "failed"
+
+
+def test_a_baseline_the_search_chose_that_breaks_a_limit_at_the_finest_settings_is_named() -> None:
+    # Nothing beat the baseline in the search; at the finer levels the baseline breaks the limit and x = 1 meets it.
+    block = _block(constraints=[{"quantity": "mass", "limit": "<= 120"}])
+
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        base = cell["x"] == 0.0 and cell["y"] == 0.0
+        return {"f": 5.0 if base else 8.0 if cell["x"] == 1.0 and cell["y"] == 0.0 else 20.0,
+                "mass": (119.9 + (0.4 - cell["mesh"]) * 2.0) if base else 100.0}
+
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.0, {"mass": 119.9}),
+                                 (0, {"x": 1.0, "y": 0.0}, 8.0, {"mass": 100.0})])
+    assert record["best"]["design"] == {"x": 0.0, "y": 0.0}
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["best"]["design"] == {"x": 1.0, "y": 0.0} and check["best"]["replaces_search_best"] is True
+    limits = check["checks"]["constraints"]
+    assert limits["status"] == "failed" and "breaks the limit on mass at finer settings" in limits["says"]
+    assert "not the one the search chose (x = 0, y = 0), which breaks a limit there" in check["says"]
 
 
 def test_a_search_that_found_only_the_baseline_reports_the_baseline_at_the_finer_settings() -> None:
