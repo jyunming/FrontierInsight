@@ -237,7 +237,8 @@ def test_a_constant_key_into_globals_reaches_a_function_of_that_name(tmp_path: P
 
 def test_a_computed_key_into_globals_still_means_fi_cannot_tell(tmp_path: Path) -> None:
     bodies = ["return globals()[name](a)", "return globals().get(name)(a)", "g = globals()" + chr(10) + "    return g['x'](a)",
-              "return vars()", "return eval('a')", "return fit.__globals__[name](a)"]
+              "return vars()", "return eval('a')", "return fit.__globals__[name](a)",
+              "return getattr(fit, '__globals__')[name](a)"]
     for i, body in enumerate(bodies):
         files = dict(_PKG)
         files["pkg/model.py"] = "def fit(a, name='x'):" + chr(10) + "    " + body + chr(10)

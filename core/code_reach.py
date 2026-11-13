@@ -16,7 +16,10 @@ it by name, and it can only run when the function it sits in runs (a nested func
 unreached or never writes its name). Every doubt
 counts as reached: a file that does not parse, a name computed at run time
 (``getattr`` with a computed name, ``globals()`` or a function's ``__globals__`` handed on or indexed by a computed name, ``eval``, ``importlib``; ``globals().get("R")`` names one variable and is read as such) or a function FI cannot find makes every
-function reached, so this can only ever spare a finding about code that is plainly never run.
+function reached, so this can only ever spare a finding about code that is plainly never run. Limit, said plainly: that
+list is of the forms FI reads, not of every way Python can look a name up. A module's or a class's own table indexed by a
+computed name (``model.__dict__[name]``, ``sys.modules[__name__].__dict__[name]``) is not on it, so a function called only
+that way, in a run whose record of calls does not show it, reads as unreached.
 
 Two computed ``getattr`` calls are read more closely than that. ``getattr(m, name)`` on an imported module ``m`` of the
 quest's code may call any function of ``m``, so it reaches all of them (and nothing else). In a file FI wrote itself
@@ -360,6 +363,8 @@ def reached(code_dir: Path, *, scripts: list[str], harness: str | None = None,
                     if called == "getattr":
                         name = node.args[1] if len(node.args) > 1 else None
                         if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                            if name.value == "__globals__":
+                                return None  # the same module scope handed on, written as a call
                             everywhere(name.value)
                             continue
                         target = imported_module(m, node.args[0]) if node.args else None
