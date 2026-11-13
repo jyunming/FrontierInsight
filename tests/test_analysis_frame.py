@@ -1136,3 +1136,20 @@ def test_a_counting_result_with_no_value_at_any_setting_is_listed_as_not_compute
     assert got["all_missing"]["status"] == "missing" and "the scan never crossed" in got["all_missing"]["why"]
     assert "one_value" not in got and "note_missing" not in got and record["complete"] is False
     assert "all_missing: the scan never crossed" in err
+
+
+def test_a_true_value_along_a_setting_of_a_searchs_scan_is_carried() -> None:
+    # Test only: no stored plan has one. Before, the true value was looked for in the top-level grid alone.
+    from core import contract as ct
+
+    known = {"estimate": "peak", "interval": ["p_lo", "p_hi"], "level": 0.95}
+    protocol = {"form": "contract", "constants": {"base": 2.0},
+                "metrics": [{"id": "peak", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "speed"}},
+                            {"id": "flat", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "mode"}},
+                            {"id": "odd", "kind": "mean", "role": "result", "known_value": {**known, "true_value": "depth"}}],
+                "grid": {"depth": [1, 2]},  # beside the block: never run
+                "optimisation": {"grid": {"speed": [1, 2, 4]}, "in_each_run": {"mode": ["a", "b"]},
+                                 "baseline": {"values": {"width": 3.0}}}}
+    contract = ct.from_design({"protocol": protocol}, fi_analysis=True)
+    assert af._known_values(protocol, contract) == {"peak": {"interval": ["p_lo", "p_hi"], "axis": "speed"},
+                                                    "flat": {"interval": ["p_lo", "p_hi"], "axis": "mode"}}

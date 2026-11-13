@@ -41,6 +41,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from . import contract as _contract
 from . import optimise_search as _search
 from . import oracle_check as _oracle
 from . import citation_support as _cites
@@ -162,17 +163,33 @@ def analysis_inputs(protocol: dict[str, Any] | None) -> dict[str, float]:
     return found
 
 
+def _study(protocol: dict[str, Any] | None) -> dict[str, Any]:
+    """The settings the runs of the study differ in and the parts that divide them, where the plan wrote them
+    (:func:`core.contract.settings_between_runs`: a measurement's grid, a search's coarse scan), as the two keys
+    :func:`core.optimise_search.study_grid` reads."""
+    grid, parts = _contract.settings_between_runs(protocol) if isinstance(protocol, dict) else (None, None)
+    return {"grid": grid, "sub_studies": parts}
+
+
+def study_axes(protocol: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """The settings the runs of the study differ in, each with its values (:func:`_study`): what a reference's
+    formula and its ``when`` may name."""
+    grid = _study(protocol)["grid"]
+    return {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v} if isinstance(grid, dict) else {}
+
+
 def grid_axes(protocol: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """The top-level ``protocol.grid`` as written (the tables of results by setting read it: core/results_by_setting.py)."""
     grid = protocol.get("grid") if isinstance(protocol, dict) else None
     return {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v} if isinstance(grid, dict) else {}
 
 
 def grid_settings(protocol: dict[str, Any] | None, limit: int = MAX_CHECKED_SETTINGS) -> list[dict[str, Any]]:
-    """The grid's settings (at most ``limit``), as the trial runner lists them (the first axis slowest)."""
-    axes = grid_axes(protocol)
+    """The study's settings (at most ``limit``), as the trial runner lists them (the first axis slowest)."""
+    axes = study_axes(protocol)
     if not axes:
         return [{}]
-    grid = _search.study_grid(protocol)
+    grid = _search.study_grid(_study(protocol))
     if getattr(grid, "sub_studies", None) and len(axes) == len(grid):  # the settings of its sub-studies, not every combination
         return list(itertools.islice(_search.iter_grid_cells(grid), limit))
     return [dict(zip(axes, combo)) for combo in itertools.islice(itertools.product(*axes.values()), limit)]
@@ -314,7 +331,7 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
     agreement with the known-answer checks of the same quantity (:func:`cross_check`)."""
     metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
     out: list[str] = []
-    axes = grid_axes(protocol)
+    axes = study_axes(protocol)
     settings = grid_settings(protocol)
     given = inputs(protocol)
     held = held_values(protocol)
@@ -329,7 +346,8 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
         ref = normalized(m["reference"])
         bad_filter = next((k for f in ref.get("when") or [] for k in f if k not in axes and k not in held), None)
         if bad_filter is not None:
-            out.append(f"{head} holds `when` {bad_filter!r}, which is not a setting of `protocol.grid` or "
+            where = "`protocol.optimisation.grid`" if isinstance(protocol.get("optimisation"), dict) else "`protocol.grid`"
+            out.append(f"{head} holds `when` {bad_filter!r}, which is not a setting of {where} or "
                        "`protocol.constants`")
             continue
         filters = ref.get("when") or []

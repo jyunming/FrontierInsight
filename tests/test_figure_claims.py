@@ -919,3 +919,12 @@ def test_an_image_embed_with_parentheses_in_its_target_or_a_title_is_whole():
 def test_a_line_with_an_embed_that_cannot_be_parsed_is_left_alone():
     md = "Some words. ![cap](figures/x.png Figure 1 shows a rise. Next.\n"
     assert _rule(md) == (md, [])
+
+
+def test_the_grid_a_claim_reads_is_the_one_numeric_setting_of_a_searchs_scan() -> None:
+    # Test only: no stored case. Before, a search plan gave no grid (its settings are inside the search block).
+    metrics = [{"id": "peak"}]
+    plan = fc.plan_of({"metrics": metrics, "optimisation": {"grid": {"speed": [1, 2, 4]}}})
+    assert plan["grid"] == [1.0, 2.0, 4.0] and plan["grid_id"] == "speed"
+    assert "grid" not in fc.plan_of({"metrics": metrics, "grid": {"depth": [1, 2]}, "optimisation": {"grid": {}}})
+    assert fc.plan_of({"metrics": metrics, "grid": {"depth": [1, 2]}})["grid"] == [1.0, 2.0]  # a measurement, as before
