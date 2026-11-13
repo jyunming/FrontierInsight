@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-13 — the coarse scan of a search gives the study its settings
+
+Page updated: [[study-types|Study types]] (the settings of a search's coarse scan, and the parts it is divided into, are the study's settings for what FI asks the plan after the first plan call: what a result may change with, what is compared across what, what a planned figure is drawn along).
+
+Sources: core/contract.py, core/contract_parts.py, core/dependent_map.py, core/optimise_search.py.
+
 ## 2026-10-24 — picking the study to run
 
 New page: [[study-cards|Picking the study to run]] (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).

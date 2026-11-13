@@ -80,7 +80,7 @@ def _short(text: Any, n: int = 1800) -> str:
 def _settings_lines(p: dict[str, Any]) -> str:
     lines = []
     for key in ("grid", "in_each_run"):
-        found = (_contract.search_in_each_run(p) or p.get(key)) if key == "in_each_run" else p.get(key)
+        found = (_contract.search_in_each_run(p) or p.get(key)) if key == "in_each_run" else _contract.settings_between_runs(p)[0]
         for name, values in found.items() if isinstance(found, dict) else []:
             lines.append(f"- {name}: {json.dumps(values)}" + (" (every run goes through all of these together)" if key == "in_each_run" else ""))
     return "\n".join(lines) or "- (the study varies no setting)"
@@ -114,8 +114,9 @@ def _formulas_prompt(templates: dict[str, string.Template], design: dict[str, An
 
     p = design.get("protocol") or {}
     rows = {str(d.get("id")): d for d in p.get("derived") or [] if isinstance(d, dict)}
+    grid = _contract.settings_between_runs(p)[0]
     known = ([str(m.get("id")) for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
-             + [i for i in rows if i not in faults] + [str(k) for k in (p.get("grid") or {})]
+             + [i for i in rows if i not in faults] + [str(k) for k in (grid if isinstance(grid, dict) else {})]
              + sorted(_reference_values.analysis_inputs(p)))
     return templates["plan_formulas"].substitute(
         formulas="\n".join(f"- {i}: {rows.get(i, {}).get('formula')} ({why})" for i, why in faults.items()),
