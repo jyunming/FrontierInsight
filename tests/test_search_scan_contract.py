@@ -3,12 +3,17 @@ recorded. The plan writes that scan inside its search block (``protocol.optimisa
 contract and the plan-time questions read the settings the runs differ in from there, by one reader."""
 from __future__ import annotations
 
+import string
+from pathlib import Path
 from typing import Any
 
 from core import analysis_frame as _frame
 from core import contract as _contract
 from core import contract_parts as _parts
 from core import dependent_map as _dependents
+
+TEMPLATES = {"plan_formulas": string.Template((Path(__file__).parent.parent / "agents" / "plan_formulas.md")
+                                              .read_text(encoding="utf-8"))}
 
 
 def _protocol() -> dict[str, Any]:
@@ -118,8 +123,9 @@ def test_the_plan_time_checks_hold_a_search_to_the_settings_of_its_scan() -> Non
     measure = {"grid": {"span": [10, 20]}, "in_each_run": {"load_case": ["static", "gust"]}, "metrics": p["metrics"]}
     for plan in (p, measure):
         assert _contract.check_part("comparisons", {"comparisons": [inside]}, {"protocol": plan}) == []
-        assert _contract.check_part("comparisons", {"comparisons": [{**inside, "values": ["static", "storm"]}]},
-                                    {"protocol": plan}) == ["comparison 1: `values` must be values of `load_case` (static, gust)"]
+        for wrong in (["static", "storm"], "static"):  # a value the plan does not list; not a list
+            assert _contract.check_part("comparisons", {"comparisons": [{**inside, "values": wrong}]}, {"protocol": plan}) == [
+                "comparison 1: `values` must be values of `load_case` (static, gust)"]
 
 
 def test_the_requests_show_the_scans_settings_and_its_names_are_declared() -> None:
@@ -128,6 +134,10 @@ def test_the_requests_show_the_scans_settings_and_its_names_are_declared() -> No
         '- material: ["steel", "timber"]', "- span: [10, 20, 30]", "- thickness: [2, 4]",
         '- load_case: ["static", "gust"] (every run goes through all of these together)']
     assert {"material", "span", "thickness", "steel", "timber", "load_case"} <= _contract._declared_names(p)
+    # A scan that is not a mapping gives the request for formulas no name (not its letters).
+    broken = {**p, "optimisation": {**p["optimisation"], "grid": "span"}, "derived": [{"id": "sag_gain", "formula": "sag / zz"}]}
+    asked = _parts._formulas_prompt(TEMPLATES, {"method": "a beam model", "protocol": broken}, {"sag_gain": "names nothing"}, [], "")
+    assert "sag, cost" in asked and ", s, p, a, n" not in asked
     # A new derived result may not take the name of a setting of the scan.
     assert _dependents._new_result_problems("D1", {"id": "span", "inputs": ["sag"], "what": "w"}, {"protocol": p}, {}) == [
         "`D1`: `span` is a setting the study changes; give the new result a name of its own"]

@@ -914,9 +914,9 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
             across = c.get("across")
             if not isinstance(vals, list) or (vals and across in listed and isinstance(listed[across], (list, tuple))
                                               and any(v not in list(listed[across]) for v in vals)):
+                own = listed.get(across) if across not in grid else None  # a setting every run goes through together
                 out.append(f"comparison {i}: `values` must be values of `{across}` "
-                           + ("in the grid" if across in grid or not isinstance(vals, list) else
-                              f"({', '.join(str(v) for v in listed[across])})"))
+                           + (f"({', '.join(str(v) for v in own)})" if isinstance(own, (list, tuple)) else "in the grid"))
             key = (str(c.get("result")), str(c.get("across")))
             if key in seen:
                 out.append(f"comparison {i} repeats {key[0]} across {key[1]}")

@@ -114,8 +114,9 @@ def _formulas_prompt(templates: dict[str, string.Template], design: dict[str, An
 
     p = design.get("protocol") or {}
     rows = {str(d.get("id")): d for d in p.get("derived") or [] if isinstance(d, dict)}
+    grid = _contract.settings_between_runs(p)[0]
     known = ([str(m.get("id")) for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("id")]
-             + [i for i in rows if i not in faults] + [str(k) for k in (_contract.settings_between_runs(p)[0] or {})]
+             + [i for i in rows if i not in faults] + [str(k) for k in (grid if isinstance(grid, dict) else {})]
              + sorted(_reference_values.analysis_inputs(p)))
     return templates["plan_formulas"].substitute(
         formulas="\n".join(f"- {i}: {rows.get(i, {}).get('formula')} ({why})" for i, why in faults.items()),
