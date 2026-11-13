@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-13 — a reference value of a search plan may use the scan's settings
+
+Updated by hand: [[study-types|Study types]] (the settings of a search's coarse scan are the settings a reference value's formula and its `when` may name).
+
+Sources: core/reference_values.py, core/analysis_frame.py, core/figure_claims.py.
+
 ## 2026-11-13 — the design reported when nothing beat the baseline
 
 Updated by hand: [[study-types|Study types]] (the check of the best design: when the search's best is the baseline, the baseline is one of the designs that may be reported; the one reported and nudged is the best at the finest settings that meets every limit).

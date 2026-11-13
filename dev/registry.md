@@ -417,8 +417,10 @@ same PR that adds, splits or renames one.
   an optional `reference` on a `protocol.metrics` entry (`value` = the trial value it is for, `formula` in the
   `oracle_forms` calculator language over grid values, fixed settings and thresholds = `inputs`, `kind`
   value/bound/lower_bound, `when` filters, `checked_by`, `note`). `shape_problem` (called by `metric_spec.normalize`),
-  `problems` (called at the end of `plan.normalize_protocol`: computes the formula on every covered grid setting and
-  compares it with the plan's known-answer checks at their cases), `without_bad_reference` (`plan.repair_protocol`
+  `problems` (called at the end of `plan.normalize_protocol`: computes the formula on every covered setting of the
+  study and compares it with the plan's known-answer checks at their cases; the study's settings are `study_axes` /
+  `grid_settings`, read where the plan wrote them through `contract.settings_between_runs`: a measurement's grid, a
+  search's coarse scan; `grid_axes` stays the top-level grid as written, which the tables of results read), `without_bad_reference` (`plan.repair_protocol`
   drops only that reference), `cross_check` (agrees / disagrees / not_confirmed / unchecked, only a check the engine
   ran and passed confirms), `copies_measured` (a reference that evaluates to the measured means to the precision its
   own numbers are written to: read off the run), `compute`, `pool` (the provenance

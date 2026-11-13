@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from . import contract as _contract
 from . import figure_facts
 from .frame_figure import RECORD_VERSION, hold_text as _hold_text
 from . import paper_values as _values
@@ -637,7 +638,7 @@ def plan_of(protocol: Any) -> dict[str, Any] | None:
     metrics = protocol.get("metrics")
     out: dict[str, Any] = {"series": [{"id": str(m["id"]), "label": ""} for m in metrics
                                       if isinstance(m, dict) and m.get("id")] if isinstance(metrics, list) else []}
-    grid = protocol.get("grid")
+    grid = _contract.settings_between_runs(protocol)[0]  # a measurement's grid, a search's coarse scan
     if isinstance(grid, dict) and len(grid) == 1:
         (name, values), = grid.items()
         if isinstance(values, list) and values and all(_finite(v) for v in values):

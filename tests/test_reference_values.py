@@ -710,3 +710,60 @@ def test_a_table_caption_quotes_the_plans_note_without_the_plans_citation_marker
     from core import citation_support as cs
     kept = "BH controls the rate [18]."  # the writer's own prose, a citation the check kept
     assert cs.CITE_RE.findall(kept) == ["18"] and cs.find_sites(kept)
+
+
+# --- a search for the best design: the settings of its coarse scan are the study's settings --------------------------
+
+
+def _search_protocol(reference: dict[str, Any], **more: Any) -> dict[str, Any]:
+    """A search plan as FI holds it: no top-level grid; the scan and its parts are inside the search block."""
+    return {"constants": {"gain": 2.0},
+            "metrics": [{"id": "peak", "kind": "mean", "reference": {"kind": "value", **reference}}],
+            "optimisation": {"grid": {"speed": [1, 2, 4], "shape": ["round", "flat"]},
+                             "sub_studies": [{"name": "by speed", "vary": ["speed"], "hold": {"shape": "round"}},
+                                             {"name": "by shape", "vary": ["shape"], "hold": {"speed": 1}}],
+                             "baseline": {"values": {"width": 3.0}}},
+            **more}
+
+
+def test_a_reference_of_a_search_plan_may_use_a_setting_of_its_scan() -> None:
+    # Before, the reference was left out of the plan: "cannot be computed at no settings: its formula uses speed, which
+    # is not a setting of the grid", and the quantity read "no reference".
+    assert rv.problems(_search_protocol({"formula": "gain * speed"})) == []
+    assert rv.problems(_search_protocol({"formula": "gain", "when": {"speed": 2}})) == []
+    assert rv.problems(_search_protocol({"formula": "gain", "when": {"shape": "flat"}})) == []
+
+
+def test_the_settings_a_search_plans_reference_is_checked_on_are_those_of_its_scans_parts() -> None:
+    settings = rv.grid_settings(_search_protocol({"formula": "gain * speed"}))
+    assert settings == [{"speed": 1, "shape": "round"}, {"speed": 2, "shape": "round"}, {"speed": 4, "shape": "round"},
+                        {"speed": 1, "shape": "flat"}]  # the union of the parts, not every combination
+
+
+@pytest.mark.parametrize("reference, words", [
+    ({"formula": "gain * nowhere"}, "its formula uses nowhere, which is not a setting of the grid"),
+    ({"formula": "gain", "when": {"nowhere": 1}}, "which is not a setting of `protocol.optimisation.grid` or"),
+    ({"formula": "gain", "when": {"speed": 3}}, "holds for no setting of the grid"),
+])
+def test_a_search_plans_reference_that_names_no_setting_of_the_scan_is_still_refused(reference: dict[str, Any],
+                                                                                    words: str) -> None:
+    found = rv.problems(_search_protocol(reference))
+    assert len(found) == 1 and words in found[0]
+
+
+def test_a_grid_beside_a_search_block_is_not_the_studys_settings() -> None:
+    # A grid left beside the block is not what runs: the plan check refuses a plan that gives both, and its repair moves
+    # the sweep into the block as the scan, where a reference reads it (the test below). Left beside, it is not read.
+    protocol = _search_protocol({"formula": "gain * depth"}, grid={"depth": [1, 2]})
+    assert list(rv.study_axes(protocol)) == ["speed", "shape"]
+    assert "its formula uses depth" in rv.problems(protocol)[0]
+    assert list(rv.grid_axes(protocol)) == ["depth"]  # the tables of results read the top-level grid as written
+
+
+def test_a_sweep_the_plans_repair_moves_into_the_search_block_is_what_a_reference_reads() -> None:
+    protocol = _search_protocol({"formula": "gain * depth"}, grid={"depth": [1, 2]})
+    del protocol["optimisation"]["grid"], protocol["optimisation"]["sub_studies"]
+    moved = {**protocol, "optimisation": {**protocol["optimisation"], "grid": protocol["grid"]}}  # what the repair does
+    del moved["grid"]
+    assert list(rv.study_axes(moved)) == ["depth"] and rv.problems(moved) == []
+    assert rv.grid_settings(moved) == [{"depth": 1}, {"depth": 2}]

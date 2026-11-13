@@ -149,7 +149,11 @@ def _known_values(protocol: dict[str, Any], c: Any) -> dict[str, dict[str, Any]]
     interval, and the true value as a number or as the setting's own axis. Nothing is guessed: a true value that is neither
     is left out, and so is the result."""
     fixed = _metric_spec.fixed_numbers(protocol)
-    axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
+    # The settings a true value may run along, where the plan wrote them: a measurement's grid or a search's scan,
+    # and what every run goes through together (a search writes that inside its block).
+    grid = _contract.settings_between_runs(protocol)[0]
+    inside = _contract.search_in_each_run(protocol) or protocol.get("in_each_run")
+    axes = {str(k) for part in (grid, inside) if isinstance(part, dict) for k in part}
     out = {}
     for r in c.results:
         kv = r.known_value if isinstance(r.known_value, dict) else {}
