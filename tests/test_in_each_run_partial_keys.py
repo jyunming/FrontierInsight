@@ -109,3 +109,65 @@ def test_a_key_naming_one_setting_twice_is_not_a_level() -> None:
     assert in_run.axes_of_key("width=0,width=74") is None
     got, why = in_run.read_returned({"spread": {"width=0,width=74": 1.0, "width=80": 2.0, "width=90": 3.0}}, LEVELS, "run_cell")
     assert got is None and "not one of the values" in why
+
+
+def test_a_text_value_that_holds_an_equals_sign_is_read_when_the_result_is_keyed_by_the_value_alone() -> None:
+    """Live: a plan gave the one setting compared inside each run five texts, one of them ``"rate = a/b"``; the simulation
+    keyed its result by each value alone, and the one with the equals sign was refused as "not one of the values the run
+    was given", so no repair of the code could make the study run."""
+    levels = in_run.level_cells({"rule": ["plain rule", "rate = a/b", "ratio of a to b, halved"]})
+    assert [in_run._level_of(v, levels) for v in ("plain rule", "rate = a/b", " rate = a/b ")] == [
+        {"rule": "plain rule"}, {"rule": "rate = a/b"}, {"rule": "rate = a/b"}]
+    returned = {"spread": {"plain rule": 1.0, "rate = a/b": 2.0, "ratio of a to b, halved": 3.0}}
+    got, why = in_run.read_returned(returned, levels, "run_cell")
+    assert why == "" and got == {"spread": {in_run.level_key(lv): x for lv, x in zip(levels, (1.0, 2.0, 3.0))}}
+    # the setting's own form still reads, and a text that is none of the values is still refused
+    assert in_run._level_of("rule=rate = a/b", levels) == {"rule": "rate = a/b"}
+    assert in_run._level_of("rate = a/c", levels) is None and in_run._level_of("other = a/b", levels) is None
+    got, why = in_run.read_returned({"spread": {"plain rule": 1.0, "rate = a/c": 2.0, "ratio of a to b, halved": 3.0}},
+                                    levels, "run_cell")
+    assert got is None and "not one of the values" in why
+    # with several settings compared inside the run a bare value names none of them, as before
+    assert in_run._level_of("rate = a/b", in_run.level_cells({"rule": ["rate = a/b"], "gap": [80, 90]})) is None
+
+
+TEXT_INSIDE = {"rule": ["plain rule", "a = 1, b = 2", "ratio p = a/b, halved"]}
+TEXT_SOURCE = '''
+def run_cell(cell):
+    return {"spread": {v: float(i + 1) for i, v in enumerate(cell["rule"])}, "total": 5.0}
+'''
+
+
+def test_a_text_value_with_a_comma_and_an_equals_sign_gets_one_record_and_names_no_other_setting(tmp_path: Path) -> None:
+    """The half of a text value after its comma (``"a = 1, b = 2"``) was taken for a setting ``b`` the run does not have:
+    each value got a record once for every such name, and the settings of the timed trials named ``b``. What each run
+    compares is FI's own list, so a part of a key is a setting only when the list has it."""
+    from core import run_estimate
+
+    levels = in_run.level_cells(TEXT_INSIDE)
+    keys = [in_run.level_key(lv) for lv in levels]
+    values, why = in_run.read_returned({"spread": {v: float(i + 1) for i, v in enumerate(TEXT_INSIDE["rule"])}, "total": 5.0},
+                                       levels, "run_cell")
+    assert why == "" and list(values["spread"]) == keys
+    rows = [{"trial": 0, "status": "ok", "values": values}]
+    assert in_run.record_levels(levels, rows) == list(levels)   # three, not three for each name a value's text holds
+    assert [c["key"] for c in in_run.summary_cells({"n": 1}, "n=1", 1, rows, levels)] == ["n=1"] + ["n=1," + k for k in keys]
+    assert in_run.for_case(values, levels, {"rule": "a = 1, b = 2"})["spread"] == 2.0
+    assert in_run.for_case(values, levels, {"rule": "ratio p = a/b, halved"})["spread"] == 3.0
+    # a run with no number for the result under its plain name is a missing number for each value, once
+    gone = in_run.settle_missing(rows + [{"trial": 1, "status": "ok", "values": {"spread": float("nan"), "total": 5.0}}], levels)
+    assert list(gone[1]["values"]["spread"]) == keys
+    # the timed trials: each value is one setting, named by the setting the run has
+    probe = run_estimate.Probe(None, None, {"m": 1}, 0.0, trials=[values])
+    cells = [c for c, _v in run_estimate.observations([probe], TEXT_INSIDE)]
+    assert cells == [{"m": 1}] + [{"m": 1, "rule": v} for v in TEXT_INSIDE["rule"]]
+    assert in_run.parse_level_key("width=74,gap=80", LEVELS) == in_run.parse_level_key("width=74,gap=80") == {"width": 74.0, "gap": 80.0}
+    # and through FI's own run of the trials
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(TEXT_SOURCE, encoding="utf-8")
+    ex = SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}")
+    run = asyncio.run(trial_runner.run_trials(ex, sys.executable, root, "code/simulate.py", {"m": [1]}, runs_per_setting=1,
+                                              base_seed=0, deterministic=True, timeout_s=60, run_id="r1", in_each_run=TEXT_INSIDE))
+    assert [r["status"] for c in run.cells for r in c.rows] == ["ok"]
+    assert [c.key for c in run.record_cells()] == ["m=1"] + ["m=1," + k for k in keys]

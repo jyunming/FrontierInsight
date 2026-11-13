@@ -465,8 +465,12 @@ PINS_AT_811719AF = {
     # and again (intended text changes) when core/in_run.py gained the search's one-number rule (search_one_number_names,
     # one_number_rule) and the check of a run's result shape (shape_problem), and the search's scan in run.py began to read
     # the pooled candidates of every searched alternative (scan(..., pool=True)); it was "31f40a3da41e1bf3"
-    "run_none": "bb9434d6181daa8e",
-    "run_plain": "bb9434d6181daa8e",
+    # and again when a returned key is read as the text value of the one compared setting, exactly, before it is taken apart
+    # as ``factor=value`` (core/in_run.py _level_of: a text value may hold an equals sign itself); it was "bb9434d6181daa8e"
+    # and again when a part of a recorded key is a setting only when the run has that setting (axes_of_key(known=),
+    # parse_level_key(levels=): a text value may hold a comma and an equals sign); it was "fd2a920a77e4f94a"
+    "run_none": "d1dd11182dcce162",
+    "run_plain": "d1dd11182dcce162",
     # the frame's own text (written only with the frame on): its RESULTS comment, its trial docstring and the refusal message
     # changed with the one list of names a trial may return (core/skeleton.py returnable_names); it was "ad084c60d61b9dde"
     # and again when the seeds of a setting moved from an environment variable to a file (FI_TRIAL_SEEDS_FILE); it was "5b45d638db4dcd2c"
@@ -487,7 +491,9 @@ PINS_AT_811719AF = {
     # "11ff3296ced4b58f"
     # and again when the table began to serve a quantity FI derives for each setting through mean() (Table.set_derived, for
     # a figure line FI names only when every point is its own record); it was "31055f8a3362dd1d"
-    "run_framed": "d22eddb03edf07e6",
+    # and again with core/in_run.py's exact read of a text value before a key is taken apart, as above; it was
+    # "d22eddb03edf07e6", then "a7dc6fa0b256914b" (a part of a key is a setting only when the run has it)
+    "run_framed": "03b115a38cbbfa2a",
 }
 
 
