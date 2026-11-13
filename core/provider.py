@@ -2037,6 +2037,13 @@ class _CliCapacityError(_CliTransientError):
     dropped connection to come back."""
 
 
+class _CliBlockedError(_CliCapacityError):
+    """The CLI's call was refused before the model's service answered it: the CLI names the failure
+    ``authentication_failed`` but the HTTP answer it quotes is not the service's own
+    (:func:`_answered_before_the_service`), as when a gateway in front of the service turns requests away for some minutes. The sign-in is still good and the same call answers again later,
+    so it is retried like a capacity error, after longer waits (``_cli_retry_wait``)."""
+
+
 class ProviderLimitError(_CliTransientError):
     """A CLI provider's usage limit, or its refused sign-in, that does not clear within the run (``_cli_fatal``). It is
     not retried, and once a client has met it every later call on that model raises it again at once, without starting
@@ -2139,11 +2146,17 @@ def _cli_stdout_errors(stdout_b: bytes | None) -> list[str]:
 
 def _cli_retry_wait(retry_state: "Any") -> float:
     """Seconds before the next CLI attempt: 30 to 90 after a capacity error,
+    180 to 300 after a call refused before the service answered (``_CliBlockedError``),
     otherwise the jittered exponential wait every other transient gets. The
     short wait (at most 20 s) spent all four attempts on a capacity outage in
-    about a minute."""
+    about a minute; a refusal of that kind was seen to last about eight minutes,
+    which three waits of 30 to 90 s can end before."""
     outcome = getattr(retry_state, "outcome", None)
     exc = outcome.exception() if outcome is not None else None
+    if isinstance(exc, _CliBlockedError):
+        import random
+
+        return random.uniform(180.0, 300.0)
     if isinstance(exc, _CliCapacityError):
         import random
 
@@ -2295,7 +2308,8 @@ def _cli_fatal(text: str) -> bool:
 #: The kinds of failed call the claude CLI names itself in its stream (the ``error`` field of an assistant or result
 #: message) that are about the account, not the call: no credit left, a refused or missing sign-in, an account held or
 #: not allowed. Waiting minutes does not bring any of them back, so the run pauses instead of retrying. A rate limit or an
-#: overloaded server is not one of them (it clears).
+#: overloaded server is not one of them (it clears). ``authentication_failed`` is the one kind the CLI also gives a call
+#: that never reached the account (a gateway's refusal): :func:`_cli_failure` reads the answer it quotes before pausing.
 _CLI_ACCOUNT_ERRORS = frozenset({"billing_error", "authentication_failed", "oauth_org_not_allowed", "account_on_hold",
                                  "verification_required"})
 
@@ -2314,9 +2328,25 @@ def _stream_account_error(raw: bytes) -> str:
     return kind if isinstance(kind, str) and kind in _CLI_ACCOUNT_ERRORS else ""
 
 
+#: The HTTP answer the claude CLI quotes in a failed call: its status, then the start of its body.
+_CLI_API_ERROR = re.compile(r"API Error: (\d{3})\s*(\S?)")
+
+
+def _answered_before_the_service(text: str) -> bool:
+    """Whether the HTTP answer a failed CLI call quotes was written by something in front of the model's service, not by
+    the service: the service answers an error with a JSON object, so a body that is not one (a gateway's page) with a
+    status other than 401 did not come from it and says nothing about the account. No quoted answer: ``False``."""
+    found = _CLI_API_ERROR.search(text)
+    return bool(found) and found.group(1) != "401" and found.group(2) != "{"
+
+
 def _cli_failure(message: str, account_error: str = "") -> "_CliTransientError":
     """The error for a failed CLI call: a :class:`ProviderLimitError` (not retried; the run pauses) when the CLI named an
-    account error in its stream, else a :class:`_CliTransientError`, which the text rules (:func:`_cli_fatal`) still sort."""
+    account error in its stream, else a :class:`_CliTransientError`, which the text rules (:func:`_cli_fatal`) still sort.
+    ``authentication_failed`` with an HTTP answer that the service did not write (:func:`_answered_before_the_service`)
+    is a :class:`_CliBlockedError` (retried after long waits); with any other text it pauses the run as before."""
+    if account_error == "authentication_failed" and _answered_before_the_service(message):
+        return _CliBlockedError(f"{message} [the CLI named it: {account_error}; the answer is not the service's own]")
     if account_error:
         return ProviderLimitError(f"{message} [the CLI named it: {account_error}]")
     return _CliTransientError(message)

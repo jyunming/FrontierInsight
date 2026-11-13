@@ -673,3 +673,59 @@ async def test_an_account_error_the_cli_names_is_raised_on_every_way_the_stream_
     _, spec = _make_fake_streaming_binary(tmp_path / "hang", events=[named], inter_delay_s=30.0)
     with pytest.raises(ProviderLimitError):
         await _run_cli(spec, "any prompt", timeout_s=20.0, inactivity_timeout_s=2.0)
+
+
+GATEWAY_PAGE = "Failed to authenticate. API Error: 403 Attention Required! | A Gateway"
+
+
+def _refused(said: str) -> list[dict]:
+    return [{"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant",
+                                              "content": [{"type": "text", "text": said}]},
+             "error": "authentication_failed"},
+            {"type": "result", "subtype": "success", "is_error": True, "result": said}]
+
+
+@pytest.mark.asyncio
+async def test_a_call_refused_before_the_service_answered_is_retried_after_long_waits(tmp_path: Path) -> None:
+    """The CLI names it ``authentication_failed``, but the answer it quotes is a page, not the service's error object:
+    the account was never asked, so the run does not pause and FI does not remember the model as unusable."""
+    from core.provider import (ProviderLimitError, _CliBlockedError, _cli_retry_wait, _is_fatal_provider_error,
+                               _retry_cli_error, _stays_unusable)
+
+    _, spec = _make_fake_streaming_binary(tmp_path, events=_refused(GATEWAY_PAGE), exit_code=1)
+    with pytest.raises(_CliBlockedError) as caught:
+        await _run_cli(spec, "any prompt", timeout_s=5.0, inactivity_timeout_s=3.0)
+    err = caught.value
+    assert not isinstance(err, ProviderLimitError)
+    assert _retry_cli_error(err) and not _stays_unusable(err) and not _is_fatal_provider_error(err)
+
+    class _State:
+        def __init__(self, exc: BaseException) -> None:
+            self.outcome = type("O", (), {"exception": lambda self: exc})()
+            self.attempt_number = 1
+
+    for _ in range(20):
+        assert 180.0 <= _cli_retry_wait(_State(err)) <= 300.0
+
+
+@pytest.mark.parametrize("said", [
+    'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"expired"}}',
+    'Failed to authenticate. API Error: 403 {"type":"error","error":{"type":"permission_error","message":"revoked"}}',
+    "Failed to authenticate. API Error: 401 Unauthorized",
+    "Not logged in. Please run /login",
+    "It cannot go on.",
+])
+def test_a_refused_sign_in_still_pauses_the_run_at_once(said: str) -> None:
+    """Known positives: the service's own refusal (its error object, or a 401) and a failure that quotes no answer keep
+    the rule that an account error the CLI names is never retried."""
+    from core.provider import ProviderLimitError, _cli_failure, _retry_cli_error, _stays_unusable
+
+    err = _cli_failure(f"claude exited rc=1 (stream error: {said}): ", "authentication_failed")
+    assert isinstance(err, ProviderLimitError) and not _retry_cli_error(err) and _stays_unusable(err)
+
+
+def test_a_page_in_front_of_the_service_does_not_excuse_another_account_error() -> None:
+    from core.provider import ProviderLimitError, _cli_failure
+
+    err = _cli_failure(f"claude exited rc=1 (stream error: {GATEWAY_PAGE}): ", "billing_error")
+    assert isinstance(err, ProviderLimitError)

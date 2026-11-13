@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-13 — a CLI call refused before the service is retried
+
+Updated by hand: [[provider-outages|Provider outages]] (the Claude CLI's `authentication_failed` with an answer the service did not write is retried after long waits, not read as a dead sign-in).
+
+Sources: core/provider.py, core/crash_kind.py.
+
 ## 2026-11-13 — a reference value of a search plan may use the scan's settings
 
 Updated by hand: [[study-types|Study types]] (the settings of a search's coarse scan are the settings a reference value's formula and its `when` may name).

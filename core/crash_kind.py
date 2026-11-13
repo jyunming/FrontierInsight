@@ -280,7 +280,10 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
         resumes = limit_resumes_at(str(exc))
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
                 f"Add credits or wait until the limit resets{f' ({resumes})' if resumes else ''}, then continue the quest.")
-    if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
+    # A CLI call refused before the account was asked (the provider's own sorting) is not a sign-in to renew.
+    blocked = any(type(e).__name__ == "_CliBlockedError" for e in _chain(exc))
+    if model_call and not blocked and (status in (401, 403)
+                                       or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
         todo = _sign_in_todo(provider)
         return (f"FI could not sign in to {service}{f' ({model})' if model else ''}: its sign-in has expired or was refused.",
                 f"{todo} Then continue the quest.")
