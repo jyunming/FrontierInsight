@@ -30,6 +30,12 @@ It fails with: $failure
 
 $code
 
+# The names the plan declares
+
+$declared
+
+When the finding is that a result is missing, compute it under one of these names, or as the form the plan gives it (`<name>_count`, `<name>_total`, `<name>_values`), and never under a name of your own: a name outside this list can be refused when the code runs. (When the list says "none stated", use the plan's own name for the result.)
+
 # How to answer
 
 - Change what the finding names and nothing else. Keep every function, name, parameter, entry point and equation label comment (`# E1`) that is not part of the problem, the handling of `FI_PILOT` and `FI_REPLICATE_SEED`, and the final `RESULT_JSON: {...}` line.

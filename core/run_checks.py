@@ -3151,6 +3151,32 @@ class RunChecksMixin:
             return ""
         return fault  # the analysis gate follows as ``Env.gate`` (one call for each change)
 
+    async def _small_values_now(self) -> dict[str, dict[str, list[Any]]] | None:
+        """What FI's small run gives for each result on the code as it is now (made again only when the code changed since
+        its record), for the check of a repair that adds a missing result; ``None`` when there is no small run."""
+        from . import small_run as _small
+
+        ctx = getattr(self, "_small_run_ctx", None)
+        if not ctx:
+            return None
+        record = await self._small_run(*ctx, baseline=False)
+        return _small.values_of(record) if record and not record.get("crashed") else None
+
+    async def _small_missing_now(self) -> list[str] | None:
+        """The results the plan declares each run returns that no trial of FI's small run returned, on the code as it is
+        now (:func:`core.small_run.missing_outputs`): what says, for the check of a repair, that a result is missing.
+        ``None`` when there is no small run or it did not run."""
+        from . import small_run as _small
+
+        ctx = getattr(self, "_small_run_ctx", None)
+        if not ctx:
+            return None
+        record = await self._small_run(*ctx, baseline=False)
+        if not record or record.get("crashed"):
+            return None
+        protocol = self._protocol_block(ctx[0])  # type: ignore[attr-defined]
+        return [f.quantity for f in _small.missing_outputs(protocol if isinstance(protocol, dict) else None, record)]
+
     async def _ask_finding_test_again(self, issue: dict[str, Any], error: Any, record: dict[str, Any],
                                       state: Any = None) -> Any:
         """At the evidence gate, a shown issue's test errors in its own code: the code model is asked once more for it,
