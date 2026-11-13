@@ -579,12 +579,12 @@ def test_two_million_values_are_walked_once_and_quickly(monkeypatch) -> None:
 
     from core import plausibility as pl
 
-    walked = []
+    walked = []  # the size of each result a walk is built for (not the walk: that would keep every result alive)
     original = pl.LeafWalk._build
 
     def counting(self):
         if not self._built:
-            walked.append(self)
+            walked.append(len(self.root["trials"]))
         original(self)
 
     monkeypatch.setattr(pl.LeafWalk, "_build", counting)
@@ -603,7 +603,7 @@ def test_two_million_values_are_walked_once_and_quickly(monkeypatch) -> None:
     after = first_check(200_000)[0]
     for _ in range(3):
         pl.check_design(result, design, seen=["gone"], walk=walk)
-    assert sum(w.root is result for w in walked) == 1  # a repeat reads the kept walk; nothing walks that result again
+    assert walked.count(len(result["trials"])) == 1  # a repeat reads the kept walk; nothing walks that result again
     # Quickly, as a machine of any speed can be held to it: ten times the values take about ten times as long (13 times
     # where this was written), against the slower of two checks of a tenth of the values, one made just before and one
     # just after. The larger result checked ten times over, which is what a cost growing with the square of the count
