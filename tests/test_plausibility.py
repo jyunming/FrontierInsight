@@ -574,24 +574,44 @@ def test_a_result_read_by_every_check_is_walked_once(monkeypatch) -> None:
     assert len(built) == 4
 
 
-def test_two_million_values_are_walked_once_and_quickly() -> None:
+def test_two_million_values_are_walked_once_and_quickly(monkeypatch) -> None:
     import time
 
-    from core.plausibility import LeafWalk, check_design
+    from core import plausibility as pl
 
-    n = 2_000_000
-    result = {"mean": 0.5, "trials": [{"ler": 0.1, "vals": [0.2] * 4} for _ in range(n // 5)]}
+    walked = []  # the size of each result a walk is built for (not the walk: that would keep every result alive)
+    original = pl.LeafWalk._build
+
+    def counting(self):
+        if not self._built:
+            walked.append(len(self.root["trials"]))
+        original(self)
+
+    monkeypatch.setattr(pl.LeafWalk, "_build", counting)
     design = {"result_assertions": [{"path": "mean", "min": 0, "max": 1}, {"path": "ler", "min": 0, "max": 0.5},
                                     {"path": "gone", "min": 0, "max": 1}]}
-    walk = LeafWalk(result)
-    started = time.monotonic()
-    assert check_design(result, design, seen=["gone"], walk=walk)[0].kind == "missing"
-    first = time.monotonic() - started
-    started = time.monotonic()
+
+    def first_check(n: int) -> tuple[float, dict, pl.LeafWalk]:
+        result = {"mean": 0.5, "trials": [{"ler": 0.1, "vals": [0.2] * 4} for _ in range(n // 5)]}
+        walk = pl.LeafWalk(result)
+        started = time.perf_counter()
+        assert pl.check_design(result, design, seen=["gone"], walk=walk)[0].kind == "missing"
+        return time.perf_counter() - started, result, walk
+
+    before = first_check(200_000)[0]
+    first, result, walk = first_check(2_000_000)
+    after = first_check(200_000)[0]
     for _ in range(3):
-        check_design(result, design, seen=["gone"], walk=walk)
-    assert time.monotonic() - started < max(first, 1.0)  # a repeat reads the kept walk instead of walking again
-    assert first < 30
+        pl.check_design(result, design, seen=["gone"], walk=walk)
+    assert walked.count(len(result["trials"])) == 1  # a repeat reads the kept walk; nothing walks that result again
+    # Quickly, as a machine of any speed can be held to it: ten times the values take about ten times as long (13 times
+    # where this was written), against the slower of two checks of a tenth of the values, one made just before and one
+    # just after. The larger result checked ten times over, which is what a cost growing with the square of the count
+    # comes to at these two sizes, took about a hundred times. What this does not hold is the number of seconds: a limit
+    # of 30 s failed on a shared machine whose time for the first check moved between runs of unchanged code (34 and 36
+    # s in the two runs that failed).
+    small = max(before, after)
+    assert first < 40 * small, f"ten times the values took {first / small:.0f} times as long"
 
 
 # ---- a result the plan declares as physical_bound may sit on its range edge --------------------------------------------
