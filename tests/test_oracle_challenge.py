@@ -224,7 +224,23 @@ def test_a_formula_that_writes_the_measurement_down_is_no_working_and_the_step_n
     assert ch.challenge_of(_CHECK, {**_QUESTION[0], "expected_formula": "n * 0 + 0.5"}, measured=0.5)[0] is None
     taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": "the simulation gives 0.500, the plan 1.0"},
                                measured=0.5)
-    assert taken is not None and "0.500" not in taken["step"] and "1.0" in taken["step"]
+    assert taken is not None and "0.500" not in taken["step"] and "1.0" not in taken["step"]
+
+
+def test_the_step_a_blind_model_reads_carries_no_number_however_the_measurement_is_rounded() -> None:
+    """A repair wrote the measured 0.10355 as "about 0.10": three matching digits were needed to take it out, so the
+    rounding reached the judge. No number the repair typed reaches it now, with or without a measured value."""
+    said = "the simulation's mean is about 0.10 (1.0e-1), near 10% of the 4 runs, so the plan's second term is wrong"
+    for measured in (0.10355, None):
+        taken, _ = ch.challenge_of(_CHECK, {**_QUESTION[0], "disputed_step": said}, measured=measured)
+        assert taken is not None
+        assert not any(c.isdigit() for c in taken["step"]), taken["step"]   # read from the text, not by the rule under test
+        assert "the plan's second term is wrong" in taken["step"]
+    # every way a value is written goes; a digit that is part of a name is the name's and stays
+    assert ch.without_numbers("rk4 at N80 gives 0.5s and x_0=1e-3, about 10% of 1/8 (-0.25)") == (
+        "rk4 at N80 gives (a value not shown)s and x_0=(a value not shown), about (a value not shown)% of "
+        "(a value not shown)/(a value not shown) ((a value not shown))")
+    assert ch.without_measured("the check expects 0.10 at 4 runs", 0.10355) == "the check expects 0.10 at 4 runs"
 
 
 def test_a_concession_or_a_verdict_that_copies_the_codes_formula_settles_nothing_by_itself() -> None:
