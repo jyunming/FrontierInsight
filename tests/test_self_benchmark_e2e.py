@@ -68,6 +68,38 @@ TASK = {
 }
 
 
+def _stop_detail(run_dir: Path) -> str:
+    """What a stopped run wrote about its stop: its stop files (each up to 6,000 characters), the last traceback of its
+    log and the end of that log. An outcome keeps only the stop's first line, and a stop that comes and goes
+    between runs of this file cannot be found from that line."""
+    try:
+        quest = runner.quest_root(run_dir)
+    except FileNotFoundError as exc:
+        return f"--- {run_dir.name}: {exc}"
+    parts = [f"--- {run_dir.name} stopped"]
+    for name in ("NEXT_STEP.md", "quest_failed.md"):
+        if (quest / name).is_file():
+            parts.append(f"{name}:" + chr(10) + (quest / name).read_text(encoding="utf-8", errors="replace")[:6000])
+    log = quest / ".fi" / "run.log"
+    if log.is_file():
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        at = max((i for i, line in enumerate(lines) if line.startswith("Traceback (most recent call last)")), default=None)
+        if at is not None:  # the error itself, whatever was logged after it
+            parts.append("run.log, its last traceback:" + chr(10) + chr(10).join(lines[max(0, at - 3):at + 120]))
+        parts.append("run.log, its last lines:" + chr(10) + chr(10).join(lines[-40:]))
+    return chr(10).join(parts)
+
+
+def _stopped_unknown(run_dir: Path) -> bool:
+    """Whether the run wrote the stop FI gives an error it does not know (read from the run's own stop file: the
+    benchmark's outcome reads an older stop card first when the quest folder holds one)."""
+    try:
+        failed = runner.quest_root(run_dir) / "quest_failed.md"
+    except FileNotFoundError:
+        return False
+    return failed.is_file() and "unexpected error" in failed.read_text(encoding="utf-8", errors="replace")
+
+
 def _claim_for(prompt: str) -> str:
     """The fake claim check grounds the citing sentence in source [1], quoting it."""
     src = plant.WAKEFIELD if "Ileal-lymphoid" in prompt else plant.MADSEN
@@ -212,8 +244,19 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
 
         outcomes = cli.score_dir(root)
         js, md = report.write(outcomes, root / "report")
+        stops = {o["run"]: _stop_detail(root / o["run"]) for o in outcomes
+                 if o["stopped"] or _stopped_unknown(root / o["run"])}
     return {"root": root, "clean": clean, "runs": runs, "meta": meta, "filtered": filtered, "replay_calls": replay_calls,
-            "outcomes": {o["run"]: o for o in outcomes}, "report": (js, md), "calls": calls}
+            "outcomes": {o["run"]: o for o in outcomes}, "report": (js, md), "calls": calls, "stops": stops}
+
+
+def test_no_run_stopped_on_an_error_fi_does_not_know(bench: dict[str, Any]) -> None:
+    """Every run of the campaign ends as FI means it to: delivered, or stopped at a check with its reason. A run that
+    stopped on an error FI has no words for fails here with what it wrote about the stop (its stop file and the end of
+    its log), which the other tests' messages do not carry."""
+    unknown = [name for name, o in bench["outcomes"].items()
+               if "unexpected error" in o["stopped"] or _stopped_unknown(bench["root"] / name)]
+    assert not unknown, (chr(10) * 2).join(bench["stops"][name] for name in unknown)
 
 
 def test_the_clean_recording_is_right_and_would_be_published(bench: dict[str, Any]) -> None:
