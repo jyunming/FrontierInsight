@@ -613,3 +613,161 @@ async def test_after_the_freeze_a_figure_is_not_offered_a_number_the_plan_only_n
     assert asked and "bloom_days" not in asked[0]
     assert [n["id"] for n in design["protocol"]["named_results"]] == ["bloom_days", "peak_ratio", "growth_theory"]
     assert [m["id"] for m in design["protocol"]["metrics"]] == ["algae_peak", "bloom"]
+
+
+def _inside_design(depends: list[str], *, grid: bool = True, derived: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The pond study with a `dose` every run goes through together; `algae_peak` changes with the settings in ``depends``."""
+    metrics = [{"id": "algae_peak", "kind": "mean", "estimand": "peak algae count", "unit": "one pond run", "role": "result",
+                "returned": "each_run", "depends_on": depends},
+               {"id": "bloom", "kind": "proportion", "estimand": "P(bloom)", "unit": "one pond run", "role": "result",
+                "returned": "each_run", "depends_on": ["nutrient"] if grid else []}]
+    protocol = {"grid": {"nutrient": [1, 2, 4] if grid else [2]}, "runs_per_setting": 50, "metrics": metrics,
+                "in_each_run": {"dose": ["low", "high"]}, **({"derived": derived} if derived else {})}
+    return {**DESIGN, "protocol": protocol}
+
+
+def test_a_figure_along_a_setting_every_run_goes_through_needs_a_number_recorded_for_each_of_its_values() -> None:
+    """The failure: a plan drew its three figures along a setting every run goes through together while every number they
+    showed was recorded once per run; the plan was accepted and the paper had none of them. FI's own record decides it."""
+    held = _inside_design(["nutrient"])  # `algae_peak` does not change with `dose`: one number per run
+    asked = {"a.png": ""}
+    row = {"shows": ["algae_peak"], "x": "dose", "panels": 1}
+    problems = cp._check_figures({"a.png": row}, asked, held)
+    assert len(problems) == 1 and "`x` is `dose`, which every run goes through together" in problems[0]
+    assert "does not declare that `algae_peak` changes with it" in problems[0] and "draw it along nutrient" in problems[0]
+    # A result whose settings the plan never declared is not judged: nothing says how it is returned.
+    unsaid = _inside_design(["nutrient"])
+    del unsaid["protocol"]["metrics"][0]["depends_on"]
+    assert cp._check_figures({"a.png": row}, asked, unsaid) == [] and "algae_peak" in cp._per_value(unsaid)["dose"]
+    # The same figure along the setting the runs differ in, or with `dose` as its lines, is accepted as it was.
+    assert cp._check_figures({"a.png": {**row, "x": "nutrient"}}, asked, held) == []
+    assert cp._check_figures({"a.png": {**row, "x": "nutrient", "series": "dose"}}, asked, held) == []
+    # A result the plan declares to change with it is recorded for each value: the figure is accepted as it was.
+    assert cp._check_figures({"a.png": row}, asked, _inside_design(["nutrient", "dose"])) == []
+
+
+def test_a_quantity_worked_out_from_a_number_recorded_for_each_value_can_be_drawn_along_that_setting() -> None:
+    asked = {"a.png": ""}
+    row = {"shows": ["peak_gain"], "x": "dose", "panels": 1}
+    worked = [{"id": "peak_gain", "inputs": ["algae_peak"]}]
+    assert cp._check_figures({"a.png": row}, asked, _inside_design(["nutrient", "dose"], derived=worked)) == []
+    problems = cp._check_figures({"a.png": row}, asked, _inside_design(["nutrient"], derived=worked))
+    assert len(problems) == 1 and "does not declare that `peak_gain` changes with it" in problems[0]
+    # A quantity the study's own function works out, with no inputs named, is not judged.
+    own = [{"id": "peak_gain"}]
+    assert cp._check_figures({"a.png": row}, asked, _inside_design(["nutrient"], derived=own)) == []
+    # A quantity worked out in two steps follows the number it starts from.
+    steps = [{"id": "peak_gain", "inputs": ["peak_log"]}, {"id": "peak_log", "inputs": ["algae_peak"]}]
+    assert cp._per_value(_inside_design(["nutrient", "dose"], derived=steps))["dose"] == ["algae_peak", "peak_gain", "peak_log"]
+    assert cp._per_value(_inside_design(["nutrient"], derived=steps))["dose"] == []
+
+
+def test_a_study_that_varies_only_what_every_run_goes_through_is_sent_to_a_figure_of_one_number_against_another() -> None:
+    """Such a study still has figures to draw: each trial's pair of two numbers. A drop stays refused, as it was."""
+    held = _inside_design([], grid=False)  # `dose` is the only setting with more than one value; nothing changes with it
+    asked = {"a.png": ""}
+    assert "does not drop a figure on a model's word" in cp._check_figures({"a.png": {"drop": True, "why": "w"}}, asked, held)[0]
+    problems = cp._check_figures({"a.png": {"shows": ["algae_peak"], "x": "dose", "panels": 1}}, asked, held)
+    assert len(problems) == 1 and "the study records no number for each value of `dose`" in problems[0]
+    assert "use as `x` one of the numbers every trial returns (algae_peak, bloom), with `series`: null" in problems[0]
+    assert "`drop`" not in problems[0]
+    # The way it names is accepted: one number against another, each trial's pair.
+    pair = {"shows": ["algae_peak"], "x": "bloom", "series": None, "panels": 1}
+    assert cp._check_figures({"a.png": pair}, asked, held) == []
+
+
+def test_a_figure_of_one_number_against_another_is_not_split_by_a_setting_every_run_goes_through() -> None:
+    """FI's own figure draws each trial's pair of numbers; with one pair per run it has nothing to split by such a setting
+    (on a stored study's record it drew no figure). A figure drawn along another setting takes it as its lines, as before."""
+    held = _inside_design(["nutrient"])
+    asked = {"a.png": ""}
+    pair = {"shows": ["algae_peak"], "x": "bloom", "series": "dose", "panels": 1}
+    problems = cp._check_figures({"a.png": pair}, asked, held)
+    assert len(problems) == 1 and "`series` is `dose`, which every run goes through together" in problems[0]
+    assert "`algae_peak`, `bloom`" in problems[0] and "answer `series`: null, or one of nutrient" in problems[0]
+    assert cp._check_figures({"a.png": {**pair, "series": None}}, asked, held) == []
+    assert cp._check_figures({"a.png": {**pair, "series": "nutrient"}}, asked, held) == []
+    assert cp._check_figures({"a.png": {**pair, "x": "nutrient"}}, asked, held) == []
+    # Numbers the plan declares to change with it are recorded for each value: the split is accepted.
+    both = _inside_design(["nutrient", "dose"])
+    both["protocol"]["metrics"][1]["depends_on"] = ["nutrient", "dose"]
+    assert cp._check_figures({"a.png": pair}, asked, both) == []
+    # One of the pair recorded once per run is enough to have nothing to split: the one on `x`, or the one shown.
+    half = _inside_design(["nutrient", "dose"])  # `algae_peak` for each value of `dose`, `bloom` once per run
+    for answer in (pair, {**pair, "shows": ["bloom"], "x": "algae_peak"}):
+        problems = cp._check_figures({"a.png": answer}, asked, half)
+        assert len(problems) == 1 and "does not declare that `bloom` changes with it" in problems[0]
+        assert "`algae_peak`" not in problems[0]
+
+
+def test_a_number_the_plan_only_names_is_drawn_along_such_a_setting_only_when_the_record_holds_one_for_each_value() -> None:
+    """FI works a named number out from its record of the trials when a figure shows it. The request and the check say the
+    same: with a number recorded for each value it may be shown along the setting, with none it may not."""
+    asked = {"a.png": ""}
+    row = {"shows": ["bloom_days"], "x": "dose", "panels": 1}
+    none = _inside_design(["nutrient"])
+    none["protocol"]["named_results"] = json.loads(json.dumps(NAMED))
+    problems = cp._check_figures({"a.png": row}, asked, none)
+    assert len(problems) == 1 and "`bloom_days` would be worked out from a record that holds no number for each value of `dose`" in problems[0]
+    assert "not an `x`" in cp._settings_said(none, ["dose", "nutrient"])
+    assert cp._check_figures({"a.png": {**row, "x": "nutrient"}}, asked, none) == []
+    some = _inside_design(["nutrient", "dose"])
+    some["protocol"]["named_results"] = json.loads(json.dumps(NAMED))
+    assert cp._check_figures({"a.png": row}, asked, some) == []
+    assert "as `x` only for algae_peak, bloom_days, peak_ratio)" in cp._settings_said(some, ["dose", "nutrient"])
+    # Beside a declared number that is one per run, each is said in its own words.
+    both = cp._check_figures({"a.png": {**row, "shows": ["algae_peak", "bloom_days"]}}, asked, none)
+    assert len(both) == 1 and "does not declare that `algae_peak` changes with it" in both[0] and "`bloom_days` would be" in both[0]
+
+
+def test_the_way_forward_of_a_refused_figure_is_an_answer_the_check_accepts() -> None:
+    held = _inside_design(["nutrient"])
+    asked = {"a.png": ""}
+    row = {"shows": ["algae_peak"], "x": "dose", "series": "nutrient", "panels": 1}
+    problems = cp._check_figures({"a.png": row}, asked, held)
+    assert len(problems) == 1
+    assert "draw it along nutrient (its `series` is then another setting, which `dose` can be, or null)" in problems[0]
+    assert cp._check_figures({"a.png": {**row, "x": "nutrient", "series": "dose"}}, asked, held) == []
+    assert cp._check_figures({"a.png": {**row, "x": "nutrient", "series": None}}, asked, held) == []
+    # Two settings every run goes through together: the figure is sent to the one its number is recorded for each value of.
+    two = _inside_design(["shade"], grid=False)
+    two["protocol"]["in_each_run"]["shade"] = ["sun", "dark"]
+    along = {"shows": ["algae_peak", "algae_peak"], "x": "dose", "panels": 1}
+    problems = cp._check_figures({"a.png": along}, asked, two)
+    assert len(problems) == 1 and "draw it along shade" in problems[0] and problems[0].count("`algae_peak`") == 1
+    assert cp._check_figures({"a.png": {**along, "x": "shade"}}, asked, two) == []
+
+
+def test_a_search_plan_writes_such_a_setting_inside_its_search_block_and_is_held_to_the_same() -> None:
+    """The plan that failed was a search: what every evaluation goes through together is under `protocol.optimisation`."""
+    design = _inside_design([], grid=False)
+    design["protocol"]["optimisation"] = {"in_each_run": design["protocol"].pop("in_each_run")}
+    assert cp._per_value(design) == {"dose": []}
+    problems = cp._check_figures({"a.png": {"shows": ["algae_peak"], "x": "dose", "panels": 1}}, {"a.png": ""}, design)
+    assert len(problems) == 1 and "`x` is `dose`, which every run goes through together" in problems[0]
+    assert "use as `x` one of the numbers every trial returns (algae_peak, bloom)" in problems[0]
+
+
+def test_the_figures_request_says_what_can_be_drawn_along_a_setting_every_run_goes_through() -> None:
+    said = cp._settings_said(_inside_design(["nutrient", "dose"]), ["dose", "nutrient"])
+    assert said == "dose (every run goes through its values together: as `x` only for algae_peak), nutrient"
+    none = cp._settings_said(_inside_design(["nutrient"]), ["dose", "nutrient"])
+    assert ("dose (every run goes through its values together and no number is recorded for each of them: not an `x`, and a "
+            "`series` only when `x` is another setting)") in none
+    prompt = cp._figures_prompt(TEMPLATES, _inside_design(["nutrient"]), {"a.png": "a.png"}, [], "")
+    assert "only when `x` is another setting), nutrient" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_figure_drawn_along_a_setting_every_run_goes_through_is_sent_back_and_the_second_answer_kept() -> None:
+    design = _inside_design(["nutrient"])
+    roles = {"results": {"algae_peak": {"role": "result", "depends_on": ["nutrient"], "returned": "each_run"},
+                         "bloom": {"role": "result", "depends_on": ["nutrient"], "returned": "each_run"}}}
+    names = [f.split(" ")[0] for f in PLANNED]
+    first = {"figures": {n: {"shows": ["algae_peak"], "x": "dose", "series": None, "panels": 1} for n in names}}
+    second = {"figures": {n: {"shows": ["algae_peak"], "x": "nutrient", "series": "dose", "panels": 1} for n in names}}
+    fake = Fake(roles=[roles], comparisons=[{"comparisons": []}], figures=[first, second])
+    out = await run(fake, design)
+    assert fake.asked("figures") == 2 and "which every run goes through together" in fake.prompts[-1][1]
+    c = contract.from_design(out.design, fi_analysis=True)
+    assert [(f.x, f.series, f.declared) for f in c.figures] == [("nutrient", "dose", True)] * 3

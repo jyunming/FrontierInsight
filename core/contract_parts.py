@@ -230,12 +230,50 @@ def _named_results(design: dict[str, Any]) -> dict[str, str]:
             if isinstance(n, dict) and n.get("id") and n.get("answer") == "result" and str(n["id"]) not in have}
 
 
+def _per_value(design: dict[str, Any]) -> dict[str, list[str]]:
+    """For each setting every run goes through together (``in_each_run``) that takes more than one value: the declared
+    numbers FI's record of the trials holds for each of its values, in the plan's order. A result is recorded for each value
+    only when the plan declares that it changes with that setting (``depends_on``, the fact :func:`_record_reads` tells the
+    model and the study's code is written from); a quantity worked out from such a result is too. A result the plan declares
+    to change with other settings only, or with none, is one number per run, and no figure can be drawn along that setting
+    from it. What the plan leaves unsaid is not judged and is listed: a result whose settings it never declared (an older
+    plan), and a derived quantity that names no inputs (the study's own function works it out from everything a run returned)."""
+    c = _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True)
+    out: dict[str, list[str]] = {}
+    for k, values in c.settings.in_each_run.items():
+        if len(values) <= 1:
+            continue
+        held = ({r.id for r in c.results if r.depends_on is None or k in r.depends_on}
+                | {d.id for d in c.derived if not d.inputs})
+        while True:
+            more = {d.id for d in c.derived if d.id not in held and set(d.inputs) & held}
+            if not more:
+                break
+            held |= more
+        out[k] = [i for i in [*(r.id for r in c.results), *(d.id for d in c.derived)] if i in held]
+    return out
+
+
 def _drawable(design: dict[str, Any]) -> list[str]:
     """What FI's own record offers a figure to show, along a setting that takes more than one value: the declared results and
     derived quantities and the numbers the plan names as returned. Empty when the study varies nothing or reports nothing; only
     then is a figure one nobody can draw. A model's word that a figure cannot be drawn is never what decides it."""
     lines, settings, _single = _figure_holds(design)
     return [line[2:].split(":")[0] for line in lines] + list(_named_results(design)) if settings else []
+
+
+def _settings_said(design: dict[str, Any], settings: list[str]) -> str:
+    """The settings a figure may be drawn along, as the request names them: a setting every run goes through together is
+    said with the numbers recorded for each of its values, the only ones a figure can draw along it as ``x`` (and, with
+    them, the numbers the plan only names: those are worked out from that record); with none, it can only be the ``series``
+    of a figure drawn along another setting. The check holds an answer to the same facts (:func:`_check_figures`)."""
+    inside, named = _per_value(design), list(_named_results(design))
+    return ", ".join(
+        k if k not in inside else
+        f"{k} (every run goes through its values together: as `x` only for {', '.join([*inside[k], *named])})" if inside[k] else
+        f"{k} (every run goes through its values together and no number is recorded for each of them: not an `x`, and a "
+        f"`series` only when `x` is another setting)"
+        for k in settings)
 
 
 def _record_reads(design: dict[str, Any]) -> list[str]:
@@ -257,7 +295,7 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
         figures="\n".join(f"- {name}: {text}" for name, text in faults.items()),
         shows="\n".join([*lines, *(f"- {j}: {w} (the plan names it as returned for each setting; FI declares it if a figure shows it)"
                                    for j, w in _named_results(design).items())]) or "- (nothing)",
-        settings=", ".join(settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
+        settings=_settings_said(design, settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
         method=_short(design.get("method")), again=_problems_text(problems, last),
         record="\n".join(_record_reads(design)), per_trial=", ".join(_per_trial(design)) or "(none)")
 
@@ -272,6 +310,7 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
     per_trial = _per_trial(design)
     named = _named_results(design)
     ids = [line[2:].split(":")[0] for line in lines] + list(named)
+    inside = _per_value(design)
     out: list[str] = []
     for name in asked:
         row = value.get(name)
@@ -292,15 +331,51 @@ def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) ->
                        f"report or work out (it holds {', '.join(ids)})"
                        + "".join(f"; `{s}` is only another name for {', '.join(labels[s])}, so list those"
                                  for s in shows if s in labels and s not in ids))
+        # One number against another: `x` and everything shown are numbers every trial returns, drawn as each trial's pair.
+        paired = row.get("x") in per_trial and not [s for s in row.get("shows") or [] if s not in per_trial]
         for axis in ("x", "series"):
             used = row.get(axis)
             if axis == "x" and used in (None, ""):
                 out.append(f"`{name}`: `x` is the setting the figure is drawn along ({', '.join(settings) or 'none'})")
-            elif axis == "x" and used in per_trial and not [s for s in row.get("shows") or [] if s not in per_trial]:
+            elif axis == "x" and paired:
                 continue  # a result every trial returns, drawn against the results it is paired with
             elif used not in (None, "") and used not in settings:
                 why = "has one value in the study" if used in single else "is not a setting of the study"
                 out.append(f"`{name}`: `{axis}` is `{used}`, which {why} (the settings to use are {', '.join(settings) or 'none'})")
+            elif used in inside and (axis == "x" or paired):
+                # Every run goes through this setting's values together: only a number recorded for each value can be drawn
+                # along it, or split by it when the figure draws each trial's pair of numbers (a figure drawn along another
+                # setting takes it as its lines as before). A number the plan only names is worked out from FI's record when a
+                # figure shows it (FI declares it along the figure's settings), so it can be drawn along this setting when the
+                # record holds some number for each of its values, and not when it holds none.
+                drawn = [*(shows if isinstance(shows, list) else []), *([row.get("x")] if axis == "series" else [])]
+                can_show = [*inside[used], *(named if inside[used] else [])]
+                known = list(dict.fromkeys(s for s in drawn if isinstance(s, str) and s in ids))
+                once = [s for s in known if s not in can_show]
+                # Where the figure can go instead: a setting the runs differ in, or another setting every run goes through
+                # together that everything drawn is recorded for each value of.
+                others = [k for k in settings if k not in inside] + [
+                    k for k in inside if k != used and inside[k] and not [s for s in known if s not in [*inside[k], *named]]]
+                ticks = [", ".join("`" + s + "`" for s in once if (s in named) is flag) for flag in (False, True)]
+                said = f"`{name}`: `{axis}` is `{used}`, which every run goes through together, and " + ", and ".join(
+                    ([f"the plan does not declare that {ticks[0]} changes with it, so FI's record holds that once per run, not "
+                      f"for each value of `{used}`"] if ticks[0] else [])
+                    + ([f"{ticks[1]} would be worked out from a record that holds no number for each value of `{used}`"]
+                       if ticks[1] else []))
+                if once and axis == "series":
+                    out.append(f"{said}, and the figure's points cannot be split by it; answer `series`: null"
+                               + (f", or one of {', '.join(others)}" if others else ""))
+                elif once:
+                    can = (f"along `{used}` a figure can show {', '.join(can_show)}" if can_show else
+                           f"the study records no number for each value of `{used}`")
+                    way = (f"draw it along {', '.join(others)}"
+                           + (f" (its `series` is then another setting, which `{used}` can be, or null)"
+                              if row.get("series") in others else "") if others else
+                           "show one of those" if can_show else
+                           f"use as `x` one of the numbers every trial returns ({', '.join(per_trial)}), with `series`: null: "
+                           "the figure then draws each trial's pair of numbers" if len(per_trial) > 1 else
+                           "FI's record holds nothing to draw this figure from")
+                    out.append(f"{said}, and there is nothing to draw along it; {can}: {way}")
         if row.get("x") not in (None, "") and row.get("x") == row.get("series"):
             out.append(f"`{name}`: `series` must be another setting than `x`, or null")
         for sc in ("x_scale", "y_scale"):
