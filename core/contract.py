@@ -398,12 +398,12 @@ def settings_between_runs(p: dict[str, Any]) -> tuple[Any, Any]:
     """``(grid, sub_studies)``: the settings the runs of the study differ in, each with its values, and the parts that
     divide them, where the plan wrote them. A measurement: ``protocol.grid`` and ``protocol.sub_studies``. A search for the
     best design: the coarse scan it runs first (``protocol.optimisation.grid`` and ``.sub_studies``), whose settings FI
-    runs and records one by one as it does a measurement's (core/optimise_search.py ``scan_grid``); a search that
-    writes no scan is read as a measurement is (as ``search_in_each_run`` reads its other part). As written: nothing is
-    checked here."""
+    runs and records one by one as it does a measurement's (core/optimise_search.py ``scan_grid``). A search that
+    writes no scan has none: a grid beside its block is never run (the engine removes it when it takes the block). As
+    written: nothing is checked here."""
     block = p.get("optimisation")
-    if isinstance(block, dict) and isinstance(block.get("grid"), dict):
-        return block["grid"], block.get("sub_studies")
+    if isinstance(block, dict):
+        return block.get("grid"), block.get("sub_studies")
     return p.get("grid"), p.get("sub_studies")
 
 
@@ -895,6 +895,8 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
             return ["`comparisons` must be a list (empty when the study compares nothing between settings)"]
         names = set(declared) | {str(x) for x in value.get("_derived", ())}
         grid = settings_between_runs(p)[0] if isinstance(settings_between_runs(p)[0], dict) else {}
+        inside = search_in_each_run(p) or p.get("in_each_run")
+        listed = {**(inside if isinstance(inside, dict) else {}), **grid}  # each setting that varies, with the values the plan gives it
         seen: set[tuple[str, str]] = set()
         for i, c in enumerate(items, 1):
             if not isinstance(c, dict):
@@ -909,9 +911,12 @@ def check_part(part: str, value: Any, design: Any) -> list[str]:
             if c.get("how", "difference") not in ("difference", "ratio"):
                 out.append(f"comparison {i}: `how` must be difference or ratio")
             vals = c.get("values", [])
-            if not isinstance(vals, list) or (vals and c.get("across") in grid
-                                              and any(v not in list(grid[c["across"]]) for v in vals)):
-                out.append(f"comparison {i}: `values` must be values of `{c.get('across')}` in the grid")
+            across = c.get("across")
+            if not isinstance(vals, list) or (vals and across in listed and isinstance(listed[across], (list, tuple))
+                                              and any(v not in list(listed[across]) for v in vals)):
+                out.append(f"comparison {i}: `values` must be values of `{across}` "
+                           + ("in the grid" if across in grid or not isinstance(vals, list) else
+                              f"({', '.join(str(v) for v in listed[across])})"))
             key = (str(c.get("result")), str(c.get("across")))
             if key in seen:
                 out.append(f"comparison {i} repeats {key[0]} across {key[1]}")

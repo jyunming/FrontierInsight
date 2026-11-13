@@ -82,7 +82,7 @@ def _new_result_problems(key: str, row: dict[str, Any], design: Any, taken: dict
     the row that gave it, and gains this one."""
     p = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else {}
     ids = declared_ids(p)
-    settings = _contract.varied_settings(p)
+    settings = _contract.varied_settings(p) + [str(k) for k in (p.get("grid") or {}) if isinstance(p.get("grid"), dict)]
     out: list[str] = []
     new = row.get("id")
     if not isinstance(new, str) or not _CODE_NAME.fullmatch(new.strip()):

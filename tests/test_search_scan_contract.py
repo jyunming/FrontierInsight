@@ -69,16 +69,27 @@ def test_a_name_that_is_no_setting_of_the_scan_is_still_left_out_and_said() -> N
     assert any("comparison `sag_by_weather` is left out" in g for g in c.gaps)
 
 
-def test_the_search_blocks_own_scan_wins_and_a_measurements_grid_is_read_as_before() -> None:
+def test_a_search_is_read_by_its_own_scan_only_and_a_measurements_grid_as_before() -> None:
+    """A grid beside a search block is never run (the engine removes it when it takes the block), so it gives the study no
+    setting: with a scan, without one, and with one FI cannot run."""
     p = _protocol()
     p["grid"], p["sub_studies"] = {"other": [1, 2]}, [{"name": "elsewhere", "vary": ["other"], "hold": {}}]
     c = _contract.from_design({"protocol": p})
     assert set(c.settings.compared) == {"material", "span", "thickness"}
     assert [s["name"] for s in c.settings.sub_studies] == ["steel", "timber"]
-    # A search that writes no scan: a grid beside it is still read (as its `in_each_run` is).
-    del p["optimisation"]["grid"], p["optimisation"]["sub_studies"]
-    c = _contract.from_design({"protocol": p})
-    assert set(c.settings.compared) == {"other"} and [s["name"] for s in c.settings.sub_studies] == ["elsewhere"]
+    for scan in ("absent", {}, "a sentence", ["span"]):
+        q = {**p, "optimisation": {k: v for k, v in p["optimisation"].items() if k not in ("grid", "sub_studies")}}
+        if scan != "absent":
+            q["optimisation"]["grid"] = scan
+        c = _contract.from_design({"protocol": q})
+        assert c.settings.compared == {} and c.settings.sub_studies == (), scan
+        assert _contract.varied_settings(q) == ["load_case"], scan
+        refused = _contract.check_part("roles", {"sag": {"role": "result", "depends_on": ["other"], "returned": "each_run"},
+                                                 "cost": {"role": "result", "depends_on": [], "returned": "each_run"}}, {"protocol": q})
+        assert refused == ["`sag`: other is not a setting that varies (the settings are load_case)"], scan
+    # A new derived result still may not take a name the plan wrote as a setting, wherever it wrote it.
+    assert _dependents._new_result_problems("D1", {"id": "other", "inputs": ["sag"], "what": "w"}, {"protocol": p}, {}) == [
+        "`D1`: `other` is a setting the study changes; give the new result a name of its own"]
     # A measurement.
     measure = {"grid": {"dose": [1, 2]}, "sub_studies": [{"name": "low", "vary": ["dose"], "hold": {}}],
                "metrics": [{"id": "yield", "estimand": "yield", "unit": "one plot"}]}
@@ -101,6 +112,14 @@ def test_the_plan_time_checks_hold_a_search_to_the_settings_of_its_scan() -> Non
         "comparison 1: `values` must be values of `material` in the grid"]
     assert _contract.check_part("comparisons", {"comparisons": [{**across, "across": "weather"}]}, {"protocol": p}) == [
         "comparison 1: `across` must be a setting that varies (material, span, thickness, load_case)"]
+    # Across what every run goes through together: its values are held to the ones the plan lists, in a search and in a
+    # measurement (before, any value passed).
+    inside = {"result": "sag", "across": "load_case", "values": ["static", "gust"]}
+    measure = {"grid": {"span": [10, 20]}, "in_each_run": {"load_case": ["static", "gust"]}, "metrics": p["metrics"]}
+    for plan in (p, measure):
+        assert _contract.check_part("comparisons", {"comparisons": [inside]}, {"protocol": plan}) == []
+        assert _contract.check_part("comparisons", {"comparisons": [{**inside, "values": ["static", "storm"]}]},
+                                    {"protocol": plan}) == ["comparison 1: `values` must be values of `load_case` (static, gust)"]
 
 
 def test_the_requests_show_the_scans_settings_and_its_names_are_declared() -> None:
