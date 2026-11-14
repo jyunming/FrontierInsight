@@ -7162,11 +7162,22 @@ _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def _caption_words(text: Any, limit: int = 120) -> str:
-    """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters."""
+    """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters. A label cut
+    short ends on a whole word outside any bracket it opened and without a trailing comma or colon: a cut inside "(plan
+    formula)" left "(plan." in the caption, and one after a comma left ",," once the caption joined the next name."""
     words = " ".join(str(text or "").split())
     if len(words) <= limit:
         return words
-    return _math_safe_cut.head_before_math(words, len(words[:limit].rsplit(" ", 1)[0])).rstrip()
+    head = _math_safe_cut.head_before_math(words, len(words[:limit].rsplit(" ", 1)[0])).rstrip()
+    still_open: list[int] = []  # where each bracket the head opens and does not close stands
+    for i, c in enumerate(head):
+        if c in "([{":
+            still_open.append(i)
+        elif c in ")]}" and still_open:
+            still_open.pop()
+    if still_open and still_open[0] > 0:
+        head = head[:still_open[0]]  # the head ends before the first bracket the cut left open
+    return head.rstrip().rstrip(",;:").rstrip()
 
 
 def _caption_safe(text: str) -> str:

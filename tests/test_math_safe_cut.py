@@ -57,3 +57,23 @@ def test_caption_words_keeps_math_balanced():
     assert _unescaped_dollars(out) % 2 == 0
     plain = "a plain label " * 12
     assert _caption_words(plain, 40) == plain[:40].rsplit(" ", 1)[0]
+
+
+def test_caption_words_never_ends_inside_a_bracket_it_opened():
+    """A label cut inside "(plan formula)" left "(plan." in a caption; the head now ends before the bracket the cut left open."""
+    from core.engine import _caption_words
+    label = "Expected doubling time of the colony at the highest nutrient level (plan formula)"
+    out = _caption_words(label, 72)
+    assert "(" not in out and out == "Expected doubling time of the colony at the highest nutrient level"
+    closed = "Doubling time (hours) of the colony at the highest nutrient level of the plan"
+    assert _caption_words(closed, 60) == "Doubling time (hours) of the colony at the highest nutrient"
+    assert _caption_words(label, 200) == label, "a label that fits is not touched"
+
+
+def test_caption_words_drops_a_trailing_comma_left_by_the_cut():
+    """A cut after a comma left ",," once the caption joined the next name."""
+    from core.engine import _caption_words
+    label = "relative deviation of the colony size from the logistic size, in percent"
+    out = _caption_words(label, 62)
+    assert out == "relative deviation of the colony size from the logistic size"
+    assert len(_caption_words("a long label of words " * 10, 60)) <= 60, "a long label is still cut"
