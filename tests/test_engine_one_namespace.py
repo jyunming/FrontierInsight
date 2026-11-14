@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 
 import pytest
 
@@ -33,19 +34,25 @@ def test_a_name_new_to_the_engine_reaches_every_part_and_leaves_with_the_patch()
     assert "print" not in vars(engine) and "print" not in vars(plan_part)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(engine, "print", fake_print, raising=False)
-        assert vars(base)["print"] is fake_print
-        assert vars(plan_part)["print"] is fake_print
+        for part in engine._PARTS:
+            assert vars(part)["print"] is fake_print, part.__name__
     assert "print" not in vars(engine)
-    assert "print" not in vars(base)
-    assert "print" not in vars(plan_part)
+    for part in engine._PARTS:
+        assert "print" not in vars(part), part.__name__
 
 
 def test_a_modules_own_names_are_not_passed_on():
-    spec = plan_part.__spec__
+    specs = {part.__name__: part.__spec__ for part in engine._PARTS}
+    docs = {part.__name__: part.__doc__ for part in engine._PARTS}
     engine.__doc__ = engine.__doc__
-    assert plan_part.__spec__ is spec
-    assert plan_part.__name__ == "core.engine_plan"
-    assert plan_part.__doc__ != engine.__doc__
+    engine.__spec__ = engine.__spec__
+    engine.__marker__ = 1
+    del engine.__marker__
+    for part in engine._PARTS:
+        assert part.__spec__ is specs[part.__name__]
+        assert part.__spec__.name == part.__name__
+        assert part.__doc__ == docs[part.__name__] != engine.__doc__
+        assert "__marker__" not in vars(part)
 
 
 def test_a_name_set_on_a_part_changes_that_part_only():
@@ -62,6 +69,9 @@ def test_every_stage_file_is_a_part():
     for stage in ("ideas", "plan", "data", "code", "improve", "run", "analyze", "write", "review"):
         module = importlib.import_module(f"core.engine_{stage}")
         assert module.__name__ in names
+        assert any(part is module for part in engine._PARTS)
         mixin = next(v for k, v in vars(module).items() if k.endswith("StageMixin"))
         assert issubclass(engine.Engine, mixin)
-    assert "core.engine_base" in names
+    assert any(part is base for part in engine._PARTS)
+    assert all(sys.modules[part.__name__] is part for part in engine._PARTS)
+    assert len(engine._PARTS) == 10
