@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core import code_project
 from core import paper_facts as pf
 
 TOPIC = "Compare two sensor filters on a simulated bridge. Keep the run under 60 seconds."
@@ -41,16 +42,26 @@ def test_settings_run_at_the_same_time_read_as_whole_sentences(tmp_path: Path) -
     assert text == (
         "**Run.** The 680 settings ran 16 at a time; the run took 611.1 s (about 10.2 minutes). The trials' own "
         "computation adds up to 31.3 s. The delivered code runs the settings one after another and was not timed as a "
-        "whole; from the settings' own times such a run takes at least 31.3 s and at most 9,200.3 s (each setting's time "
-        "while 16 ran at once, added up). Whether it keeps to the topic's limit of 60 s is not shown.")
+        "whole; from the settings' own times such a run takes at least 31.3 s. Whether it keeps to the topic's limit of "
+        "60 s is not shown.")
     assert "((" not in text and ") (" not in text, "no nested or stacked brackets"
 
 
 def test_the_other_verdicts_of_the_delivered_code(tmp_path: Path) -> None:
     over = _quest(tmp_path / "a", {**AT_ONCE, "trial_sum_s": 75.0, "settings_s": 400.0})
     assert pf.run_facts_text(over, topic=TOPIC).endswith("It goes over the topic's limit of 60 s.")
+    # the settings' process times added up (50 s) are no upper bound: only FI's timed run of the delivered code says within
     within = _quest(tmp_path / "b", {**AT_ONCE, "trial_sum_s": 5.0, "settings_s": 50.0})
-    assert pf.run_facts_text(within, topic=TOPIC).endswith("It keeps to the topic's limit of 60 s.")
+    assert pf.run_facts_text(within, topic=TOPIC).endswith("Whether it keeps to the topic's limit of 60 s is not shown.")
+    (within / "code").mkdir()
+    (within / "code" / "run.py").write_text("print(1)", encoding="utf-8")
+    (within / "needs").mkdir()
+    (within / code_project.CHECK_RECORD).write_text(json.dumps(
+        {"ok": True, "status": "ran", "seconds": 96, "run_seconds": 21.4, "code": code_project.code_digest(within)}),
+        encoding="utf-8")
+    text = pf.run_facts_text(within, topic=TOPIC)
+    assert "FI ran it once in a clean environment and it took 21.4 s." in text
+    assert text.endswith("It keeps to the topic's limit of 60 s.")
 
 
 def test_settings_run_one_after_another_and_the_counts(tmp_path: Path) -> None:
@@ -214,7 +225,7 @@ def test_it_is_the_run_unless_the_delivered_code_was_just_described(tmp_path: Pa
     rows = [{"event": "trial", "cell": "a", "trial": 0, "seed": 1, "status": "ok", "duration_s": 100.0}]
     (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     text = pf.run_facts_text(root, topic=TOPIC)  # only the trials' least time is known
-    assert "The whole run was not timed." in text and text.endswith("The run goes over the topic's limit of 60 s.")
+    assert "FI's whole run was not timed." in text and text.endswith("The run goes over the topic's limit of 60 s.")
 
 
 def test_a_paper_resumed_straight_into_review_gets_the_run_paragraph(tmp_path: Path) -> None:

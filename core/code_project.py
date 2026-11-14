@@ -1335,6 +1335,44 @@ def pip_error(stderr: str | None, *, limit: int = 1000) -> str:
     return "\n".join(errors or lines)[:limit].strip()
 
 
+#: The record of FI's run of ``code/`` in a clean environment (:func:`verify`), relative to the quest folder.
+CHECK_RECORD = "needs/CODE_PROJECT_CHECK.json"
+
+
+def code_digest(quest_root: Path) -> str:
+    """One hash of every file a person gets in ``code/`` (``run.py`` and FI's other files included; not ``__pycache__``,
+    git's own folder or the change log): the code :func:`verify` ran, so its time is read only for that code."""
+    code = Path(quest_root) / "code"
+    h = hashlib.sha256()
+    if code.is_dir():
+        for path in sorted(p for p in code.rglob("*") if p.is_file()):
+            rel = path.relative_to(code)
+            if "__pycache__" in rel.parts or ".git" in rel.parts or rel.as_posix() == "CHANGELOG.md":
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            h.update(rel.as_posix().encode("utf-8") + b"/" + hashlib.sha256(data).digest())
+    return h.hexdigest()
+
+
+def delivered_seconds(quest_root: Path) -> float | None:
+    """How long ``python run.py`` took when FI ran the delivered code once in a clean environment (:func:`verify`), the
+    install not counted: ``None`` unless that run finished without an error and ``code/`` is still the code it ran. It is a
+    whole run as a reader makes it, one setting after another, so it decides a time limit (core/run_facts.py)."""
+    try:
+        record = json.loads((Path(quest_root) / CHECK_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("status") != "ran":
+        return None
+    t = record.get("run_seconds")
+    if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 <= t < float("inf"):
+        return None
+    return float(t) if record.get("code") == code_digest(quest_root) else None
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
     ``python run.py``. Never raises; returns ``{"ok": bool, "status": "ran" | "ran_figures_failed" | "failed" |
@@ -1370,6 +1408,8 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     result["reason"] = f"installing requirements.txt failed: {pip_error(done.stderr)}"
             if not result["reason"]:
                 step = "running run.py"
+                result["code"] = code_digest(quest_root)  # the code this run timed (delivered_seconds)
+                run_started = time.monotonic()
                 # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.
                 with _ProcessTree(
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1391,6 +1431,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                     if result.get("status") != "not_finished":
                         if tree.proc.returncode == 0:
                             result["ok"] = True
+                            result["run_seconds"] = time.monotonic() - run_started  # run.py alone, unrounded: it is compared with a limit
                         elif (figures := _figures_only_failed(quest_root, tree.proc.returncode, out or "")):
                             result["ok"] = True  # the results were produced, as in the run; only a figure was not drawn
                             result["status"] = "ran_figures_failed"
@@ -1418,7 +1459,7 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
         f"({result['reason']}). The results above are not affected; fix requirements.txt or run.py before sharing code/."
     )
     try:
-        out = quest_root / "needs" / "CODE_PROJECT_CHECK.json"
+        out = quest_root / CHECK_RECORD
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     except OSError:

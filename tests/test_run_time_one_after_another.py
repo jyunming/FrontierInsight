@@ -1,8 +1,9 @@
 """The run time and the topic's time limit are judged against what a reader's run of the delivered code takes: its
 settings run one after another. FI's wall time decides neither "within" nor "over" when the settings ran at the same time
-(or FI does not know that they did not): "over" only when the least a one-after-another run takes is over the limit,
-"within" only when the most it takes is at or under it (``core/run_facts.py``: ``reader_run``, ``reader_verdict``, read by
-``core/paper_facts.py`` and ``core/disclosure.py``)."""
+(or FI does not know that they did not). When FI ran the delivered code once in a clean environment and timed it, that
+time decides; otherwise "over" only when the least a one-after-another run takes is over the limit, and never "within":
+the settings' process times added up while they ran at the same time are no upper bound (``core/run_facts.py``:
+``reader_run``, ``reader_verdict``, read by ``core/paper_facts.py`` and ``core/disclosure.py``)."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from core import disclosure, paper_facts, run_facts, trial_runner
+from core import code_project, disclosure, paper_facts, run_facts, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 TOPIC = "Estimate a rate. The whole study must run in under 60 seconds."
@@ -98,27 +99,62 @@ def test_the_log_line_is_not_a_count_of_this_run(tmp_path: Path) -> None:
     assert run_facts.settings_at_once(root) is None
 
 
-def _both(root: Path, *, least: float, most: float | None, topic: str = TOPIC) -> tuple[str, str, str]:
+def _timed(root: Path, seconds: float | None, *, status: str = "ran", same_code: bool = True) -> None:
+    """FI's record of its clean run of ``code/`` (core/code_project.py::verify): ``seconds`` for run.py alone."""
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "run.py").write_text("print('run')\n", encoding="utf-8")
+    record = {"ok": status != "failed", "status": status, "seconds": 999, "code": code_project.code_digest(root)}
+    if seconds is not None:
+        record["run_seconds"] = seconds
+    (root / "needs").mkdir(exist_ok=True)
+    (root / code_project.CHECK_RECORD).write_text(json.dumps(record), encoding="utf-8")
+    if not same_code:
+        (root / "code" / "run.py").write_text("print('changed')\n", encoding="utf-8")
+
+
+def _both(root: Path, *, least: float, most: float | None, timed: float | None = None, topic: str = TOPIC,
+          **how: object) -> tuple[str, str, str]:
     _quest(root, wall=12.0, total=least, at_once=4, most=most)
+    if timed is not None:
+        _timed(root, timed, **how)  # type: ignore[arg-type]
     return _met(root, 12.0, topic)
 
 
-def test_within_only_when_the_most_it_can_take_is_at_or_under_the_limit(tmp_path: Path) -> None:
+def test_the_settings_process_times_are_no_upper_bound(tmp_path: Path) -> None:
+    # The settings' process times while 16 ran at once added up to 127.6 s and the delivered run.py took 153.9 s: their
+    # sum is not the most a reader's run takes, so it never makes the limit "within".
     met, said, sentence = _both(tmp_path / "q", least=40.0, most=50.0)
-    assert met == "within" and "between 40 s and 50 s" in said and "measured while the settings ran at the same time" in said
-    assert "is within the topic" in sentence and "between 40 s and 50 s" in sentence
-    assert _both(tmp_path / "e", least=40.0, most=60.0)[0] == "within"
+    assert met == NOT_SHOWN and "at least 40 s" in said and "50 s" not in said
+    assert f"{NOT_SHOWN} the topic's limit of 60 s" in sentence and "50 s" not in sentence
+
+
+def test_the_timed_delivered_run_decides_within(tmp_path: Path) -> None:
+    met, said, sentence = _both(tmp_path / "q", least=40.0, most=75.0, timed=18.3)
+    assert met == "within" and "18.3 s (FI ran the delivered code once in a clean environment and timed it)" in said
+    assert "is within the topic's limit of 60 s" in sentence and "at least" not in sentence
+    paragraph = paper_facts.run_facts_text(tmp_path / "q", topic=TOPIC, fallback_s=12.0)
+    assert "FI ran it once in a clean environment and it took 18.3 s." in paragraph
+    assert "keeps to the topic's limit of 60 s" in paragraph and "not shown" not in paragraph
+
+
+def test_the_timed_delivered_run_decides_over(tmp_path: Path) -> None:
+    # the trials alone take 0.1 s; the delivered run.py, one process per setting, took 153.9 s
+    met, said, sentence = _both(tmp_path / "q", least=0.1, most=127.6, timed=153.9)
+    assert met == "over" and "153.9 s" in said and "is over the topic's limit of 60 s" in sentence
+
+
+def test_a_timed_run_of_other_code_or_one_that_stopped_is_not_read(tmp_path: Path) -> None:
+    assert _both(tmp_path / "old", least=40.0, most=None, timed=18.3, same_code=False)[0] == NOT_SHOWN
+    assert _both(tmp_path / "fig", least=40.0, most=None, timed=18.3, status="ran_figures_failed")[0] == NOT_SHOWN
+    assert _both(tmp_path / "late", least=40.0, most=None, timed=18.3, status="not_finished")[0] == NOT_SHOWN
+    _quest(tmp_path / "none", wall=12.0, total=40.0, at_once=4)
+    _timed(tmp_path / "none", None)  # an older record: the install and the run timed together
+    assert _met(tmp_path / "none", 12.0)[0] == NOT_SHOWN
 
 
 def test_over_when_the_least_it_can_take_is_over_the_limit(tmp_path: Path) -> None:
     met, _said, sentence = _both(tmp_path / "q", least=70.0, most=150.0)
     assert met == "over" and "is over the topic" in sentence
-
-
-def test_between_the_two_is_neither_within_nor_over(tmp_path: Path) -> None:
-    met, said, sentence = _both(tmp_path / "q", least=40.0, most=75.0)
-    assert met == NOT_SHOWN and "between 40 s and 75 s" in said
-    assert f"{NOT_SHOWN} the topic's limit of 60 s" in sentence
 
 
 def test_the_runner_counts_the_settings_that_ran_together(tmp_path: Path) -> None:
@@ -177,10 +213,55 @@ def test_without_a_wall_time_the_bounds_still_give_the_same_verdict(tmp_path: Pa
     assert known["time_limit_met"].text == "over" and "is over the topic" in sentence
     ok = tmp_path / "r"
     run_facts.record_trials(ok, key="k", wall_s=None, trials=10, cells=5, trial_sum_s=30.0, at_once=4, settings_s=50.0)
+    assert paper_facts.facts(ok, topic=TOPIC)["time_limit_met"].text == NOT_SHOWN
+    _timed(ok, 41.0)
     assert paper_facts.facts(ok, topic=TOPIC)["time_limit_met"].text == "within"
     assert "is within the topic" in disclosure._time_sentence(ok, TOPIC, None)
 
 
-def test_the_range_says_a_one_after_another_run_takes_at_most_the_upper_time(tmp_path: Path) -> None:
-    _met_, said, _s = _both(tmp_path / "q", least=40.0, most=50.0)
-    assert "takes at most that" in said
+def test_settings_run_together_with_no_trial_times_are_never_judged_by_the_wall_time(tmp_path: Path) -> None:
+    # four at once in 12 s, the trials' own times not recorded: the wall time is not what a one-after-another run takes
+    root = tmp_path / "q"
+    run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=None, at_once=4, settings_s=50.0)
+    met, said, sentence = _met(root, 12.0)
+    assert met == NOT_SHOWN and "None" not in said and "None" not in sentence and "is within" not in sentence
+    assert "None" not in paper_facts.run_facts_text(root, topic=TOPIC)
+
+
+def test_a_timed_run_decides_a_run_counted_one_setting_at_a_time_too(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "q", wall=40.0, total=39.0, at_once=1)
+    assert _met(root, 40.0)[0] == "within"
+    _timed(root, 80.0)  # the delivered run.py took 80 s: that, not FI's 40 s, is what a reader's run takes
+    met, said, sentence = _met(root, 40.0)
+    assert met == "over" and "80 s" in said and "is over the topic's limit of 60 s" in sentence
+    paragraph = paper_facts.run_facts_text(root, topic=TOPIC, fallback_s=40.0)
+    assert "FI ran it once in a clean environment and it took 80 s." in paragraph and "take 40 s" not in paragraph
+
+
+def test_without_a_wall_time_the_paper_names_the_timed_run_that_decides(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    run_facts.record_trials(root, key="k", wall_s=None, trials=10, cells=5, trial_sum_s=40.0, at_once=4)
+    _timed(root, 80.0)
+    paragraph = paper_facts.run_facts_text(root, topic=TOPIC)
+    assert "FI ran it once in a clean environment and it took 80 s." in paragraph
+    assert "goes over the topic's limit of 60 s" in paragraph
+
+
+def test_a_time_just_over_the_limit_is_over(tmp_path: Path) -> None:
+    assert _both(tmp_path / "q", least=40.0, most=None, timed=60.04)[0] == "over"
+
+
+def test_a_count_of_settings_run_together_alone_never_lets_the_wall_time_decide(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=None, at_once=4)
+    met, said, sentence = _met(root, 12.0)
+    assert met == NOT_SHOWN and "None" not in said and "is within" not in sentence
+
+
+def test_a_timed_run_decides_without_a_record_of_the_trials(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    root.mkdir()
+    _timed(root, 80.0)
+    assert run_facts.reader_verdict(run_facts.reader_run(root), 60.0) == "over"
+    sentence = disclosure._time_sentence(root, TOPIC, 40.0)
+    assert "80 s" in sentence and "is over the topic's limit of 60 s" in sentence
