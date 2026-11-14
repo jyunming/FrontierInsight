@@ -8,6 +8,7 @@ import pytest
 
 from core import engine as engine_mod
 from core import plan
+from tests._engine_text import engine_text
 from tests.test_grid_size_at_plan import BIG, NAMES, PARTS, Model, TOPIC, _draft, _engine
 
 GRID = {"kind": ["a", "b"], "size": [1, 2, 3], "depth": [10, 20]}
@@ -91,7 +92,7 @@ def test_the_plan_models_raw_answers_are_kept_without_save_model_calls(tmp_path:
 
 def test_the_plan_prompt_says_a_run_the_method_describes_must_be_in_the_grid() -> None:
     """Old prompt let a method text name an extra setting the grid did not hold, and nothing compared them."""
-    source = Path(engine_mod.__file__).read_text(encoding="utf-8")
+    source = engine_text()
     assert "that run must be a value of a `grid` setting or a part of `sub_studies`" in source
 
 
