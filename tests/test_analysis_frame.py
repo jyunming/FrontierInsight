@@ -621,6 +621,22 @@ def test_a_body_reads_a_value_the_trials_returned_that_the_plan_lists_as_no_resu
     assert all("lag" not in row for row in printed.values() if isinstance(row, dict))
 
 
+def test_a_figure_that_draws_only_an_input_drew_nothing_of_the_results(tmp_path: Path) -> None:
+    # The figure declares it shows `growth` but draws only `lag`, a value the trials returned that is no result: FI says it
+    # drew nothing from the trial record, as for a figure that read no value at all.
+    record = json.loads(json.dumps(RECORD))
+    for c in record["cells"]:
+        c["metrics"]["lag"] = {"values": [2.0 * v for v in c["metrics"]["growth"]["values"]],
+                               "trials": c["metrics"]["growth"]["trials"]}
+    bodies = """
+    def figure_fig1(fig, table):
+        fig.axes[0].plot([1, 2], [table.mean("lag", k) for k in table.keys()][:2])
+    """
+    _code, _printed, rec, _err = _run(_quest(tmp_path, _design(), bodies, record))
+    fig = next(f for f in rec["figures"] if f.get("id") == "fig1")
+    assert fig["status"] != "ok" and "drew nothing from the trial record" in fig["why"]
+
+
 # ---- RESULT_JSON ------------------------------------------------------------------------------------------------------------
 def test_result_json_has_the_shape_the_analysis_was_always_asked_for(tmp_path: Path) -> None:
     design = _design([_derived("gain", formula="growth - base"), _derived("twice_base", "reference", formula="2*base", inputs=())])

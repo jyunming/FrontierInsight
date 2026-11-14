@@ -431,7 +431,7 @@ class Table:
         self.last_error.clear()
 
     def _gave(self, name, got):
-        if got:
+        if got and name not in self.inputs:  # an input is not a result a figure drew: a figure of inputs alone drew none
             self.gave_values.add(name)
         return got
 
