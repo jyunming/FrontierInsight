@@ -59,21 +59,43 @@ def test_caption_words_keeps_math_balanced():
     assert _caption_words(plain, 40) == plain[:40].rsplit(" ", 1)[0]
 
 
-def test_caption_words_never_ends_inside_a_bracket_it_opened():
-    """A label cut inside "(plan formula)" left "(plan." in a caption; the head now ends before the bracket the cut left open."""
+
+def test_caption_words_closes_a_bracket_the_cut_left_open():
+    """A label cut inside "(plan formula)" left "(plan." in a caption; the bracket is now closed after " ..."."""
     from core.engine import _caption_words
     label = "Expected doubling time of the colony at the highest nutrient level (plan formula)"
-    out = _caption_words(label, 72)
-    assert "(" not in out and out == "Expected doubling time of the colony at the highest nutrient level"
+    out = _caption_words(label, 78)
+    assert out == "Expected doubling time of the colony at the highest nutrient level (plan ...)" and len(out) <= 78
     closed = "Doubling time (hours) of the colony at the highest nutrient level of the plan"
     assert _caption_words(closed, 60) == "Doubling time (hours) of the colony at the highest nutrient"
     assert _caption_words(label, 200) == label, "a label that fits is not touched"
+    assert _caption_words("(long label with a bracket and many more words to follow", 30) == "(long label with a ...)"
+
+
+def test_caption_words_keeps_two_labels_that_differ_inside_a_bracket_apart():
+    from core.engine import _caption_words
+    a = _caption_words("Rate (control group of the colony at the highest nutrient level here)", 30)
+    b = _caption_words("Rate (treated group of the colony at the highest nutrient level here)", 30)
+    assert a != b and a.endswith("...)") and b.endswith("...)") and max(len(a), len(b)) <= 30
+
+
+def test_caption_words_reads_no_bracket_of_a_formula_or_an_escape():
+    from core.engine import _caption_words
+    out = _caption_words(r"Value $\left(x$ followed by many extra words for the label", 28)
+    assert _unescaped_dollars(out) % 2 == 0 and not out.endswith(")")
+    assert not _caption_words(r"Value \{set followed by many extra words for the label", 30).endswith(")")
 
 
 def test_caption_words_drops_a_trailing_comma_left_by_the_cut():
     """A cut after a comma left ",," once the caption joined the next name."""
     from core.engine import _caption_words
     label = "relative deviation of the colony size from the logistic size, in percent"
-    out = _caption_words(label, 62)
-    assert out == "relative deviation of the colony size from the logistic size"
+    assert _caption_words(label, 62) == "relative deviation of the colony size from the logistic size"
     assert len(_caption_words("a long label of words " * 10, 60)) <= 60, "a long label is still cut"
+
+
+def test_closers_left_open_skips_math_and_escapes():
+    from core.math_safe_cut import closers_left_open
+    assert closers_left_open("a (b [c") == "])" and closers_left_open("a (b) c") == ""
+    assert closers_left_open(r"$\left(x$ y") == "" and closers_left_open(r"a \{b") == ""
+    assert closers_left_open("x $(a$ (b") == ")"

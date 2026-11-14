@@ -7163,21 +7163,22 @@ _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 
 def _caption_words(text: Any, limit: int = 120) -> str:
     """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters. A label cut
-    short ends on a whole word outside any bracket it opened and without a trailing comma or colon: a cut inside "(plan
-    formula)" left "(plan." in the caption, and one after a comma left ",," once the caption joined the next name."""
+    short ends on a whole word without a trailing comma or colon, and a bracket the cut leaves open is closed after
+    " ...": a cut inside "(plan formula)" left "(plan." in the caption, and one after a comma left ",," once the
+    caption joined the next name. The words inside the bracket stay, so two labels that differ only there keep two
+    names (a cut before the bracket made both one)."""
     words = " ".join(str(text or "").split())
     if len(words) <= limit:
         return words
-    head = _math_safe_cut.head_before_math(words, len(words[:limit].rsplit(" ", 1)[0])).rstrip()
-    still_open: list[int] = []  # where each bracket the head opens and does not close stands
-    for i, c in enumerate(head):
-        if c in "([{":
-            still_open.append(i)
-        elif c in ")]}" and still_open:
-            still_open.pop()
-    if still_open and still_open[0] > 0:
-        head = head[:still_open[0]]  # the head ends before the first bracket the cut left open
-    return head.rstrip().rstrip(",;:").rstrip()
+    cut = len(words[:limit].rsplit(" ", 1)[0])
+    while True:
+        head = _math_safe_cut.head_before_math(words, cut).rstrip().rstrip(",;:").rstrip()
+        closers = _math_safe_cut.closers_left_open(head)
+        out = head + (" ..." + closers if closers else "")
+        shorter = len(head.rsplit(" ", 1)[0]) if " " in head else cut
+        if len(out) <= limit or shorter >= cut:
+            return out
+        cut = shorter  # the closing words did not fit: one word less
 
 
 def _caption_safe(text: str) -> str:
