@@ -160,7 +160,8 @@ def wilson_interval(successes: float, trials: float, *, z: float = _Z95) -> tupl
     denom = 1.0 + z * z / n
     centre = (p_hat + z * z / (2.0 * n)) / denom
     half = z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
+    # The interval holds p_hat exactly (at 0 or 1 it ends there); rounding can leave an end 1e-16 past it.
+    return max(0.0, min(p_hat, centre - half)), min(1.0, max(p_hat, centre + half))
 
 
 def wilson_half_width(successes: float, trials: float) -> float | None:

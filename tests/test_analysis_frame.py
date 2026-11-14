@@ -974,14 +974,17 @@ def test_a_result_recorded_only_per_compared_value_is_printed_with_its_trials_to
     assert b["growth_values"] == [2.0, 2.5, 3.5, 3.0] and b["growth"] == pytest.approx(2.75)
 
 
-def test_plan_of_gives_a_several_panel_figure_its_settings_and_labels_and_a_one_panel_figure_only_the_labels_of_its_axes() -> None:
+def test_plan_of_gives_every_figure_the_settings_a_panel_may_hold_and_their_labels() -> None:
     figures = [{"id": "fig1", "file": "a.png", "shows": ["growth"], "x": "rate", "series": "dose", "panels": 2},
                {"id": "fig2", "file": "b.png", "shows": ["growth"], "x": "rate", "series": "dose"}]
     plan = af.plan_of(_design(figures=figures, labels={"rate": "Infection rate", "mode": "Run mode"}))
     assert plan["figures"]["fig1"]["settings"] == {"rate": [0.1, 0.2], "dose": [1, 2], "mode": ["a", "b"]}
     assert plan["figures"]["fig1"]["labels"] == {"rate": "Infection rate", "mode": "Run mode"}
-    # a one-panel figure has no panel to declare (no settings); it carries the plan's labels of its own axes, which the default figure names them by
-    assert "settings" not in plan["figures"]["fig2"] and plan["figures"]["fig2"]["labels"] == {"rate": "Infection rate"}
+    # a one-panel figure that shows one value of a setting holds it (`fig.panel(0, mode="a")`), so it gets the same settings
+    assert plan["figures"]["fig2"]["settings"] == plan["figures"]["fig1"]["settings"]
+    assert plan["figures"]["fig2"]["labels"] == {"rate": "Infection rate", "mode": "Run mode"}
+    stub = af.derive_source(_design(figures=figures), "", True)
+    assert "A panel that shows one value of a setting that varies holds it: `fig.panel(0, setting=value)`." in stub
 
 
 def _clamp_check(tmp_path: Path, body: str) -> list[Any]:

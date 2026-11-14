@@ -495,3 +495,15 @@ def test_a_read_of_a_result_recorded_per_compared_value_says_so_instead_of_retur
     assert [v for _k, _t, v in t.level_rows("growth", key)] == [[1.0, 3.0], [2.0, 4.0]]
     # a result no cell holds at all is still an empty read (nothing to say about a level)
     assert t.values("alive", key) == []
+
+
+def test_the_wilson_interval_holds_its_own_proportion_at_0_and_1() -> None:
+    # 6 of 6 gave an upper end of 0.9999999999999999 and 0 of 11 a lower end of 2.8e-17: an error bar below or above the
+    # proportion was then negative, and a plot refused the figure
+    from core import frame_table, stats
+
+    for n in range(1, 3001):
+        for k in (0, n):
+            for lo, hi in (frame_table.wilson_interval(k, n), stats.wilson_interval(k, n)):
+                assert lo <= k / n <= hi and 0.0 <= lo and hi <= 1.0, (k, n, lo, hi)
+    assert frame_table.wilson_interval(6, 6)[1] == 1.0 and frame_table.wilson_interval(0, 11)[0] == 0.0
