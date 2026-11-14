@@ -3,6 +3,7 @@ FI's reader refused every plan the model wrote, the model repeated the same answ
 and a redesign after it had already decided that nothing would run. Neutral names throughout."""
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import asyncio
 import json
 from pathlib import Path
@@ -191,5 +192,5 @@ def test_the_graph_sends_a_topic_stop_from_the_reflect_step_to_the_gate() -> Non
 
     from core.engine import Engine
 
-    source = inspect.getsource(Engine)
+    source = engine_text()
     assert '"proceed": "improve", "stuck": "evidence_gate"' in source

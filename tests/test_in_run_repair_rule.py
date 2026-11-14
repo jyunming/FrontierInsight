@@ -3,6 +3,7 @@ compares values inside each run, and the one form FI reads back, with a full exa
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 from core import skeleton
 
 PROTOCOL = {"in_each_run": {"step": [0.4, 0.2, 0.1]}}
@@ -24,5 +25,5 @@ def test_the_oracle_and_crash_repairs_carry_the_rule() -> None:
 
     from core import engine
 
-    src = inspect.getsource(engine.Engine)
+    src = engine_text()
     assert src.count("_skeleton.level_rule(self._protocol_block(state)") >= 2

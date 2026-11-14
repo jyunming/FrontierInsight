@@ -18,7 +18,7 @@ must not be.** The target user is a scientist or engineer who will not read this
 before their first run: a console line, a config key, a CLI flag, an error message, or a new term must be
 understandable at a glance, in the words a domain scientist already uses, not in words this codebase invented for its
 own convenience. When rigor and surface simplicity pull against each other, keep the rigor internal and simplify the
-surface — do not simplify the check itself to make the surface easier. Concretely: `core/engine.py:STAGE_PROGRESS`
+surface — do not simplify the check itself to make the surface easier. Concretely: `core/engine_base.py:STAGE_PROGRESS`
 shows one plain sentence per stage while `run.log` keeps every internal detail; `fi tools <name>` moved the ~15
 rarest CLI commands out of the default `--help` without removing or renaming a single flag; `core/evidence.py`'s
 `summary_line()` defaults to a level's plain-language sentence, never the raw six-way identifier. Before adding a new
@@ -122,9 +122,9 @@ External prerequisites are all optional and feature-gated:
 
 **Entry point**: `launch.py` is async. It parses args, builds one or more `Config` objects, constructs an `Engine(cfg)` per quest, runs them under a bounded `asyncio.Semaphore` if `--fleet`, then runs each `generation/*` generator on the resulting `QuestArtifacts`. One generator failure does not abort the rest.
 
-**The engine** (`core/engine.py::Engine`) is stateless w.r.t. process globals — N parallel Engines must coexist in one process for `--fleet`. The graph is async LangGraph compiled with `AsyncSqliteSaver` at `<quest_root>/.fi/state.sqlite`; the LangGraph `thread_id` is the quest_id. A killed run is resumed via `python launch.py --config <yaml> --resume <quest_id>` (or `@fi /resume <quest_id>` in VSCode). On resume `Engine.run()` calls `graph.aget_state()` first; if prior state exists, it passes `None` to `ainvoke` so LangGraph continues from the last completed node instead of replaying from `ideate`. The source YAML is auto-copied to `<quest_root>/config.yaml` at startup so `/resume` is a one-step lookup.
+**The engine** (`core/engine.py::Engine`; its methods are split by stage into the mixin classes of `core/engine_<stage>.py`, and its module-level names live in `core/engine_base.py` and are all importable from `core.engine`) is stateless w.r.t. process globals — N parallel Engines must coexist in one process for `--fleet`. The graph is async LangGraph compiled with `AsyncSqliteSaver` at `<quest_root>/.fi/state.sqlite`; the LangGraph `thread_id` is the quest_id. A killed run is resumed via `python launch.py --config <yaml> --resume <quest_id>` (or `@fi /resume <quest_id>` in VSCode). On resume `Engine.run()` calls `graph.aget_state()` first; if prior state exists, it passes `None` to `ainvoke` so LangGraph continues from the last completed node instead of replaying from `ideate`. The source YAML is auto-copied to `<quest_root>/config.yaml` at startup so `/resume` is a one-step lookup.
 
-**`QuestState`** (TypedDict in `core/engine.py`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators. Self-correction state lives on `QuestState` too: `clarify_*`, `ideate_critique`, `exec_reflect_iter`/`exec_reflect_history`/`exec_give_up_reason`, `cross_check`. No-simulation bookkeeping: `no_simulation_resolved` (bool), `auto_collected_count` (int — total files written into `data/auto_collected/` by Axon + every adapter in `engine.dataset_adapters`).
+**`QuestState`** (TypedDict in `core/engine_base.py`, imported from `core.engine`) is the contract between every node and the prompts in `agents/*.md`. Field names are stable; any alternate graph must keep them backwards-compatible. `QuestArtifacts` is the contract between the engine and the generators. Self-correction state lives on `QuestState` too: `clarify_*`, `ideate_critique`, `exec_reflect_iter`/`exec_reflect_history`/`exec_give_up_reason`, `cross_check`. No-simulation bookkeeping: `no_simulation_resolved` (bool), `auto_collected_count` (int — total files written into `data/auto_collected/` by Axon + every adapter in `engine.dataset_adapters`).
 
 **Provider layer** (`core/provider.py`): four transports, one `LLMClient.chat(messages) -> str` surface.
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
@@ -202,7 +202,7 @@ merge requirements for you).
 
 Many fixes are small and mechanical. A coding agent that delegates work can hand those to a small, fast model (a
 Haiku-class model) and run several at once, keeping a larger model for judgment calls, the engine's core flow in
-`core/engine.py`, and changes that span modules. This works only when each task is small and fully specified.
+`core/engine.py` and `core/engine_<stage>.py`, and changes that span modules. This works only when each task is small and fully specified.
 
 - **One task, one place.** One file and one function where possible, at most the file plus its test file (and one
   named line elsewhere). Give each task its own git worktree and branch, created from the current branch head, so no

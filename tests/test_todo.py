@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from core import todo
 
 
 def test_every_pause_kind_the_engine_raises_has_a_decision_and_a_recommendation() -> None:
-    engine = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    engine = engine_text()
     import re
 
     kinds = set(re.findall(r'kind="([a-z_]+)",\s*\n?\s*interaction=', engine))

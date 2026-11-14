@@ -3,6 +3,7 @@ suggestions, robustness to missing or old files, and the cross-quest table (`fi 
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import csv
 import json
 from pathlib import Path
@@ -275,7 +276,7 @@ def test_write_puts_files_at_root_or_out_dir_and_never_raises(tmp_path: Path) ->
 
 
 def test_engine_run_ends_by_writing_the_report() -> None:
-    src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    src = engine_text()
     assert "_quality_report.write_quietly(self.quest_root)" in src
     # The hook sits in run()'s outermost finally, before the quest logger is closed.
     assert src.index("_quality_report.write_quietly(self.quest_root)") < src.index("_close_quest_logger(self.quest_id)",
@@ -342,7 +343,7 @@ def test_every_suggested_key_routes_the_step_it_names(tmp_path: Path) -> None:
     import re
     from core import provider as prov
 
-    engine = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    engine = engine_text()
     oracle_review = (Path(__file__).resolve().parent.parent / "core" / "oracle_review.py").read_text(encoding="utf-8")
     steps = set(re.findall(r'node="([a-z_]+)', engine)) | set(re.findall(r'^NODE = "([a-z_]+)"', oracle_review, re.M))
     root = tmp_path / "q-keys"

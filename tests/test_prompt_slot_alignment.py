@@ -11,6 +11,7 @@ find. This makes it a one-second failure instead.
 """
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import inspect
 import re
 from pathlib import Path
@@ -29,7 +30,7 @@ def _substitute_calls() -> dict[str, set[str]]:
     """Map prompt name -> the kwargs engine.py (and the engine's mixins that render a prompt) pass to its substitute()."""
     import core.agent_build as agent_build_mod
 
-    src = inspect.getsource(engine_mod) + "\n" + inspect.getsource(agent_build_mod)
+    src = engine_text() + "\n" + inspect.getsource(agent_build_mod)
     calls: dict[str, set[str]] = {}
 
     def _kwargs_from(start: int) -> set[str]:

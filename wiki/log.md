@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-14 — the engine is split by stage
+
+No page changed. `core/engine.py` now holds the `Engine` class, its graph and its run loop; what was at module level is in `core/engine_base.py`, and the methods of each stage are in `core/engine_<stage>.py` (ideas, plan, data, code, improve, run, analyze, write, review). A page whose sources list `core/engine.py` may mean any of these files; `dev/registry.md` says which.
+
+Sources: core/engine.py, core/engine_base.py, dev/registry.md.
+
 ## 2026-11-13 — a CLI call refused before the service is retried
 
 Updated by hand: [[provider-outages|Provider outages]] (the Claude CLI's `authentication_failed` with an answer the service did not write is retried after long waits, not read as a dead sign-in).

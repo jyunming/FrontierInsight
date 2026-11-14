@@ -11,6 +11,7 @@ grid is now always kept, and only a setting the study compares sends the code ba
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import json
 from pathlib import Path
 
@@ -282,7 +283,7 @@ def test_a_not_done_item_the_plan_no_longer_supports_is_taken_away_before_the_ru
 
 
 def test_the_check_runs_after_the_checks_of_the_code_and_before_the_timing():
-    source = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    source = engine_text()
     gate = source.index("stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)")
     drop = source.index("self._check_unread_settings(state, simulate_path)")
     size = source.index("too_long = await self._size_the_run(state, runner, py, self._first_run_env(exec_env, record=False))")

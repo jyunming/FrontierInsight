@@ -7,6 +7,7 @@ another simulation or plan, a search that found no design, a search whose scan f
 """
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import sys
 from pathlib import Path
 from typing import Any
@@ -228,7 +229,7 @@ async def test_a_run_that_stopped_for_another_reason_is_not_taken_for_this_one(t
 def test_the_run_step_ends_the_quest_before_it_could_retry_or_repair() -> None:
     """Wiring: the runner's plain stop is read right after the run, before the retry of a run that failed at once and
     before everything that follows a failed run (the repair step reads the run's record)."""
-    src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    src = engine_text()
     node = src[src.index("async def _node_execute_steps("):]
     after_run = node[node.index("runner.execute(\n"):]
     assert "self._stop_for_unusable_search(runner)" in after_run

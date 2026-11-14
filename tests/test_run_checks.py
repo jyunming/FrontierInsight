@@ -5,6 +5,7 @@ Fake model, toy simulations (a cooling cup, a damped spring), real subprocesses.
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import asyncio
 import copy
 import json
@@ -153,7 +154,7 @@ async def test_a_later_text_of_the_simulation_is_read_again_and_an_unchanged_one
 
 
 def test_the_node_reads_the_simulation_again_after_each_gate() -> None:
-    src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    src = engine_text()
     node = src[src.index("async def _node_execute("):]
     node = node[:node.index("pilot_run and not self.config.execution.background_jobs")]
     assert "self._gate_pass(state, py, exec_env, seed_path)" in node, "the node makes the checks through one function"

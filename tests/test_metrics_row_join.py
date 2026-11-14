@@ -8,6 +8,7 @@ from its own record, trial by trial; a record without it is the simulation's to 
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import hashlib
 import json
 from pathlib import Path
@@ -266,7 +267,7 @@ def test_the_engine_hands_the_protocol_s_thresholds_to_the_oracle() -> None:
 
     from core import engine
 
-    source = inspect.getsource(engine.Engine)
+    source = engine_text()
     call = source[source.index("_trial_runner.measure_oracles("):]
     call = call[:call.index("reported = {")]
     assert 'protocol.get("thresholds")' in call

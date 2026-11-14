@@ -10,6 +10,7 @@ IMRAD sections inside an essay-format paper.
 """
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 from pathlib import Path
 
 import pytest
@@ -209,7 +210,7 @@ def test_checked_figure_rule_names_the_drawn_quantity_and_the_mark_standing_alon
     write = (root / "agents" / "write.md").read_text(encoding="utf-8")
     assert "Results this figure draws: ..." in write and "as a sentence on its own" in write
     # the prompt quotes the line FI writes into the figure entry, word for word
-    assert "Results this figure draws: " in (root / "core" / "engine.py").read_text(encoding="utf-8")
+    assert "Results this figure draws: " in engine_text()
     slides = (root / "agents" / "slides.md").read_text(encoding="utf-8")
     assert "**Figure N shows what is plotted" not in slides
     assert "copied word for word" in slides[slides.index("## Figures"):]
