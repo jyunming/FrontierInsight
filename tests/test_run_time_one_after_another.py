@@ -249,3 +249,19 @@ def test_without_a_wall_time_the_paper_names_the_timed_run_that_decides(tmp_path
 
 def test_a_time_just_over_the_limit_is_over(tmp_path: Path) -> None:
     assert _both(tmp_path / "q", least=40.0, most=None, timed=60.04)[0] == "over"
+
+
+def test_a_count_of_settings_run_together_alone_never_lets_the_wall_time_decide(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=None, at_once=4)
+    met, said, sentence = _met(root, 12.0)
+    assert met == NOT_SHOWN and "None" not in said and "is within" not in sentence
+
+
+def test_a_timed_run_decides_without_a_record_of_the_trials(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    root.mkdir()
+    _timed(root, 80.0)
+    assert run_facts.reader_verdict(run_facts.reader_run(root), 60.0) == "over"
+    sentence = disclosure._time_sentence(root, TOPIC, 40.0)
+    assert "80 s" in sentence and "is over the topic's limit of 60 s" in sentence

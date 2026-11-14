@@ -252,21 +252,22 @@ def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
     the time is worked out; the paper's facts and the run record both read it, and :func:`reader_verdict` judges it."""
     from . import code_project as _code_project
 
+    timed = _code_project.delivered_seconds(Path(quest_root))
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
-        return None
+        # No record of the trials' times (no trials FI ran, or an older record): a timed run of the delivered code still decides
+        return None if timed is None else {"least": None, "most": None, "timed": timed, "at_once": None, "overlap": False}
     n = settings_at_once(quest_root)
     least, wall = _seconds(run.get("trial_sum_s")), _seconds(run.get("wall_s"))
     search = search_seconds(quest_root)
-    timed = _code_project.delivered_seconds(Path(quest_root))
     if n == 1:
         if timed is None and (wall is None or not search):
             return None
         one = None if wall is None else wall + search
         return {"least": one, "most": one, "timed": timed, "at_once": 1, "overlap": False}
     overlap = n is not None or (least is not None and wall is not None and least > wall)
-    if least is None and timed is None and _seconds(run.get("settings_s")) is None:
-        return None  # nothing of the settings' times is recorded: FI's wall time is all FI knows
+    if least is None and timed is None and _seconds(run.get("settings_s")) is None and n is None:
+        return None  # nothing of the settings' times is recorded and no count: FI's wall time is all FI knows
     return {"least": None if least is None else least + search, "most": None, "timed": timed, "at_once": n,
             "overlap": overlap}
 
