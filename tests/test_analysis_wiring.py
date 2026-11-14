@@ -493,7 +493,7 @@ PINS_AT_811719AF = {
     # a figure line FI names only when every point is its own record); it was "31055f8a3362dd1d"
     # and again with core/in_run.py's exact read of a text value before a key is taken apart, as above; it was
     # "d22eddb03edf07e6", then "a7dc6fa0b256914b" (a part of a key is a setting only when the run has it)
-    "run_framed": "03b115a38cbbfa2a",
+    "run_framed": "bac047b05f2c18c2",
 }
 
 

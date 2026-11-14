@@ -594,23 +594,29 @@ def test_a_body_reads_a_value_the_trials_returned_that_the_plan_lists_as_no_resu
     # it; a name no trial returned is still refused. Before, `lag` was refused too, and the body's value went missing.
     record = json.loads(json.dumps(RECORD))
     for c in record["cells"]:
-        c["metrics"]["lag"] = {"values": [2.0 * v for v in c["metrics"]["growth"]["values"]],
-                               "trials": c["metrics"]["growth"]["trials"]}
+        trials = c["metrics"]["growth"]["trials"]
+        c["metrics"]["lag"] = {"values": [2.0 * v for v in c["metrics"]["growth"]["values"]], "trials": trials}
+        c["metrics"]["ratio"] = {"values": [99.0 for _ in trials], "trials": trials}  # a trial value named like a derived one
     bodies = """
     def derive_ratio(table):
         return {k: table.mean("lag", k) / table.mean("growth", k) for k in table.keys()}
 
     def derive_ghost(table):
         return table.mean("never_returned", table.keys()[0])
+
+    def derive_results_only(table):
+        return 1.0 if "lag" not in table.declared and "growth" in table.declared else 0.0
     """
-    quest = _quest(tmp_path, _design([_derived("ratio"), _derived("ghost")]), bodies, record)
+    quest = _quest(tmp_path, _design([_derived("ratio"), _derived("ghost"), _derived("results_only")]), bodies, record)
     _code, printed, rec, _err = _run(quest)
     ratio = rec["derived"]["ratio"]
     assert ratio["status"] == "ok" and set(ratio["by_setting"]) == set(KEYS)
-    assert all(v == pytest.approx(2.0) for v in ratio["by_setting"].values())
+    assert all(v == pytest.approx(2.0) for v in ratio["by_setting"].values())  # the derived value, not the trials' 99
     assert "lag" in ratio["inputs"]
     ghost = rec["derived"]["ghost"]
     assert ghost["status"] == "failed" and "never_returned" in ghost["why"]
+    # what the table calls the study's results (what a figure draws as a result) is still the declared results alone
+    assert rec["derived"]["results_only"]["value"] == 1.0
     assert printed is not None and "lag" not in printed  # an input a body read is not printed as a result of the study
     assert all("lag" not in row for row in printed.values() if isinstance(row, dict))
 

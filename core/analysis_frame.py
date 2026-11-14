@@ -1715,18 +1715,19 @@ def run(record_path, quest_root):
     notes = []
     base = {**PLAN.FIXED, **_thresholds(record_path)}
     readable = list(PLAN.RESULTS) + list(PLAN.AFTERWARDS)
-    # Every value the trials returned is in FI's record and may be read by a body (a per-trial input of a derived quantity, such
-    # as a second estimate or an interval's hit), not only the declared results; a name no trial returned is still refused.
-    readable += sorted({str(n) for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)
-                        for n in c["metrics"]} - set(readable))
+    # Every other value the trials returned is in FI's record and may be read by a body as an input (a second estimate, an
+    # interval's hit), never as a result of the study; a name no trial returned is still refused, and a quantity the plan
+    # derives keeps its own value under its name.
+    inputs = sorted({str(n) for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)
+                     for n in c["metrics"]} - set(readable) - set(PLAN.DERIVED))
     # ``FI_FIGURE_FALLBACK=only``: the figures that failed are drawn beside the earlier run's results, which stay as they were. No
     # function of the study's is run again (it may draw random numbers), so no derived value, reference or result can change.
     only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
     earlier = _earlier_record(quest_root) if only else None
-    first = Table(cells, readable)
+    first = Table(cells, readable, inputs=inputs)
     table = Table(cells, readable, {} if only else _references(first, base, notes),
                   {name: first.at(**hold) for name, hold in PLAN.PARTS.items()}, getattr(PLAN, "KNOWN", {}),
-                  getattr(PLAN, "KINDS", {}))
+                  getattr(PLAN, "KINDS", {}), inputs=inputs)
     table._thresholds = _thresholds(record_path)  # read only by the figures: a threshold line is named by the plan's key
     compared = {k: list(v) for k, v in PLAN.COMPARED.items()}
     records = earlier["derived"] if only else _derived(table, base, compared)
