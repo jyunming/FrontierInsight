@@ -241,35 +241,44 @@ def _seconds(value: Any) -> float | None:
 
 def reader_run(quest_root: Path | str) -> dict[str, Any] | None:
     """What a reader's run of the delivered code takes, when FI's wall time is not all of it: ``{"least", "most",
-    "at_once", "overlap"}``, else ``None`` (the settings ran one at a time, as counted, and there was no search: FI's wall
-    time is the run). The delivered ``code/run.py`` runs the settings one after another. ``least``: the trials' own times
-    added up. ``most``: every setting's process time added up, measured WHILE the settings ran at the same time, so an
-    upper bound (``None`` when FI did not record it). For a run counted as one setting at a time the wall time is both. The
-    search FI ran counts in every bound. ``at_once``: the most settings that ran together, or ``None`` when FI did not
-    count; ``overlap`` is then ``True`` only when the trials' own times add up to more than the wall time, which
-    one-at-a-time trials cannot. This is the one place the time is worked out; the paper's facts and the run record both
-    read it, and :func:`reader_verdict` judges it."""
+    "timed", "at_once", "overlap"}``, else ``None`` (the settings ran one at a time, as counted, and there was no search:
+    FI's wall time is the run). The delivered ``code/run.py`` runs the settings one after another. ``timed``: how long it
+    took when FI ran it once in a clean environment (core/code_project.py::delivered_seconds), ``None`` when FI did not;
+    it is the one time that decides a limit. ``least``: the trials' own times added up, a lower bound. ``most``: for a run
+    counted as one setting at a time, its wall time; else ``None``: the settings' process times added up while they ran at
+    the same time are no upper bound (the run also starts, analyses and draws). The search FI ran counts in every bound.
+    ``at_once``: the most settings that ran together, or ``None`` when FI did not count; ``overlap`` is then ``True`` only
+    when the trials' own times add up to more than the wall time, which one-at-a-time trials cannot. This is the one place
+    the time is worked out; the paper's facts and the run record both read it, and :func:`reader_verdict` judges it."""
+    from . import code_project as _code_project
+
     run = read(quest_root).get("trials_run")
     if not isinstance(run, dict):
         return None
     n = settings_at_once(quest_root)
-    least, most, wall = _seconds(run.get("trial_sum_s")), _seconds(run.get("settings_s")), _seconds(run.get("wall_s"))
+    least, wall = _seconds(run.get("trial_sum_s")), _seconds(run.get("wall_s"))
     search = search_seconds(quest_root)
+    timed = _code_project.delivered_seconds(Path(quest_root))
     if n == 1:
-        if wall is None or not search:
+        if timed is None and (wall is None or not search):
             return None
-        return {"least": wall + search, "most": wall + search, "at_once": 1, "overlap": False}
+        one = None if wall is None else wall + search
+        return {"least": one, "most": one, "timed": timed, "at_once": 1, "overlap": False}
     overlap = n is not None or (least is not None and wall is not None and least > wall)
-    if least is None and most is None:
-        return None
-    return {"least": None if least is None else least + search, "most": None if most is None else most + search,
-            "at_once": n, "overlap": overlap}
+    if least is None and timed is None and _seconds(run.get("settings_s")) is None:
+        return None  # nothing of the settings' times is recorded: FI's wall time is all FI knows
+    return {"least": None if least is None else least + search, "most": None, "timed": timed, "at_once": n,
+            "overlap": overlap}
 
 
 def reader_verdict(reader: dict[str, Any], limit: float) -> str:
-    """``"over"`` only when the least a reader's run takes is over ``limit``; ``"within"`` only when the most it takes is
-    at or under it; else ``"not shown to be within or over"``. FI's own wall time decides neither: the settings ran at the
-    same time, or FI does not know that they did not."""
+    """When FI timed the delivered code (``timed``), that time decides: ``"within"`` at or under ``limit``, else
+    ``"over"``. Otherwise ``"over"`` only when the least a reader's run takes is over ``limit``, ``"within"`` only when
+    the most it takes (a run counted as one setting at a time) is at or under it, and else ``"not shown to be within or
+    over"``. FI's own wall time decides neither: the settings ran at the same time, or FI does not know that they did not."""
+    timed = reader.get("timed")
+    if timed is not None:
+        return "within" if timed <= limit else "over"
     if reader["least"] is not None and reader["least"] > limit:
         return "over"
     return "within" if reader["most"] is not None and reader["most"] <= limit else "not shown to be within or over"
@@ -287,16 +296,15 @@ def reader_clause(reader: dict[str, Any]) -> str:
 
 
 def reader_words(reader: dict[str, Any], plain: Any) -> str:
-    """The reader's run time in words (``plain`` writes a number of seconds): a single time, a least, or the range."""
-    least, most = reader["least"], reader["most"]
-    if least is not None and most is not None and most > least:
-        return (f"between {plain(least)} and {plain(most)}, the latter measured while the settings ran at the same time, "
-                "so a one-after-another run takes at most that")
-    if most is not None and least is None:
-        return f"at most {plain(most)} (measured while the settings ran at the same time)"
-    if most is not None:
-        return plain(most)
-    return f"at least {plain(least)}"
+    """The reader's run time in words (``plain`` writes a number of seconds): the time FI measured for the delivered code,
+    else a single time or a least."""
+    if reader.get("timed") is not None:
+        return f"{plain(reader['timed'])} (FI ran the delivered code once in a clean environment and timed it)"
+    if reader["most"] is not None:
+        return plain(reader["most"])
+    if reader["least"] is not None:
+        return f"at least {plain(reader['least'])}"
+    return "a time FI did not measure (the trials' own times were not recorded)"
 
 
 def run_stage(quest_root: Path | str) -> tuple[str | None, dict[str, Any]]:

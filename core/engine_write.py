@@ -573,7 +573,9 @@ class WriteStageMixin:
         if self.config.execution.sandbox != "venv" or self.config.execution.background_jobs:
             return
         try:
-            digest = json.dumps(_attempts.script_hashes(self.quest_root), sort_keys=True)
+            # Every file a person gets (FI's run.py and study.json too): the time this check keeps is read only for that code
+            # (code_project.delivered_seconds), so a change to any of them is checked again.
+            digest = _code_project.code_digest(self.quest_root)
             marker = self.fi_dir / "code_project_checked.json"
             if marker.is_file() and marker.read_text(encoding="utf-8") == digest:
                 return

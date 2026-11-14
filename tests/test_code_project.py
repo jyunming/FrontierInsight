@@ -291,6 +291,14 @@ def test_verify_says_it_ran_in_a_clean_environment(tmp_path):
     assert result["status"] == "ran"
     assert json.loads((root / "needs" / "CODE_PROJECT_CHECK.json").read_text())["ok"] is True
     assert not (root / ".fi" / "project_check").exists()
+    # run.py's own time, the install not counted, is kept with the code it ran: it is read only for that code
+    assert 0 <= result["run_seconds"] <= result["seconds"] + 1 and result["code"] == code_project.code_digest(root)
+    assert code_project.delivered_seconds(root) == result["run_seconds"]
+    (root / "code" / "__pycache__").mkdir(exist_ok=True)
+    (root / "code" / "__pycache__" / "x.pyc").write_bytes(b"0")  # a run's cache is not a change of the code
+    assert code_project.delivered_seconds(root) == result["run_seconds"]
+    (root / "code" / "run.py").write_text((root / "code" / "run.py").read_text() + "\n# edited\n", encoding="utf-8")
+    assert code_project.delivered_seconds(root) is None
 
 
 def test_verify_runs_the_project_without_fis_api_keys(tmp_path, monkeypatch):

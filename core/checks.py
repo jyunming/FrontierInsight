@@ -1160,8 +1160,8 @@ CHECKS: tuple[Check, ...] = (
           "From FI's trial record: settings that drew the same random numbers; a note only"),
     Check('reader_run_time_verdict', 'core.run_facts', 'reader_verdict',
           'write', 'own_record', 'note',
-          "Whether a reader's run of the delivered code is over or within the time limit; given to the paper's "
-          'run-time sentence'),
+          "Whether a reader's run of the delivered code is over or within the time limit (FI's timed clean run of "
+          "that code decides when there is one); given to the paper's run-time sentence"),
     Check('evidence_ladder', 'core.evidence', 'assess',
           'evidence_gate', 'own_record', 'note',
           'Classifies the quest on the six-level evidence ladder from its records and lists one gap per missing '

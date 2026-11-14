@@ -1354,17 +1354,17 @@ def _cells_run(root: Path) -> str:
 
 
 def _delivered_sentence(reader: dict[str, Any]) -> str:
-    """What a run of the delivered code, which runs the settings one after another, takes by FI's measurements."""
-    least, most, at_once = reader["least"], reader["most"], reader["at_once"]
+    """What a run of the delivered code, which runs the settings one after another, takes by FI's measurements: the time
+    of FI's own run of it when FI timed one, else the least the settings' own times give."""
     plain = _disclosure._plain_seconds
-    together = (f"while {at_once} ran at once" if at_once else "while the settings ran at the same time")
-    if least is not None and most is not None and most > least:
-        said = f"at least {plain(least)} and at most {plain(most)} (each setting's time {together}, added up)"
-    elif most is not None and least is None:
-        said = f"at most {plain(most)} (each setting's time {together}, added up)"
-    else:  # the trials' own time is a true lower bound whatever the timing noise of the other
-        said = f"at least {plain(least)}"
-    return f"The delivered code runs the settings one after another and was not timed as a whole; from the settings' own times such a run takes {said}."
+    if reader.get("timed") is not None:
+        return (f"The delivered code runs the settings one after another; FI ran it once in a clean environment and it "
+                f"took {plain(reader['timed'])}.")
+    if reader["least"] is None:
+        return ("The delivered code runs the settings one after another and was not timed as a whole, and the trials' own "
+                "times were not recorded.")
+    return ("The delivered code runs the settings one after another and was not timed as a whole; from the settings' own "
+            f"times such a run takes at least {plain(reader['least'])}.")
 
 
 def _run_time_sentences(root: Path, wall: float | None, least: float | None,
@@ -1372,13 +1372,14 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
     """The run time as whole short sentences, from the same records as the ``{{run_time}}`` fact."""
     stage, others = _run_facts.run_stage(root)
     plain = _disclosure._plain_seconds
+    timed = [_delivered_sentence(reader)] if reader is not None and reader.get("timed") is not None else []
     if wall is None:
         if least is None:
-            return []
+            return timed
         if _search_seconds(root):
             return [f"The settings run, the search and its check at finer settings took at least {_plain(least)}.",
-                    "The rest was not timed."]
-        return [f"The trials alone took at least {_plain(least)}.", "The whole run was not timed."]
+                    "The rest of FI's run was not timed."] + timed
+        return [f"The trials alone took at least {_plain(least)}.", "FI's whole run was not timed."] + timed
     took = {"confirm": "the confirming run, whose results are reported, took",
             "explore": "the exploring run, whose results are reported, took"}.get(stage or "", "the run took")
     n = settings or _cells_run(root)
@@ -1398,7 +1399,9 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
         explore = (others.get("explore") or {}).get("wall_s")
         if isinstance(explore, (int, float)) and not isinstance(explore, bool):
             out.append(f"The exploring run took {_plain(float(explore))}.")
-    if reader is not None and reader["at_once"] == 1:
+    if reader is not None and reader["at_once"] == 1 and reader.get("timed") is not None:
+        out.append(_delivered_sentence(reader))
+    elif reader is not None and reader["at_once"] == 1:
         out.append(f"Run one after another, as the delivered code does, the settings and the search take "
                    f"{plain(reader['most'])}.")
     elif reader is not None:
