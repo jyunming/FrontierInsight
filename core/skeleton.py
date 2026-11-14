@@ -369,7 +369,10 @@ class Table:
     is named by ``keys()`` (FI's names, ``a=1,b=2``). The numbers come from ``fi_table`` (``core/frame_table.py``, carried
     beside this file)."""
 
-    def __init__(self, cells, declared, references=None, parts=None, known=None, kinds=None):
+    def __init__(self, cells, declared, references=None, parts=None, known=None, kinds=None, inputs=None):
+        # ``inputs``: other values the trials returned, which a function may read as an input of what it works out; they are
+        # never a result of the study (``declared`` stays the results alone: what a figure draws as a result, what FI serves).
+        self.inputs = [str(n) for n in (inputs or ()) if n not in set(declared)]
         self._kinds = dict(kinds or {})  # id -> "proportion" or "mean": a result gets a binomial interval only when the plan says proportion
         self._known = dict(known or {})  # id -> {"interval": [low id, high id], "truth": number or "axis": name}: a result with a known true value
         self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
@@ -428,14 +431,15 @@ class Table:
         self.last_error.clear()
 
     def _gave(self, name, got):
-        if got:
+        if got and name not in self.inputs:  # an input is not a result a figure drew: a figure of inputs alone drew none
             self.gave_values.add(name)
         return got
 
     def _check(self, name):
-        if name not in self.declared:
-            raise UnknownResult("`%s` is not a result the plan declares; the declared results are: %s"
-                                % (name, ", ".join(sorted(self.declared)) or "(none)"))
+        if name not in self.declared and name not in self.inputs:
+            other = (" or a value a trial returned (those are: %s)" % ", ".join(sorted(self.inputs))) if self.inputs else ""
+            raise UnknownResult("`%s` is not a result the plan declares%s; the declared results are: %s"
+                                % (name, other, ", ".join(sorted(self.declared)) or "(none)"))
         if name not in self.served:
             self.served.append(name)
 

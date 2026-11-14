@@ -589,6 +589,54 @@ def test_a_body_sees_the_sub_studies_and_what_it_served_is_recorded(tmp_path: Pa
     assert peak["inputs"] == ["growth", "wobble"]
 
 
+def test_a_body_reads_a_value_the_trials_returned_that_the_plan_lists_as_no_result(tmp_path: Path) -> None:
+    # The trials return a second estimate (`lag`) the plan never declares as a result: it is in FI's record, so a body may read
+    # it; a name no trial returned is still refused. Before, `lag` was refused too, and the body's value went missing.
+    record = json.loads(json.dumps(RECORD))
+    for c in record["cells"]:
+        trials = c["metrics"]["growth"]["trials"]
+        c["metrics"]["lag"] = {"values": [2.0 * v for v in c["metrics"]["growth"]["values"]], "trials": trials}
+        c["metrics"]["ratio"] = {"values": [99.0 for _ in trials], "trials": trials}  # a trial value named like a derived one
+    bodies = """
+    def derive_ratio(table):
+        return {k: table.mean("lag", k) / table.mean("growth", k) for k in table.keys()}
+
+    def derive_ghost(table):
+        return table.mean("never_returned", table.keys()[0])
+
+    def derive_results_only(table):
+        return 1.0 if "lag" not in table.declared and "growth" in table.declared else 0.0
+    """
+    quest = _quest(tmp_path, _design([_derived("ratio"), _derived("ghost"), _derived("results_only")]), bodies, record)
+    _code, printed, rec, _err = _run(quest)
+    ratio = rec["derived"]["ratio"]
+    assert ratio["status"] == "ok" and set(ratio["by_setting"]) == set(KEYS)
+    assert all(v == pytest.approx(2.0) for v in ratio["by_setting"].values())  # the derived value, not the trials' 99
+    assert "lag" in ratio["inputs"]
+    ghost = rec["derived"]["ghost"]
+    assert ghost["status"] == "failed" and "never_returned" in ghost["why"]
+    # what the table calls the study's results (what a figure draws as a result) is still the declared results alone
+    assert rec["derived"]["results_only"]["value"] == 1.0
+    assert printed is not None and "lag" not in printed  # an input a body read is not printed as a result of the study
+    assert all("lag" not in row for row in printed.values() if isinstance(row, dict))
+
+
+def test_a_figure_that_draws_only_an_input_drew_nothing_of_the_results(tmp_path: Path) -> None:
+    # The figure declares it shows `growth` but draws only `lag`, a value the trials returned that is no result: FI says it
+    # drew nothing from the trial record, as for a figure that read no value at all.
+    record = json.loads(json.dumps(RECORD))
+    for c in record["cells"]:
+        c["metrics"]["lag"] = {"values": [2.0 * v for v in c["metrics"]["growth"]["values"]],
+                               "trials": c["metrics"]["growth"]["trials"]}
+    bodies = """
+    def figure_fig1(fig, table):
+        fig.axes[0].plot([1, 2], [table.mean("lag", k) for k in table.keys()][:2])
+    """
+    _code, _printed, rec, _err = _run(_quest(tmp_path, _design(), bodies, record))
+    fig = next(f for f in rec["figures"] if f.get("id") == "fig1")
+    assert fig["status"] != "ok" and "drew nothing from the trial record" in fig["why"]
+
+
 # ---- RESULT_JSON ------------------------------------------------------------------------------------------------------------
 def test_result_json_has_the_shape_the_analysis_was_always_asked_for(tmp_path: Path) -> None:
     design = _design([_derived("gain", formula="growth - base"), _derived("twice_base", "reference", formula="2*base", inputs=())])

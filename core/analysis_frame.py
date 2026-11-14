@@ -246,7 +246,7 @@ def _frame_text(plan: dict[str, Any]) -> str:
         "import os as _os  # noqa: E402\nimport sys as _sys  # noqa: E402\n\n"
         "_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))\n"
         "from fi_frame import Figure, Missing, NotYet, Table, UnknownResult  # noqa: E402,F401\n\n"
-        f"RESULTS = {_literal(tuple(plan['results']))}  # every result the plan declares: what a body reads from FI's record, by id\n"
+        f"RESULTS = {_literal(tuple(plan['results']))}  # every result the plan declares; a body reads these, and any other value a trial returned, from FI's record by id\n"
         f"ROLES = {_literal(plan['roles'])}\n"
         f"KINDS = {_literal(plan['kinds'])}\n"
         f"AFTERWARDS = {_literal(tuple(plan['afterwards']))}  # results the study works out from the trials: readable from the record\n"
@@ -291,8 +291,8 @@ def _stub(plan: dict[str, Any], name: str, calls: bool = False) -> str:
                 f'    raise NotYet("{name} is not written yet")\n')
     inputs = ", ".join(f"`{i}`" for i in d["inputs"]) or "the results the plan declares"
     return (f"def {name}(table):\n"
-            f'    """{what}: one number for the study, or `{{setting key: number or None}}`; read {inputs} from `table`, and\n'
-            f'    return `table.missing("why")` where it does not exist."""\n'
+            f'    """{what}: one number for the study, or `{{setting key: number or None}}`; read {inputs} (or any other value\n'
+            f'    a trial returned) from `table`, and return `table.missing("why")` where it does not exist."""\n'
             f'    raise NotYet("{name} is not written yet")\n')
 
 
@@ -1715,14 +1715,19 @@ def run(record_path, quest_root):
     notes = []
     base = {**PLAN.FIXED, **_thresholds(record_path)}
     readable = list(PLAN.RESULTS) + list(PLAN.AFTERWARDS)
+    # Every other value the trials returned is in FI's record and may be read by a body as an input (a second estimate, an
+    # interval's hit), never as a result of the study; a name no trial returned is still refused, and a quantity the plan
+    # derives keeps its own value under its name.
+    inputs = sorted({str(n) for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)
+                     for n in c["metrics"]} - set(readable) - set(PLAN.DERIVED))
     # ``FI_FIGURE_FALLBACK=only``: the figures that failed are drawn beside the earlier run's results, which stay as they were. No
     # function of the study's is run again (it may draw random numbers), so no derived value, reference or result can change.
     only = os.environ.get("FI_FIGURE_FALLBACK") == "only"
     earlier = _earlier_record(quest_root) if only else None
-    first = Table(cells, readable)
+    first = Table(cells, readable, inputs=inputs)
     table = Table(cells, readable, {} if only else _references(first, base, notes),
                   {name: first.at(**hold) for name, hold in PLAN.PARTS.items()}, getattr(PLAN, "KNOWN", {}),
-                  getattr(PLAN, "KINDS", {}))
+                  getattr(PLAN, "KINDS", {}), inputs=inputs)
     table._thresholds = _thresholds(record_path)  # read only by the figures: a threshold line is named by the plan's key
     compared = {k: list(v) for k, v in PLAN.COMPARED.items()}
     records = earlier["derived"] if only else _derived(table, base, compared)

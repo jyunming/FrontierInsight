@@ -514,7 +514,7 @@ runs on the table of FI's record and can change nothing in it:
   correlation, spread or quantile of the trials is one of these, never `NotYet`; and `table.keys()`, `table.setting(key)`,
   `table.at(**settings)` (a LIST of the keys of the settings that hold those values: pass one of them, `table.at(**settings)[0]`,
   to a read, never the list), `table.across(axis, **fixed)` (the values of one setting with their keys),
-  `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares: any other id raises an error
+  `table.reference(id, key)` and, for a sub-study, `table.part(name)`. Name only ids the plan declares or values a trial returned: any other id raises an error
   that lists the ones FI holds. `table.mean` is `None` and `table.interval` is `(None, None)` at a setting where no trial gave
   the result a value (a result the run records only at some settings): test for `None` before any arithmetic, `float()` or
   drawing, and skip that setting (or return `table.missing("why")`).
