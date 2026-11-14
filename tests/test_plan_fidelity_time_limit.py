@@ -7,6 +7,7 @@ the run-size change (RunChecksMixin._size_the_run there); this file covers only 
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import json
 from pathlib import Path
 
@@ -43,6 +44,6 @@ def test_the_code_writing_prompts_are_given_the_topics_shorter_limit(tmp_path):
 
 
 def test_the_design_prompt_keeps_fis_limit_beside_the_time_note():
-    source = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    source = engine_text()
     assert "timeout_s=str(self.config.execution.timeout_s),\n            time_note=self._time_note(state)," in source
     assert source.count("timeout_s=self._planning_limit(state)") == 3  # implement_outline, implement, implement_body

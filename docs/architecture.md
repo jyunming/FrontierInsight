@@ -132,7 +132,7 @@ Top-level fields: `topic`, `title`, `provider`, `engine`, `execution`,
 
 ### `QuestState` (TypedDict)
 
-Defined at `core/engine.py` (just under the `Engine` import block).
+Defined in `core/engine_base.py` and imported from `core.engine`.
 `total=False` so every field is optional — nodes patch in what they
 produce, LangGraph merges the patches.
 
@@ -234,7 +234,7 @@ prerequisites.
 ## Dataset adapters
 
 The no-simulation `auto_collect_data` node calls
-`Engine._run_dataset_adapters` (`core/engine.py:~1055`) which
+`Engine._run_dataset_adapters` (`core/engine_data.py`) which
 walks the `engine.dataset_adapters` list, dispatches each name to
 the matching module under `core/datasets/` (`worldbank.py`,
 `wikipedia.py`), and writes the returned `DatasetRow`s into

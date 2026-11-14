@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests._engine_text import engine_text
 import asyncio
 import json
 import logging
@@ -158,7 +159,7 @@ def test_the_crashed_script_repair_reads_a_sentence_before_its_object() -> None:
 
     from core import engine
 
-    assert '_repair_reply_json(text, node="execute_reflect")' in inspect.getsource(engine.Engine)
+    assert '_repair_reply_json(text, node="execute_reflect")' in engine_text()
 
 
 def test_an_object_whose_code_is_not_a_string_is_not_a_reply() -> None:
