@@ -3258,22 +3258,28 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
 
 # The engine's module-level names are one namespace, as they were when this was one file: a name set on ``core.engine``
-# (a test that replaces a helper or a constant, say) is set in every part that holds it, so the code that moved to
-# ``core/engine_base.py`` and ``core/engine_<stage>.py`` reads the same value as the code here. Setting a name on a part
-# itself changes that part only.
+# (a test that replaces a helper or a constant, say) is set in every part that holds it, and a name new to the engine in
+# every part, so the code that moved to ``core/engine_base.py`` and ``core/engine_<stage>.py`` reads the same value as
+# the code here. A module's own ``__dunder__`` names are never passed on. Setting a name on a part itself changes that
+# part only.
 _PARTS = tuple(sys.modules[__name__.rsplit(".", 1)[0] + "." + _part] for _part in (
     "engine_base", "engine_ideas", "engine_plan", "engine_data", "engine_code", "engine_improve", "engine_run", "engine_analyze", "engine_write", "engine_review"))
 
 
 class _OneNamespace(type(sys)):
     def __setattr__(self, name: str, value: Any) -> None:
+        new_here = name not in vars(self)
         super().__setattr__(name, value)
+        if name.startswith("__") and name.endswith("__"):
+            return
         for part in _PARTS:
-            if name in vars(part):
+            if new_here or name in vars(part):
                 setattr(part, name, value)
 
     def __delattr__(self, name: str) -> None:
         super().__delattr__(name)
+        if name.startswith("__") and name.endswith("__"):
+            return
         for part in _PARTS:
             if name in vars(part):
                 delattr(part, name)
