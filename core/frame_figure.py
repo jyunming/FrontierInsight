@@ -1688,7 +1688,9 @@ class FigureCalls:
         some settings only (the plan's ``when``) would read as a line over all of them. A panel with a line of the body's own
         beside the result (a curve not from the plan, or a line at a table value) is left as it is, since that line may be the
         reference and FI cannot tell. A reference ``fig.ref`` refuses there (one that changes with a setting the panel does not
-        hold, or along an x that is not a setting) is left out as before. Called by FI after the body returns and before
+        hold, or along an x that is not a setting) is left out as before, and so is one that changes along x where the result
+        has no point at one of its x (``_reference_within_drawn_x``: decided before drawing, so a refusal changes nothing). A
+        vertical line the body drew at the reference is not its line on the y axis. Called by FI after the body returns and before
         :meth:`finish`; returns ``[(panel, result id)]`` drawn, and each line's record says ``"drawn_by": "FI"``."""
         held = getattr(getattr(self, "table", None), "_references", None)
         if not isinstance(held, dict) or not held:
