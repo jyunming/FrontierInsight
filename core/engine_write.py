@@ -1621,7 +1621,8 @@ class WriteStageMixin:
                 self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
                                   "QUALITY.md says so", pages, limit)
             elif measured is not None:
-                _paper_facts.write_page_record(self.quest_root, int(measured["pages"]), limit, final=False)
+                # Within the limit (after a move, or as it was): no earlier measurement over it speaks for this paper.
+                (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         return out
 
     async def _check_citations(self, state: QuestState) -> QuestState:
