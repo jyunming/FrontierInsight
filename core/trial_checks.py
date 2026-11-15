@@ -1282,9 +1282,11 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     # did not crash. Without a declared truth there is nothing to judge the rest against, and the settings are left out
     # (and said in the paper); only more than half of them left out stops the quest (above).
     remaining = {f.key for f in run if f.key not in keys}
-    # A setting counts as judged by its intervals and standard errors (and their multiplier), not by an estimate's bias
-    # alone: an estimate whose only declared error is one the plan gives several estimates has nothing else judged.
-    judged = {s.key for q in cal.quantities if q.kind not in ("bias", "no_estimate") for s in q.settings}
+    # An estimate whose declared error FI set aside (a name the plan gives several estimates) has only its bias judged:
+    # that bias alone does not show its settings sound.
+    aside = {e for ests in _metric_spec.shared_uncertainty_names(protocol).values() for e in ests}
+    judged = {s.key for q in cal.quantities if not (q.kind in ("bias", "no_estimate") and q.label in aside)
+              for s in q.settings}
     unjudged = sorted(remaining - judged)
     declared = any(spec.get("known_value") for spec in _metric_spec.declared(protocol))
     if unjudged and declared and not no_calibration:  # a search never uses a failed design: nothing it leaves out is analysed
