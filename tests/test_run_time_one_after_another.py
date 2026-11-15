@@ -145,11 +145,17 @@ def test_the_timed_delivered_run_decides_over(tmp_path: Path) -> None:
 
 def test_a_timed_run_of_other_code_or_one_that_stopped_is_not_read(tmp_path: Path) -> None:
     assert _both(tmp_path / "old", least=40.0, most=None, timed=18.3, same_code=False)[0] == NOT_SHOWN
-    assert _both(tmp_path / "fig", least=40.0, most=None, timed=18.3, status="ran_figures_failed")[0] == NOT_SHOWN
     assert _both(tmp_path / "late", least=40.0, most=None, timed=18.3, status="not_finished")[0] == NOT_SHOWN
     _quest(tmp_path / "none", wall=12.0, total=40.0, at_once=4)
     _timed(tmp_path / "none", None)  # an older record: the install and the run timed together
     assert _met(tmp_path / "none", 12.0)[0] == NOT_SHOWN
+
+
+def test_a_timed_run_that_drew_every_result_but_a_figure_decides(tmp_path: Path) -> None:
+    # The analysis records a figure it cannot draw and goes on; run.py then exits 1 after its last step. Five of five
+    # papers that said "not shown" in a live round had such a run, timed and then not read.
+    met, said, _sentence = _both(tmp_path / "fig", least=40.0, most=None, timed=18.3, status="ran_figures_failed")
+    assert met == "within" and "18.3 s" in said
 
 
 def test_over_when_the_least_it_can_take_is_over_the_limit(tmp_path: Path) -> None:

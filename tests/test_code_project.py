@@ -348,6 +348,10 @@ def test_verify_says_the_results_reproduced_when_only_a_figure_was_not_drawn(tmp
     assert result["ok"] is True and result["status"] == "ran_figures_failed", result
     assert "did NOT run" not in result["says"] and "reproduced the results" in result["says"]
     assert "`fig2` not drawn, as in the run" in result["says"]
+    # run.py ran to its end (the analysis records a figure it cannot draw and goes on): its time is a whole run and counts
+    root = tmp_path / "q"
+    assert isinstance(result.get("run_seconds"), float) and result["run_seconds"] >= 0
+    assert code_project.delivered_seconds(root) == result["run_seconds"]
 
 
 def test_verify_still_says_it_did_not_run_when_the_rerun_gave_no_results(tmp_path):
@@ -863,3 +867,92 @@ def test_verify_reports_pips_error_when_the_install_fails(tmp_path, monkeypatch)
     assert result["ok"] is False and result["status"] == "failed"
     assert "installing requirements.txt failed: ERROR: No matching distribution found for fi_table" in result["reason"]
     assert "notice" not in result["says"]
+
+
+def test_an_earlier_runs_analysis_record_does_not_make_a_stopped_run_look_whole(tmp_path):
+    # run.py stopped before the analysis (exit 1), and run_output still holds an earlier run's record of a figure not drawn:
+    # that record is not this run's, so the run failed and its time is not kept.
+    import os
+    import time as _time
+
+    root = _rerun_quest(tmp_path)
+    stale = root / "run_output" / "data" / "results" / "derived.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text(json.dumps({"schema": "fi.derived/v1", "derived": {"r1": {"role": "result", "status": "ok"}},
+                                 "figures": [{"id": "fig2", "status": "failed"}], "fi_faults": []}), encoding="utf-8")
+    old = _time.time() - 3600
+    os.utime(stale, (old, old))
+    (root / "code" / "run.py").write_text(
+        "import json, sys\nprint('RESULT_JSON: ' + json.dumps({'a': 1}))\nsys.exit(1)\n", encoding="utf-8")
+    result = code_project.verify(root)
+    assert result["status"] == "failed" and "run_seconds" not in result, result
+    assert code_project.delivered_seconds(root) is None
+
+
+def test_a_clean_run_with_fewer_trials_than_the_study_is_not_timed_as_a_whole_run(tmp_path):
+    # A setting that failed in the clean run (but not in the study's own) makes its time no whole run.
+    root = _rerun_quest(tmp_path)
+    cells = lambda ok: {"schema": "fi.trials/v1", "cells": [{"key": "a=1", "ok": ok, "failed": 10 - ok}]}  # noqa: E731
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps(cells(10)), encoding="utf-8")
+    run_py = (root / "code" / "run.py").read_text(encoding="utf-8")
+    write = ("import os\nos.makedirs('../run_output/raw', exist_ok=True)\n"
+             "open('../run_output/raw/trials.json', 'w').write(OKS)\n")
+    (root / "code" / "run.py").write_text(write.replace("OKS", repr(json.dumps(cells(4)))) + run_py, encoding="utf-8")
+    result = code_project.verify(root)
+    assert result["status"] == "ran_figures_failed" and "run_seconds" not in result, result
+    assert code_project.delivered_seconds(root) is None
+    # The same trials as the study's own: a whole run, timed.
+    (root / "code" / "run.py").write_text(write.replace("OKS", repr(json.dumps(cells(10)))) + run_py, encoding="utf-8")
+    result = code_project.verify(root)
+    assert isinstance(result.get("run_seconds"), float)
+    assert code_project.delivered_seconds(root) == result["run_seconds"]
+
+
+def test_records_an_earlier_clean_run_left_are_not_taken_for_this_runs(tmp_path):
+    # An earlier clean run's records, written moments ago, are removed before this run: one there after it is its own.
+    root = _rerun_quest(tmp_path)
+    record = root / "run_output" / "data" / "results" / "derived.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"schema": "fi.derived/v1", "derived": {"r1": {"role": "result", "status": "ok"}},
+                                  "figures": [{"id": "fig2", "status": "failed"}], "fi_faults": []}), encoding="utf-8")
+    trials = root / "run_output" / "raw" / "trials.json"
+    trials.parent.mkdir(parents=True)
+    trials.write_text(json.dumps({"cells": [{"key": "a=1", "ok": 0, "failed": 3}]}), encoding="utf-8")
+    run_py = (root / "code" / "run.py").read_text(encoding="utf-8")
+    (root / "code" / "run.py").write_text(
+        "import json, sys\nprint('RESULT_JSON: ' + json.dumps({'a': 1}))\nsys.exit(1)\n", encoding="utf-8")
+    result = code_project.verify(root)
+    assert result["status"] == "failed" and "run_seconds" not in result, result
+    # a whole run of a script that runs no trials of FI's runner is timed, whatever an earlier run left
+    trials.parent.mkdir(parents=True, exist_ok=True)
+    trials.write_text(json.dumps({"cells": [{"key": "a=1", "ok": 0, "failed": 3}]}), encoding="utf-8")
+    (root / "code" / "run.py").write_text(run_py, encoding="utf-8")
+    result = code_project.verify(root)
+    assert result["status"] == "ran_figures_failed" and isinstance(result.get("run_seconds"), float), result
+
+
+def test_a_clean_run_is_whole_only_with_the_studys_own_trials(tmp_path):
+    root = _rerun_quest(tmp_path)
+    own = {"cells": [{"key": "a=1", "ok": 4, "failed": 6}]}
+    (root / "raw").mkdir()
+    (root / "raw" / "trials.json").write_text(json.dumps(own), encoding="utf-8")
+    mine = root / "run_output" / "raw" / "trials.json"
+    mine.parent.mkdir(parents=True)
+
+    def whole(cells) -> bool:
+        if cells is None:
+            mine.unlink(missing_ok=True)
+        else:
+            mine.write_text(cells if isinstance(cells, str) else json.dumps({"cells": cells}), encoding="utf-8")
+        return code_project._whole_run(root, 0.0)
+
+    assert whole([{"key": "a=1", "ok": 4, "failed": 6}]), "as the study's own run came out: what a reader gets"
+    assert not whole([{"key": "a=1", "ok": 4, "failed": 7}]), "a failure the study's own run did not have"
+    assert not whole([{"key": "b=2", "ok": 10, "failed": 0}]), "not the study's setting"
+    assert not whole(None), "the study ran FI's trials; this run wrote none"
+    assert not whole([{"key": "a=1", "ok": "unknown", "failed": 0}]), "a count that is no number"
+    assert not whole("not json")
+    (root / "raw" / "trials.json").unlink()
+    assert whole(None), "no trials either side: taken as it ran"
+    assert not whole([{"key": "a=1", "ok": 9, "failed": 1}]), "no record of the study's own: none may fail"
