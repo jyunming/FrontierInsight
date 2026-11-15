@@ -1216,7 +1216,7 @@ def test_an_interval_end_the_plan_names_for_two_results_is_counted_for_neither()
         return {"true_value": "t", "estimate": est, "interval": list(ends), "level": 0.95}
 
     protocol = {"form": "contract", "constants": {"t": 1.0}, "grid": {"n": [1, 2]},
-                "metrics": [{"id": "a", "kind": "mean", "role": "result", "known_value": kv("a", ("lo", "a_hi"))},
+                "metrics": [{"id": "a", "kind": "mean", "role": "result", "known_value": kv("a", (" lo ", "a_hi"))},
                             {"id": "b", "kind": "mean", "role": "result", "known_value": kv("b", ("lo", "b_hi"))},
                             {"id": "c", "kind": "mean", "role": "result", "known_value": kv("c", ("c_lo", "c_hi"))}]}
     contract = ct.from_design({"protocol": protocol}, fi_analysis=True)

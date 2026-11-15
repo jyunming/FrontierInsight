@@ -320,12 +320,16 @@ def _shared_in(specs: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 def without_shared(kv: dict[str, Any], shared: dict[str, list[str]]) -> dict[str, Any]:
     """``kv`` (a metric's ``known_value``) with the standard error, variance or interval that names one of ``shared``
-    taken out (:func:`shared_uncertainty_names`): what is left is the estimate's own. The interval's multiplier
+    taken out (:func:`shared_uncertainty_names`): what is left is the estimate's own, for a check that pairs an
+    estimate with its uncertainty. The names the code is asked to return stay as the plan declares them. The interval's multiplier
     (``degrees_of_freedom``, ``scale``) describes the standard error and the interval together, so it goes with either."""
     if not shared or not isinstance(kv, dict):
         return kv
-    out = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and v in shared
-                                               or k == "interval" and any(e in shared for e in v or []))}
+    def named(v: Any) -> bool:
+        return isinstance(v, str) and v.strip() in shared
+
+    out = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and named(v)
+                                               or k == "interval" and isinstance(v, (list, tuple)) and any(map(named, v)))}
     if len(out) != len(kv) and not (out.get("standard_error") and out.get("interval")):
         out = {k: v for k, v in out.items() if k not in ("degrees_of_freedom", "scale")}
     return out
@@ -459,21 +463,15 @@ def result_forms(ident: str) -> tuple[str, ...]:
     return (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values")
 
 
-def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None, *,
-             keep_shared: bool = False) -> list[dict[str, Any]]:
+def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
     """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
     ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
     (:func:`shares_draws`, the same answer the trial seeds follow); otherwise their trials are independent and are not
-    joined. A ``known_value`` keeps only the standard error and interval that are its estimate's own
-    (:func:`without_shared`), unless ``keep_shared`` (the check that says what it left unchecked)."""
+    joined."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    clean = clean or []
-    names = {} if keep_shared else _shared_in(clean)
-    draws = shares_draws(protocol, quest_root)
-    return [{**spec, "paired": bool(spec.get("paired")) and draws,
-             **({"known_value": without_shared(spec["known_value"], names)} if names and spec.get("known_value") else {})}
-            for spec in clean]
+    shared = shares_draws(protocol, quest_root)
+    return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
 
 
 def _cluster_key(spec: dict[str, Any]) -> str | None:

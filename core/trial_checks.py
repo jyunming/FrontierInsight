@@ -965,7 +965,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     # What the plan fixes by name: its constants and thresholds (the true value of a study is among them).
     thresholds = _metric_spec.fixed_numbers(protocol, thresholds)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
-    known = [s for s in _metric_spec.declared(protocol, keep_shared=True) if s.get("known_value")]
+    known = [s for s in _metric_spec.declared(protocol) if s.get("known_value")]
     if not known:
         out.not_checked.append(NO_DECLARATION)
         return out
@@ -1112,9 +1112,10 @@ def reported_coverage_mismatches(cells: list[dict[str, Any]], protocol: dict[str
         return []
     walked = _metric_spec._walk(result_json)
     out: list[dict[str, Any]] = []
+    shared = _metric_spec.shared_uncertainty_names(protocol)  # an interval end several estimates share is none's own
     for spec in _metric_spec.declared(protocol):
-        kv = spec.get("known_value")
-        if not kv or spec["kind"] != "proportion":
+        kv = _metric_spec.without_shared(spec.get("known_value"), shared)
+        if not kv or spec["kind"] != "proportion" or not kv.get("interval"):
             continue
         ident = spec["id"]
         places: dict[tuple[str, ...], float] = {}

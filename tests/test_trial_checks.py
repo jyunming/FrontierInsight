@@ -202,18 +202,25 @@ def test_an_interval_the_plan_names_for_several_estimates_is_judged_for_none():
     proto["metrics"].append(cov)
     reported = {c["key"]: {"b_cover": 0.95} for c in cells}
     assert tc.reported_coverage_mismatches(cells, proto, reported, proto["thresholds"]) == []
-    assert all("interval" not in s["known_value"] for s in metric_spec.declared(proto))
-    assert metric_spec.declared(proto, keep_shared=True)[0]["known_value"]["interval"] == ["lo", "hi"]
+    # the declarations themselves keep every name: the code is still asked for them and may return them
+    assert metric_spec.declared(proto)[0]["known_value"]["interval"] == ["lo", "hi"]
+    assert "lo" in tc.truth_names(proto)
+
+    def own(p):
+        shared = metric_spec.shared_uncertainty_names(p)
+        return [metric_spec.without_shared(s["known_value"], shared) for s in metric_spec.declared(p)]
+
     # a standard error shared, beside an interval of the estimate's own: the own interval stays, its multiplier goes
     # (it describes the standard error and the interval together); a shared variance is dropped the same way
     se = _proto(known("a_hat", "a_true", se="s", interval=("a_lo", "a_hi"), df=4, ident="a"),
                 known("b_hat", "b_true", se="s", ident="b"), thresholds={"a_true": 5.0, "b_true": 9.0})
-    kv = metric_spec.declared(se)[0]["known_value"]
+    kv = own(se)[0]
     assert kv["interval"] == ["a_lo", "a_hi"] and "standard_error" not in kv and "degrees_of_freedom" not in kv
     var = _proto(known("a_hat", "a_true", var="v", ident="a"), known("b_hat", "b_true", var="v", interval=("b_lo", "b_hi"),
                                                                     ident="b"), thresholds={"a_true": 5.0, "b_true": 9.0})
-    assert [s["known_value"].get("variance") for s in metric_spec.declared(var)] == [None, None]
-    assert metric_spec.declared(var)[1]["known_value"]["interval"] == ["b_lo", "b_hi"]
+    assert [k.get("variance") for k in own(var)] == [None, None] and own(var)[1]["interval"] == ["b_lo", "b_hi"]
+    # a name written with spaces around it is the same name
+    assert metric_spec.without_shared({"estimate": "a", "interval": [" lo ", "a_hi"]}, {"lo": ["a", "b"]}) == {"estimate": "a"}
 
 
 def test_a_failed_setting_is_not_left_out_on_the_strength_of_an_estimates_bias_alone():
