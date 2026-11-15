@@ -30,6 +30,17 @@ from .engine_base import (  # noqa: F401
 class ReviewStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
+    def _supplement_for_review(self) -> str:
+        """``paper/supplement.md`` as the reviewer is shown it after the paper, or ``""`` when there is none."""
+        from . import supplement as _supplement
+
+        try:
+            text = (self.quest_root / _supplement.FILE).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return ""
+        return ("\n\n---\n\nThe supplement that ships with this paper (FI moved these parts out of the paper, "
+                "unchanged, for its page limit):\n\n" + text + "\n") if text else ""
+
     async def _node_review(self, state: QuestState) -> QuestState:
         """Single-reviewer (default) OR panel-mode review.
 
@@ -52,11 +63,12 @@ class ReviewStageMixin:
         checked = Path(paper_path).read_bytes() if paper_path and Path(paper_path).is_file() else None
         page_record = await self._page_limit_review(state, paper_path)
         if checked is not None and Path(paper_path).is_file() and Path(paper_path).read_bytes() != checked:
-            # The fit only takes Further reading entries or whole sentences out of the draft the claim check judged,
+            # The fit only moves FI's own parts to the supplement or takes whole sentences out of the draft the claim
+            # check judged,
             # and the claims of a sentence taken out leave its grounding with it (the review reads the grounding of
             # the paper it reads): no claim is added and none loses its source, so the verdict covers what is left.
             _receipts.carry_over(self.quest_root, "claim_check", "paper", checked, Path(paper_path).read_bytes(),
-                                 "the page-limit fit only took entries or sentences out of the checked draft")
+                                 "the page-limit fit only moved FI's own parts out or took sentences out of the checked draft")
         # Read after that: it may have dropped Further reading entries from the
         # file, and the review reads the paper as it now is.
         paper_md = ""
@@ -95,7 +107,9 @@ class ReviewStageMixin:
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
-            paper_md=_paper_for_prompt(review_marked, "review", self._log),
+            # FI's own parts a paper over its page limit moved to the supplement are shown after it, so a one-line
+            # Limitations is not read as a paper that hides its limits.
+            paper_md=_paper_for_prompt(review_marked + self._supplement_for_review(), "review", self._log),
         )
 
         panel_names = list(self.config.engine.review_panel or [])

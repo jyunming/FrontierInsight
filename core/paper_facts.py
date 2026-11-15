@@ -58,6 +58,7 @@ from . import figure_claims as _claims
 from . import figure_facts as _figures
 from . import frozen_protocol as _frozen
 from . import math_safe_cut as _math_safe
+from . import supplement as _supplement
 from . import paper_values as _values
 from . import run_facts as _run_facts
 from . import run_manifest as _run_manifest
@@ -2010,9 +2011,19 @@ def without_marks(markdown: str) -> str:
     return _TAG.sub("", _values.without_marks(markdown or ""))
 
 
-def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "") -> str:
+def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "",
+               full: bool = False) -> str:
     """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
-    FI's records, :func:`run_facts_text`); ``""`` when there is none."""
+    FI's records, :func:`run_facts_text`); ``""`` when there is none. A block a paper over its page limit sent to the
+    supplement (core/supplement.py) is its pointer there, unless ``full`` (what the supplement holds)."""
+    if not full and name in (_supplement.TABLES, _supplement.LIMITATIONS) and name in _supplement.moved(quest_root):
+        if not block_text(quest_root, name, full=True):
+            return ""
+        if name == _supplement.TABLES:
+            return _supplement.table_pointer()
+        items = [i for i in required_items(quest_root) if i.kind != CODE_FINDING]
+        return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
+                                               discussion=bool(_supplement.writer_text(quest_root)))
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":
@@ -2213,13 +2224,23 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
 
 
 def page_limit_text(quest_root: Path | str) -> str:
-    """The sentence for the quality report when the finished paper is longer than the topic's page limit, else ``""``. The
-    limit is a guideline: the paper does not carry this sentence (QUALITY.md and run.log do)."""
+    """The sentence for the quality report when the finished paper is longer than the topic's page limit, and the one
+    that says which of FI's own parts it moved to the supplement for that limit (core/supplement.py); ``""`` with
+    neither. The limit is a guideline: the paper does not carry this sentence (QUALITY.md and run.log do)."""
     pages = _read(Path(quest_root), str(PAGE_RECORD))
+    over = ""
     if (isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)
             and isinstance(pages.get("limit"), int) and pages["pages"] > pages["limit"]):
-        return _sentence(f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it")
-    return ""
+        over = _sentence(f"This paper is {pages['pages']} pages, over the {pages['limit']}-page limit set for it")
+    moved = _supplement.moved(quest_root)
+    if not moved or not (Path(quest_root) / _supplement.FILE).is_file():
+        return over
+    names = {_supplement.TABLES: "its tables of every setting", _supplement.LIMITATIONS: "its Limitations (one line "
+             "stays in the paper)", _supplement.FURTHER_READING: "its Further reading"}
+    listed = [names[m] for m in moved]
+    said = listed[0] if len(listed) == 1 else ", ".join(listed[:-1]) + " and " + listed[-1]
+    return " ".join(s for s in (over, _sentence(f"For the page limit, FI moved {said} to the supplement, "
+                                                f"`{_supplement.SHOWN}`, unchanged")) if s)
 
 
 def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: bool) -> None:
@@ -2752,6 +2773,10 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
         # FI writes the Limitations block itself: an item is missing from the paper only when the block is not in it (an
         # open problem in the code is never in the block, it is in QUALITY.md only)
         in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
+        # what the paper states, with the Limitations it sent to the supplement (core/supplement.py)
+        # (FI's list, and the paper's own paragraphs of that section that went with it)
+        stated = (paper_md or "") + ("\n" + limitations_text(quest_root) + "\n" + _supplement.writer_text(quest_root)
+                                     if _supplement.LIMITATIONS in _supplement.moved(quest_root) else "")
         # an open problem in the code is met when the paper carries FI's sentence for it (:func:`touched_sentences`)
         said = touched_sentences(quest_root, paper_md)
         block = chr(10).join(m.group(2) for m in _MARK.finditer(paper_md or "") if m.group(1) == "run_facts")
@@ -2760,12 +2785,12 @@ def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untrac
                   **({"named": i.key in said} if i.kind == CODE_FINDING else {})}
                  for i in required_items(quest_root)
                  if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in block)
-                 or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in paper_md)]
+                 or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in stated)]
         # The statements taken out just now are not in the kept record yet: one item per figure, never per sentence.
         have = {u["id"] for u in unmet}
         for stem, number in _figure_left_out_items(dropped):
             ident = f"{_ID_PREFIX[FIGURE_LEFT_OUT]}-{_slug(stem)}"
-            if ident not in have and figure_left_out_sentence(number) not in paper_md:
+            if ident not in have and figure_left_out_sentence(number) not in stated:
                 unmet.append({"kind": FIGURE_LEFT_OUT, "id": ident, "name": f"figure {number} statements",
                               "text": figure_left_out_sentence(number)})
         unfilled = unfilled_in(paper_md)

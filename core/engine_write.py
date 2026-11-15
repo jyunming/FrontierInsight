@@ -34,6 +34,33 @@ from .engine_base import (  # noqa: F401
 )
 
 
+from . import supplement as _supplement
+
+
+_FURTHER_LABEL = re.compile(r"^\s*[-*]\s*\[(W\d+)\]")
+
+
+def _further_label(line: str) -> str:
+    """The label (``"W3"``) a Further reading entry line lists; ``""`` for any other line."""
+    m = _FURTHER_LABEL.match(line)
+    return m.group(1) if m else ""
+
+
+def _with_further_lines(text: str, lines: str) -> str:
+    """``text`` with the Further reading entries ``lines`` listed again: the section is added after the References when
+    the paper has none; a paper that lists some of its own again keeps them and gets the others back after them."""
+    block = _further_reading_block(text)
+    if block is None:
+        return text.rstrip() + "\n\n## Further reading\n\n" + lines.strip() + "\n"
+    missing = [ln for ln in lines.split("\n") if ln.strip() and _further_label(ln) not in set(block.labels)]
+    if not missing:
+        return text
+    entries = [block.lines[i] for i in block.entries]
+    tail = text[block.end:]
+    section = "## Further reading\n\n" + "\n".join([*entries, *missing]) + ("\n\n" if tail.strip() else "\n")
+    return text[:block.start] + section + tail.lstrip("\n")
+
+
 class WriteStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -311,12 +338,14 @@ class WriteStageMixin:
                 self._log.warning("[write] %s", v.hit.text())
         return out.text
 
-    def _restate_limitations(self, state: QuestState, why: str, *, strict: bool = False) -> bool:
+    def _restate_limitations(self, state: QuestState, why: str, *, strict: bool = False,
+                             path: Path | None = None) -> bool:
         """The paper's Limitations are FI's block (``{{limitations}}``, core/paper_facts.py), written from its records as
         they are now: called after a step that changed one of them, so the paper that is delivered says what the records
         say. FI's own text and no claim of its own, so the claim check's and the citation check's receipts move to the
-        paper that carries it (``why`` is the reason they keep). No model call; best-effort. Returns whether the paper changed."""
-        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        paper that carries it (``why`` is the reason they keep). No model call; best-effort. Returns whether the paper changed.
+        ``path``: the paper to write, when it is not the state's (the page check is given its draft's path)."""
+        path = path or _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         if not path or not Path(path).is_file():
             return False
         try:
@@ -326,6 +355,9 @@ class WriteStageMixin:
                                           topic=str(self.config.topic or ""),
                                           fallback_s=(state.get("exec_result") or {}).get("duration_s"),
                                           limitations_heading=self._limitations_heading(state)), state)
+            if _supplement.read(self.quest_root):
+                # the supplement says what the records say now, as the pointer in the paper does
+                self._write_supplement(state, _supplement.read(self.quest_root).get("limit"))
             if after == before:
                 return False
             checked = Path(path).read_bytes()
@@ -595,6 +627,11 @@ class WriteStageMixin:
 
     async def _node_write(self, state: QuestState) -> QuestState:
         await self._check_code_project()
+        # A rewrite reads the paper on disk: what the page check moved to the supplement comes back first, so the writer
+        # is given its own Limitations paragraphs and FI's parts as they were, and the next review decides again.
+        earlier = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if earlier and Path(earlier).is_file():
+            self._supplement_reset(state, Path(earlier))
         persona_block = self._resolve_write_persona(state)
         self._log.info(
             "[write] authoring paper.md (persona=%s)",
@@ -1565,12 +1602,27 @@ class WriteStageMixin:
         limit = resolve_page_limit(self.config)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         if limit is not None and paper_path and Path(paper_path).is_file():
-            measured = await self._measure_draft_pages(Path(paper_path), {**state, **out})  # type: ignore[arg-type]
+            now: QuestState = {**state, **out}  # type: ignore[assignment]
+            # The supplement holds what the records say now (the Limitations were just written again); one that cannot
+            # be written is no place to point to, so what moved comes back into the paper.
+            if _supplement.read(self.quest_root) and not self._write_supplement(now, limit):
+                self._supplement_reset(now, Path(paper_path))
+            measured = await self._measure_draft_pages(Path(paper_path), now)
             if measured is not None and int(measured["pages"]) > limit:
-                pages = await self._state_page_overrun({**state, **out}, Path(paper_path), limit,  # type: ignore[arg-type]
-                                                       int(measured["pages"]))
+                fitted = await self._fit_with_supplement(now, Path(paper_path), limit, measured)
+                if fitted is not None:
+                    self._log.warning("[page_limit] the paper as delivered rendered to %d pages, over the limit of %d: FI "
+                                      "moved its own %s to the supplement; it now renders to %d pages",
+                                      int(measured["pages"]), limit, ", ".join(_supplement.NAMES[m] for m in fitted[1]),
+                                      int(fitted[0]["pages"]))
+                    measured = fitted[0]
+            if measured is not None and int(measured["pages"]) > limit:
+                pages = await self._state_page_overrun(now, Path(paper_path), limit, int(measured["pages"]))
                 self._log.warning("[page_limit] the paper as delivered renders to %d pages, over the limit of %d: "
                                   "QUALITY.md says so", pages, limit)
+            elif measured is not None:
+                # Within the limit (after a move, or as it was): no earlier measurement over it speaks for this paper.
+                (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         return out
 
     async def _check_citations(self, state: QuestState) -> QuestState:
@@ -2841,72 +2893,170 @@ class WriteStageMixin:
             )
         return None
 
-    async def _drop_further_reading_to_fit(
-        self, state: QuestState, paper_path: Path, limit: int,
-    ) -> tuple[dict[str, Any], list[str], int] | None:
-        """Bring a draft that is over the page limit within it by dropping
-        entries from the end of its Further reading, when that alone does it.
+    def _supplement_can_move(self, part: str, text: str) -> bool:
+        """Whether FI's own ``part`` (core/supplement.py ``ORDER``) is in the paper ``text`` with something to move: its
+        tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
+        text cites none of its pages (a citation would name nothing in the paper)."""
+        if part == _supplement.FURTHER_READING:
+            block = _further_reading_block(text)
+            return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
+        if f"<!-- fi:fact-{part} -->" not in text:
+            return False
+        if part == _supplement.LIMITATIONS:
+            return bool(_paper_facts.limitations_text(self.quest_root))
+        return bool(_paper_facts.block_text(self.quest_root, part, full=True))
 
-        FI writes that list itself and sets it after the body, so on a paper
-        cut to the limit it is what spills onto one page more: a real quest
-        (limit 4) ended on 5 pages, page 5 holding two entries of it, and the
-        whole-paper rewrites that followed changed a correct citation and added
-        unsupported ones. The body is not touched here and no model is called.
+    def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
+        """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
+        tables and the Limitations as FI would have put them in the paper, the Further reading as it was listed. No model
+        call. Returns ``False`` only when the file could not be written."""
+        root = self.quest_root
+        moved = _supplement.moved(root)
+        parts: dict[str, str] = {}
+        if _supplement.TABLES in moved:
+            parts[_supplement.TABLES] = _paper_facts.block_text(root, _supplement.TABLES, full=True)
+        if _supplement.LIMITATIONS in moved:
+            # the paper's own paragraphs of its Limitations section first, as they stood there, then FI's list
+            parts[_supplement.LIMITATIONS] = (_supplement.writer_text(root) + "\n\n"
+                                              + _paper_facts.limitations_text(root)).strip()
+        if _supplement.FURTHER_READING in moved:
+            parts[_supplement.FURTHER_READING] = _supplement.further_text(root)
+        try:
+            _supplement.write(root, limit, {k: _paper_facts.without_marks(v) for k, v in parts.items()})
+            return True
+        except OSError as e:
+            self._log.warning("[page_limit] the supplement could not be written (%s)", e)
+            return False
 
-        First the draft is rendered with as many entries removed as may go (an
-        entry the text cites is never one of them, since the citation would then
-        name nothing); if it is still over, the body is what is too long and
-        nothing is changed. Otherwise one more entry is put back at a time,
-        rendering each time, and the first draft that fits is written over
-        ``paper_path``. That is one render per entry at most, each the render
-        the page check makes. Returns the measurement of the draft written, the
-        labels dropped and how many entries there were, or ``None`` when
-        nothing was dropped."""
+    def _supplement_reset(self, state: QuestState, paper_path: Path) -> bool:
+        """A new draft is measured with all of FI's parts in it: what an earlier draft sent to the supplement comes back
+        (FI's blocks written in full again, the Further reading lines put back after the References, the paper's own
+        Limitations paragraphs put back under that heading when the section holds none of the writer's prose: a draft
+        that wrote its own does not get the old ones too) and the record and the file go. Returns whether the paper
+        changed."""
+        root = self.quest_root
+        if not _supplement.read(root):
+            return False
+        lines = _supplement.further_text(root)
+        section = _supplement.writer_section(root)
+        changed = False
+        try:
+            text = new = paper_path.read_text(encoding="utf-8")
+            if section is not None:
+                back = _supplement.put_back_writer_limitations(new, *section)
+                if back is None:
+                    self._log.info("[page_limit] the draft's Limitations section is not the one FI moved paragraphs "
+                                   "from, so they are not put back into it; the draft is measured as written")
+                else:
+                    new = back
+            if lines:
+                new = _with_further_lines(new, lines)
+            if new != text:
+                before = paper_path.read_bytes()
+                paper_path.write_text(new, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                         "FI put back what it had moved to the supplement, unchanged, and added no claim")
+                changed = True
+        except (OSError, UnicodeDecodeError) as e:
+            # the record stays: what moved is still in the supplement, and the next page check tries again
+            self._log.warning("[page_limit] what moved to the supplement could not be put back (%s)", e)
+            return False
+        held = {f: (f.read_bytes() if f.is_file() else None) for f in (root / _supplement.RECORD, root / _supplement.FILE)}
+        _supplement.save(root, [], limit=0)
+        try:
+            return self._restate_limitations(state, "FI wrote its own blocks in full again and added no claim",
+                                             path=paper_path, strict=True) or changed
+        except (OSError, UnicodeDecodeError) as e:
+            # the paper still holds FI's pointers: the record and the supplement they point to stay
+            self._restore_files(held)
+            self._log.warning("[page_limit] FI's blocks could not be written in full again (%s); what moved stays in "
+                              "the supplement", e)
+            return changed
+
+    async def _fit_with_supplement(
+        self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]] | None:
+        """Bring a paper over the page limit toward it by moving FI's own parts to the supplement, in a fixed order and
+        without a model call (core/supplement.py): its tables of every setting, then its Limitations (one line stays:
+        how many things FI recorded, each part of the topic the study did not do by name, and where they are; the
+        paper's own paragraphs of that section go with it, except a figure, a table or a paragraph that cites a
+        source), then its Further reading. The References stay. After each part the paper is rendered again, and the move stops as soon
+        as it fits; a paper still over with all of them moved keeps them moved (it is shorter, and the sentence trim
+        that may follow has less to take). What moved goes into ``paper/supplement.md`` unchanged.
+
+        On 16 stored papers (limit 4, all over it, mean 6.9 pages) FI's own parts alone gave mean 4.9 pages and 4 of
+        16 within the limit; with the writer's Limitations paragraphs too, mean 4.75 and 6 of 16.
+
+        Returns the measurement after the move and the parts moved by this call, or ``None`` when nothing moved. A
+        render that cannot be counted puts the paper, the record and the supplement back as they were."""
+        root = self.quest_root
         try:
             text = paper_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return None
-        block = _further_reading_block(text)
-        if block is None:
-            return None
-        cited = _web_labels_cited(text)
-        droppable = 0
-        for label in reversed(block.labels):
-            if label in cited:
+        keep = {f: (f.read_bytes() if f.is_file() else None)
+                for f in (paper_path, root / _supplement.RECORD, root / _supplement.FILE,
+                          _receipts.path(root, "claim_check"), _receipts.path(root, "citation_check"))}
+        parts = _supplement.moved(root)
+        newly: list[str] = []
+        for part in _supplement.ORDER:
+            if int(measured["pages"]) <= limit:
                 break
-            droppable += 1
-        if not droppable:
-            return None
-        n_entries = len(block.labels)
-        trial = self.fi_dir / "page_check_trial.md"
-        self.fi_dir.mkdir(parents=True, exist_ok=True)
-
-        async def render(keep: int) -> dict[str, Any] | None:
-            trial.write_text(_trim_further_reading(text, keep), encoding="utf-8")
-            return await self._measure_draft_pages(trial, state)
-
-        try:
-            fewest = n_entries - droppable
-            found = await render(fewest)
-            if found is None or int(found["pages"]) > limit:
-                self._log.info(
-                    "[page_limit] the draft is still over the limit of %d with its Further reading "
-                    "%s, so the body is what is too long; the list is left as written",
-                    limit, "removed" if not fewest else f"cut to its first {fewest} entries",
-                )
+            if not self._supplement_can_move(part, text):
+                continue
+            if part in parts and part != _supplement.FURTHER_READING:
+                continue  # FI writes its moved blocks as their pointer; a Further reading list can come back (below)
+            if part not in parts:
+                parts.append(part)
+            newly.append(part)
+            if part == _supplement.FURTHER_READING:
+                # with a list moved before (the citation check's renumbering can start a new one), the two are one list
+                block = _further_reading_block(text)
+                entries = "\n".join(block.lines[i] for i in block.entries) if block else ""
+                new_labels = list(block.labels) if block else []
+                old = [ln for ln in _supplement.further_text(root).split("\n")
+                       if ln.strip() and _further_label(ln) not in new_labels]  # the list in the paper now is current
+                labels = [*[x for x in _supplement.further_labels(root) if x not in new_labels], *new_labels]
+                _supplement.save(root, parts, limit=limit, further=labels,
+                                 further_lines="\n".join([*old, *([entries] if entries.strip() else [])]),
+                                 writer=_supplement.writer_text(root), section=_supplement.writer_section(root))
+                before = paper_path.read_bytes()
+                paper_path.write_text(_trim_further_reading(text, 0), encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                         "FI moved its own Further reading list to the supplement and added no claim")
+            else:
+                writer, section = _supplement.writer_text(root), _supplement.writer_section(root)
+                if part == _supplement.LIMITATIONS:
+                    left, taken = _supplement.take_writer_limitations(text)
+                    if taken:
+                        section = (_supplement.section_body(text) or "", _supplement.section_body(left) or "")
+                        before = paper_path.read_bytes()
+                        paper_path.write_text(left, encoding="utf-8")
+                        for check in ("claim_check", "citation_check"):
+                            _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                                 "FI moved the paper's own Limitations paragraphs to the supplement "
+                                                 "unchanged and added no claim")
+                        writer = taken
+                _supplement.save(root, parts, limit=limit, further=_supplement.further_labels(root),
+                                 further_lines=_supplement.further_text(root), writer=writer, section=section)
+                self._restate_limitations(state, "FI moved one of its own blocks to the supplement and added no claim",
+                                          path=paper_path)
+            text = paper_path.read_text(encoding="utf-8")
+            found = await self._measure_draft_pages(paper_path, state)
+            if found is None:
+                self._restore_files(keep)
+                self._log.warning("[page_limit] the paper could not be measured after FI moved its %s to the "
+                                  "supplement; it is left as it was", _supplement.NAMES[part])
                 return None
-            keep = fewest
-            for more in range(n_entries - 1, fewest, -1):
-                measured = await render(more)
-                if measured is None:
-                    return None
-                if int(measured["pages"]) <= limit:
-                    keep, found = more, measured
-                    break
-        finally:
-            trial.unlink(missing_ok=True)
-        paper_path.write_text(_trim_further_reading(text, keep), encoding="utf-8")
-        return found, block.labels[keep:], n_entries
+            measured = found
+        if not newly:
+            return None
+        if not self._write_supplement(state, limit):
+            self._restore_files(keep)  # the paper cannot point to a supplement that is not there
+            return None
+        return measured, newly
 
     async def _trim_body_to_fit(
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
@@ -3149,32 +3299,33 @@ class WriteStageMixin:
         """The page-limit part of the review: the record for ``review["page_limit"]``.
         Without a page limit nothing is rendered and the record is empty, as it is
         when the draft cannot be measured. The limit is a guideline: a draft over it
-        is never sent back to be shortened. Its Further reading list loses its last
-        entries (:meth:`_drop_further_reading_to_fit`), then a few sentences of
+        is never sent back to be shortened. FI's own parts go to the supplement
+        (:meth:`_fit_with_supplement`), then a few sentences of
         background and discussion are taken out (:meth:`_trim_body_to_fit`), and what is
         still over goes on record for the quality report and the log."""
         limit = resolve_page_limit(self.config)
         if limit is None or not paper_path or not Path(paper_path).is_file():
             return None
+        # A new draft is measured with all of FI's own parts in it: what an earlier draft sent to the supplement is
+        # decided again.
+        self._supplement_reset(state, Path(paper_path))
         measured = await self._measure_draft_pages(Path(paper_path), state)
         if measured is None:
             return None
         pages = int(measured["pages"])
         record: dict[str, Any] = {"pages": pages, "limit": limit}
         if pages > limit:
-            # The engine's own Further reading may be all that is over. Dropping
-            # its last entries costs no model call and no rewrite of the body.
-            fitted = await self._drop_further_reading_to_fit(state, Path(paper_path), limit)
+            # FI's own parts go to the supplement first, in a fixed order: no model call and no rewrite of the body.
+            fitted = await self._fit_with_supplement(state, Path(paper_path), limit, measured)
             if fitted is not None:
-                before, (measured, dropped, n_entries) = pages, fitted
+                before, (measured, moved) = pages, fitted
                 pages = int(measured["pages"])
                 record["pages"] = pages
-                record["further_reading_dropped"] = dropped
+                record["supplement"] = moved
                 self._log.warning(
-                    "[page_limit] the draft renders to %d pages, over the limit of %d, and only its "
-                    "Further reading was over: dropped %d of its %d entries from the end (%s); it now "
-                    "renders to %d pages",
-                    before, limit, len(dropped), n_entries, ", ".join(f"[{w}]" for w in dropped), pages,
+                    "[page_limit] the draft renders to %d pages, over the limit of %d: FI moved its own %s to the "
+                    "supplement (paper/supplement.md); it now renders to %d pages",
+                    before, limit, ", ".join(_supplement.NAMES[m] for m in moved), pages,
                 )
         if pages > limit:
             # Then the body: a few sentences of background and discussion out, no
