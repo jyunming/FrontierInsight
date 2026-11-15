@@ -974,8 +974,17 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     if not returned:
         out.not_checked.append("no setting has trials to judge, so the calibration was not checked")
         return out
+    shared = _metric_spec.shared_uncertainty_names(protocol)
     for spec in known:
         kv, ident = spec["known_value"], spec["id"]
+        if gone := [n for n in [kv.get("standard_error"), kv.get("variance"), *(kv.get("interval") or [])] if n in shared]:
+            # A name the plan gives to several estimates' uncertainty belongs to at most one of them, and the plan does not
+            # say which: it is judged for none (the estimate itself still is), and nothing is held back on it.
+            kv = _metric_spec.without_shared(kv, shared)
+            for name in dict.fromkeys(gone):
+                out.not_checked.append(f"`{name}` ({ident}): the plan names it as the uncertainty of "
+                                       + ", ".join(f"`{e}`" for e in shared[name])
+                                       + ", so FI cannot tell whose it is, and did not check it")
         truth, level, est = kv["true_value"], kv["level"], kv["estimate"]
         df = kv.get("degrees_of_freedom")
         if df is not None and all(n in returned for n in [kv["standard_error"], *kv["interval"]]):
@@ -1103,9 +1112,10 @@ def reported_coverage_mismatches(cells: list[dict[str, Any]], protocol: dict[str
         return []
     walked = _metric_spec._walk(result_json)
     out: list[dict[str, Any]] = []
+    shared = _metric_spec.shared_uncertainty_names(protocol)  # an interval end several estimates share is none's own
     for spec in _metric_spec.declared(protocol):
-        kv = spec.get("known_value")
-        if not kv or spec["kind"] != "proportion":
+        kv = _metric_spec.without_shared(spec.get("known_value"), shared)
+        if not kv or spec["kind"] != "proportion" or not kv.get("interval"):
             continue
         ident = spec["id"]
         places: dict[tuple[str, ...], float] = {}
@@ -1272,7 +1282,11 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     # did not crash. Without a declared truth there is nothing to judge the rest against, and the settings are left out
     # (and said in the paper); only more than half of them left out stops the quest (above).
     remaining = {f.key for f in run if f.key not in keys}
-    judged = {s.key for q in cal.quantities for s in q.settings}
+    # An estimate whose declared error FI set aside (a name the plan gives several estimates) has only its bias judged:
+    # that bias alone does not show its settings sound.
+    aside = {e for ests in _metric_spec.shared_uncertainty_names(protocol).values() for e in ests}
+    judged = {s.key for q in cal.quantities if not (q.kind in ("bias", "no_estimate") and q.label in aside)
+              for s in q.settings}
     unjudged = sorted(remaining - judged)
     declared = any(spec.get("known_value") for spec in _metric_spec.declared(protocol))
     if unjudged and declared and not no_calibration:  # a search never uses a failed design: nothing it leaves out is analysed

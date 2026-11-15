@@ -156,8 +156,9 @@ def _known_values(protocol: dict[str, Any], c: Any) -> dict[str, dict[str, Any]]
     inside = _contract.search_in_each_run(protocol) or protocol.get("in_each_run")
     axes = {str(k) for part in (grid, inside) if isinstance(part, dict) for k in part}
     out = {}
+    shared = _metric_spec.shared_uncertainty_names(protocol)  # an interval end several results share is none's own
     for r in c.results:
-        kv = r.known_value if isinstance(r.known_value, dict) else {}
+        kv = _metric_spec.without_shared(r.known_value, shared) if isinstance(r.known_value, dict) else {}
         ends, truth = kv.get("interval"), kv.get("true_value")
         number = _metric_spec.fixed_value(truth, fixed)
         if isinstance(ends, (list, tuple)) and len(ends) == 2 and (number is not None or truth in axes):

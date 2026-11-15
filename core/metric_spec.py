@@ -292,14 +292,61 @@ def fixed_value(truth: Any, fixed: dict[str, float]) -> float | None:
     return oracle_forms.evaluate(truth, fixed).value
 
 
+def shared_uncertainty_names(protocol: dict[str, Any] | None) -> dict[str, list[str]]:
+    """The names the protocol's ``known_value`` declarations give to the standard error, variance or interval ends of more
+    than one estimate: name -> those estimates, in the declared order. run_trial returns one value under a name, so it
+    belongs to at most one of them, and the plan does not say which: FI judges none of them against it."""
+    items = protocol.get("metrics") if isinstance(protocol, dict) else None
+    # Read from the entries as written, not only from a list that passes as a whole: a draft (or a contract built from it)
+    # whose other entries are still incomplete reads the same names.
+    specs = [{"known_value": {k: (v.strip() if isinstance(v, str) else [e.strip() for e in v if isinstance(e, str)]
+                                  if isinstance(v, (list, tuple)) else v) for k, v in m["known_value"].items()}}
+             for m in (items if isinstance(items, list) else []) if isinstance(m, dict) and isinstance(m.get("known_value"), dict)]
+    return _shared_in(specs)
+
+
+def _shared_in(specs: list[dict[str, Any]]) -> dict[str, list[str]]:
+    users: dict[str, list[str]] = {}
+    for spec in specs:
+        kv = spec.get("known_value") or {}
+        est = kv.get("estimate")
+        if not est:
+            continue
+        for name in [kv.get("standard_error"), kv.get("variance"), *(kv.get("interval") or [])]:
+            if name and est not in users.setdefault(name, []):
+                users[name].append(est)
+    return {name: ests for name, ests in users.items() if len(ests) > 1}
+
+
+def without_shared(kv: dict[str, Any], shared: dict[str, list[str]]) -> dict[str, Any]:
+    """``kv`` (a metric's ``known_value``) with the standard error, variance or interval that names one of ``shared``
+    taken out (:func:`shared_uncertainty_names`): what is left is the estimate's own, for a check that pairs an
+    estimate with its uncertainty. The names the code is asked to return stay as the plan declares them. The interval's multiplier
+    (``degrees_of_freedom``, ``scale``) describes the standard error and the interval together, so it goes with either."""
+    if not shared or not isinstance(kv, dict):
+        return kv
+    def named(v: Any) -> bool:
+        return isinstance(v, str) and v.strip() in shared
+
+    out = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and named(v)
+                                               or k == "interval" and isinstance(v, (list, tuple)) and any(map(named, v)))}
+    if len(out) != len(kv) and not (out.get("standard_error") and out.get("interval")):
+        out = {k: v for k, v in out.items() if k not in ("degrees_of_freedom", "scale")}
+    return out
+
+
 def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     """A declared true value that is neither a number, nor a threshold, a constant or a grid parameter of the protocol, nor
-    a formula of the numbers it fixes, one sentence each."""
+    a formula of the numbers it fixes, and a standard error or interval named for more than one estimate
+    (:func:`shared_uncertainty_names`), one sentence each."""
     if not isinstance(protocol, dict):
         return []
+    out = [f"The metrics give the same name `{name}` to the uncertainty of " + ", ".join(f"`{e}`" for e in ests)
+           + "; run_trial returns one value under a name, so FI cannot tell whose it is and checks none of them against "
+             "it. Give each estimate its own name for its standard error (and for its interval's ends), and return each."
+           for name, ests in shared_uncertainty_names(protocol).items()]
     fixed = fixed_numbers(protocol)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
-    out = []
     for spec in declared(protocol):
         df = (spec.get("known_value") or {}).get("degrees_of_freedom")
         if isinstance(df, dict):

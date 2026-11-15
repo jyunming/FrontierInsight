@@ -1204,3 +1204,20 @@ def test_a_true_value_along_a_setting_of_a_searchs_scan_is_carried() -> None:
     contract = ct.from_design({"protocol": protocol}, fi_analysis=True)
     assert af._known_values(protocol, contract) == {"peak": {"interval": ["p_lo", "p_hi"], "axis": "speed"},
                                                     "flat": {"interval": ["p_lo", "p_hi"], "axis": "mode"}}
+
+
+def test_an_interval_end_the_plan_names_for_two_results_is_counted_for_neither() -> None:
+    """Two results declare intervals sharing the end `lo`; run_trial returns one value under it, so a coverage FI counted
+    from it for either would pair one result's estimate with another's interval. Neither is counted; a result whose
+    interval is its own still is."""
+    from core import contract as ct
+
+    def kv(est, ends):
+        return {"true_value": "t", "estimate": est, "interval": list(ends), "level": 0.95}
+
+    protocol = {"form": "contract", "constants": {"t": 1.0}, "grid": {"n": [1, 2]},
+                "metrics": [{"id": "a", "kind": "mean", "role": "result", "known_value": kv("a", (" lo ", "a_hi"))},
+                            {"id": "b", "kind": "mean", "role": "result", "known_value": kv("b", ("lo", "b_hi"))},
+                            {"id": "c", "kind": "mean", "role": "result", "known_value": kv("c", ("c_lo", "c_hi"))}]}
+    contract = ct.from_design({"protocol": protocol}, fi_analysis=True)
+    assert af._known_values(protocol, contract) == {"c": {"interval": ["c_lo", "c_hi"], "truth": 1.0}}
