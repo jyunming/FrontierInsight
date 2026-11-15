@@ -431,7 +431,9 @@ def _answers_prompt(templates: dict[str, string.Template], design: dict[str, Any
                 if isinstance(m, dict) and m.get("physical_unit") is not None}
     lines = [f"{x} [{declared[x[2:].split(':')[0]]}]" if x[2:].split(":")[0] in declared else x for x in lines]
     quantities = "\n".join(f"- {i}: {q['name']}" + (f" (the topic: {_short(q['stated'], 200)})" if q["stated"] else "")
-                           + (f" [the plan maps it to `{q['by']}`]" if q.get("by") else "") for i, q in asked.items())
+                           + (f" [the plan maps it to `{q['by']}`]" if q.get("by") else "")
+                           + (f" (the plan gives it the same number as {', '.join(q['shared'])})" if q.get("shared") else "")
+                           for i, q in asked.items())
     settings = "\n".join(f"- {a}: {json.dumps(v)}" for a, v in _topic_req.view(design, design["protocol"])["axes"].items())
     eqs = ", ".join(sorted(_contract._model_equation_ids(design["protocol"]))) or "(none)"
     return templates["plan_answers"].substitute(
@@ -524,11 +526,32 @@ def _unit_gap(design: dict[str, Any], row: Any, final: str, planned: str, by: st
     return None if got is None else {"asked": got[0], "result": got[1], "declared": declared is not None}
 
 
-def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[str, Any],
-                   conflicts: dict[str, tuple[str, str]] | None = None) -> list[str]:
+def _final_by(row: dict[str, Any], q: dict[str, Any]) -> str:
+    """The result a quantity ends on: the answer's ``by`` where the answer may move the plan's map (no map, or a map that
+    gives the quantity the same number as another, ``shared``), else the plan's own."""
+    by = str(row.get("by") or "").strip()
+    planned = str(q.get("by") or "")
+    return by if by and (not planned or q.get("shared")) else planned or by
+
+
+def _same_number(value: dict[str, Any], asked: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    """``{id: [other ids]}`` for the quantities asked about that the answer still gives one number: the same result at the same
+    setting with the same statistic (:func:`core.topic_requirements.answer_key`)."""
+    keys: dict[tuple[str, str, str], list[str]] = {}
+    for ident, q in asked.items():
+        row = value.get(ident)
+        if isinstance(row, dict) and (key := _topic_req.answer_key({**row, "by": _final_by(row, q)})) is not None:
+            keys.setdefault(key, []).append(ident)
+    return {i: [j for j in ids if j != i] for ids in keys.values() if len(ids) > 1 for i in ids}
+
+
+def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[str, Any],
+                   conflicts: dict[str, tuple[str, str]] | None = None, same: dict[str, list[str]] | None = None) -> list[str]:
     """Why ``value``, the answer for ``answers``, cannot be used; empty when it can. Each quantity asked about gets ``by`` (a
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
-    maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values."""
+    maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values. Two
+    quantities may not end on one number (the paper would print it for both); at the last ask (``same`` given) the ones that
+    still do are put in ``same`` and left unanswered (:func:`_apply_answers`), not a reason to refuse the rest."""
     if not isinstance(value, dict):
         return ["the answer for `answers` must be a mapping"]
     lines, _settings, _single = _figure_holds(design)
@@ -543,7 +566,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
             continue
         by = str(row.get("by") or "").strip()
         head, _s, name = by.partition(":")
-        if not q.get("by") and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
+        if (not q.get("by") or (q.get("shared") and by)) and by != "none" and not ((head == "metric" and name in ids) or (head == "equation" and name in eqs)):
             out.append(f"`{ident}`: `by` must be `metric:<id>` with an id of {', '.join(ids)}, `equation:<id>` with an id of "
                        f"{', '.join(sorted(eqs)) or '(none)'}, or `none`")
         # The unit the question asks in against the unit of the result it will be answered by: the plan's map where the plan
@@ -581,11 +604,26 @@ def _check_answers(value: Any, asked: dict[str, dict[str, str]], design: dict[st
                 out.append(f"`{ident}`: `at` names `{axis}`, which is not a setting of the study ({', '.join(axes) or 'none'})")
             elif not any(v == x or str(v) == str(x) for x in axes[axis]):
                 out.append(f"`{ident}`: `{axis}` has no value {v!r} (its values are {json.dumps(axes[axis])})")
+    shared = _same_number(value, asked)
+    if shared and same is not None:
+        same.update(shared)
+    elif shared:
+        done: set[str] = set()
+        for ident, others in shared.items():
+            if ident in done:
+                continue
+            done.update([ident, *others])
+            out.append(f"{', '.join(f'`{i}`' for i in [ident, *others])} would all be given the same number "
+                       f"(`{_final_by(value[ident], asked[ident])}` at the same setting with the same statistic), but the topic "
+                       "asks them as different quantities: give each the result that is that quantity (`statistic` `bias` or `sd` "
+                       "where it asks how far the estimates lie from the truth or how much they scatter), or `none` for one no "
+                       "number of the study is")
     return out + [f"`{k}` was not asked about" for k in value if k not in asked]
 
 
 def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any],
-                   asked: dict[str, dict[str, str]], conflicts: dict[str, tuple[str, str]] | None = None) -> dict[str, Any]:
+                   asked: dict[str, dict[str, Any]], conflicts: dict[str, tuple[str, str]] | None = None,
+                   same: dict[str, list[str]] | None = None) -> dict[str, Any]:
     """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept, except for a
     derived result the names step made for that very question; any other derived result the model names that is worked out from
     it is recorded as ``other_candidate``, disclosed and never used), and
@@ -599,6 +637,15 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         keys = {_topic_req._name_key(ident), _topic_req._name_key(q["name"])}
         mine = [m for m in rows if _topic_req._name_key(m.get("item")) in keys]
         by = str(row.get("by") or "").strip()
+        if ident in (same or {}) or (q.get("shared") and by == "none"):
+            # One number for different questions (still, at the last ask, or the answer says no result is this one): the
+            # quantity is left unanswered and the paper says so, rather than print another question's number for it.
+            rows = [m for m in rows if m not in mine]
+            continue
+        if q.get("shared") and by and by != q.get("by"):
+            for m in mine:
+                m["by"] = by  # the answer gives this quantity its own result in place of the shared one
+            q = {**q, "by": by}
         stat = row.get("statistic") if row.get("statistic") in ("bias", "sd") else None
         planned = q.get("by", "")
         gone = unit_gaps(row, planned, design)["planned"] if planned and by not in ("", planned) else None
@@ -820,6 +867,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids,
                              "_labels": _contract.family_labels(current["protocol"])}
                 conflicts: dict[str, tuple[str, str]] = {}  # answers: units that still differ at the last ask (stated in the paper)
+                same: dict[str, list[str]] = {}  # answers: quantities still given one number at the last ask (left unanswered)
                 taken: dict[str, str] = {}  # dependents: the new derived names given in this answer
                 unsure = got.get("uncertainties") if part == "dependents" else None
                 if part == "dependents" and record["asks"] >= _dependents.MAX_ASKS and not _dependents.check(value, entries, current, taken):
@@ -832,7 +880,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                             + _dependents.check_uncertainties(unsure, current, taken) if part == "dependents" else
                             _check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else
-                            _check_answers(value, faults, current, conflicts if record["asks"] >= MAX_ASKS else None)
+                            _check_answers(value, faults, current, *((conflicts, same) if record["asks"] >= MAX_ASKS else ()))
                             if part == "answers" else
                             _contract.check_part(part, value, current))
                 if problems:
@@ -847,7 +895,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 elif part == "figures":
                     kept, checked = _apply_figures(p, current, value, faults), None
                 elif part == "answers":
-                    kept, checked = _apply_answers(p, current, value, faults, conflicts), None
+                    kept, checked = _apply_answers(p, current, value, faults, conflicts, same), None
+                    if same:
+                        record["same_number_left_out"] = sorted(same)
                 elif part == "names":
                     kept, checked = _apply_names(p, value, topic_quantities)
                 else:

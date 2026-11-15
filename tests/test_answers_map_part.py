@@ -268,3 +268,61 @@ def test_a_stated_condition_is_matched_as_a_whole_name_and_a_whole_number() -> N
     assert pins("error at a = 20", {"a": 2}) == ["a = 2"]
     assert pins("error (when a = 2)", {"a": 2}) == []  # a condition really stated is still said once
     assert pins("error when a = 2.", {"a": 2}) == []
+
+
+# Two different questions the map answers with one number (the same result at the same setting with the same statistic)
+REQ_TWO = {"quantities": [
+    {"name": "nutrient at which algae pass 100", "stated": "the nutrient where the count passes 100 and 500", "main": True},
+    {"name": "nutrient at which algae pass 500", "stated": "the nutrient where the count passes 100 and 500", "main": True},
+    {"name": "chance of a bloom", "stated": "report the bloom chance", "main": True},
+]}
+PLAN_TWO = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                      {"item": "Q2", "by": "metric:algae_peak", "at": {}},
+                                      {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+
+
+def test_quantities_the_plan_gives_one_number_are_asked_again_and_the_others_are_not() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    assert list(asked) == ["Q1", "Q2"]
+    assert asked["Q1"]["shared"] == ["Q2"] and asked["Q2"]["shared"] == ["Q1"] and asked["Q1"]["by"] == "metric:algae_peak"
+    # the same result read at two different settings is two numbers: nothing is asked
+    apart = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {"temp": 10}},
+                                       {"item": "Q2", "by": "metric:algae_peak", "at": {"temp": 20}},
+                                       {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+    assert tr.quantities_to_place(REQ_TWO, apart) == {}
+
+
+def test_an_answer_that_still_gives_two_questions_one_number_is_asked_again_and_a_none_leaves_one_unanswered() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    same = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:algae_peak"}}}
+    fixed = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "none"}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [same, fixed], asked)
+    assert len(seen) == 2 and "the same number as Q2" in seen[0]
+    assert "would all be given the same number" in seen[1]
+    rows = out.design["protocol"]["topic_map"]
+    assert [r["item"] for r in rows if r["by"] == "metric:algae_peak"] == ["Q1"]
+    assert not [r for r in rows if r["item"] == "Q2"]  # unanswered in the paper, never the other question's number
+
+
+def test_a_shared_quantity_may_be_moved_to_its_own_result() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom"}}}
+    out, _seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [reply], asked)
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows["Q1"] == "metric:algae_peak" and rows["Q2"] == "metric:bloom"
+
+
+def test_quantities_still_given_one_number_at_the_last_ask_are_left_unanswered_and_the_rest_is_kept() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    same = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:algae_peak"}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [same] * cp.MAX_ASKS, asked)
+    assert len(seen) == cp.MAX_ASKS and out.parts["answers"]["valid"]
+    assert out.parts["answers"]["same_number_left_out"] == ["Q1", "Q2"]
+    rows = out.design["protocol"]["topic_map"]
+    assert not [r for r in rows if r["item"] in ("Q1", "Q2")] and {"item": "Q3", "by": "metric:bloom", "at": {}} in rows
+
+
+def test_one_question_one_number_asks_nothing_more() -> None:
+    plain = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                       {"item": "Q2", "by": "metric:bloom", "at": {}}]}
+    assert tr.shared_answers(REQ_TWO, plain) == {}

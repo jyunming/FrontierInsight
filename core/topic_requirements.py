@@ -462,20 +462,49 @@ def map_entries(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict
     return [m for m in plan.get("topic_map") or [] if isinstance(m, dict) and _name_key(m.get("item")) in wanted]
 
 
-def quantities_to_place(req: dict[str, Any], protocol: dict[str, Any]) -> dict[str, dict[str, str]]:
-    """The main quantities of the topic whose map in the plan does not yet say where in the study they are answered (no entry,
-    or an entry without an ``at``): ``{FI's id: {"name", "stated", "by"}}``, ``by`` being the plan's own map (``""`` for none).
-    The plan is asked once for these (core/contract_parts.py, the ``answers`` part)."""
+def answer_key(entry: dict[str, Any]) -> tuple[str, str, str] | None:
+    """What one map entry makes the paper print: the result, the setting it is read at and the statistic, ``None`` for an
+    entry that names no result. Two quantities with the same key are given the same number."""
+    by = str(entry.get("by") or "").strip()
+    if not by or by == "none":
+        return None
+    at = entry.get("at") if isinstance(entry.get("at"), dict) else {}
+    return by, json.dumps(at, sort_keys=True, default=str), str(entry.get("statistic") or "value")
+
+
+def shared_answers(req: dict[str, Any], protocol: dict[str, Any]) -> dict[str, list[str]]:
+    """``{FI's id: [the other ids]}`` for the main quantities of the topic that the plan's map answers with one entry each,
+    the same result at the same setting with the same statistic: the paper would print one number for different questions
+    (a fact of the map, not a reading of the questions' words)."""
     plan = view({}, protocol)
-    out: dict[str, dict[str, str]] = {}
+    by_key: dict[tuple[str, str, str], list[str]] = {}
     for index, item in enumerate(req.get("quantities") or []):
         if not isinstance(item, dict) or item.get("main") is not True:
             continue
         entries = map_entries(req, plan, "quantities", item)
-        if entries and all("at" in m for m in entries):
+        if len(entries) == 1 and (key := answer_key(entries[0])) is not None:
+            by_key.setdefault(key, []).append(_item_id("quantities", index))
+    return {i: [j for j in ids if j != i] for ids in by_key.values() if len(ids) > 1 for i in ids}
+
+
+def quantities_to_place(req: dict[str, Any], protocol: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The main quantities of the topic whose map in the plan does not yet say where in the study they are answered (no entry,
+    or an entry without an ``at``), and those the map answers with the same number as another (:func:`shared_answers`):
+    ``{FI's id: {"name", "stated", "by"[, "shared"]}}``, ``by`` being the plan's own map (``""`` for none) and ``shared`` the
+    other quantities given that number. The plan is asked once for these (core/contract_parts.py, the ``answers`` part)."""
+    plan = view({}, protocol)
+    shared = shared_answers(req, protocol)
+    out: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(req.get("quantities") or []):
+        if not isinstance(item, dict) or item.get("main") is not True:
             continue
-        out[_item_id("quantities", index)] = {"name": str(item.get("name") or ""), "stated": str(item.get("stated") or ""),
-                                              "by": str(entries[0].get("by") or "") if entries else ""}
+        ident = _item_id("quantities", index)
+        entries = map_entries(req, plan, "quantities", item)
+        if entries and all("at" in m for m in entries) and ident not in shared:
+            continue
+        out[ident] = {"name": str(item.get("name") or ""), "stated": str(item.get("stated") or ""),
+                      "by": str(entries[0].get("by") or "") if entries else "",
+                      **({"shared": shared[ident]} if ident in shared else {})}
     return out
 
 
