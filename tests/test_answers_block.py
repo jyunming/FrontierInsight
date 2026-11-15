@@ -105,7 +105,8 @@ def test_an_explicit_map_to_an_existing_metric_is_placed_and_named_whatever_the_
     """The plan's explicit map is the fact even when the metric's name does not resemble the quantity's (``judge``): the line
     names the metric, so a wrong map is disclosed. A map to a missing metric is not answered."""
     root = _quest(tmp_path, monkeypatch)
-    wrong = {**PROTOCOL, "topic_map": PROTOCOL["topic_map"] + [{"item": "Q3", "by": "metric:decay_rate"}]}
+    # (Q1 left out of the map: two questions on the one result would be given one number, which no line does)
+    wrong = {**PROTOCOL, "topic_map": PROTOCOL["topic_map"][1:] + [{"item": "Q3", "by": "metric:decay_rate"}]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: wrong)
     text = pf.answers_text(root)
     assert "- colour of the sample (measured as: Decay rate): {{v:decay_rate" in text
@@ -227,14 +228,17 @@ def test_the_true_value_of_a_result_without_a_reference_is_its_reference_value()
     assert pv.known_truth(ESTIMATE_PROTOCOL, "nothing") is None
 
 
-def test_an_old_plan_with_no_statistic_prints_the_result_as_it_is(tmp_path, monkeypatch) -> None:
-    """Old plans type no statistic: the question's words are never read, so 'bias' prints the result's value as before."""
+def test_an_old_plan_with_no_statistic_gives_no_question_another_ones_number(tmp_path, monkeypatch) -> None:
+    """Old plans type no statistic, so 'bias', 'spread' and 'x' were all the result's value: one number printed for three
+    questions. The question's words are never read; three questions on one number are each left unanswered, and a question
+    with a number of its own (the bias of y) is answered as before."""
     root = _estimate_quest(tmp_path, monkeypatch)
     old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
     text = pf.answers_text(root)
-    assert "- bias (measured as: Estimated x): {{v:x_hat @ dose=each | range}}" in text
-    assert "diff ref" not in text and ":sd" not in text
+    assert '- bias: not answered (the plan answers it with the same number as "spread of the estimates"; "x"' in text
+    assert "{{v:x_hat" not in text and "diff ref" not in text and ":sd" not in text
+    assert "- bias of y (measured as: Estimated y)" in text
 
 
 def test_an_answer_line_names_the_setting_it_differs_with_by_the_plans_label(tmp_path, monkeypatch) -> None:
