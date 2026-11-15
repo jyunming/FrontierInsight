@@ -419,11 +419,13 @@ class Table:
     def set_derived(self, records):
         """Serve the quantities FI derived for each setting (FI's record of the analysis, ``derived.json``'s ``derived``) through
         ``mean(id, key)``, as a declared result's mean is served. A quantity worked out once for the whole study, or not worked
-        out, is not served; a declared result is never replaced."""
+        out, is not served. A declared result a trial returned is never replaced; one no trial returned (a result the plan works
+        out afterwards from the trials) has FI's record as its only value, so it is served from there too."""
+        returned = {str(n) for c in self._cells for n in c["metrics"]}
         self._derived = {}
         for ident, record in (records or {}).items():
             if (isinstance(record, dict) and record.get("status") == "ok" and isinstance(record.get("by_setting"), dict)
-                    and ident not in self.declared):
+                    and (ident not in self.declared or str(ident) not in returned)):
                 self._derived[str(ident)] = dict(record["by_setting"])
 
     def reset_reads(self):
@@ -553,8 +555,8 @@ class Table:
     @_noting
     def mean(self, name, key):
         """The mean of those values; ``None`` when no trial gave one. For a quantity FI derives for each setting (``set_derived``):
-        its value at setting ``key``."""
-        if isinstance(name, str) and name in self._derived and name not in self.declared:
+        its value at setting ``key`` (``set_derived`` holds only what no trial's value may stand for)."""
+        if isinstance(name, str) and name in self._derived:
             import fi_table
 
             self._cell(key)

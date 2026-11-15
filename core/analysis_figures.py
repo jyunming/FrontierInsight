@@ -1484,6 +1484,8 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
     text value of a derived ``x`` is a category, and the outcome is marked ``paired``. A plan that declares no ``shows`` or no ``x``,
     or a table that holds no value to draw, gives no default: the outcome is ``dropped`` and says why, and no file is kept."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
+    if isinstance(derived, dict) and callable(getattr(table, "set_derived", None)):
+        table.set_derived(derived)  # as run_figures does: the drawing calls then compare a derived line with FI's own value of it
     _remove(out_dir, file)
     _remove_calls(file)
     shows = spec.get("shows")
