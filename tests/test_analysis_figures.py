@@ -1872,3 +1872,54 @@ def test_a_scan_map_over_three_varying_settings_does_not_hide_points_behind_each
         assert len(marks) == 9 and len(set(marks)) == 9  # every point of a panel has its own position
     (two,) = af._scan_figure({"scan": [s for s in scan if s["design"]["c"] == 0]}, str(tmp_path))
     assert "note" not in two  # known positive: two varying settings need no note
+
+
+# ---- a one-panel figure holds a setting -------------------------------------------------------------------------------------
+class _TwoSettingTable(_CallTable):
+    """Two sizes at each of two modes: the growth differs by mode, so a line over size shows one mode."""
+
+    def keys(self):
+        return ["size=1,mode=a", "size=2,mode=a", "size=1,mode=b", "size=2,mode=b"]
+
+    def setting(self, key):
+        size, mode = (part.split("=")[1] for part in key.split(","))
+        return {"size": float(size), "mode": mode}
+
+    def mean(self, ident, key):
+        self.gave_values.add(ident)
+        return {"size=1,mode=a": 1.0, "size=2,mode=a": 2.0, "size=1,mode=b": 5.0, "size=2,mode=b": 7.0}[key]
+
+
+def _one_panel_hold_run(tmp_path, body):
+    ns = types.SimpleNamespace(figure_g=body, COMPARED={})
+    spec = {"id": "g", "file": "g.png", "panels": 1, "x": "size", "series": None, "shows": ["growth"],
+            "settings": {"size": [1, 2], "mode": ["a", "b"]}, "labels": {"size": "Colony size", "mode": "Mode"}}
+    return af.run_figures([spec], ns, _TwoSettingTable(), str(tmp_path / "figures"))[0]
+
+
+def test_a_one_panel_figure_holds_a_setting_and_its_line_is_named_from_the_table(tmp_path, frame5):
+    def body(fig, table):
+        fig.panel(0, mode="a")
+        fig.line(0, "growth", [1, 2], [table.mean("growth", "size=1,mode=a"), table.mean("growth", "size=2,mode=a")], "growth")
+
+    out = _one_panel_hold_run(tmp_path, body)
+    assert out["status"] == "ok", out
+    record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
+    assert record["panels"][0]["hold"] == {"mode": "a"}
+    assert [s.get("label") for s in record["panels"][0]["series"]] == ["growth"]
+    assert "computed value" not in json.dumps(record)
+
+
+def test_a_held_one_panel_line_that_is_not_the_tables_value_there_is_still_named_neutrally(tmp_path, frame5):
+    def body(fig, table):  # mode b's values drawn on a panel that says mode a
+        fig.panel(0, mode="a")
+        fig.line(0, "growth", [1, 2], [5.0, 7.0], "growth")
+
+    out = _one_panel_hold_run(tmp_path, body)
+    record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
+    assert out["status"] == "ok" and "computed value" in json.dumps(record), (out, record)
+
+
+def test_a_one_panel_hold_of_a_value_the_plan_does_not_have_is_refused(tmp_path, frame5):
+    out = _one_panel_hold_run(tmp_path, lambda fig, table: fig.panel(0, mode="c"))
+    assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "mode = a, b" in out["why"], out

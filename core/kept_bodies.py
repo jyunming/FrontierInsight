@@ -73,6 +73,13 @@ def reads(design: dict[str, Any], name: str) -> str:
 
     if kind == "figure" and ident in plan["figures"]:
         fig = plan["figures"][ident]
+        if int(fig.get("panels") or 1) < 2:
+            # An exception, said plainly: a one-panel figure is given every setting it may hold, but only those on its axes
+            # count here, as before it was given them, so a changed setting it does not draw does not ask for it again (a
+            # model call). A hold of a value the plan no longer has is refused when the figure runs and repaired then.
+            on_axes = {str(a) for a in (fig.get("x"), fig.get("series")) if a}
+            labels = {k: v for k, v in (fig.get("labels") or {}).items() if k in on_axes}
+            fig = {k: v for k, v in fig.items() if k not in ("settings", "labels")} | ({"labels": labels} if labels else {})
         named = {str(x) for x in (fig.get("x"), fig.get("series"), *(fig.get("settings") or {})) if x}
         return _sha({"figure": fig, "shows": [result(i) for i in fig["shows"]],
                      "axes": {k: v for k, v in axes.items() if k in named}, "compared": plan["compared"]})

@@ -200,13 +200,11 @@ def _nominal_levels(c: Any, shows: Any = None) -> dict[str, Any]:
 
 
 def _panel_words(c: Any, panels: int, axes: tuple[Any, ...] = ()) -> dict[str, Any]:
-    """For a figure of several panels: the settings a panel may be declared for with their values, and the plan's label for each
-    (``fig.panel``, ``core/analysis_figures.py``). A one-panel figure gets only the plan's labels of its ``axes`` (the setting along
-    x and the one that makes its lines), which FI's default figure names its axes by; nothing when the plan labels neither."""
-    if panels < 2:
-        got = {str(a): c.labels[str(a)] for a in axes if a and c.labels.get(str(a))}
-        return {"labels": got} if got else {}
-    settings = {str(k): list(v) for k, v in {**c.settings.compared, **c.settings.in_each_run}.items()}
+    """The settings a panel may be declared for with their values, and the plan's label for each and for the figure's ``axes``
+    (``fig.panel``, ``core/analysis_figures.py``), for a figure of one panel too: a panel that shows one value of a setting that
+    varies holds it (``agents/figure_primitives.md``), so FI can say which value the panel shows and compare its lines with the
+    table there. ``panels`` is not read: every figure may hold the same settings."""
+    settings ={str(k): list(v) for k, v in {**c.settings.compared, **c.settings.in_each_run}.items()}
     named = {**settings, **{str(a): [] for a in axes if a}}
     return {"settings": settings, "labels": {k: c.labels[k] for k in named if c.labels.get(k)}}
 
@@ -273,7 +271,8 @@ def _stub(plan: dict[str, Any], name: str, calls: bool = False) -> str:
         shows = ", ".join(f["shows"]) or "what the plan names"
         if calls:
             note = ("\n    Panels that show different settings: `fig.panel(0, setting=value)` on each (FI writes the title)."
-                    if f["panels"] > 1 else "")
+                    if f["panels"] > 1 else
+                    "\n    A panel that shows one value of a setting that varies holds it: `fig.panel(0, setting=value)`.")
             return (f"def {name}(fig, table):\n"
                     f'    """Draw with FI\'s drawing calls ({_CALL_NAMES}); FI creates, labels, saves and closes the figure. '
                     f'It shows {shows}. It has {f["panels"]} panel(s), numbered from 0 (the `panel` of a drawing call).{note}"""\n'
