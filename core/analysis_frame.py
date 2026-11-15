@@ -130,7 +130,8 @@ def plan_of(design: dict[str, Any]) -> dict[str, Any]:
         "kinds": {**{r.id: r.kind for r in c.results}, **{d["id"]: d["kind"] for d in derived}},
         "paired": [r.id for r in c.results if r.paired and c.shared_draws],
         "derived": derived,
-        "references": {k: {"formula": v["formula"], "when": v.get("when")} for k, v in references.items()},
+        # ``kind`` (value, an upper bound or a lower bound) only names FI's line in a figure; no function reads it
+        "references": {k: {"formula": v["formula"], "when": v.get("when"), "kind": v.get("kind", "value")} for k, v in references.items()},
         "held": _reference_values.held_values(protocol),
         "fixed": _reference_values.analysis_inputs(protocol),
         "compared": {str(k): list(v) for k, v in c.settings.in_each_run.items()},

@@ -334,8 +334,9 @@ class Figure(FigureCalls):
     closes it."""
 
     def __init__(self, axes, x=None, series=None, shows=None, file=None, table=None, settings=None, series_ids=None,
-                 references=None, labels=None, fallback=False, derived_ids=None):
+                 references=None, labels=None, fallback=False, derived_ids=None, reference_kinds=None):
         self.axes = list(axes)
+        self.reference_kinds = dict(reference_kinds or {})  # the plan's kind of each reference: names FI's line for it
         self.x = x
         self.series = series
         self.shows = shows

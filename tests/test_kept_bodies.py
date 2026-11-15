@@ -139,6 +139,17 @@ def test_a_figure_reads_the_settings_it_shows_and_a_quantity_reads_every_setting
     assert kb.reads(shown, "figure_over_dose") == kb.reads(DESIGN, "figure_over_dose")
 
 
+def test_a_references_kind_names_a_line_and_never_asks_for_the_figure_again() -> None:
+    # the kind (an upper bound, a value) only names FI's line; the formula is what a figure's code reads (known positive below)
+    def with_ref(kind: str, formula: str = "0.5") -> dict[str, Any]:
+        d = copy.deepcopy(DESIGN)
+        d["protocol"]["metrics"][0]["reference"] = {"formula": formula, "kind": kind}
+        return d
+    assert af.plan_of(with_ref("bound"))["references"]["growth"]["kind"] == "bound"
+    assert kb.reads(with_ref("bound"), "figure_over_rate") == kb.reads(with_ref("value"), "figure_over_rate")
+    assert kb.reads(with_ref("value", "0.6"), "figure_over_rate") != kb.reads(with_ref("value"), "figure_over_rate")
+
+
 def test_a_function_is_put_back_where_it_was_or_added() -> None:
     text = "import os\n\n\ndef figure_a(fig, table):\n    return 1\n\n\ndef helper():\n    return 2\n"
     out = kb.put_back(text, "figure_a", "def figure_a(fig, table):\n    return 5\n")
