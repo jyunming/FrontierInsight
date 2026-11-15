@@ -196,6 +196,45 @@ def test_an_interval_the_plan_names_for_several_estimates_is_judged_for_none():
     cal = tc.calibration(cells, proto)
     assert not any(q.kind in ("coverage", "inside") for q in [*cal.quantities, *cal.inside])
     assert any("`lo`" in n for n in cal.not_checked) and metric_spec.shared_uncertainty_names(proto) == {"lo": ["a_hat", "b_hat"]}
+    # every reader of the declarations gets only an estimate's own names: the coverage the analysis reports for a
+    # proportion metric over a shared end is not recomputed from it (recomputed, it was 0.0 against the reported 0.95)
+    cov = {**known("b_hat", "b_true", interval=("lo", "b_hi"), ident="b_cover"), "kind": "proportion"}
+    proto["metrics"].append(cov)
+    reported = {c["key"]: {"b_cover": 0.95} for c in cells}
+    assert tc.reported_coverage_mismatches(cells, proto, reported, proto["thresholds"]) == []
+    assert all("interval" not in s["known_value"] for s in metric_spec.declared(proto))
+    assert metric_spec.declared(proto, keep_shared=True)[0]["known_value"]["interval"] == ["lo", "hi"]
+    # a standard error shared, beside an interval of the estimate's own: the own interval stays, its multiplier goes
+    # (it describes the standard error and the interval together); a shared variance is dropped the same way
+    se = _proto(known("a_hat", "a_true", se="s", interval=("a_lo", "a_hi"), df=4, ident="a"),
+                known("b_hat", "b_true", se="s", ident="b"), thresholds={"a_true": 5.0, "b_true": 9.0})
+    kv = metric_spec.declared(se)[0]["known_value"]
+    assert kv["interval"] == ["a_lo", "a_hi"] and "standard_error" not in kv and "degrees_of_freedom" not in kv
+    var = _proto(known("a_hat", "a_true", var="v", ident="a"), known("b_hat", "b_true", var="v", interval=("b_lo", "b_hi"),
+                                                                    ident="b"), thresholds={"a_true": 5.0, "b_true": 9.0})
+    assert [s["known_value"].get("variance") for s in metric_spec.declared(var)] == [None, None]
+    assert metric_spec.declared(var)[1]["known_value"]["interval"] == ["b_lo", "b_hi"]
+
+
+def test_a_failed_setting_is_not_left_out_on_the_strength_of_an_estimates_bias_alone():
+    """Failed trials in one setting leave it out only when the remaining settings' standard errors or intervals were
+    judged. Two estimates share their one declared standard error, so only their bias is judged: that does not show the
+    remaining settings sound, and the quest stops instead of leaving the setting out."""
+    rng = random.Random(9)
+    proto = _proto(known("a_hat", "a_true", se="se_shared", ident="a"), known("b_hat", "b_true", se="se_shared", ident="b"),
+                   thresholds={"a_true": 5.0, "b_true": 9.0})
+    per = {f"s{i}": {"a_hat": [5 + rng.gauss(0, 1) for _ in range(100)], "b_hat": [9 + rng.gauss(0, 1) for _ in range(100)],
+                     "se_shared": [1.0] * 100} for i in range(4)}
+    cells = _cells(per, planned=100)
+    cells.append({"key": "s4", "cell": {}, "planned": 100, "failed": 80,
+                  "metrics": {m: {"values": v[:20], "trials": list(range(20))} for m, v in per["s0"].items()}})
+    verdict = tc.judge(cells, proto, proto["thresholds"], {}, repairs_left=False)
+    assert verdict.action == tc.STOP
+    # each estimate with its own standard error (right): the remaining settings are judged, and the failed one is left out
+    own = _proto(known("a_hat", "a_true", se="se_a", ident="a"), thresholds={"a_true": 5.0})
+    for c in cells:
+        c["metrics"]["se_a"] = c["metrics"]["se_shared"]
+    assert tc.judge(cells, own, own["thresholds"], {}, repairs_left=False).action == tc.LEAVE_OUT
 
 
 def test_estimates_that_never_vary_anywhere_while_the_trials_report_an_error_are_a_fault():

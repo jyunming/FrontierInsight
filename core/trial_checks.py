@@ -965,7 +965,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     # What the plan fixes by name: its constants and thresholds (the true value of a study is among them).
     thresholds = _metric_spec.fixed_numbers(protocol, thresholds)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
-    known = [s for s in _metric_spec.declared(protocol) if s.get("known_value")]
+    known = [s for s in _metric_spec.declared(protocol, keep_shared=True) if s.get("known_value")]
     if not known:
         out.not_checked.append(NO_DECLARATION)
         return out
@@ -980,10 +980,7 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
         if gone := [n for n in [kv.get("standard_error"), kv.get("variance"), *(kv.get("interval") or [])] if n in shared]:
             # A name the plan gives to several estimates' uncertainty belongs to at most one of them, and the plan does not
             # say which: it is judged for none (the estimate itself still is), and nothing is held back on it.
-            kv = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and v in shared
-                                                      or k == "interval" and any(e in shared for e in v or []))}
-            if not (kv.get("standard_error") and kv.get("interval")):  # these describe the pair: with half of it gone, none
-                kv = {k: v for k, v in kv.items() if k not in ("degrees_of_freedom", "scale")}
+            kv = _metric_spec.without_shared(kv, shared)
             for name in dict.fromkeys(gone):
                 out.not_checked.append(f"`{name}` ({ident}): the plan names it as the uncertainty of "
                                        + ", ".join(f"`{e}`" for e in shared[name])
@@ -1284,7 +1281,9 @@ def judge(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = None, t
     # did not crash. Without a declared truth there is nothing to judge the rest against, and the settings are left out
     # (and said in the paper); only more than half of them left out stops the quest (above).
     remaining = {f.key for f in run if f.key not in keys}
-    judged = {s.key for q in cal.quantities for s in q.settings}
+    # A setting counts as judged by its intervals and standard errors (and their multiplier), not by an estimate's bias
+    # alone: an estimate whose only declared error is one the plan gives several estimates has nothing else judged.
+    judged = {s.key for q in cal.quantities if q.kind not in ("bias", "no_estimate") for s in q.settings}
     unjudged = sorted(remaining - judged)
     declared = any(spec.get("known_value") for spec in _metric_spec.declared(protocol))
     if unjudged and declared and not no_calibration:  # a search never uses a failed design: nothing it leaves out is analysed

@@ -296,8 +296,18 @@ def shared_uncertainty_names(protocol: dict[str, Any] | None) -> dict[str, list[
     """The names the protocol's ``known_value`` declarations give to the standard error, variance or interval ends of more
     than one estimate: name -> those estimates, in the declared order. run_trial returns one value under a name, so it
     belongs to at most one of them, and the plan does not say which: FI judges none of them against it."""
+    items = protocol.get("metrics") if isinstance(protocol, dict) else None
+    # Read from the entries as written, not only from a list that passes as a whole: a draft (or a contract built from it)
+    # whose other entries are still incomplete reads the same names.
+    specs = [{"known_value": {k: (v.strip() if isinstance(v, str) else [e.strip() for e in v if isinstance(e, str)]
+                                  if isinstance(v, (list, tuple)) else v) for k, v in m["known_value"].items()}}
+             for m in (items if isinstance(items, list) else []) if isinstance(m, dict) and isinstance(m.get("known_value"), dict)]
+    return _shared_in(specs)
+
+
+def _shared_in(specs: list[dict[str, Any]]) -> dict[str, list[str]]:
     users: dict[str, list[str]] = {}
-    for spec in declared(protocol):
+    for spec in specs:
         kv = spec.get("known_value") or {}
         est = kv.get("estimate")
         if not est:
@@ -306,6 +316,19 @@ def shared_uncertainty_names(protocol: dict[str, Any] | None) -> dict[str, list[
             if name and est not in users.setdefault(name, []):
                 users[name].append(est)
     return {name: ests for name, ests in users.items() if len(ests) > 1}
+
+
+def without_shared(kv: dict[str, Any], shared: dict[str, list[str]]) -> dict[str, Any]:
+    """``kv`` (a metric's ``known_value``) with the standard error, variance or interval that names one of ``shared``
+    taken out (:func:`shared_uncertainty_names`): what is left is the estimate's own. The interval's multiplier
+    (``degrees_of_freedom``, ``scale``) describes the standard error and the interval together, so it goes with either."""
+    if not shared or not isinstance(kv, dict):
+        return kv
+    out = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and v in shared
+                                               or k == "interval" and any(e in shared for e in v or []))}
+    if len(out) != len(kv) and not (out.get("standard_error") and out.get("interval")):
+        out = {k: v for k, v in out.items() if k not in ("degrees_of_freedom", "scale")}
+    return out
 
 
 def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
@@ -436,15 +459,21 @@ def result_forms(ident: str) -> tuple[str, ...]:
     return (ident, f"{ident}_count", f"{ident}_total", f"{ident}_values")
 
 
-def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> list[dict[str, Any]]:
+def declared(protocol: dict[str, Any] | None, quest_root: Path | str | None = None, *,
+             keep_shared: bool = False) -> list[dict[str, Any]]:
     """The valid metric specs of a protocol (an entry that is not a mapping with an id and a kind is left out). A spec is
     ``paired`` (a contrast joins the settings' trials by number) only when the settings share their draws
     (:func:`shares_draws`, the same answer the trial seeds follow); otherwise their trials are independent and are not
-    joined."""
+    joined. A ``known_value`` keeps only the standard error and interval that are its estimate's own
+    (:func:`without_shared`), unless ``keep_shared`` (the check that says what it left unchecked)."""
     items = protocol.get("metrics") if isinstance(protocol, dict) else None
     clean, _why = normalize(items) if items is not None else ([], None)
-    shared = shares_draws(protocol, quest_root)
-    return [{**spec, "paired": bool(spec.get("paired")) and shared} for spec in clean or []]
+    clean = clean or []
+    names = {} if keep_shared else _shared_in(clean)
+    draws = shares_draws(protocol, quest_root)
+    return [{**spec, "paired": bool(spec.get("paired")) and draws,
+             **({"known_value": without_shared(spec["known_value"], names)} if names and spec.get("known_value") else {})}
+            for spec in clean]
 
 
 def _cluster_key(spec: dict[str, Any]) -> str | None:

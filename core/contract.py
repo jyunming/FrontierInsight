@@ -432,6 +432,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         gaps, "the settings") or Settings()
 
     metrics = _rows(p.get("metrics"), gaps, "the metrics")
+    from . import metric_spec as _metric_spec  # a standard error or interval several estimates share is none's own
+    shared = _metric_spec.shared_uncertainty_names(p)
     ranges = {}
     assertions = []
     declared_ids = {_ident(m.get("id")) for m in metrics} - {None}
@@ -478,7 +480,7 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "returned": m.get("returned") if m.get("returned") in ("each_run", "afterwards") else None,
                 "range": ranges.get(rid) or m.get("range"),
-                "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
+                "known_value": _metric_spec.without_shared(m.get("known_value"), shared), "reference": m.get("reference"), "given": _ident(given),
                 "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "exact": m.get("exact") if isinstance(m.get("exact"), bool) else None,
                 "family": str(m.get("family") or ""),
                 "undefined_when": _mapping(m.get("undefined_when"))}
