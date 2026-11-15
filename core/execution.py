@@ -860,10 +860,16 @@ def _build_venv(
         resolved = sys.executable
 
     if resolved == sys.executable:
-        # Fast, in-process path — no subprocess needed.
+        # Fast, in-process path — no subprocess needed. Outside Windows the
+        # venv's python is a link to this interpreter (as `python -m venv`
+        # makes it there), not a copy: a copy is a file opened for writing,
+        # and a subprocess another quest of this process starts while it is
+        # open keeps it open until that subprocess runs its program, so the
+        # venv's first run of its new python can fail with "Text file busy".
         builder = venv.EnvBuilder(
             with_pip=with_pip, clear=clear, upgrade_deps=False,
             system_site_packages=system_site_packages,
+            symlinks=os.name != "nt",
         )
         builder.create(str(venv_dir))
         return
