@@ -473,12 +473,12 @@ def test_a_draft_over_the_limit_is_recorded_and_never_sent_back_to_be_shortened(
     eng = _engine(tmp_path, panel=panel)
     calls = _measured(monkeypatch, 5)
     patch = _review(eng, tmp_path, iteration=2)
-    # The paper lists a Further reading entry, so it is tried once without it;
-    # still 5 pages, the body is what is over and the paper stays as written.
-    assert calls == [tmp_path / "paper" / "paper.md", tmp_path / ".fi" / "page_check_trial.md"]
-    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER
+    # The paper lists a Further reading entry: it moves to the supplement and the paper is measured again;
+    # still 5 pages, the body is what is over, and nothing else of the paper changes.
+    assert calls == [tmp_path / "paper" / "paper.md", tmp_path / "paper" / "paper.md"]
+    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER[:PAPER.index("## Further reading")].rstrip() + "\n"
     assert patch["review"]["must_flag_hits"] == []
-    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4}
+    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4, "supplement": ["further_reading"]}
     assert "iteration" not in patch and "page_limit_rewrites" not in patch
     assert json.loads((tmp_path / ".fi" / "page_limit.json").read_text()) == {"pages": 5, "limit": 4, "final": True}
     assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]

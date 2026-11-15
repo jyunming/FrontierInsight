@@ -1092,7 +1092,7 @@ class PosterGenerator:
         # Web pages the same way: only those the paper's own Further reading lists.
         sources.update({
             str(w["label"]): w for w in listed_further_reading(
-                build_further_reading(literature, audience=output.audience), paper_md, art.raw_state)
+                build_further_reading(literature, audience=output.audience), paper_md, art.raw_state, art.quest_root)
         })
 
         # safe_substitute: paper_md is model-written prose that may carry

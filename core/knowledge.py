@@ -5263,6 +5263,11 @@ class Knowledge:
                 if paper_md_path.exists()
                 else ""
             )
+            # The supplement a paper over its page limit sent parts of itself to (core/supplement.py) sits beside it and
+            # is stored with it, so what the paper points to is in the knowledge base too.
+            supplement_md = paper_md_path.parent / "supplement.md"
+            if paper_md and supplement_md.is_file():
+                paper_md = paper_md.rstrip() + "\n\n" + supplement_md.read_text(encoding="utf-8").strip() + "\n"
             quest_paper_meta_for_helpers = {
                 "title": meta_no_refs.get("title", ""),
                 "authors": meta_no_refs.get("authors") or [],

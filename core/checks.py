@@ -1340,9 +1340,10 @@ CHECKS: tuple[Check, ...] = (
     Check('code_project_clean_run', 'core.engine', 'Engine._check_code_project',
           'write', 'measured', 'note',
           'code/ run in a clean environment once per code version; a failure is a warning only'),
-    Check('page_limit_further_reading_dropped', 'core.engine', 'Engine._drop_further_reading_to_fit',
+    Check('page_limit_supplement', 'core.engine', 'Engine._fit_with_supplement',
           'review', 'measured', 'strip',
-          'draft over the page limit only because of Further reading: last entries dropped until it fits'),
+          'paper over the page limit: FI moves its own tables, Limitations (one line stays) and Further reading to '
+          'paper/supplement.md, in that order, until it fits; no model call'),
     Check('page_limit_body_trim', 'core.engine', 'Engine._trim_body_to_fit',
           'review', 'model_judge', 'strip',
           'a model ranks sentences, FI cuts background/discussion sentences (never the last citation of a '

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core import paper_facts as _paper_facts
+from core import supplement as _supplement
 from core.citations import to_bibtex, to_csl_json
 from core.config import Config, resolve_page_limit
 from core.engine import (
@@ -1088,11 +1089,16 @@ _STOPPED_GLYPH_RE = re.compile(r"Unicode char(?:acter)?[^\n]*?\(U\+([0-9A-Fa-f]{
 _MISSING_GLYPH_RE = re.compile(r"Missing character: There is no .*?\(U\+([0-9A-Fa-f]{4,6})\)")
 
 
-def listed_further_reading(further: list[dict], paper_md: str, raw_state: dict | None) -> list[dict]:
-    """The web pages the paper lists, under References (the ones its text cites) or Further reading (a page dropped to
-    keep the paper within its page limit is not one). With no web page listed the paper has no such section, and the
-    review's record of what was dropped says which pages. Used by the poster, so it lists what the paper lists."""
+def listed_further_reading(further: list[dict], paper_md: str, raw_state: dict | None,
+                           quest_root: Path | None = None) -> list[dict]:
+    """The web pages the paper lists, under References (the ones its text cites) or Further reading, with the Further
+    reading a paper over its page limit moved to its supplement (core/supplement.py; ``quest_root`` names the quest).
+    With no web page listed the paper has no such section, and the review's record of what an older FI dropped says
+    which pages. Used by the poster, so it lists what the paper lists."""
     listed = web_pages_listed(paper_md)
+    moved = _supplement.further_labels(quest_root) if quest_root is not None else []
+    if moved:
+        listed = [*(listed or []), *moved]
     if listed is not None:
         return [w for w in further if w["label"] in listed]
     review = (raw_state or {}).get("review")
@@ -1275,6 +1281,14 @@ class PaperGenerator:
                 else:
                     dst.write_text(plain, encoding="utf-8")
             result["paper_md"] = dst
+            # The supplement a paper over its page limit sent FI's own parts to (core/supplement.py) ships with it.
+            supplement = art.quest_root / _supplement.FILE
+            if supplement.is_file():
+                beside = out_dir / _supplement.FILE
+                if beside.resolve() != supplement.resolve():
+                    beside.parent.mkdir(parents=True, exist_ok=True)
+                    beside.write_text(_paper_facts.without_marks(supplement.read_text(encoding="utf-8")), encoding="utf-8")
+                result["supplement_md"] = beside
 
         # Machine-readable citations: emit the paper's references as BibTeX +
         # CSL-JSON so they drop straight into a reference manager. Reuses the
@@ -1285,13 +1299,12 @@ class PaperGenerator:
         audience = self.config.output.audience
         cited_md = art.paper_md.read_text(encoding="utf-8") if art.paper_md is not None else ""
         further = build_further_reading(literature, audience=audience)
-        # The pages its Further reading lists: a page dropped to keep the paper
-        # within its page limit is not in the export either. With the whole
-        # list dropped the paper has no such section, and the review's record
-        # of what was dropped says which pages.
-        listed_web = listed_further_reading(further, cited_md, art.raw_state)
+        # The pages its Further reading lists, in the paper or in its supplement (a
+        # paper over its page limit moves the list there). With no list, the
+        # review's record of what an older FI dropped says which pages.
+        listed_web = listed_further_reading(further, cited_md, art.raw_state, art.quest_root)
         in_references = set(references_web_listed(cited_md))
-        further_only = set(further_reading_listed(cited_md) or [])
+        further_only = set(further_reading_listed(cited_md) or []) | set(_supplement.further_labels(art.quest_root))
         if further_reading_listed(cited_md) is None and not in_references:
             further_only = {w["label"] for w in listed_web}  # no list to read: the record of what was dropped decides
         for stem, entries in (
