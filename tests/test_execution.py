@@ -77,6 +77,42 @@ async def test_build_venv_falls_back_to_sys_executable_and_warns(
     assert any("no Python 2.4 interpreter found" in r.message for r in caplog.records)
 
 
+def test_the_venv_python_is_a_link_outside_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside Windows the quest venv's python links to FI's interpreter instead of being a copy. A copy is a file
+    open for writing while it is made; a subprocess another quest of the same process starts in that moment keeps it
+    open, and the venv's first run of its new python then fails with "Text file busy" (seen on CI: a benchmark quest
+    stopped before its first step)."""
+    import os
+    import venv as venv_mod
+
+    from core import execution
+
+    seen: dict[str, object] = {}
+
+    class Builder:
+        def __init__(self, **kw: object) -> None:
+            seen.update(kw)
+
+        def create(self, path: str) -> None:
+            seen["path"] = path
+
+    monkeypatch.setattr(venv_mod, "EnvBuilder", Builder)
+    want = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    execution._build_venv(tmp_path / "v", with_pip=False, clear=True, python_version=want)
+    assert seen["symlinks"] is (os.name != "nt")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a Windows venv copies its python")
+@pytest.mark.asyncio
+async def test_setup_links_the_venv_python(tmp_path: Path) -> None:
+    exe = VenvExecutor()
+    await exe.setup(tmp_path / "q")
+    py = exe.python_path(tmp_path / "q")
+    assert py.is_symlink(), f"{py} is a copy"
+    result = await exe.execute([str(py), "-c", "import sys; print(sys.prefix)"], cwd=tmp_path / "q", timeout_s=60)
+    assert result.returncode == 0 and ".venv" in result.stdout, "the link still runs inside the venv"
+
+
 @pytest.mark.asyncio
 async def test_execute_simple_script(venv_quest: Path) -> None:
     exe = VenvExecutor()
