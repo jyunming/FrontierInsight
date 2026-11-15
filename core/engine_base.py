@@ -7162,11 +7162,27 @@ _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 
 
 def _caption_words(text: Any, limit: int = 120) -> str:
-    """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters."""
+    """A label or title from FI's record, as a caption may quote it: one line, at most ``limit`` characters. A label cut
+    short ends on a whole word without a trailing comma or colon, and a bracket the cut leaves open is closed after
+    " ...": a cut inside "(plan formula)" left "(plan." in the caption, and one after a comma left ",," once the
+    caption joined the next name. The words inside the bracket stay, so two labels that differ only there keep two
+    names (a cut before the bracket made both one) wherever the differing word fits. A label whose head is one word or
+    one formula with no room for the closing is cut as before; only a formula longer than ``limit`` comes back
+    longer (it is never cut inside)."""
     words = " ".join(str(text or "").split())
     if len(words) <= limit:
         return words
-    return _math_safe_cut.head_before_math(words, len(words[:limit].rsplit(" ", 1)[0])).rstrip()
+    cut = len(words[:limit].rsplit(" ", 1)[0])
+    while True:
+        head = _math_safe_cut.head_before_math(words, cut).rstrip().rstrip(",;:").rstrip()
+        closers = _math_safe_cut.closers_left_open(head)
+        out = head + (" ..." + closers if closers else "")
+        shorter = len(head.rsplit(" ", 1)[0]) if " " in head else cut
+        if len(out) <= limit:
+            return out
+        if shorter >= cut:  # one word or one formula: no closing fits, so the head is given as main cut it
+            return head
+        cut = shorter  # the closing words did not fit: one word less
 
 
 def _caption_safe(text: str) -> str:

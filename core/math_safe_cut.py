@@ -46,3 +46,30 @@ def head_before_math(text: str, end: int) -> str:
                 return before if stop is not None else head
             return text[:stop]
     return head
+
+
+_CLOSER = {"(": ")", "[": "]", "{": "}"}
+
+
+def closers_left_open(text: str) -> str:
+    r"""The closing brackets, innermost first, of the brackets ``text`` opens outside math and never closes (``""`` when
+    it closes them all). A bracket inside a math span or escaped (``\{``) is the formula's, not the text's."""
+    in_math = [(a, len(text) if b is None else b) for a, b in _spans(text)]
+    still: list[str] = []
+    i = 0
+    while i < len(text):
+        span = next((b for a, b in in_math if a == i), None)
+        if span is not None:
+            i = span
+            continue
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in _CLOSER:
+            still.append(_CLOSER[c])
+        elif c in ")]}" and still:
+            still.pop()
+        i += 1
+    return "".join(reversed(still))
+
