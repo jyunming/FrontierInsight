@@ -62,3 +62,31 @@ def test_a_result_a_trial_returned_is_never_replaced_by_a_derived_record():
     assert table.mean("growth", "size=1") == 2.0  # the trials' mean, not the record's 99
     assert _drawn_what({"growth": _record({"size=1": 99.0, "size=2": 99.0})}, [99.0, 99.0], "growth") == "other"
     assert _drawn_what({"growth": _record({"size=1": 99.0, "size=2": 99.0})}, [2.0, 4.0], "growth") == "growth"
+
+
+def test_a_table_read_of_fis_derived_value_is_not_called_a_mean():
+    # review: FI's one value of such a result at a setting is no mean of trials, so the line's name says no "Mean of"
+    h = _Host(panels=1)
+    h.table = _table({"spread": _record(SPREAD)})
+    h.settings = ["size"]
+    h.labels = {"spread": "Spread", "growth": "Growth", "size": "Size"}
+    h.line(0, "fast", [1, 2], [0.25, 0.5], "spread")
+    h.ref(0, at="spread", key="size=1")
+    assert [r["label"] for r in h.record()["panels"][0]["refs"]] == ["Spread at Size = 1"]
+    h.ref(0, at="growth", key="size=1")  # a declared result the trials returned keeps "Mean of"
+    assert h.record()["panels"][0]["refs"][-1]["label"].startswith("Mean of Growth at Size = 1")
+
+
+def test_the_run_that_only_draws_failed_figures_serves_fis_record_too(tmp_path):
+    # review: FI_FIGURE_FALLBACK=only draws the plan's figure with the earlier run's record; the table must serve it there too
+    from core import analysis_figures as af
+
+    class _Spy:
+        served = None
+
+        def set_derived(self, records):
+            self.served = records
+
+    spy, records = _Spy(), {"spread": _record(SPREAD)}
+    af.default_figure({"id": "f1", "file": "f1.png"}, spy, str(tmp_path), None, records)  # no shows: dropped, but served first
+    assert spy.served is records

@@ -1623,8 +1623,12 @@ class FigureCalls:
 
     def _at_label(self, ident, form, key):
         """The label of a line at a table value: ``Mean of <result> at <setting> = <value>, ...`` in the plan's words for each
-        setting of the key (a setting without a plan label keeps its id), each value written so it reads back as the value."""
+        setting of the key (a setting without a plan label keeps its id), each value written so it reads back as the value. A
+        quantity FI derives for each setting (the table serves its one value, not a mean of trials) is named without "Mean of"."""
         words = {"mean": "Mean", "n": "Number of runs", "low": "Lower 95% bound", "high": "Upper 95% bound"}[form]
+        served = getattr(getattr(self, "table", None), "_derived", None)
+        if form == "mean" and isinstance(served, dict) and ident in served:
+            words = None
         pieces = self._key_pieces(key) or {}
         where = []
         for name, text in pieces.items():
@@ -1633,6 +1637,8 @@ class FigureCalls:
             except (TypeError, ValueError):
                 shown = text
             where.append("%s = %s" % (self._label_of(name), shown))
+        if words is None:
+            return "%s at %s" % (self._label_of(ident), ", ".join(where) or key)
         return "%s of %s at %s" % (words, self._label_of(ident), ", ".join(where) or key)
 
     def note(self, panel, x=None, y=None, what=None, form="mean", key=None):
