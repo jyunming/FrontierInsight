@@ -159,6 +159,45 @@ def test_a_standard_error_far_too_small_is_a_fault_and_a_right_one_is_not():
     assert not tc.calibration(cells, proto).faults
 
 
+def test_a_standard_error_the_plan_names_for_several_estimates_is_judged_for_none():
+    """A plan gave three estimates the same standard-error name; run_trial returned one value under it (the first
+    estimate's), and FI set the second estimate's spread against it (ratio about 0.001) and stopped a study whose
+    errors were right. The name is the uncertainty of at most one of them and the plan does not say which: none is
+    judged against it, each estimate's own bias still is, and the plan is told to name each one's error."""
+    rng = random.Random(5)
+    proto = _proto(known("a_hat", "a_true", se="se_shared", ident="a"), known("b_hat", "b_true", se="se_shared", ident="b"),
+                   known("c_hat", "c_true", se="c_se", ident="c"), thresholds={"a_true": 5.0, "b_true": 0.001, "c_true": 2.0})
+    cells = _cells({f"s{i}": {"a_hat": [5 + rng.gauss(0, 1) for _ in range(100)],
+                              "b_hat": [0.001 + rng.gauss(0, 0.001) for _ in range(100)], "se_shared": [1.0] * 100,
+                              "c_hat": [2 + rng.gauss(0, 1) for _ in range(100)], "c_se": [1.0] * 100} for i in range(4)})
+    cal = tc.calibration(cells, proto)
+    assert not cal.faults
+    assert {(q.kind, q.label) for q in cal.quantities} >= {("bias", "a_hat"), ("bias", "b_hat"), ("se_ratio", "c_hat")}
+    assert not any(q.kind == "se_ratio" and q.label in ("a_hat", "b_hat") for q in cal.quantities)
+    assert sum("`se_shared`" in n and "cannot tell whose it is" in n for n in cal.not_checked) == 2
+    assert tc.judge(cells, proto, proto["thresholds"], {}, repairs_left=False).action == tc.OK
+    # an estimate's own error, wrong, is still found beside the shared one
+    wrong = [{**c, "metrics": {**c["metrics"], "c_se": {**c["metrics"]["c_se"], "values": [0.01] * 100}}} for c in cells]
+    assert [(q.kind, q.label) for q in tc.calibration(wrong, proto).faults] == [("se_ratio", "c_hat")]
+    notes = metric_spec.known_value_problems(proto)
+    assert any("`se_shared`" in n and "`a_hat`, `b_hat`" in n for n in notes)
+    # one estimate declared twice under the same name (two metrics of it) is not a shared name
+    twice = _proto(known("a_hat", "a_true", se="a_se", ident="a1"), known("a_hat", "a_true", se="a_se", ident="a2"),
+                   thresholds={"a_true": 5.0})
+    assert metric_spec.shared_uncertainty_names(twice) == {}
+
+
+def test_an_interval_the_plan_names_for_several_estimates_is_judged_for_none():
+    rng = random.Random(6)
+    proto = _proto(known("a_hat", "a_true", interval=("lo", "hi"), ident="a"),
+                   known("b_hat", "b_true", interval=("lo", "b_hi"), ident="b"), thresholds={"a_true": 5.0, "b_true": 9.0})
+    cells = _cells({f"s{i}": {"a_hat": [5 + rng.gauss(0, 1) for _ in range(100)], "b_hat": [9 + rng.gauss(0, 1) for _ in range(100)],
+                              "lo": [3.0] * 100, "hi": [7.0] * 100, "b_hi": [11.0] * 100} for i in range(4)})
+    cal = tc.calibration(cells, proto)
+    assert not any(q.kind in ("coverage", "inside") for q in [*cal.quantities, *cal.inside])
+    assert any("`lo`" in n for n in cal.not_checked) and metric_spec.shared_uncertainty_names(proto) == {"lo": ["a_hat", "b_hat"]}
+
+
 def test_estimates_that_never_vary_anywhere_while_the_trials_report_an_error_are_a_fault():
     """A simulation that ignores its seed returns one number a trial, in every setting: with only a standard error
     declared (so no coverage), the spread is 0 against a reported error of 0.5. Before, a setting with no spread was

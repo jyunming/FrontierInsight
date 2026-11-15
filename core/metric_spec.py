@@ -292,14 +292,34 @@ def fixed_value(truth: Any, fixed: dict[str, float]) -> float | None:
     return oracle_forms.evaluate(truth, fixed).value
 
 
+def shared_uncertainty_names(protocol: dict[str, Any] | None) -> dict[str, list[str]]:
+    """The names the protocol's ``known_value`` declarations give to the standard error, variance or interval ends of more
+    than one estimate: name -> those estimates, in the declared order. run_trial returns one value under a name, so it
+    belongs to at most one of them, and the plan does not say which: FI judges none of them against it."""
+    users: dict[str, list[str]] = {}
+    for spec in declared(protocol):
+        kv = spec.get("known_value") or {}
+        est = kv.get("estimate")
+        if not est:
+            continue
+        for name in [kv.get("standard_error"), kv.get("variance"), *(kv.get("interval") or [])]:
+            if name and est not in users.setdefault(name, []):
+                users[name].append(est)
+    return {name: ests for name, ests in users.items() if len(ests) > 1}
+
+
 def known_value_problems(protocol: dict[str, Any] | None) -> list[str]:
     """A declared true value that is neither a number, nor a threshold, a constant or a grid parameter of the protocol, nor
-    a formula of the numbers it fixes, one sentence each."""
+    a formula of the numbers it fixes, and a standard error or interval named for more than one estimate
+    (:func:`shared_uncertainty_names`), one sentence each."""
     if not isinstance(protocol, dict):
         return []
+    out = [f"The metrics give the same name `{name}` to the uncertainty of " + ", ".join(f"`{e}`" for e in ests)
+           + "; run_trial returns one value under a name, so FI cannot tell whose it is and checks none of them against "
+             "it. Give each estimate its own name for its standard error (and for its interval's ends), and return each."
+           for name, ests in shared_uncertainty_names(protocol).items()]
     fixed = fixed_numbers(protocol)
     axes = {str(k) for part in ("grid", "in_each_run") if isinstance(protocol.get(part), dict) for k in protocol[part]}
-    out = []
     for spec in declared(protocol):
         df = (spec.get("known_value") or {}).get("degrees_of_freedom")
         if isinstance(df, dict):

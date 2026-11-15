@@ -974,8 +974,20 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
     if not returned:
         out.not_checked.append("no setting has trials to judge, so the calibration was not checked")
         return out
+    shared = _metric_spec.shared_uncertainty_names(protocol)
     for spec in known:
         kv, ident = spec["known_value"], spec["id"]
+        if gone := [n for n in [kv.get("standard_error"), kv.get("variance"), *(kv.get("interval") or [])] if n in shared]:
+            # A name the plan gives to several estimates' uncertainty belongs to at most one of them, and the plan does not
+            # say which: it is judged for none (the estimate itself still is), and nothing is held back on it.
+            kv = {k: v for k, v in kv.items() if not (k in ("standard_error", "variance") and v in shared
+                                                      or k == "interval" and any(e in shared for e in v or []))}
+            if not (kv.get("standard_error") and kv.get("interval")):  # these describe the pair: with half of it gone, none
+                kv = {k: v for k, v in kv.items() if k not in ("degrees_of_freedom", "scale")}
+            for name in dict.fromkeys(gone):
+                out.not_checked.append(f"`{name}` ({ident}): the plan names it as the uncertainty of "
+                                       + ", ".join(f"`{e}`" for e in shared[name])
+                                       + ", so FI cannot tell whose it is, and did not check it")
         truth, level, est = kv["true_value"], kv["level"], kv["estimate"]
         df = kv.get("degrees_of_freedom")
         if df is not None and all(n in returned for n in [kv["standard_error"], *kv["interval"]]):
