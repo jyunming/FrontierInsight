@@ -493,7 +493,9 @@ PINS_AT_811719AF = {
     # a figure line FI names only when every point is its own record); it was "31055f8a3362dd1d"
     # and again with core/in_run.py's exact read of a text value before a key is taken apart, as above; it was
     # "d22eddb03edf07e6", then "a7dc6fa0b256914b" (a part of a key is a setting only when the run has it)
-    "run_framed": "b2c0fec39e69d961",
+    # and again when the frame's Figure took the plan's kind of each reference (Figure(..., reference_kinds=): FI names its line
+    # for a reference "Upper bound of" / "Lower bound of" as the plan says, an intended text change); it was "b2c0fec39e69d961"
+    "run_framed": "a9a7c613dbc16eba",
 }
 
 

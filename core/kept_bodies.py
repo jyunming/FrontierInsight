@@ -55,6 +55,14 @@ def _save(root: Path, record: dict[str, Any]) -> None:
 
 
 # ---- what a function reads ----------------------------------------------------------------------------------------------------
+def _what_code_reads(reference: Any) -> Any:
+    """A plan reference as a function's code reads it: its formula and where it applies. Its kind only names FI's line in a
+    figure, so a changed kind never asks for the code again (and a body kept before kinds were carried keeps its digest)."""
+    if not isinstance(reference, dict):
+        return reference
+    return {"formula": reference.get("formula"), "when": reference.get("when")}
+
+
 def reads(design: dict[str, Any], name: str) -> str:
     """A digest of the parts of the plan the function ``name`` of ``derive.py`` reads: when it differs from the one recorded when
     the function ran, the design changed something the function reads. A figure reads its own declaration, the results it shows
@@ -69,7 +77,7 @@ def reads(design: dict[str, Any], name: str) -> str:
     def result(i: str) -> dict[str, Any]:
         return {"id": i, "role": plan["roles"].get(i), "kind": plan["kinds"].get(i),
                 "derived": next((d for d in plan["derived"] if d["id"] == i), None),
-                "reference": plan["references"].get(i), "known": plan["known"].get(i)}
+                "reference": _what_code_reads(plan["references"].get(i)), "known": plan["known"].get(i)}
 
     if kind == "figure" and ident in plan["figures"]:
         fig = plan["figures"][ident]

@@ -22,7 +22,9 @@ What the host (``Figure``) must hold, by these names:
 * ``references`` -- ``{reference id: value}`` or ``{reference id: {"value": number, "label": text}}``;
 * ``labels`` -- ``{id: label}`` or ``{id: {"label": text}}``, the plan's words (set by FI; absent means the id stands in
   for the label);
-* ``fallback`` -- True when FI drew the figure itself (absent means False).
+* ``fallback`` -- True when FI drew the figure itself (absent means False);
+* ``reference_kinds`` -- ``{reference id: "value" | "bound" | "lower_bound"}``, the plan's kind of each reference, which
+  names FI's line for it (absent means "value").
 
 Every one but ``axes`` and ``table`` may be missing: the call then has less to check against and says so only where it must.
 The mixin has no ``__init__``; it keeps its state in two private attributes it creates on first use."""
@@ -474,11 +476,14 @@ class FigureCalls:
 
     def _reference_label(self, ident):
         """The name of a plan reference: the plan's own label; a reference that is the plan's formula for one of the study's
-        results is named as that result's expected value, so its line and the result's curve never share a name."""
+        results is named as what the plan says it is (that result's expected value, or an upper or a lower bound of it), so
+        its line and the result's curve never share a name."""
         got = (getattr(self, "references", None) or {}).get(ident)
         own = str(got["label"]) if isinstance(got, dict) and got.get("label") else None
         if ident in self._results() and own in (None, self._label_of(ident)):
-            return "Expected %s (plan formula)" % self._label_of(ident)
+            kind = (getattr(self, "reference_kinds", None) or {}).get(ident)
+            word = {"bound": "Upper bound of", "lower_bound": "Lower bound of"}.get(kind, "Expected")
+            return "%s %s (plan formula)" % (word, self._label_of(ident))
         return own or self._label_of(ident)
 
     def _results(self):
@@ -1673,6 +1678,80 @@ class FigureCalls:
             entry["corner"] = None  # FI chooses it in ``finish``
         rec["notes"].append(entry)
         return art
+
+    def add_plan_references(self):
+        """Draw the plan's reference of each result a panel draws when the body left it out: the plan declares a result's
+        reference and FI holds its value at every setting (the table's references), so the line is FI's to draw, as the axis
+        labels are. Left out, it was only a Limitations sentence ("Figure 2 draws no line for the plan's reference ...").
+
+        A reference is drawn on a panel only when FI has a value of it at every setting the panel shows: one that applies at
+        some settings only (the plan's ``when``) would read as a line over all of them. A panel with a line of the body's own
+        beside the result (a curve not from the plan, or a line at a table value) is left as it is, since that line may be the
+        reference and FI cannot tell. A reference ``fig.ref`` refuses there (one that changes with a setting the panel does not
+        hold, or along an x that is not a setting) is left out as before, and so is one that changes along x where the result
+        has no point at one of its x (``_reference_within_drawn_x``: decided before drawing, so a refusal changes nothing). A
+        vertical line the body drew at the reference is not its line on the y axis. Called by FI after the body returns and before
+        :meth:`finish`; returns ``[(panel, result id)]`` drawn, and each line's record says ``"drawn_by": "FI"``."""
+        held = getattr(getattr(self, "table", None), "_references", None)
+        if not isinstance(held, dict) or not held:
+            return []
+        added = []
+        for panel, rec in sorted(self._state().items()):
+            if rec.get("raw"):
+                continue
+            results = list(dict.fromkeys(str(s.get("what")) for s in rec["series"]
+                                         if s.get("kind") != "image" and str(s.get("what")) in held))
+            own_line = (any(s.get("kind") == "curve" and s.get("source") != "plan" for s in rec["series"])
+                        or any(r.get("source") != "plan" for r in rec["refs"]))
+            if not results or own_line:
+                continue
+            keys = self._held_keys(rec)
+            for rid in results:
+                # drawn already: a horizontal line or a curve of it (a vertical line at its value is not its line on the y axis)
+                if (any(r.get("id") == rid and r.get("source") == "plan" and r.get("axis", "y") == "y" for r in rec["refs"])
+                        or any(s.get("id") == rid and s.get("source") == "plan" for s in rec["series"])):
+                    continue
+                per_setting = held.get(rid)
+                if not keys or not isinstance(per_setting, dict) or not all(
+                        k in per_setting and _finite(per_setting[k]) for k in keys):
+                    continue
+                if not self._reference_within_drawn_x(rec, rid, keys, per_setting):
+                    continue
+                before = (len(rec["refs"]), len(rec["series"]))
+                try:
+                    self.ref(panel, rid)
+                except ValueError:
+                    continue
+                for part, n in (("refs", before[0]), ("series", before[1])):
+                    for entry in rec[part][n:]:
+                        entry["drawn_by"] = "FI"
+                if (len(rec["refs"]), len(rec["series"])) != before:
+                    added.append((panel, rid))
+        return added
+
+    @staticmethod
+    def _reference_within_drawn_x(rec, rid, keys, per_setting):
+        """Decided before anything is drawn, so a refusal changes nothing on the axes: a reference with one number at every
+        setting the panel shows is a horizontal line (it spans the axes and needs no x); one that changes there is a curve
+        through each setting's x, drawn only when the result has a point (a finite y) at every one of those x, never out to a
+        setting the figure shows no data of."""
+        values = [float(per_setting[k]) for k in keys]
+        if all(math.isclose(v, values[0], rel_tol=1e-9, abs_tol=0.0) for v in values):
+            return True
+        x_info = rec.get("x") or {}
+        if x_info.get("kind") != "setting":
+            return False
+        drawn = [float(xv) for s in rec["series"] if str(s.get("what")) == rid
+                 for xv, yv in zip(s.get("x") or [], s.get("y") or []) if _finite(xv) and _finite(yv)]
+        for key in keys:
+            pieces = dict(p.partition("=")[::2] for p in str(key).split(","))
+            try:
+                xv = float(pieces[x_info.get("id")])
+            except (KeyError, TypeError, ValueError):
+                return False
+            if not any(math.isclose(xv, w, rel_tol=1e-9, abs_tol=1e-12) for w in drawn):
+                return False
+        return True
 
     # ---- labels, legend and limits: FI's, never the body's --------------------------------------------------------------
 

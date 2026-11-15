@@ -369,6 +369,9 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
             fault = _audit(handle, fig, axes)
             if fault:
                 return _outcome(fid, file, "fi_fault", "FI's record of the calls of figure `%s` and the calls it kept disagree: %s." % (fid, fault))
+            add_references = getattr(handle, "add_plan_references", None)  # the plan's reference lines the body left out
+            if callable(add_references):
+                add_references()
             handle.finish((plan or {}).get("labels") or {}, (plan or {}).get("result_info") or {},
                           {k: (plan or {}).get(k + "_scale") for k in ("x", "y")})
         panel_record = _set_panel_titles(handle, axes, spec.get("labels") or {})
@@ -415,6 +418,8 @@ def _figure_handle(axes: list[Any], spec: dict[str, Any], file: str, plan: dict[
         given = {"table": table, "settings": plan.get("settings"), "series_ids": plan.get("series_ids"),
                  "references": plan.get("references"), "labels": plan.get("labels"), "fallback": plan.get("fallback", False),
                  "derived_ids": plan.get("derived_ids")}
+        if "reference_kinds" in takes:
+            given["reference_kinds"] = plan.get("reference_kinds")
     handle = Figure(axes, x=spec.get("x"), series=spec.get("series"), shows=spec.get("shows"), file=file, **given)
     handle.axes = _Panels(handle.axes, str(spec.get("id")))
     handle.declared = {}
@@ -604,8 +609,11 @@ def _plan_for(spec: dict[str, Any], namespace: Any, table: Any) -> dict[str, Any
         references["%s_nominal" % ident] = {"value": float(level), "fixed": True,
                                             "label": "Nominal level of %s = %s" % (labels.get(str(ident), str(ident)), _number_text(level))}
     derived = _from(namespace, "DERIVED", {})
+    declared_refs = _from(namespace, "REFERENCES", {})
+    kinds = {str(k): str(v["kind"]) for k, v in (declared_refs.items() if isinstance(declared_refs, dict) else [])
+             if isinstance(v, dict) and v.get("kind")}  # the plan's kind of each reference: names FI's line for it
     return {"settings": settings, "series_ids": series_ids, "references": references, "labels": labels,
-            "result_info": info,
+            "result_info": info, "reference_kinds": kinds,
             **{k: spec[k] for k in ("x_scale", "y_scale") if spec.get(k) in ("linear", "log")},
             "fallback": bool(spec.get("fallback")), "derived_ids": [str(k) for k in derived] if isinstance(derived, dict) else []}
 
