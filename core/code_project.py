@@ -1312,13 +1312,78 @@ def _minutes(seconds: float) -> str:
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
 
 
-def _figures_only_failed(quest_root: Path, returncode: int, stdout: str) -> str:
+#: The records FI's clean run of ``run.py`` is judged by, in ``run_output/``: :func:`verify` removes them before the run,
+#: so one that is there afterwards was written by that run.
+_RUN_RECORDS = (Path("raw") / "trials.json", Path("data") / "results" / "derived.json")
+
+
+def _count(value: Any) -> int | None:
+    """A trial count from a record: a whole number, else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():  # 1.9, an infinity or NaN is no count
+        return None
+    return int(value)
+
+
+def _cells(path: Path) -> dict[str, tuple[int, int]] | None:
+    """The trials a record holds, setting for setting: ``{key: (ok, failed)}``; ``None`` when it cannot be read."""
+    try:
+        cells = json.loads(path.read_text(encoding="utf-8")).get("cells")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(cells, list):
+        return None
+    out: dict[str, tuple[int, int]] = {}
+    for c in cells:
+        if not isinstance(c, dict):
+            return None
+        ok, failed = _count(c.get("ok") or 0), _count(c.get("failed") or 0)
+        if ok is None or failed is None:
+            return None
+        out[str(c.get("key"))] = (ok, failed)
+    return out
+
+
+def _whole_run(quest_root: Path, since: float) -> bool:
+    """Whether FI's clean run of ``run.py`` that ended just now ran the study as the study's own run did, so its time is a
+    whole run: the trials it records (``run_output/raw/trials.json``, written by this run) came out, setting for setting,
+    with at least as many results and no more failures than the study's own run (``raw/trials.json``); with no record of
+    the study's own, none failed. A study whose own run used FI's runner needs this run's record; one that did not (no
+    record either side) is taken as it ran."""
+    mine = Path(quest_root) / "run_output" / "raw" / "trials.json"
+    own_path = Path(quest_root) / "raw" / "trials.json"
+    if not mine.is_file():
+        return not own_path.is_file()
+    try:
+        if mine.stat().st_mtime < since:
+            return False
+    except OSError:
+        return False
+    cells = _cells(mine)
+    if cells is None:
+        return False
+    if not own_path.is_file():
+        return all(failed == 0 for _ok, failed in cells.values())
+    own = _cells(own_path)
+    if own is None:
+        return False
+    return all(key in cells and cells[key][0] >= ok and cells[key][1] <= failed for key, (ok, failed) in own.items())
+
+
+def _figures_only_failed(quest_root: Path, returncode: int, stdout: str, since: float | None = None) -> str:
     """When the clean rerun of ``run.py`` exited 1 but produced its results and only figures failed, in the same sense as the
     run itself (``analysis_frame.run_produced``, the rule behind ``results_produced``): a plain sentence naming the figures
     that were not drawn; else ``""``. The rerun works in ``run_output/``, where its own record of the analysis is."""
     from . import analysis_frame as _analysis
     from .engine import _extract_result_json
 
+    record_path = Path(quest_root) / "run_output" / _analysis.DERIVED_PATH
+    try:
+        if since is not None and record_path.stat().st_mtime < since:
+            return ""  # the record of an earlier run: this run never reached the analysis
+    except OSError:
+        return ""
     record = _analysis.read_record(Path(quest_root) / "run_output")
     on = _analysis.is_fis_file(Path(quest_root) / "code" / _analysis.EXPERIMENT_FILE)
     if not _analysis.run_produced(returncode, bool(_extract_result_json(stdout)), record, on):
@@ -1359,13 +1424,16 @@ def code_digest(quest_root: Path) -> str:
 
 def delivered_seconds(quest_root: Path) -> float | None:
     """How long ``python run.py`` took when FI ran the delivered code once in a clean environment (:func:`verify`), the
-    install not counted: ``None`` unless that run finished without an error and ``code/`` is still the code it ran. It is a
-    whole run as a reader makes it, one setting after another, so it decides a time limit (core/run_facts.py)."""
+    install not counted: ``None`` unless that run finished (without an error, or with only a figure not drawn) and
+    ``code/`` is still the code it ran. It is a
+    whole run as a reader makes it, one setting after another, so it decides a time limit (core/run_facts.py). A run that
+    produced every result and could not draw a figure (``ran_figures_failed``, as in the study's own run) ran to its end
+    too: its time counts."""
     try:
         record = json.loads((Path(quest_root) / CHECK_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(record, dict) or record.get("status") != "ran":
+    if not isinstance(record, dict) or record.get("status") not in ("ran", "ran_figures_failed"):
         return None
     t = record.get("run_seconds")
     if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 <= t < float("inf"):
@@ -1409,7 +1477,11 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
             if not result["reason"]:
                 step = "running run.py"
                 result["code"] = code_digest(quest_root)  # the code this run timed (delivered_seconds)
+                for rel in _RUN_RECORDS:  # an earlier run's records: one there after this run was written by it
+                    (quest_root / "run_output" / rel).unlink(missing_ok=True)
                 run_started = time.monotonic()
+                # a record copied in from the study's folder keeps its old time (stage_inputs): this run's are newer
+                run_since = time.time() - 1.0
                 # A tree, not just the child: run.py starts a worker process per cell, and a timeout must stop them all.
                 with _ProcessTree(
                     [str(py), str(code_dir / RUN)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -1429,11 +1501,17 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
                         tree.kill()
                         err = _drain(tree.proc)
                     if result.get("status") != "not_finished":
+                        took = time.monotonic() - run_started  # run.py alone, unrounded: it is compared with a limit
                         if tree.proc.returncode == 0:
                             result["ok"] = True
-                            result["run_seconds"] = time.monotonic() - run_started  # run.py alone, unrounded: it is compared with a limit
-                        elif (figures := _figures_only_failed(quest_root, tree.proc.returncode, out or "")):
+                            if _whole_run(quest_root, run_since):
+                                result["run_seconds"] = took
+                        elif (figures := _figures_only_failed(quest_root, tree.proc.returncode, out or "", run_since)):
                             result["ok"] = True  # the results were produced, as in the run; only a figure was not drawn
+                            # The analysis records a figure it cannot draw and goes on, so run.py ran to its end: its time
+                            # is a whole run, as a reader gets it (when its trials came out as the study's own did).
+                            if _whole_run(quest_root, run_since):
+                                result["run_seconds"] = took
                             result["status"] = "ran_figures_failed"
                             result["figures_note"] = figures
                         else:
