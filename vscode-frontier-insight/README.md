@@ -90,23 +90,21 @@ says so.
 
 A topic that states a page limit ("≤ 4 pages", "at most 4 pages", "a 4-page
 paper"), or a Page limit set in `@fi /new` under "Edit an advanced field"
-(written to `output.page_limit`; leave it blank for no set limit), keeps the
-paper to it. The paper
+(written to `output.page_limit`; leave it blank for no set limit), sets the
+paper's target length. The paper
 gets a tighter layout (2 cm margins where its template had 1 in, figures at most
 a third of the text height, smaller References and Further reading lists), and
 the writer gets a word budget. After each draft the review renders it the way
-`paper.pdf` will be and counts its pages. A draft over the limit comes back as
-the must-flag hit `over_page_limit`, with the page count, the limit and about
-how many words to cut, and the paper is written again, shorter. There are at
-most two of these rewrites, and they do not count against
-`engine.max_iterations`; a draft still over after two is recorded in the review
-instead. When the overflow is only FI's own Further reading list, the body is
-not rewritten: the list's last entries are dropped, one at a time, until the
-PDF fits (no model call). When the body is a few sentences over (about 400 words or fewer), the
-model is asked which sentences of the background and discussion to take out instead of writing the
-paper again; the engine decides what may go (never the Abstract, Methods or Results, a sentence
-that says what the paper does or finds, a number stated nowhere else or a source's only citation),
-and a paper it cannot bring within the limit goes to the rewrite as before. Without a limit the paper keeps its usual layout and
+`paper.pdf` will be and counts its pages. The limit is a guideline: a draft over
+it is never sent back to be written again. FI first moves its own parts to a
+supplement, `paper/supplement.md`, without a model call: its tables of every
+setting, then its Limitations (one line stays, naming each part of the topic the
+study did not do), then its Further reading; the References stay. When the body
+is still a few sentences over (about 400 words or fewer), the model is asked
+which sentences of the background and discussion to take out, and the engine
+decides what may go. A paper still over is delivered as written, and QUALITY.md
+says so.
+Without a limit the paper keeps its usual layout and
 length.
 
 ## One-time setup
