@@ -571,7 +571,8 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
                        f"{', '.join(sorted(eqs)) or '(none)'}, or `none`")
         # The unit the question asks in against the unit of the result it will be answered by: the plan's map where the plan
         # has one (a difference of units never moves it), else the result the answer names.
-        planned = q.get("by", "")
+        # A shared question the answer moves to another result is held to that result (its unit, its true value).
+        planned = "" if q.get("shared") and by and by not in ("none", q.get("by")) else q.get("by", "")
         gaps = unit_gaps(row, planned, design)
         units = gaps["planned"] if planned else gaps["chosen"]
         if units and conflicts is not None:
@@ -589,7 +590,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
         elif stat == "bias":
             from . import paper_values as _values
 
-            target = (q.get("by") or by).partition(":")[2].strip()
+            target = (planned or by).partition(":")[2].strip()
             if _values.known_truth(design["protocol"], target) is None:
                 out.append(f"`{ident}`: `bias` needs a result with a known true value that the plan fixes; `{target or by}` has none "
                            "(answer `value` or `sd`, or another result)")

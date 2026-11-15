@@ -326,3 +326,27 @@ def test_one_question_one_number_asks_nothing_more() -> None:
     plain = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                        {"item": "Q2", "by": "metric:bloom", "at": {}}]}
     assert tr.shared_answers(REQ_TWO, plain) == {}
+
+
+def test_the_paper_never_gives_two_questions_one_number_whatever_map_it_reads(tmp_path, monkeypatch) -> None:
+    # A frozen or resumed plan whose map still answers two questions with one number (the answers step never asked, or failed)
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
+    text = pf.answers_text(root)
+    assert '- peak algae: not answered (the plan answers it with the same number as "water clarity"' in text
+    assert '- water clarity: not answered (the plan answers it with the same number as "peak algae"' in text
+    assert "{{v:algae_peak" not in text
+    # the same result read at different settings is two numbers: both answered (the known negative)
+    root2 = tmp_path / "two"
+    root2.mkdir()
+    root2 = _quest(root2, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1}},
+                                        {"item": "Q3", "by": "metric:algae_peak", "at": {"nutrient": 2}}])
+    assert "same number as" not in pf.answers_text(root2)
+
+
+def test_a_shared_question_moved_to_another_result_is_held_to_that_result() -> None:
+    # moved to a result with no known true value, a bias is refused (the plan's result is not what is checked)
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom", "statistic": "bias"}}}
+    problems = cp._check_answers(reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO})
+    assert any("`Q2`: `bias` needs a result with a known true value" in p and "`bloom` has none" in p for p in problems)

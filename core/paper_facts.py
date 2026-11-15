@@ -1559,6 +1559,12 @@ def answers_text(quest_root: Path | str) -> str:
     varied = rec.varied()
     estimates = _known_estimates(protocol)
     plain = _plain_in(protocol, root)
+    # Two questions the map answers with one number (a frozen plan, a resumed quest, an answers step that failed): neither is
+    # given it, since the line would print one question's number as the other's answer (core/topic_requirements.py).
+    shared = _topic_req.shared_answers(req, protocol)
+    ids = {id(q): f"Q{i + 1}" for i, q in enumerate(req.get("quantities") or [])}
+    names = {f"Q{i + 1}": " ".join(str(q.get("name") or "").split()) for i, q in enumerate(req.get("quantities") or [])
+             if isinstance(q, dict)}
     lines: list[str] = []
     starts: list[int] = []  # the first line of each question, to find where one question's lines end
     unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
@@ -1567,6 +1573,11 @@ def answers_text(quest_root: Path | str) -> str:
         if not name:
             continue
         starts.append(len(lines))
+        if ids.get(id(item)) in shared:
+            others = "; ".join(f'"{names.get(o) or o}"' for o in shared[ids[id(item)]])
+            lines.append(f"- {name}: not answered (the plan answers it with the same number as {others}, a different "
+                         "question, so that number is not given for it)")
+            continue
         # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers part)
         # is still answered by that result: the line states both units, and FI converts nothing.
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
