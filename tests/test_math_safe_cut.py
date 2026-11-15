@@ -99,3 +99,9 @@ def test_closers_left_open_skips_math_and_escapes():
     assert closers_left_open("a (b [c") == "])" and closers_left_open("a (b) c") == ""
     assert closers_left_open(r"$\left(x$ y") == "" and closers_left_open(r"a \{b") == ""
     assert closers_left_open("x $(a$ (b") == ")"
+
+
+def test_caption_words_with_no_room_for_the_closing_stays_within_the_limit():
+    from core.engine import _caption_words
+    out = _caption_words("(abcdefghijk remaining words", 10)
+    assert out == "(abcdefghi" and len(out) <= 10, "one word and no room for ' ...)': cut as before"
