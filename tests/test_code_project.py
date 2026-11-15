@@ -952,6 +952,8 @@ def test_a_clean_run_is_whole_only_with_the_studys_own_trials(tmp_path):
     assert not whole([{"key": "b=2", "ok": 10, "failed": 0}]), "not the study's setting"
     assert not whole(None), "the study ran FI's trials; this run wrote none"
     assert not whole([{"key": "a=1", "ok": "unknown", "failed": 0}]), "a count that is no number"
+    assert not whole([{"key": "a=1", "ok": 4.5, "failed": 6}]), "a count that is no whole number"
+    assert not whole('{"cells": [{"key": "a=1", "ok": Infinity, "failed": 0}]}'), "an infinite count: no error"
     assert not whole("not json")
     (root / "raw" / "trials.json").unlink()
     assert whole(None), "no trials either side: taken as it ran"

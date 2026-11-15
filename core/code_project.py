@@ -1319,7 +1319,9 @@ _RUN_RECORDS = (Path("raw") / "trials.json", Path("data") / "results" / "derived
 
 def _count(value: Any) -> int | None:
     """A trial count from a record: a whole number, else ``None``."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():  # 1.9, an infinity or NaN is no count
         return None
     return int(value)
 
