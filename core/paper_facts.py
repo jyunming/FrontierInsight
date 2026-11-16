@@ -584,25 +584,37 @@ def _number_said(value: Any) -> str:
     return f"{value:.4g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
 
 
-def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
-    """``(key, name, sentence)`` for each check of the code against a known answer the quest went on without, from FI's own
-    record (``needs/ORACLE_CHECK.json`` with status ``went_on_failing``), in the paper's words: the plan's own words for what
-    the check compares (the first sentence of its ``check``), FI's numbers, and what happened (it failed, it could not be run on its case, the trials
-    could not decide it, or the simulation and the plan's own working of the known value disagree). The writer is told the
-    same, but whether the paper says it never rests on the writer. More than :data:`_MAX_SETTING_ITEMS` are one item."""
+def went_on_checks(root: Path) -> list[dict[str, Any]]:
+    """The entries of the known-answer checks the quest went on without (``needs/ORACLE_CHECK.json`` with status
+    ``went_on_failing``); ``[]`` when there is none. An entry with no name says no check of the plan could be judged."""
     from . import accepted_checks as _accepted
 
     record = _read(root, f"needs/{_accepted.ORACLE_RECORD}")
     if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON:
         return []
+    return [e for e in record.get("went_on") or [] if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
+
+
+def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
+    """``(key, name, sentence)`` for each check of the code against a known answer the quest went on without, from FI's own
+    record (:func:`went_on_checks`), in the paper's words: the plan's own words for what the check compares (the first
+    sentence of its ``check``), FI's numbers, and what happened (it failed, it could not be run on its case, the trials
+    could not decide it, or the simulation and the plan's own working of the known value disagree; an entry with no name:
+    no check could be judged). The writer is told the same, but whether the paper says it never rests on the writer. More
+    than :data:`_MAX_SETTING_ITEMS` are one item; the line the Limitations keep counts the checks, not the items."""
+    entries = went_on_checks(root)
+    if not entries:
+        return []
     frozen = _read(root, "needs/FROZEN_PROTOCOL.json")
     oracles = (frozen.get("protocol") or {}).get("oracles") if isinstance(frozen, dict) else None
     # the plan's first sentence of what the check compares (the rest is how the plan sized it), else the check's name
-    words = {str(o.get("name")): re.split(r"(?<=[.;])\s+(?=[A-Z])", _one(o.get("check")))[0].rstrip(".;")
+    words = {str(o.get("name")): re.split(r"(?<=\.)\s+(?=[A-Z])", _one(o.get("check")))[0].rstrip(".")
              for o in oracles or [] if isinstance(o, dict) and o.get("name")}
     out: list[tuple[str, str, str]] = []
-    for e in record.get("went_on") or []:
-        if not isinstance(e, dict) or not e.get("name"):
+    for e in entries:
+        if not e.get("name"):  # recorded when no check of the plan could be judged at all
+            out.append(("none", "known-answer checks not judged", _sentence(
+                "No check of the code against a known answer could be judged, so the results are not validated against one")))
             continue
         name = str(e["name"])
         what = words.get(name) or name
@@ -623,7 +635,7 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
             said = f"{lead} did not pass ({gave})"
         out.append((name, f"known-answer check {name}", _sentence(f"{said}; the results are not validated against it")))
     if len(out) > _MAX_SETTING_ITEMS:
-        listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out)
+        listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out if k != "none")
         return [("checks", "known-answer checks", _sentence(
             f"{len(out)} checks of the code against a known answer failed, could not be run on their case or could not be "
             f"decided, and the study went on: {listed}; the results are not validated against them (the quality report "
@@ -2133,7 +2145,7 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         items = [i for i in required_items(quest_root) if i.kind != CODE_FINDING]
         return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
                                                discussion=bool(_supplement.writer_text(quest_root)),
-                                               known_answers=len(known_answer_items(Path(quest_root))))
+                                               known_answers=len(went_on_checks(Path(quest_root))))
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":

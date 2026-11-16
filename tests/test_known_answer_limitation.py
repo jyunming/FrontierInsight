@@ -85,3 +85,27 @@ def test_the_line_the_limitations_keep_in_the_paper_names_them(tmp_path: Path) -
     (root / sup.FILE).write_text("# Supplement\n", encoding="utf-8")
     line = pf.block_text(root, sup.LIMITATIONS)
     assert "4 checks of the code against a known answer that did not confirm the results" in line, line
+
+
+def test_a_record_that_no_check_could_be_judged_is_said_too(tmp_path: Path) -> None:
+    # The gate writes an entry with no name when no check of the plan could be judged at all.
+    said = _said(_quest(tmp_path, [{"name": "", "measured": None, "unmeasured": "no check could be judged"}]))
+    assert said == ["No check of the code against a known answer could be judged, so the results are not validated "
+                    "against one."]
+
+
+def test_the_line_the_limitations_keep_counts_every_check_when_many_are_one_item(tmp_path: Path) -> None:
+    many = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
+    root = _quest(tmp_path, many, oracles=[])
+    assert len(_said(root)) == 1
+    (root / sup.RECORD).parent.mkdir(parents=True, exist_ok=True)
+    (root / sup.RECORD).write_text(json.dumps({"moved": [sup.LIMITATIONS]}), encoding="utf-8")
+    (root / sup.FILE).parent.mkdir(parents=True, exist_ok=True)
+    (root / sup.FILE).write_text("# Supplement\n", encoding="utf-8")
+    assert f"{len(many)} checks of the code against a known answer" in pf.block_text(root, sup.LIMITATIONS)
+
+
+def test_the_plans_first_sentence_is_kept_whole_through_a_semicolon(tmp_path: Path) -> None:
+    oracles = [{"name": "peak_closed_form", "check": "The total algae is conserved; All inflows are zero. It uses 40 runs."}]
+    said = _said(_quest(tmp_path, WENT_ON[:1], oracles=oracles))
+    assert '"The total algae is conserved; All inflows are zero"' in said[0]
