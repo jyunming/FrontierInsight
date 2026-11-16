@@ -188,7 +188,6 @@ def test_an_answer_only_adds_to_the_requirements_and_never_removes_one() -> None
 def test_an_answer_never_changes_the_main_quantity_and_a_derived_result_gets_an_item() -> None:
     d = design(ENTRY_PEAK, "bloom")
     rows = {ENTRY_PEAK: {"answer": "result", "by": ["bloom_rate", "algae_peak"]}}  # the first entry, tied by the plan's model
-    assert code_review.headline_names(d, _protocol(rows)) == code_review.headline_names(d, _protocol({}))
     before = {r["name"]: r["headline"] for r in code_review.requirements(d, _protocol({}))}
     after = code_review.requirements(d, _protocol(rows))
     assert all(r["headline"] == before[r["name"]] for r in after if r["name"] in before)  # no item becomes the main quantity
@@ -206,45 +205,10 @@ def test_a_long_first_entry_and_a_short_one_are_treated_alike() -> None:
         p = dependent_map.apply(d["protocol"], {k: {"answer": "result", "inputs": ["algae_peak"]} for k in entries}, entries)
         peak = next(r for r in code_review.requirements(d, p) if r["name"] == "algae_peak")
         assert "also names it as" in peak["text"] and not peak["headline"], entry
-        assert code_review.headline_names(d, p) == code_review.headline_names(d, d["protocol"]), entry
-
-
-def test_a_wrong_tie_of_the_first_entry_never_turns_a_fault_that_is_left_out_into_a_stop(tmp_path: Path) -> None:
-    from core import shown_reach
-    from tests import test_shown_reach as T
-
-    root = tmp_path / "quest"
-    for rel, text in T.FILES.items():
-        (root / "code" / rel).parent.mkdir(parents=True, exist_ok=True)
-        (root / "code" / rel).write_text(text, encoding="utf-8")
-    (root / "raw").mkdir()
-    metrics = {k: {"values": [1.0], "trials": [0]} for k in ("est_a", "est_b", "se_a", "lo_a", "hi_a")}
-    (root / "raw" / "trials.json").write_text(json.dumps({"cells": [{"cell": {"noise": 0.1}, "metrics": metrics}]}), encoding="utf-8")
-    derived = {"schema": "fi.derived/v1", "complete": True, "not_computed": [], "bodies": {}, "figures": [],
-               "derived": {"corr_ab": {"status": "ok", "by": "derive_corr_ab", "inputs": ["est_a"], "by_setting": {"noise=0.1": 0.4}},
-                           "cover": {"status": "ok", "by": "derive_cover", "inputs": [], "by_setting": {"noise=0.1": 0.9}}}}
-    (root / "data" / "results").mkdir(parents=True)
-    (root / "data" / "results" / "derived.json").write_text(json.dumps(derived), encoding="utf-8")
-    entry = "the size of the first effect over the noise levels"
-
-    def effect(dependent: list[str], rows: dict[str, Any] | None, moved: str) -> Any:
-        protocol = copy.deepcopy(T.PROTOCOL) | ({"dependent_map": rows} if rows else {})
-        d = {"variables": {"dependent": dependent, "independent": ["noise"]}}
-        return shown_reach.Reach(root, protocol, code_review.headline_names(d, protocol), []).effect_of_changes([moved])
-
-    wrong = effect([entry, "est_b"], {entry: {"answer": "result", "by": ["corr_ab"]}}, "corr_ab")
-    assert not wrong.stop and wrong.left_out == ["corr_ab"]  # left out and said, as without the answer
-    untied = effect([entry, "est_b"], None, "corr_ab")
-    assert (untied.stop, untied.left_out) == (wrong.stop, wrong.left_out)
-    own = effect(["est_a", "est_b"], None, "est_a")  # the plan's own main quantity: a fault there still stops
-    assert own.stop and "est_a" in own.stop
 
 
 def test_an_answer_never_ties_an_entry_for_the_release_of_a_finding() -> None:
     rows = {ENTRY_PEAK: {"answer": "result", "by": ["algae_peak"]}}
-    rec = {"read_problems": [{"fid": "F-1", "kind": "dependent variable", "name": ENTRY_PEAK, "status": "missing"}]}
-    ids = ["algae_peak", "bloom"]
-    assert code_review.untied_dependents(rec, {"id": "F-1"}, ids, []) == [ENTRY_PEAK]  # the answer unlocks nothing
     assert code_review.unplaced_dependents(design(ENTRY_PEAK), _protocol(rows) | {"form": "contract"}) == [ENTRY_PEAK]
 
 

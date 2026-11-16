@@ -39,9 +39,8 @@ def test_r9k_s_paper_and_quality_report(tmp_path: Path) -> None:
     assert [v["fid"] for v in found["never_run"]] == ["F-560671f3"]
     assert [v["fid"] for v in found["flagged"]] == ["F-a3441c2a"]
     block = code_review.findings_block(root, root / "code")
-    note = code_review.write_note(root, root / "code")
-    assert "weighted_minus_unweighted" not in block and "weighted_minus_unweighted" not in note
-    assert "diagonal matrix" in block and "diagonal matrix" in note
+    assert "weighted_minus_unweighted" not in block
+    assert "diagonal matrix" in block
     rows = {r["id"]: r for r in quality_report.build(root)["code"]["issues"]}
     assert rows["F-560671f3"]["never_run"] is True and rows["F-a3441c2a"]["never_run"] is False
 

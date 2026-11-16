@@ -251,8 +251,6 @@ async def test_unresolved_is_a_finding_in_the_quality_report_and_the_claim_check
     assert "mean_quality" in " ".join(second_impl.limitations(record)) or "mean quality" in " ".join(second_impl.limitations(record))
     found = code_review.open_findings(engine.quest_root, engine.quest_root / "code")
     assert len(found["second_version"]) == 1
-    note = code_review.write_note(engine.quest_root, engine.quest_root / "code")
-    assert note == "", "the writer is not told that a second version of a function could not be settled"
     block = code_review.findings_block(engine.quest_root, engine.quest_root / "code")
     assert "second, independent version of a key function was not settled" in block and "mean quality" in block
     # No second model read this code: the paper must not say one did

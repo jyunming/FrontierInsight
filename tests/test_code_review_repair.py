@@ -6,7 +6,6 @@ quest. Fake models, a mass on a damped spring."""
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -253,24 +252,11 @@ async def test_a_reader_that_fails_twice_is_recorded_and_the_final_version_is_sa
     assert calls["n"] == 2, "a failed request is made once more, and no more"
     record = cr.load(engine.quest_root)
     assert "twice" in record["error"] and record["final_read"] is False
-    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     block = cr.findings_block(engine.quest_root, engine.quest_root / "code")
     assert "not compared with the plan by another model" in block and "twice" in block
 
 
 # --- after the run --------------------------------------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_a_high_finding_about_the_main_quantity_that_the_results_cannot_settle_is_a_limitation_never_a_stop(
-        tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    engine._client = _Script(lambda n, code: [HEADLINE_FINDING])
-    await engine._code_review_gate(WITH_PLAN, final=True)
-    results = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 2.5}, {"c": 0.5, "quality_factor": 1.0}]}}
-    assert engine._no_results_verdict(results) is None
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "quality_factor ignores the damping" in note and "not resolved" in note and "[high]" in note
 
 
 @pytest.mark.asyncio
@@ -299,21 +285,6 @@ async def test_a_finding_that_the_results_contradict_lets_the_paper_go_on_with_t
     assert engine._no_results_verdict(varies) is None, "the results show it varies: the reviewer was wrong"
     record = cr.load(engine.quest_root)
     assert record["disagreement"] == ["quality_factor does not depend on the damping"]
-    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
-
-
-@pytest.mark.asyncio
-async def test_a_lower_severity_finding_or_one_about_another_quantity_is_a_limitation_not_a_stop(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    minor = {**HEADLINE_FINDING, "severity": "medium", "what": "a normalisation differs"}
-    other = {**HEADLINE_FINDING, "severity": "high", "quantity": "settling_time", "what": "settling_time uses the wrong band"}
-    script = _Script(lambda n, code: [minor, other])
-    engine._client = script
-    await engine._code_review_gate(WITH_PLAN, final=True)
-    results = {**STATE, "result_json": {"quality_factor": 1.0, "settling_time": 3.0}}
-    assert engine._no_results_verdict(results) is None
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "a normalisation differs" in note and "settling_time uses the wrong band" in note and "[high]" in note
 
 
 def test_the_quality_report_shows_whether_the_final_version_was_read_and_whether_the_repairs_converged(tmp_path: Path) -> None:

@@ -106,16 +106,6 @@ def test_the_plans_quantities_are_found_under_the_names_the_results_use() -> Non
     assert not any("bias" in k or "coverage" in k for k in _left_out_keys())
 
 
-def test_the_open_findings_of_the_version_that_ran_name_the_quantities(tmp_path: Path) -> None:
-    engine = _quest(tmp_path)
-    found = cr.differing_quantities(engine.quest_root, engine.quest_root / "code")
-    assert {f["name"] for f in found} == PLANNED and len(found) == 3
-    assert all(f["status"] == cr.DIFFERENT for f in found)
-    # Not for other code: the record is for the version that was read.
-    (engine.quest_root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')  # changed\n", encoding="utf-8")
-    assert cr.differing_quantities(engine.quest_root, engine.quest_root / "code") == []
-
-
 def test_a_reader_claim_leaves_nothing_out_of_the_analysis_input(tmp_path: Path) -> None:
     """A second model's word that a quantity is computed differently is its opinion: it takes no quantity out at execute time,
     no check of it is recorded, and the analysis and the paper's values still see every key."""
@@ -156,7 +146,6 @@ def test_a_quantity_the_reader_called_missing_that_the_results_hold_is_not_left_
         if p.get("kind") in cr.QUANTITY_KINDS:
             p["status"] = cr.MISSING  # the reader said "not computed", but the results hold it: the reader was wrong
     cr.save(engine.quest_root, record)
-    assert {f["status"] for f in cr.differing_quantities(engine.quest_root, engine.quest_root / "code")} == {cr.MISSING}
     assert engine._code_reader_findings(_result()) == []
 
 

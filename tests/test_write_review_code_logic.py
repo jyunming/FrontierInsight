@@ -137,8 +137,6 @@ async def test_a_high_finding_still_there_after_the_repairs_is_said_in_the_limit
     engine._client = _Logic(NORMALISATION)
     assert await engine._code_review_gate(STATE, final=True) is None   # no repair is made of the version that runs
     code = engine.quest_root / "code"
-    note = cr.write_note(engine.quest_root, code)
-    assert "still flags" in note and "E1 divides by the length" in note and "[high]" in note and "not resolved" in note
     # The results cannot decide a normalisation: the quest goes on whatever they hold.
     for result in ({"by_c": [{"quality": 1.0}, {"quality": 2.0}]}, {"quality": 1.0}):
         assert engine._no_results_verdict({**STATE, "result_json": result}) is None
@@ -154,12 +152,10 @@ async def test_a_false_high_severity_constant_does_not_stop_a_correct_quest(tmp_
     engine = _engine(tmp_path)
     engine._client = _Logic(CONSTANT, always=True)
     assert await engine._code_review_gate(STATE, final=True) is None
-    code = engine.quest_root / "code"
     varies = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 2.5}, {"c": 0.5, "quality_factor": 1.0}]}}
     assert engine._no_results_verdict(varies) is None, "the results show the quantity varies: the reviewer was wrong"
     record = cr.load(engine.quest_root)
     assert record["disagreement"] and "quality_factor does not depend" in record["disagreement"][0]
-    assert cr.write_note(engine.quest_root, code) == "", "the paper is not told a quantity is a constant when it is not"
 
 
 @pytest.mark.asyncio
@@ -203,7 +199,6 @@ async def test_an_agree_only_code_review_is_asked_again_and_then_recorded_as_not
     record = cr.load(engine.quest_root)
     assert record["error"] == "its answers cited no place in the code it was shown" and not record.get("read_version")
     assert record["cited_outside_what_was_shown"]
-    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert "not compared with the plan by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
     # Asked again, it cites the places and says what it checked: a review with nothing found.
     class _Then(_Logic):

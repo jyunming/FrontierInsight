@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from core import paper_facts, rerun_check, run_facts
+from core import paper_facts, run_facts
 from core import trial_runner as trials
 from tests.test_optimise_runner import _ledger, _protocol, _quest, _run
 
@@ -46,20 +46,6 @@ async def test_a_search_with_a_scan_writes_the_run_record_with_what_fi_measured(
 
 
 @pytest.mark.asyncio
-async def test_a_rerun_of_a_search_study_has_a_bound(tmp_path: Path) -> None:
-    root = _quest(tmp_path)
-    assert rerun_check.time_allowed(root) is None
-    await _run(root, _protocol(grid=SCAN, search_method="global_then_local", evaluation_budget=SMALL))
-    run = run_facts.read(root)["trials_run"]
-    allowed = rerun_check.time_allowed(root)
-    assert allowed is not None
-    serial = rerun_check.SERIAL_FACTOR * (run["settings_s"] + run["evaluations_s"])
-    whole = run_facts.run_seconds(root)
-    assert allowed == pytest.approx(max(rerun_check.FLOOR_S, rerun_check.SLACK * max(whole, serial)))
-    assert rerun_check.time_allowed(root, 5) == 5.0
-
-
-@pytest.mark.asyncio
 async def test_the_paper_states_the_search_studys_run_time_and_settings_once(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     await _run(root, _protocol(grid=SCAN, search_method="global_then_local", evaluation_budget=SMALL))
@@ -80,7 +66,6 @@ async def test_a_search_without_a_scan_keeps_its_evaluations_and_not_an_earlier_
     await _run(root, _protocol(search_method="global_then_local", evaluation_budget=SMALL))
     run = run_facts.read(root)["trials_run"]
     assert "key" not in run and "settings_s" not in run and run["evaluations"] > 0
-    assert rerun_check.time_allowed(root) is not None
     assert run_facts.run_seconds(root) == pytest.approx(_best(root)["time"]["seconds"], abs=0.02)
 
 

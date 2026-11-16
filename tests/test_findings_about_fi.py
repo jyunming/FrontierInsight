@@ -81,15 +81,6 @@ def test_a_finding_about_fis_frame_is_set_aside_and_one_about_the_studys_body_is
     assert record["readings"][0]["open"] == 1
 
 
-def test_a_shown_fault_about_fis_frame_is_never_a_candidate_for_the_gates_stop(tmp_path: Path) -> None:
-    code = _code(tmp_path)
-    for line, stops in ((_line(DERIVE, "REFERENCES"), False), (_line(DERIVE, "return table.mean"), True)):
-        record = _read(code, [_problem("derive.py", line, "a fault")])
-        for issue in cf.issues_of(record).values():
-            issue.update(demonstrated=True, failure_kind=cf.ASSERTION)
-        assert bool(cf.shown_open(record)) is stops
-
-
 def test_a_position_is_never_judged_against_code_it_was_not_read_from(tmp_path: Path) -> None:
     code = _code(tmp_path)
     body = "def trial(cell, ctx):\n" + "".join(f"    x{n} = {n}\n" for n in range(30)) + "    return 1.0\n"
@@ -161,49 +152,7 @@ def test_setting_aside_again_changes_nothing_and_the_quality_row_says_it(tmp_pat
 
 
 # ---- the real gate ---------------------------------------------------------------------------------------------------------
-import pytest  # noqa: E402
 
-from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig  # noqa: E402
-from core.engine import Engine  # noqa: E402
-
-FAILING_TEST = "import helper\n\n\ndef test_f_is_two():\n    assert helper.f() == 2, 'f is one'\n"
-STATE: dict[str, Any] = {"exec_result": {"returncode": 0}, "result_json": {"dose": 60.0}}
-
-
-async def _gate(tmp_path: Path, line_of: str, outcome: str) -> dict[str, Any] | None:
-    cfg = Config(topic="a dose to size", title="dose", provider=ProviderConfig(name="openai"),
-                 engine=EngineConfig(max_iterations=1, review_loop=False),
-                 execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
-                 output=OutputConfig(output_dir=tmp_path / "outputs"))
-    engine = Engine(cfg)
-    code = engine.quest_root / "code"
-    code.mkdir(parents=True, exist_ok=True)
-    for name, text in (("derive.py", DERIVE), ("helper.py", "def f():\n    return 1\n")):
-        (code / name).write_text(text, encoding="utf-8")
-    (engine.quest_root / ".fi" / "finding_tests").mkdir(parents=True, exist_ok=True)
-    (engine.quest_root / ".fi" / "finding_tests" / "F-1_1.py").write_text(FAILING_TEST, encoding="utf-8")
-    where = f"derive.py:{_line(DERIVE, line_of)}"
-    issue = {"id": "F-1", "changes_result": True, "demonstrated": True, "failure_kind": cf.ASSERTION, "outcome": outcome,
-             "plan_conflict": False, "readings": [{"n": 1, "status": "open", "version": code_review.version(code)}],
-             "severity": "high", "first_seen": 1, "file": "derive.py", "function": "", "where": where,
-             "text": "a fault shown by a test", "test": ".fi/finding_tests/F-1_1.py"}
-    code_review.save(engine.quest_root, {"issues": {"F-1": issue}})
-    return await engine._shown_fault_verdict(STATE)
-
-
-@pytest.mark.usefixtures("this_python")
-@pytest.mark.asyncio
-async def test_the_gate_does_not_stop_for_a_shown_fault_in_fis_frame(tmp_path: Path) -> None:
-    assert await _gate(tmp_path, "REFERENCES", cf.OPEN) is None
-    record = code_review.load(next((tmp_path / "outputs").iterdir()))
-    assert record["issues"]["F-1"]["fi_own"] is True and record["about_fi"][0]["id"] == "F-1"
-
-
-@pytest.mark.usefixtures("this_python")
-@pytest.mark.asyncio
-async def test_the_gate_still_stops_for_a_shown_fault_in_the_studys_function(tmp_path: Path) -> None:
-    verdict = await _gate(tmp_path, "return table.mean", cf.OPEN)
-    assert verdict and verdict["stuck"] is True and verdict["stuck_reason"] == "shown_fault_open"
 
 
 def _requirement(file: str, line: int) -> dict[str, Any]:

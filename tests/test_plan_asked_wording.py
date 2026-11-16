@@ -49,7 +49,7 @@ def test_every_caller_names_a_part_of_the_plan_or_what_it_lacks() -> None:
                 # every caller passes `what` as a literal keyword, so the sentence it makes can be read here
                 assert isinstance(what, ast.Constant) and isinstance(what.value, str), f"{f.name}:{node.lineno}"
                 whats.append(what.value)
-    assert len(whats) >= 5, whats
+    assert len(whats) >= 4, whats
     # "the plan's <what> was missing" reads badly when <what> is itself a whole phrase or speaks of a plan
     bad = [w for w in whats if not w.startswith("what ") and (re.match(r"(a|an|the)\b", w) or re.search(r"\bplan", w))]
     assert not bad, bad

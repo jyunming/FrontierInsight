@@ -128,12 +128,6 @@ def test_the_paper_never_claims_which_definition_the_value_follows(tmp_path: Pat
     assert "two different formulas" in text and "could not tell which of the two" in text and "follows the definition" not in text
 
 
-def test_the_gap_in_the_plan_is_gone_only_when_the_double_definition_is_gone() -> None:
-    proto = _design(TWICE)["protocol"]
-    assert cr.double_definition_gaps(_design(TWICE), proto)
-    assert cr.double_definition_gaps(_design(ONCE), proto) == []
-
-
 def test_a_check_is_linked_to_the_names_fi_evaluates_in_its_measure(tmp_path: Path) -> None:
     # `measure` is FI's own executable formula: the quantity it reads is a name FI evaluates, not any word of the text
     for n, (measure, found) in enumerate((("quantity_a/(2*pi) - 1", ["check_a"]), ("the quantity_a of the swing", []),

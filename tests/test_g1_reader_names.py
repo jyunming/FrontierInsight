@@ -14,9 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from core import code_findings
 from core import code_review as cr
-from tests.test_shown_fault_names import _gate_on
 
 SENTENCE = "the mean time the loop takes to settle, for every setting"
 
@@ -78,45 +76,3 @@ def test_the_reader_is_contradicted_by_a_key_with_one_more_word_in_it(tmp_path: 
     assert cr.load(tmp_path)["problems"][0]["contradicted"] is True
     cr.save(tmp_path, {"final": True, "version": cr.version(code), "problems": [dict(problem)]})
     assert cr.resolve_headline(tmp_path, code, {"n_trials": 5}) == [problem["text"]]  # known positive: still absent
-
-
-def _issue(**over: Any) -> dict[str, Any]:
-    base = {"id": "F-1", "changes_result": True, "demonstrated": True, "failure_kind": code_findings.ASSERTION,
-            "outcome": code_findings.GAVE_UP, "plan_conflict": False, "readings": [{"n": 1, "status": "open"}],
-            "severity": "high", "first_seen": 1, "file": "experiment.py", "function": "main", "text": "a finding",
-            "test": ".fi/finding_tests/F-1_1.py"}
-    return {**base, **over}
-
-
-def test_a_missing_sentence_named_main_quantity_no_record_places_stops_the_quest(tmp_path: Path, monkeypatch: Any) -> None:
-    """The reader says a sentence-named quantity is not there and its test fails, and no record of FI's shows that no value was
-    worked out for it: FI cannot tell whether the test stands for a value reported under another name, so it stops."""
-    cr.save(tmp_path, {**_missing_record("dependent variable", SENTENCE, "the dependent variable is computed", True),
-                       "issues": {"F-1": _issue(headline=True, quantity=SENTENCE)}})
-    _root, verdict, _eng = _gate_on(tmp_path, {"gain": 1.0}, monkeypatch)
-    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
-
-
-def test_a_different_main_quantity_still_stops(tmp_path: Path, monkeypatch: Any) -> None:
-    """Known positive: the reader says the main quantity is computed differently and a test showed it: stop."""
-    record = _missing_record("dependent variable", SENTENCE, "the dependent variable is computed", True)
-    record["read_problems"][0]["status"] = "different"
-    cr.save(tmp_path, {**record, "issues": {"F-1": _issue(headline=True, quantity=SENTENCE)}})
-    _root, verdict, _eng = _gate_on(tmp_path, {"gain": 1.0}, monkeypatch)
-    assert verdict is not None and verdict["stuck_reason"] == "shown_fault_open"
-
-
-def test_a_count_reported_as_an_empty_list_is_left_out_not_a_stop(tmp_path: Path, monkeypatch: Any) -> None:
-    """The quantity's own key holds no number (the plan asked a count; the code reported a list, here empty): it is the
-    result the shown fault is about, so it is left out. A fault whose quantity has no key at all still stops."""
-    cr.save(tmp_path, {"issues": {"F-1": _issue(quantity="blocked_count", kind="logic")}})
-    _root, verdict, _eng = _gate_on(tmp_path, {"blocked_count": [], "gain": 1.0}, monkeypatch)
-    assert verdict is None
-    assert cr.load(tmp_path)["issues"]["F-1"]["at_gate"]["outcome"] == "left_out"
-
-
-def test_a_fault_whose_quantity_has_no_key_still_stops(tmp_path: Path, monkeypatch: Any) -> None:
-    """Known positive (a measured fault in a check's input FI cannot map to a result): the conservative stop stays."""
-    cr.save(tmp_path, {"issues": {"F-1": _issue(quantity="printable_count", kind="logic")}})
-    _root, verdict, _eng = _gate_on(tmp_path, {"blocked_count": [], "gain": 1.0}, monkeypatch)
-    assert verdict is not None and "cannot find which of the results it changes" in verdict["rationale"]

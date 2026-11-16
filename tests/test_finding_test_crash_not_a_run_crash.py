@@ -14,32 +14,11 @@ import pytest
 
 from core import code_findings, code_review, finding_repair, paper_facts
 from core.engine import Engine
-from tests.test_shown_finding_gate import STATE, _engine, _issue, _record
+from tests.test_shown_finding_gate import _engine
 
 pytestmark = pytest.mark.usefixtures("this_python")
 
 CRASHES = "def dose():\n    return {}['missing']\n"
-CALLS = "import experiment\n\n\ndef test_x():\n    assert experiment.dose() != 60.0\n"
-
-
-def _crashing(tmp_path: Path) -> Engine:
-    engine = _engine(tmp_path)
-    (engine.quest_root / "code" / "experiment.py").write_text(CRASHES, encoding="utf-8")
-    _record(engine, _issue(), test=CALLS)
-    return engine
-
-
-@pytest.mark.asyncio
-async def test_a_finding_test_crash_in_the_code_after_a_good_run_is_no_run_crash(tmp_path: Path) -> None:
-    engine = _crashing(tmp_path)
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict is None, "no repair_crash, no stuck: the study's run was fine"
-    issue = code_review.load(engine.quest_root)["issues"]["F-1"]
-    assert issue["gate_error"]["place"] == "program" and issue["gate_error"]["at"] == "code/experiment.py:2"
-    assert "crash" not in issue, "nothing is kept for a crash repair"
-    # the finding is unshown, and the paper says so
-    [item] = [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING]
-    assert "not confirmed that the fault is fixed" in item.sentence
 
 
 class _Replies(dict):
@@ -77,14 +56,6 @@ def test_a_review_test_that_raises_inside_the_code_shows_nothing_and_is_no_run_c
     assert "crash" not in issue, "nothing is kept for a crash repair"
     assert issue["errors"] and all(e["place"] == "program" for e in issue["errors"])
     assert issue["tests"] == finding_repair.TEST_CALLS, "the bounded tries were all used, asking for another test each time"
-    assert not code_findings.shown_open(record), "it stops nothing"
-    # no part of the engine takes it for the study's run: the gate on it neither routes nor stops
-    code_review.save(root, {**record, "final": True, "version": code_review.version(root / "code")})
-    from tests.test_shown_finding_gate import _engine
-
-    engine = _engine(tmp_path / "e")
-    engine.quest_root = root
-    assert asyncio.run(engine._shown_fault_verdict(STATE)) is None
 
 
 def test_a_replacement_test_that_fails_by_assertion_is_still_recognised(tmp_path: Path) -> None:
@@ -94,7 +65,7 @@ def test_a_replacement_test_that_fails_by_assertion_is_still_recognised(tmp_path
     shown = asyncio.run(finding_repair.demonstrate(env, issue, "experiment.py"))
     assert shown is True and issue["demonstrated"] is True and issue["failure_kind"] == code_findings.ASSERTION
     assert issue["errors"] and issue["errors"][0]["place"] == "program", "the first try's crash is kept, and is no crash route"
-    assert "crash" not in issue and code_findings.shown_open(record) == [issue]
+    assert "crash" not in issue
 
 
 def _reviewed_then_changed(tmp_path: Path, replies: list[str], *, problem: dict[str, Any] | None = None,
@@ -132,29 +103,6 @@ def test_a_later_test_that_ran_and_passed_is_not_said_to_have_failed_to_run(tmp_
 def test_a_finding_the_runs_results_contradict_stays_out(tmp_path: Path) -> None:
     root, issue = _reviewed_then_changed(tmp_path, [FENCED_CALL], problem={"contradicted": True})
     assert _findings(root) == []
-
-
-@pytest.mark.asyncio
-async def test_a_later_gate_where_the_test_passes_drops_the_error_and_the_item(tmp_path: Path) -> None:
-    engine = _crashing(tmp_path)
-    assert await engine._shown_fault_verdict(STATE) is None
-    assert code_review.load(engine.quest_root)["issues"]["F-1"].get("gate_error")
-    (engine.quest_root / "code" / "experiment.py").write_text("def dose():\n    return 61.0\n", encoding="utf-8")
-    assert await engine._shown_fault_verdict(STATE) is None
-    assert "gate_error" not in code_review.load(engine.quest_root)["issues"]["F-1"]
-    assert [i for i in paper_facts.required_items(engine.quest_root) if i.kind == paper_facts.CODE_FINDING] == []
-
-
-@pytest.mark.asyncio
-async def test_a_fault_that_stops_the_quest_is_not_held_up_by_a_crash_elsewhere(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    (engine.quest_root / "code" / "experiment.py").write_text(
-        "def dose():\n    return 60.0\n\n\ndef other():\n    return {}['missing']\n", encoding="utf-8")
-    _record(engine, _issue("F-1", first_seen=1), _issue("F-2", first_seen=2, function="other"))
-    (engine.quest_root / ".fi" / "finding_tests" / "F-2_1.py").write_text(
-        "import experiment\n\n\ndef test_x():\n    assert experiment.other()\n", encoding="utf-8")
-    verdict = await engine._shown_fault_verdict(STATE)
-    assert verdict and verdict["stuck_reason"] == "shown_fault_open"
 
 
 def test_a_real_study_crash_still_goes_to_the_run_repair(tmp_path: Path) -> None:

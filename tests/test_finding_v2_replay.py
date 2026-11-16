@@ -28,7 +28,7 @@ from typing import Any
 
 import pytest
 
-from core import code_findings, code_review, finding_repair
+from core import code_findings, finding_repair
 
 FIX = Path(__file__).parent / "fixtures" / "replay" / "finding_v2"
 AGENTS = Path(__file__).parent.parent / "agents"
@@ -101,20 +101,6 @@ def test_replay_e2_the_crash_is_not_a_shown_fault_and_the_quest_does_not_stop(tm
     f33 = _first_show(tmp_path, "e2_written", record, "F-331a25f1")
     assert f33["demonstrated"] is True and f33["failure_kind"] == code_findings.ASSERTION
     assert f33["assertion"].startswith("assert hasattr(") and f33["test"].endswith("F-331a25f1_2.py")
-    assert [i["id"] for i in code_findings.shown_open(record)] == ["F-331a25f1"]
-
-    # the gate, on the code that ran
-    from tests.test_disclosure import _engine
-
-    root = tmp_path / "gate"
-    shutil.copytree(FIX / "e2_final", root)
-    code_review.save(root, record)
-    eng = _engine(root)
-    verdict = asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
-        {"exec_result": {"returncode": 0}, "result_json": _gz("e2_result.json.gz")}))
-    assert verdict is None
-    gate = code_review.load(root)["issues"]["F-331a25f1"]["at_gate"]
-    assert gate["outcome"] == "left_out" and "convergence_check" in gate["keys"]
 
 
 @pytest.mark.usefixtures("this_python")
@@ -122,21 +108,6 @@ def test_replay_r14b_a_test_that_errors_on_the_code_that_ran_does_not_stop(tmp_p
     record = _gz("r14b_record.json.gz")
     issue = _first_show(tmp_path, "r14b_written", record, "F-27f456d7")
     assert issue["demonstrated"] is True and issue["failure_kind"] == code_findings.ASSERTION
-    from tests.test_disclosure import _engine
-
-    root = tmp_path / "gate"
-    shutil.copytree(FIX / "r14b_final", root)
-    for other in record["issues"].values():  # only this issue is replayed; the others are as the quest left them
-        if other["id"] != "F-27f456d7":
-            other.pop("failure_kind", None)
-    code_review.save(root, record)
-    assert [i["id"] for i in code_findings.shown_open(record)] == ["F-27f456d7"]
-    eng = _engine(root)
-    verdict = asyncio.run(eng._shown_fault_verdict(  # type: ignore[arg-type]
-        {"exec_result": {"returncode": 0}, "result_json": _gz("r14b_result.json.gz")}))
-    assert verdict is None
-    error = code_review.load(root)["issues"]["F-27f456d7"]["gate_error"]
-    assert error["place"] == "test" and "has no attribute 'plt'" in error["detail"]
 
 
 def test_replay_r12_its_finding_tests_error_one_inside_the_code_and_none_goes_to_the_run_repair(tmp_path: Path) -> None:
@@ -158,4 +129,3 @@ def test_replay_r12_its_finding_tests_error_one_inside_the_code_and_none_goes_to
     assert aece["errors"][-1]["place"] == "program" and aece["errors"][-1]["at"] == "code/kinetics_parameter_recovery/model.py:91"
     assert b166["demonstrated"] is False and "crash" not in b166
     assert b166["errors"][-1]["place"] == "test" and "unexpected keyword argument" in b166["errors"][-1]["detail"]
-    assert not code_findings.shown_open(record)

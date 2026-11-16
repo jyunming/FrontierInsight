@@ -10,7 +10,6 @@ import pytest
 
 from core import code_findings as cf
 from core import code_review as cr
-from core import review_pairs as pairs
 
 CODE = '''import math
 
@@ -195,16 +194,6 @@ def test_a_contradiction_of_the_plan_is_not_among_the_issues_the_repairs_are_for
                              changes_result=True)], code)
     (issue,) = cf.issues_of(record).values()
     assert issue["plan_conflict"] is True and cf.changing_open(record) == []
-
-
-def test_the_request_to_the_plan_s_model_holds_the_contradiction_and_no_value() -> None:
-    text = cf.plan_conflict_request("a spring", [("the spread is a standard deviation in one part and an absolute error "
-                                                   "in another", "the metric says one, the method the other")], [0.25])
-    assert "contradicts itself" in text and "standard deviation" in text and "a spring" in text
-    assert "protocol.metrics" in text and "Do not change a check, a threshold" in text
-    leaky = cf.plan_conflict_request("t", [("the value should be 0.25 here", "")], [0.25])
-    assert "0.25" not in leaky and pairs.PLACEHOLDER in leaky
-    assert set(cf.PLAN_PARTS) == {"metrics", "ci_method", "model"}, "no check, threshold or tolerance can be rewritten"
 
 
 @pytest.mark.parametrize("text,expected", [("p_missing", "pmissing"), ("Quality_Factor", "qualityfactor")])

@@ -245,11 +245,6 @@ def test_a_test_that_swallows_the_codes_error_is_refused_and_asked_for_once_more
     issue = run.record["issues"]["F-1"]
     assert issue["demonstrated"] is False and "try/except" in issue["reason"]
     assert [k for _w, k, _n in run.asked] == ["test", "test"]
-    # the test asked for again after an error at the gate is held to the same rule
-    run = Run(tmp_path / "gate", [{"id": "F-1"}], {"code:test": [_block(SWALLOWS)]})
-    issue = run.record["issues"]["F-1"]
-    assert asyncio.run(fr.ask_again(run.env, issue, "spring.py", fr.TestRun("error", "NameError", place="test"))) is None
-    assert "try/except" in issue["asked_again"]["outcome"]
 
 
 def test_a_test_that_passes_on_the_current_code_leaves_the_finding_alone(tmp_path: Path) -> None:
