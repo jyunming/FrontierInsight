@@ -611,6 +611,7 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
     words = {str(o.get("name")): re.split(r"(?<=\.)\s+(?=[A-Z])", _one(o.get("check")))[0].rstrip(".")
              for o in oracles or [] if isinstance(o, dict) and o.get("name")}
     out: list[tuple[str, str, str]] = []
+    kinds: list[str] = []
     # an entry with no name is recorded when no check of the plan could be judged at all: said on its own, never counted
     # or folded in as a check
     none_judged = [("none", "known-answer checks not judged", _sentence(
@@ -628,21 +629,27 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
                     if tol is not None else ""))
         gave = f"the run gave {_number_said(e.get('measured'))}, {known}" if e.get("measured") is not None else known
         if e.get("disagreement"):
+            kinds.append("could not be judged")
             said = (f"{lead} could not be judged: the simulation and the plan's own working of the known value disagree, and "
                     "neither is confirmed")
         elif e.get("undecided"):
+            kinds.append("could not be decided with the trials the study ran")
             said = f"{lead} could not be decided with the trials the study ran ({gave})"
         elif e.get("measured") is None:
+            kinds.append("could not be run on its case")
             said = f"{lead} could not be run on its case"
         else:
+            kinds.append("did not pass")
             said = f"{lead} did not pass ({gave})"
         out.append((name, f"known-answer check {name}", _sentence(f"{said}; the results are not validated against it")))
     if len(out) > _MAX_SETTING_ITEMS:
         listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out)
+        # each kind counted from what happened to it, so a check that was not run or not decided is never said to fail
+        counts = ", ".join(f"{kinds.count(k)} {k}" for k in dict.fromkeys(kinds))
         out = [("checks", "known-answer checks", _sentence(
-            f"{len(out)} checks of the code against a known answer failed, could not be run on their case or could not be "
-            f"decided, and the study went on: {listed}; the results are not validated against them (the quality report "
-            "gives each with its numbers)"))]
+            f"{len(out)} checks of the code against a known answer did not confirm the results ({counts}), and the study "
+            f"went on: {listed}; the results are not validated against them (the quality report gives each with its "
+            "numbers)"))]
     return out + none_judged
 
 

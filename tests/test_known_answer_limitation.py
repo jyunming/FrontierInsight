@@ -119,3 +119,14 @@ def test_no_check_judged_is_never_counted_or_folded_in_as_a_check(tmp_path: Path
     line = sup.limitations_pointer(3, [], none_judged=True)
     assert line.endswith("; no check of the code against a known answer could be judged; each is stated in full in the "
                          "supplement (`paper/supplement.md`).") and "1 check" not in line
+
+
+def test_many_checks_folded_into_one_item_never_say_a_check_failed_that_was_not_run(tmp_path: Path) -> None:
+    not_run = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
+    said = _said(_quest(tmp_path / "not_run", not_run, oracles=[]))
+    assert len(said) == 1 and "fail" not in said[0] and "did not pass" not in said[0], said
+    assert f"({len(not_run)} could not be run on its case)" in said[0], said
+    mixed = [*not_run, {**WENT_ON[0], "name": "p"}, {**WENT_ON[1], "name": "u"}]
+    said = _said(_quest(tmp_path / "mixed", mixed, oracles=[]))
+    assert (f"({len(not_run)} could not be run on its case, 1 did not pass, 1 could not be decided with the trials the "
+            "study ran)") in said[0], said
