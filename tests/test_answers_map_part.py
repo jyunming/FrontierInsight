@@ -268,3 +268,158 @@ def test_a_stated_condition_is_matched_as_a_whole_name_and_a_whole_number() -> N
     assert pins("error at a = 20", {"a": 2}) == ["a = 2"]
     assert pins("error (when a = 2)", {"a": 2}) == []  # a condition really stated is still said once
     assert pins("error when a = 2.", {"a": 2}) == []
+
+
+# Two different questions the map answers with one number (the same result at the same setting with the same statistic)
+REQ_TWO = {"quantities": [
+    {"name": "nutrient at which algae pass 100", "stated": "the nutrient where the count passes 100 and 500", "main": True},
+    {"name": "nutrient at which algae pass 500", "stated": "the nutrient where the count passes 100 and 500", "main": True},
+    {"name": "chance of a bloom", "stated": "report the bloom chance", "main": True},
+]}
+PLAN_TWO = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                      {"item": "Q2", "by": "metric:algae_peak", "at": {}},
+                                      {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+
+
+def test_quantities_the_plan_gives_one_number_are_asked_again_and_the_others_are_not() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    assert list(asked) == ["Q1", "Q2"]
+    assert asked["Q1"]["shared"] == ["Q2"] and asked["Q2"]["shared"] == ["Q1"] and asked["Q1"]["by"] == "metric:algae_peak"
+    # the same result read at two different settings is two numbers: nothing is asked
+    apart = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {"temp": 10}},
+                                       {"item": "Q2", "by": "metric:algae_peak", "at": {"temp": 20}},
+                                       {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+    assert tr.quantities_to_place(REQ_TWO, apart) == {}
+    # one setting value written two ways is one number: asked again
+    written = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {"temp": 10}},
+                                         {"item": "Q2", "by": "metric:algae_peak", "at": {"temp": 10.0}},
+                                         {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+    assert list(tr.quantities_to_place(REQ_TWO, written)) == ["Q1", "Q2"]
+
+
+def test_an_answer_that_still_gives_two_questions_one_number_is_asked_again_and_a_none_leaves_one_unanswered() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    same = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:algae_peak"}}}
+    fixed = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "none"}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [same, fixed], asked)
+    assert len(seen) == 2 and "the same number as Q2" in seen[0]
+    assert "would all be given the same number" in seen[1]
+    rows = out.design["protocol"]["topic_map"]
+    assert [r["item"] for r in rows if r["by"] == "metric:algae_peak"] == ["Q1"]
+    assert not [r for r in rows if r["item"] == "Q2"]  # unanswered in the paper, never the other question's number
+
+
+def test_a_shared_quantity_may_be_moved_to_its_own_result() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom"}}}
+    out, _seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [reply], asked)
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows["Q1"] == "metric:algae_peak" and rows["Q2"] == "metric:bloom"
+
+
+def test_quantities_still_given_one_number_at_the_last_ask_are_kept_and_recorded() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    same = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:algae_peak"}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [same] * cp.MAX_ASKS, asked)
+    assert len(seen) == cp.MAX_ASKS and out.parts["answers"]["valid"]
+    assert out.parts["answers"]["same_number"] == ["Q1", "Q2"]  # the paper gives their number once, saying so
+    rows = out.design["protocol"]["topic_map"]
+    assert {r["item"] for r in rows if r["by"] == "metric:algae_peak"} == {"Q1", "Q2"}
+    assert {"item": "Q3", "by": "metric:bloom", "at": {}} in rows
+
+
+def test_one_question_one_number_asks_nothing_more() -> None:
+    plain = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                       {"item": "Q2", "by": "metric:bloom", "at": {}}]}
+    assert tr.shared_answers(REQ_TWO, plain) == {}
+
+
+def test_the_paper_never_gives_two_questions_one_number_whatever_map_it_reads(tmp_path, monkeypatch) -> None:
+    # A frozen or resumed plan whose map still answers two questions with one number (the answers step never asked, or failed)
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
+    text = pf.answers_text(root)
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+    # the same result read at different settings is two numbers: both answered (the known negative)
+    root2 = tmp_path / "two"
+    root2.mkdir()
+    root2 = _quest(root2, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1}},
+                                        {"item": "Q3", "by": "metric:algae_peak", "at": {"nutrient": 2}}])
+    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in pf.answers_text(root2)
+
+
+def test_a_map_with_several_entries_still_never_gives_two_questions_one_number(tmp_path, monkeypatch) -> None:
+    # Q1 has an entry for a result the study lacks and one for algae_peak; the paper reads algae_peak for it, as for Q3
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:not_a_result", "at": {}},
+                                          {"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
+    text = pf.answers_text(root)
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+
+
+def test_one_number_the_analysis_worked_out_is_not_given_to_two_questions_at_different_settings(tmp_path, monkeypatch) -> None:
+    # an analysis answer is one number whatever setting the map pins: two settings in the map still print one number
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:clarity", "at": {"nutrient": 1}},
+                                          {"item": "Q3", "by": "metric:clarity", "at": {"nutrient": 2}}])
+    protocol = {**pf.plan_protocol(root), "metrics": [*PROTOCOL["metrics"], {"id": "clarity", "kind": "mean", "estimand": "clarity"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    (root / pv.ANSWERS).write_text(json.dumps({"scheduled": 1, "runs": [{"run": "0", "values": {"clarity": 0.5}}]}), encoding="utf-8")
+    text = pf.answers_text(root)
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+    assert text.count("{{v:clarity}}") == 1
+    # the known negative: one question on that number is answered with it
+    protocol["topic_map"] = [{"item": "Q1", "by": "metric:clarity", "at": {"nutrient": 1}}]
+    assert "- peak algae (measured as: `clarity`): {{v:clarity}}" in pf.answers_text(root)
+
+
+def test_one_place_written_two_ways_is_still_one_number(tmp_path, monkeypatch) -> None:
+    # the settings in another order, and 10 written as 10.0, read the same trials
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1, "temp": 10}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10.0, "nutrient": 1}}])
+    text = pf.answers_text(root)
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+
+
+def test_a_setting_the_record_does_not_have_does_not_make_two_numbers(tmp_path, monkeypatch) -> None:
+    # the map pins a setting the study never varied: the line reads the result without it, so both print one number
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"salinity": 3}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"salinity": 4}}])
+    text = pf.answers_text(root)
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+
+
+def test_a_question_at_one_setting_of_a_result_another_gives_for_each_setting_keeps_its_answer(tmp_path, monkeypatch) -> None:
+    # Q1 is answered for each temp, Q3 at temp 10 only: one of Q1's numbers, not all of them; both keep their answers
+    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
+                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10}}])
+    text = pf.answers_text(root)
+    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in text
+    assert "20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in text and "- water clarity" in text
+    assert "{{v:algae_peak @ nutrient=each, temp=10 | range}}" in [ln for ln in text.splitlines() if ln.startswith("- water clarity")][0]
+
+
+def test_a_shared_question_moved_to_a_result_with_a_true_value_may_ask_for_its_bias() -> None:
+    plan = {**PROTOCOL, "constants": {"peak_true": 30.0},
+            "metrics": [*PROTOCOL["metrics"], {"id": "peak_hat", "kind": "mean", "known_value": {
+                "true_value": "peak_true", "estimate": "peak_hat", "standard_error": "peak_se", "level": 0.95}}],
+            "topic_map": [{"item": "Q1", "by": "metric:bloom", "at": {}}, {"item": "Q2", "by": "metric:bloom", "at": {}},
+                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}]}
+    asked = tr.quantities_to_place(REQ_TWO, plan)
+    reply = {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "metric:peak_hat", "statistic": "bias"}}
+    assert not [p for p in cp._check_answers(reply, asked, {**DESIGN, "protocol": plan}) if "bias" in p]
+    # the known positive: the plan's shared result has no true value, so a bias kept there is refused
+    kept = {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "metric:bloom", "statistic": "bias"}}
+    assert [p for p in cp._check_answers(kept, asked, {**DESIGN, "protocol": plan}) if "bias" in p]
+
+
+def test_a_shared_question_moved_to_another_result_is_held_to_that_result() -> None:
+    # moved to a result with no known true value, a bias is refused (the plan's result is not what is checked)
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom", "statistic": "bias"}}}
+    problems = cp._check_answers(reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO})
+    assert any("`Q2`: `bias` needs a result with a known true value" in p and "`bloom` has none" in p for p in problems)

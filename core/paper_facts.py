@@ -1561,12 +1561,14 @@ def answers_text(quest_root: Path | str) -> str:
     plain = _plain_in(protocol, root)
     lines: list[str] = []
     starts: list[int] = []  # the first line of each question, to find where one question's lines end
+    said_names: list[str] = []  # the question each start is
     unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
         if not name:
             continue
         starts.append(len(lines))
+        said_names.append(name)
         # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers part)
         # is still answered by that result: the line states both units, and FI converts nothing.
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
@@ -1701,7 +1703,57 @@ def answers_text(quest_root: Path | str) -> str:
         # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
         if start < end and "{{" in lines[end - 1]:
             lines[end - 1] += _unit_sentence(conflict, mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else "", rec, plain)
+    lines = _shared_numbers_once(lines, starts, said_names)
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
+
+
+_VALUE_KEY = re.compile(r"\{\{v:[^{}]*\}\}")
+
+
+def _same_value(value: Any) -> Any:
+    """A setting's value as one number where it is one (``1`` and ``1.0`` are the same setting)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _number_place(key_text: str) -> Any:
+    """Where the number a key prints is read from: the result, its statistic (with or without an interval, the same
+    number), the settings in any order, and what is done with it. A key FI cannot read is its own text."""
+    try:
+        key = _values.parse(key_text)
+    except Exception:  # noqa: BLE001 - an unreadable key is compared as written
+        return key_text
+    where = lambda w: tuple(sorted((a, p.kind, _same_value(p.value)) for a, p in (w or {}).items()))  # noqa: E731
+    return (key.metric, _values.FORM_STATISTIC.get(key.form, key.form), where(key.where), key.op, key.operand,
+            where(key.operand_where), key.operand_metric, key.reducer, key.word, key.percent, key.form_arg)
+
+
+def _shared_numbers_once(lines: list[str], starts: list[int], names: list[str]) -> list[str]:
+    """``lines`` with the questions that print exactly the same numbers (the same places FI reads, :func:`_number_place`)
+    given them once, together: the first one's line names every one of them and says the plan gives these different
+    questions one number, so it can be the answer to only one of them. Neither the number (it may be the right answer to
+    one of them) nor the fact that it cannot answer both is lost. The places are the ones the lines print, so it holds
+    whatever led two questions there (a map with several entries, a result the analysis worked out once whatever the
+    setting, a setting the record does not have). A question whose numbers are only some of another's (one setting of a
+    result the other gives for each setting) keeps its own line: in 244 stored studies that case never occurred."""
+    spans = [(s, starts[i + 1] if i + 1 < len(starts) else len(lines)) for i, s in enumerate(starts)]
+    keys = [frozenset(_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))) for s, e in spans]
+    out: list[str] = []
+    for i, (s, e) in enumerate(spans):
+        group = [j for j in range(len(spans)) if keys[i] and keys[j] == keys[i]]
+        if len(group) < 2:
+            out.extend(lines[s:e])
+        elif group[0] == i:
+            here = lines[s:e]
+            head = "- " + names[i]
+            together = "; ".join(names[j] for j in group)
+            here[0] = "- " + together + here[0][len(head):] if here[0].startswith(head) else here[0]
+            here[-1] += (" (the plan gives these different questions one number, so it can be the answer to only one of "
+                         "them)")
+            out.extend(here)
+    return out
 
 
 def _unit_words(conflict: dict[str, Any]) -> list[str]:
