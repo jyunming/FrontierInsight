@@ -125,8 +125,11 @@ def test_many_checks_folded_into_one_item_never_say_a_check_failed_that_was_not_
     not_run = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
     said = _said(_quest(tmp_path / "not_run", not_run, oracles=[]))
     assert len(said) == 1 and "fail" not in said[0] and "did not pass" not in said[0], said
-    assert f"({len(not_run)} could not be run on its case)" in said[0], said
+    assert f"({len(not_run)} could not be run on their cases)" in said[0], said
     mixed = [*not_run, {**WENT_ON[0], "name": "p"}, {**WENT_ON[1], "name": "u"}]
     said = _said(_quest(tmp_path / "mixed", mixed, oracles=[]))
-    assert (f"({len(not_run)} could not be run on its case, 1 did not pass, 1 could not be decided with the trials the "
+    assert (f"({len(not_run)} could not be run on their cases, 1 did not pass, 1 could not be decided with the trials the "
             "study ran)") in said[0], said
+    one = [{**WENT_ON[2], "name": "c"}, *({**WENT_ON[0], "name": f"p{i}"} for i in range(pf._MAX_SETTING_ITEMS))]
+    said = _said(_quest(tmp_path / "one_not_run", one, oracles=[]))
+    assert "(1 could not be run on its case, " in said[0], said

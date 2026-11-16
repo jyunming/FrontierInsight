@@ -620,7 +620,8 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
     if len(out) > _MAX_SETTING_ITEMS:
         listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out)
         # each kind counted from what happened to it, so a check that was not run or not decided is never said to fail
-        counts = ", ".join(f"{kinds.count(k)} {k}" for k in dict.fromkeys(kinds))
+        counts = ", ".join(f"{n} {k.replace('its case', 'their cases') if n > 1 else k}"
+                           for k in dict.fromkeys(kinds) for n in [kinds.count(k)])
         out = [("checks", "known-answer checks", _sentence(
             f"{len(out)} checks of the code against a known answer did not confirm the results ({counts}), and the study "
             f"went on: {listed}; the results are not validated against them (the quality report gives each with its "
