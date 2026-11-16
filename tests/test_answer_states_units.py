@@ -90,15 +90,6 @@ def test_a_unit_gap_on_a_result_with_no_value_is_listed_as_left_out_not_disclose
     assert [p["status"] for p in problems] == ["left out"] and "water clarity" in problems[0]["text"]
 
 
-def test_a_unit_gap_on_a_question_left_out_for_another_ones_number_is_listed_as_left_out(tmp_path, monkeypatch) -> None:
-    # the Answers block leaves both questions out (one number for two questions); the record must not say it was given
-    rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "unit_conflict": {"asked": "m", "result": "1", "declared": False}},
-            {"item": "Q3", "by": "metric:algae_peak", "at": {}}]
-    problems = _quality(tmp_path, monkeypatch, rows)
-    assert [p["status"] for p in problems] == ["left out"] and "peak algae" in problems[0]["text"]
-    assert pf.unit_notes(tmp_path) == []
-
-
 def test_a_plan_of_the_older_form_keeps_its_reading_in_the_paper_and_the_quality_report(tmp_path, monkeypatch) -> None:
     old = "the result the plan names is in a pure number (no unit), the question asks for m"
     rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "unit_conflict": old}]

@@ -230,14 +230,15 @@ def test_the_true_value_of_a_result_without_a_reference_is_its_reference_value()
 
 def test_an_old_plan_with_no_statistic_gives_no_question_another_ones_number(tmp_path, monkeypatch) -> None:
     """Old plans type no statistic, so 'bias', 'spread' and 'x' were all the result's value: one number printed for three
-    questions. The question's words are never read; three questions on one number are each left unanswered, and a question
-    with a number of its own (the bias of y) is answered as before."""
+    questions. The question's words are never read; the three questions on one number are given it once, on one line that
+    says it can answer only one of them, and a question with a number of its own (the bias of y) is answered as before."""
     root = _estimate_quest(tmp_path, monkeypatch)
     old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
     text = pf.answers_text(root)
-    assert '- bias: not answered (it would be given the same number as "spread of the estimates"; "x"' in text
-    assert "{{v:x_hat" not in text and "diff ref" not in text and ":sd" not in text
+    assert "- bias; spread of the estimates; x (measured as: Estimated x)" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith(("- spread of the estimates", "- x "))]
+    assert "diff ref" not in text and ":sd" not in text
     assert "- bias of y (measured as: Estimated y)" in text
 
 

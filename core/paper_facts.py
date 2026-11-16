@@ -1539,12 +1539,11 @@ def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> str:
     return f"FI holds no value for \"{plain(metric)}\""
 
 
-def answers_text(quest_root: Path | str, left_out: set[str] | None = None) -> str:
+def answers_text(quest_root: Path | str) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
     plan maps to nothing FI holds is said as not answered, and why. ``""`` when the topic asks for no main quantity or FI
-    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write.
-    ``left_out``, when given, gets the name of each question left unanswered because another question prints its number."""
+    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write."""
     from . import topic_requirements as _topic_req
 
     root = Path(quest_root)
@@ -1704,7 +1703,7 @@ def answers_text(quest_root: Path | str, left_out: set[str] | None = None) -> st
         # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
         if start < end and "{{" in lines[end - 1]:
             lines[end - 1] += _unit_sentence(conflict, mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else "", rec, plain)
-    lines = _without_shared_numbers(lines, starts, said_names, left_out)
+    lines = _shared_numbers_once(lines, starts, said_names)
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
 
 
@@ -1731,27 +1730,29 @@ def _number_place(key_text: str) -> Any:
             where(key.operand_where), key.operand_metric, key.reducer, key.word, key.percent, key.form_arg)
 
 
-def _without_shared_numbers(lines: list[str], starts: list[int], names: list[str],
-                            left_out: set[str] | None = None) -> list[str]:
-    """``lines`` with every question that prints exactly the numbers another question prints (the same places FI reads,
-    :func:`_number_place`) said as not answered instead: the topic asks them as different quantities, so one number cannot
-    be the answer to both. The places are the ones the lines print, so it holds whatever led two questions there (a map
-    with several entries, a result the analysis worked out once whatever the setting, a setting the record does not have).
-    A question whose numbers are only some of another's (one setting of a result the other gives for each setting) keeps
-    its answer: in 244 stored studies that case never occurred, and both answers may be right."""
+def _shared_numbers_once(lines: list[str], starts: list[int], names: list[str]) -> list[str]:
+    """``lines`` with the questions that print exactly the same numbers (the same places FI reads, :func:`_number_place`)
+    given them once, together: the first one's line names every one of them and says the plan gives these different
+    questions one number, so it can be the answer to only one of them. Neither the number (it may be the right answer to
+    one of them) nor the fact that it cannot answer both is lost. The places are the ones the lines print, so it holds
+    whatever led two questions there (a map with several entries, a result the analysis worked out once whatever the
+    setting, a setting the record does not have). A question whose numbers are only some of another's (one setting of a
+    result the other gives for each setting) keeps its own line: in 244 stored studies that case never occurred."""
     spans = [(s, starts[i + 1] if i + 1 < len(starts) else len(lines)) for i, s in enumerate(starts)]
-    keys = [{_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))} for s, e in spans]
+    keys = [frozenset(_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))) for s, e in spans]
     out: list[str] = []
     for i, (s, e) in enumerate(spans):
-        others = [names[j] for j in range(len(spans)) if j != i and keys[i] and keys[i] == keys[j]]
-        if others:
-            if left_out is not None:
-                left_out.add(names[i])
-            out.append(f"- {names[i]}: not answered (it would be given the same number as "
-                       f"{'; '.join(chr(34) + o + chr(34) for o in others)}, a different question, so that number is not "
-                       "given for it)")
-        else:
+        group = [j for j in range(len(spans)) if keys[i] and keys[j] == keys[i]]
+        if len(group) < 2:
             out.extend(lines[s:e])
+        elif group[0] == i:
+            here = lines[s:e]
+            head = "- " + names[i]
+            together = "; ".join(names[j] for j in group)
+            here[0] = "- " + together + here[0][len(head):] if here[0].startswith(head) else here[0]
+            here[-1] += (" (the plan gives these different questions one number, so it can be the answer to only one of "
+                         "them)")
+            out.extend(here)
     return out
 
 
@@ -1777,19 +1778,15 @@ def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
     plan = _topic_req.view({}, protocol)
     rec = _values.records_of(root, protocol)
     out: list[dict[str, Any]] = []
-    shared: set[str] | None = None  # the questions the Answers block leaves out for another one's number (read once, if needed)
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item) if m.get("unit_conflict")), None)
         if not name or not conflict:
             continue
-        if shared is None:
-            shared = set()
-            answers_text(root, shared)
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
         valued = (isinstance(conflict, dict) and rec is not None and bool(rec.cells) and bool(metric) and metric not in rec.by_run
-                  and (metric in rec.metrics() or metric in rec.answers) and name not in shared)
+                  and (metric in rec.metrics() or metric in rec.answers))
         out.append({"name": name, "conflict": conflict, "metric": metric, "valued": valued})
     return out
 

@@ -551,7 +551,8 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
     maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values. Two
     quantities may not end on one number (the paper would print it for both); at the last ask (``same`` given) the ones that
-    still do are put in ``same`` and left unanswered (:func:`_apply_answers`), not a reason to refuse the rest."""
+    still do are put in ``same`` and kept as answered (the paper gives the number once for them, saying it can answer only
+    one: :func:`core.paper_facts.answers_text`), not a reason to refuse the rest."""
     if not isinstance(value, dict):
         return ["the answer for `answers` must be a mapping"]
     lines, _settings, _single = _figure_holds(design)
@@ -623,8 +624,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
 
 
 def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, Any],
-                   asked: dict[str, dict[str, Any]], conflicts: dict[str, tuple[str, str]] | None = None,
-                   same: dict[str, list[str]] | None = None) -> dict[str, Any]:
+                   asked: dict[str, dict[str, Any]], conflicts: dict[str, tuple[str, str]] | None = None) -> dict[str, Any]:
     """The plan's ``topic_map`` with an ``at`` on the entry of each quantity asked about (the plan's own ``by`` is kept, except for a
     derived result the names step made for that very question; any other derived result the model names that is worked out from
     it is recorded as ``other_candidate``, disclosed and never used), and
@@ -638,9 +638,8 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         keys = {_topic_req._name_key(ident), _topic_req._name_key(q["name"])}
         mine = [m for m in rows if _topic_req._name_key(m.get("item")) in keys]
         by = str(row.get("by") or "").strip()
-        if ident in (same or {}) or (q.get("shared") and by == "none"):
-            # One number for different questions (still, at the last ask, or the answer says no result is this one): the
-            # quantity is left unanswered and the paper says so, rather than print another question's number for it.
+        if q.get("shared") and by == "none":
+            # The answer says no result of the study is this quantity: it is left unanswered, never given another one's number.
             rows = [m for m in rows if m not in mine]
             continue
         if q.get("shared") and by and by != q.get("by"):
@@ -868,7 +867,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     value = {"comparisons": value if value is not None else [], "_derived": derived_ids,
                              "_labels": _contract.family_labels(current["protocol"])}
                 conflicts: dict[str, tuple[str, str]] = {}  # answers: units that still differ at the last ask (stated in the paper)
-                same: dict[str, list[str]] = {}  # answers: quantities still given one number at the last ask (left unanswered)
+                same: dict[str, list[str]] = {}  # answers: quantities still given one number at the last ask (the paper says so)
                 taken: dict[str, str] = {}  # dependents: the new derived names given in this answer
                 unsure = got.get("uncertainties") if part == "dependents" else None
                 if part == "dependents" and record["asks"] >= _dependents.MAX_ASKS and not _dependents.check(value, entries, current, taken):
@@ -896,9 +895,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 elif part == "figures":
                     kept, checked = _apply_figures(p, current, value, faults), None
                 elif part == "answers":
-                    kept, checked = _apply_answers(p, current, value, faults, conflicts, same), None
+                    kept, checked = _apply_answers(p, current, value, faults, conflicts), None
                     if same:
-                        record["same_number_left_out"] = sorted(same)
+                        record["same_number"] = sorted(same)
                 elif part == "names":
                     kept, checked = _apply_names(p, value, topic_quantities)
                 else:

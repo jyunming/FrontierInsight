@@ -312,14 +312,15 @@ def test_a_shared_quantity_may_be_moved_to_its_own_result() -> None:
     assert rows["Q1"] == "metric:algae_peak" and rows["Q2"] == "metric:bloom"
 
 
-def test_quantities_still_given_one_number_at_the_last_ask_are_left_unanswered_and_the_rest_is_kept() -> None:
+def test_quantities_still_given_one_number_at_the_last_ask_are_kept_and_recorded() -> None:
     asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
     same = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:algae_peak"}}}
     out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [same] * cp.MAX_ASKS, asked)
     assert len(seen) == cp.MAX_ASKS and out.parts["answers"]["valid"]
-    assert out.parts["answers"]["same_number_left_out"] == ["Q1", "Q2"]
+    assert out.parts["answers"]["same_number"] == ["Q1", "Q2"]  # the paper gives their number once, saying so
     rows = out.design["protocol"]["topic_map"]
-    assert not [r for r in rows if r["item"] in ("Q1", "Q2")] and {"item": "Q3", "by": "metric:bloom", "at": {}} in rows
+    assert {r["item"] for r in rows if r["by"] == "metric:algae_peak"} == {"Q1", "Q2"}
+    assert {"item": "Q3", "by": "metric:bloom", "at": {}} in rows
 
 
 def test_one_question_one_number_asks_nothing_more() -> None:
@@ -333,15 +334,14 @@ def test_the_paper_never_gives_two_questions_one_number_whatever_map_it_reads(tm
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                           {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
     text = pf.answers_text(root)
-    assert '- peak algae: not answered (it would be given the same number as "water clarity"' in text
-    assert '- water clarity: not answered (it would be given the same number as "peak algae"' in text
-    assert "{{v:algae_peak" not in text
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
     # the same result read at different settings is two numbers: both answered (the known negative)
     root2 = tmp_path / "two"
     root2.mkdir()
     root2 = _quest(root2, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1}},
                                         {"item": "Q3", "by": "metric:algae_peak", "at": {"nutrient": 2}}])
-    assert "same number as" not in pf.answers_text(root2)
+    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in pf.answers_text(root2)
 
 
 def test_a_map_with_several_entries_still_never_gives_two_questions_one_number(tmp_path, monkeypatch) -> None:
@@ -350,9 +350,8 @@ def test_a_map_with_several_entries_still_never_gives_two_questions_one_number(t
                                           {"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                           {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
     text = pf.answers_text(root)
-    assert '- peak algae: not answered (it would be given the same number as "water clarity"' in text
-    assert '- water clarity: not answered (it would be given the same number as "peak algae"' in text
-    assert "{{v:algae_peak" not in text
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
 
 
 def test_one_number_the_analysis_worked_out_is_not_given_to_two_questions_at_different_settings(tmp_path, monkeypatch) -> None:
@@ -363,8 +362,9 @@ def test_one_number_the_analysis_worked_out_is_not_given_to_two_questions_at_dif
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
     (root / pv.ANSWERS).write_text(json.dumps({"scheduled": 1, "runs": [{"run": "0", "values": {"clarity": 0.5}}]}), encoding="utf-8")
     text = pf.answers_text(root)
-    assert '- peak algae: not answered (it would be given the same number as "water clarity"' in text
-    assert "{{v:clarity}}" not in text
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
+    assert text.count("{{v:clarity}}") == 1
     # the known negative: one question on that number is answered with it
     protocol["topic_map"] = [{"item": "Q1", "by": "metric:clarity", "at": {"nutrient": 1}}]
     assert "- peak algae (measured as: `clarity`): {{v:clarity}}" in pf.answers_text(root)
@@ -375,8 +375,8 @@ def test_one_place_written_two_ways_is_still_one_number(tmp_path, monkeypatch) -
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1, "temp": 10}},
                                           {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10.0, "nutrient": 1}}])
     text = pf.answers_text(root)
-    assert '- peak algae: not answered (it would be given the same number as "water clarity"' in text
-    assert "{{v:algae_peak" not in text
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
 
 
 def test_a_setting_the_record_does_not_have_does_not_make_two_numbers(tmp_path, monkeypatch) -> None:
@@ -384,8 +384,8 @@ def test_a_setting_the_record_does_not_have_does_not_make_two_numbers(tmp_path, 
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"salinity": 3}},
                                           {"item": "Q3", "by": "metric:algae_peak", "at": {"salinity": 4}}])
     text = pf.answers_text(root)
-    assert '- water clarity: not answered (it would be given the same number as "peak algae"' in text
-    assert "{{v:algae_peak" not in text
+    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
+    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
 
 
 def test_a_question_at_one_setting_of_a_result_another_gives_for_each_setting_keeps_its_answer(tmp_path, monkeypatch) -> None:
@@ -393,7 +393,7 @@ def test_a_question_at_one_setting_of_a_result_another_gives_for_each_setting_ke
     root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                           {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10}}])
     text = pf.answers_text(root)
-    assert "same number as" not in text
+    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in text
     assert "20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in text and "- water clarity" in text
     assert "{{v:algae_peak @ nutrient=each, temp=10 | range}}" in [ln for ln in text.splitlines() if ln.startswith("- water clarity")][0]
 
