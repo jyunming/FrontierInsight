@@ -109,3 +109,13 @@ def test_the_plans_first_sentence_is_kept_whole_through_a_semicolon(tmp_path: Pa
     oracles = [{"name": "peak_closed_form", "check": "The total algae is conserved; All inflows are zero. It uses 40 runs."}]
     said = _said(_quest(tmp_path, WENT_ON[:1], oracles=oracles))
     assert '"The total algae is conserved; All inflows are zero"' in said[0]
+
+
+def test_no_check_judged_is_never_counted_or_folded_in_as_a_check(tmp_path: Path) -> None:
+    unnamed = {"name": "", "measured": None, "unmeasured": "no check could be judged"}
+    many = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
+    said = _said(_quest(tmp_path, [*many, unnamed], oracles=[]))
+    assert len(said) == 2 and said[0].startswith(f"{len(many)} checks") and said[1].startswith("No check of the code")
+    line = sup.limitations_pointer(3, [], none_judged=True)
+    assert line.endswith("; no check of the code against a known answer could be judged; each is stated in full in the "
+                         "supplement (`paper/supplement.md`).") and "1 check" not in line

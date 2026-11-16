@@ -611,10 +611,13 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
     words = {str(o.get("name")): re.split(r"(?<=\.)\s+(?=[A-Z])", _one(o.get("check")))[0].rstrip(".")
              for o in oracles or [] if isinstance(o, dict) and o.get("name")}
     out: list[tuple[str, str, str]] = []
+    # an entry with no name is recorded when no check of the plan could be judged at all: said on its own, never counted
+    # or folded in as a check
+    none_judged = [("none", "known-answer checks not judged", _sentence(
+        "No check of the code against a known answer could be judged, so the results are not validated against one"))
+        for e in entries if not e.get("name")][:1]
     for e in entries:
-        if not e.get("name"):  # recorded when no check of the plan could be judged at all
-            out.append(("none", "known-answer checks not judged", _sentence(
-                "No check of the code against a known answer could be judged, so the results are not validated against one")))
+        if not e.get("name"):
             continue
         name = str(e["name"])
         what = words.get(name) or name
@@ -635,12 +638,12 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
             said = f"{lead} did not pass ({gave})"
         out.append((name, f"known-answer check {name}", _sentence(f"{said}; the results are not validated against it")))
     if len(out) > _MAX_SETTING_ITEMS:
-        listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out if k != "none")
-        return [("checks", "known-answer checks", _sentence(
+        listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out)
+        out = [("checks", "known-answer checks", _sentence(
             f"{len(out)} checks of the code against a known answer failed, could not be run on their case or could not be "
             f"decided, and the study went on: {listed}; the results are not validated against them (the quality report "
             "gives each with its numbers)"))]
-    return out
+    return out + none_judged
 
 
 def shared_seeds_text(root: Path) -> str:
@@ -2143,9 +2146,11 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         if name == _supplement.TABLES:
             return _supplement.table_pointer()
         items = [i for i in required_items(quest_root) if i.kind != CODE_FINDING]
+        went_on = went_on_checks(Path(quest_root))
         return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
                                                discussion=bool(_supplement.writer_text(quest_root)),
-                                               known_answers=len(went_on_checks(Path(quest_root))))
+                                               known_answers=sum(1 for e in went_on if e.get("name")),
+                                               none_judged=any(not e.get("name") for e in went_on))
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":
