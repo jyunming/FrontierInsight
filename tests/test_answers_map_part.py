@@ -423,3 +423,60 @@ def test_a_shared_question_moved_to_another_result_is_held_to_that_result() -> N
     reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "metric:bloom", "statistic": "bias"}}}
     problems = cp._check_answers(reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO})
     assert any("`Q2`: `bias` needs a result with a known true value" in p and "`bloom` has none" in p for p in problems)
+
+
+SPREAD = {**PROTOCOL, "derived": [{"id": "peak_spread", "inputs": ["algae_peak"], "role": "result",
+                                   "label": "relative spread of the peak over the runs"}]}
+
+
+def test_the_spread_of_a_result_worked_out_once_per_setting_is_refused_and_its_value_is_kept() -> None:
+    # A derived result is one number per setting: an `sd` of it has no trials to spread over, and the paper then said the
+    # quantity was "not answered" because no setting had two trials, though every setting had many.
+    design = {**DESIGN, "protocol": SPREAD}
+    asked = {"Q1": {"name": "spread of the estimates", "stated": "report the spread", "by": "metric:peak_spread"}}
+    bad = {"answers": {"Q1": {"by": "metric:peak_spread", "statistic": "sd"}}}
+    problems = cp._check_answers(bad["answers"], asked, design)
+    assert any("`Q1`: `sd` is the spread over the trials" in p and "`peak_spread` is worked out once per setting from "
+               "`algae_peak`" in p for p in problems)
+    good = {"answers": {"Q1": {"by": "metric:peak_spread", "statistic": "value"}}}
+    out, seen = _ask(design, [bad, good], asked)
+    assert out.parts["answers"]["valid"] and out.parts["answers"]["asks"] == 2
+    assert "worked out once per setting" in seen[1]
+    assert not [r for r in out.design["protocol"]["topic_map"] if r.get("statistic") == "sd"]
+
+
+def test_the_spread_of_a_result_each_trial_returns_is_still_accepted() -> None:
+    design = {**DESIGN, "protocol": SPREAD}
+    asked = {"Q1": {"name": "spread of the peak", "stated": "report the spread", "by": ""}}
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak", "statistic": "sd"}}}
+    assert cp._check_answers(reply["answers"], asked, design) == []
+
+
+def test_an_sd_given_for_another_result_is_not_put_on_the_plans_result_worked_out_once_per_setting() -> None:
+    # Recorded on a real plan: the plan maps the spread to a derived relative spread; the answer names the estimate with
+    # `sd` (the right pair). FI keeps the plan's map, so the `sd` went onto the derived result, which has no spread over
+    # trials, and the paper said the spread was not answered. The plan's result now answers with its value.
+    design = {**DESIGN, "protocol": SPREAD}
+    asked = {"Q1": {"name": "spread of the estimates", "stated": "report the spread", "by": "metric:peak_spread"}}
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak", "statistic": "sd"}}}
+    assert cp._check_answers(reply["answers"], asked, design) == []
+    out, seen = _ask({**design, "protocol": {**SPREAD, "topic_map": [{"item": "Q1", "by": "metric:peak_spread"}]}},
+                     [reply], asked)
+    assert out.parts["answers"]["valid"] and len(seen) == 1
+    row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
+    assert row["by"] == "metric:peak_spread" and "statistic" not in row
+
+
+def test_a_plan_map_naming_its_result_worked_out_once_per_setting_without_a_prefix_gets_no_sd_either() -> None:
+    # A plan's own map may name a result without `metric:` (FI reads `x` and `metric:x` alike); the bare name hid that the
+    # kept result is worked out once per setting, and the answer's `sd` went onto it.
+    design = {**DESIGN, "protocol": SPREAD}
+    asked = {"Q1": {"name": "spread of the estimates", "stated": "report the spread", "by": "peak_spread"}}
+    out, seen = _ask({**design, "protocol": {**SPREAD, "topic_map": [{"item": "Q1", "by": "peak_spread"}]}},
+                     [{"answers": {"Q1": {"by": "metric:algae_peak", "statistic": "sd"}}}], asked)
+    row = next(r for r in out.design["protocol"]["topic_map"] if r["item"] == "Q1")
+    assert row["by"] == "peak_spread" and "statistic" not in row
+    refused = cp._check_answers({"Q1": {"by": "", "statistic": "sd"}}, asked, design)
+    assert refused and "worked out once per setting" in refused[0]
+    again = cp._check_answers({"Q1": {"by": "metric:peak_spread", "statistic": "sd"}}, asked, design)
+    assert again and "worked out once per setting" in again[0], "the same result named with its prefix is the plan's result"

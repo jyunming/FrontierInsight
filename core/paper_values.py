@@ -1086,7 +1086,7 @@ def _pooled_sd(cells: list[dict[str, Any]], metric: str) -> tuple[float, int]:
             num += (n - 1) * sd * sd
             dof += n - 1
     if dof <= 0:
-        raise _Unfilled("no setting here has two trials, so there is no SD")
+        raise _Unfilled(f"{metric} has fewer than two values in every setting here, so there is no SD over trials")
     return math.sqrt(num / dof), int(dof)
 
 
