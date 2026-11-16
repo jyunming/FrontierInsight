@@ -1,7 +1,7 @@
 """The code review is a real gate and its repair channel is its own (core/code_review.py, Engine._code_review_gate): the
-findings are sent in full, to the file they name, in batches; the changed version is read again; repairs stop when the open
-high-severity findings do not drop; the last reading is kept for the version that will run; an open high-severity finding
-about the main quantity that the results do not contradict ends in the honest stop. Fake models, a mass on a damped spring."""
+findings are sent in full, to the file they name, one at a time; only a high-severity finding that changes a result is
+repaired; the code is read once and the repaired version is not read again; an open finding is listed and never stops the
+quest. Fake models, a mass on a damped spring."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ async def test_a_finding_that_names_the_model_s_package_rewrites_that_file_and_n
     engine = _engine(tmp_path)
     _with_package(engine)
     on_model = {"where": "model.py:3", "what": "E1 divides by the wrong quantity", "why": "the plan's E1 divides by c",
-                "fix": "divide by c", "severity": "medium"}
+                "fix": "divide by c", "severity": "high", "changes_result": True}
     fixed = "# E1\ndef quality(m, w, c):\n    return m * w / c  # divided by c\n"
     script = _Script(lambda n, code: [on_model] if "# divided by c" not in code else [],
                      lambda rel, n: fixed if rel == "spring/model.py" else None)
@@ -128,42 +128,43 @@ async def test_a_finding_that_names_the_model_s_package_rewrites_that_file_and_n
     assert (engine.quest_root / "code" / "spring" / "model.py").read_text(encoding="utf-8") == fixed
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SIM_FULL
     assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == ANALYSIS
-    assert cr.load(engine.quest_root)["final"] is True
 
 
 # --- findings in full, in batches, with the opening sentence --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_findings_are_taken_one_at_a_time_each_in_full_with_its_own_test_and_the_ones_that_change_a_result_first(
+async def test_findings_are_taken_one_at_a_time_each_in_full_with_its_own_test_and_only_serious_ones_that_change_a_result_are_repaired(
         tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    kinds = [("minor", False, "medium"), ("changes", True, "medium"), ("high", True, "high")]
+    kinds = [("minor", False, "medium"), ("changes", True, "medium"), ("high", True, "high"), ("serious", True, "high")]
     many = [{"where": "simulate.py:2", "what": f"finding {name} " + "w" * 120, "why": f"reason {name} " + "y" * 200,
              "fix": f"remedy {name} " + "z" * 200, "severity": sev, "quantity": f"q_{name}", "changes_result": changes}
             for name, changes, sev in kinds]
     script = _Script(lambda n, code: many if n == 1 else [], lambda rel, n: attempt(n))
     engine._client = script
     assert await engine._code_review_gate(WITH_PLAN) is None
-    assert len(script.test_prompts) == 3 and len(script.repair_prompts) == 3, "each finding: one test, one repair"
+    assert len(script.test_prompts) == 2 and len(script.repair_prompts) == 2, "each repaired finding: one test, one repair"
     for prompt in script.repair_prompts:
         assert prompt.lstrip().startswith(REPAIR_HEAD) and "has NOT crashed" in prompt.split("# Topic")[0]
         assert prompt.count("What is wrong:") == 1, "one finding at a time"
         assert "How to fix it:" in prompt and "Why it is wrong against the plan:" in prompt
     for prompt in script.test_prompts:
         assert prompt.lstrip().startswith(fr.TEST_HEAD) and prompt.count("What is wrong:") == 1
-    # The ones that can change a result come first (the high one, then the other), the one that changes nothing last.
+    # Only a high-severity finding that changes a result is repaired; the medium one and the one that changes nothing are listed.
     order = [next(n for n, *_ in kinds if f"finding {n} " in p) for p in script.repair_prompts]
-    assert order == ["high", "changes", "minor"]
-    for name, *_ in kinds:
+    assert sorted(order) == ["high", "serious"]
+    for name in ("high", "serious"):
         assert f"finding {name} " + "w" * 120 in "\n".join(script.repair_prompts), "the finding is sent whole"
         assert f"remedy {name} " + "z" * 200 in "\n".join(script.repair_prompts)
+    assert not any(f"finding {name} " in "\n".join(script.repair_prompts) for name in ("minor", "changes"))
     # The second sees the first's change: the file is read again from disk for each request.
     assert "# attempt 1" in script.repair_prompts[1]
     record = cr.load(engine.quest_root)
-    assert record["repair_calls"] == 3 and record["test_calls"] == 3 and record["finding_calls"] == 6
-    assert sorted(i["outcome"] for i in record["issues"].values()) == ["fixed"] * 3
-    assert {i["fixed_by"] for i in record["issues"].values()}, "the record says which model fixed each"
+    assert record["repair_calls"] == 2 and record["test_calls"] == 2 and record["finding_calls"] == 4
+    fixed = [i for i in record["issues"].values() if i["outcome"] == "fixed"]
+    assert len(fixed) == 2 and all(i["fixed_by"] for i in fixed), "the record says which model fixed each"
+    assert {p["text"].split()[1] for p in record["problems"]} >= {"minor", "changes"}, "the two not repaired stay listed"
 
 
 @pytest.mark.asyncio
@@ -182,22 +183,6 @@ async def test_the_repair_request_names_the_topic_and_the_equations_but_never_an
 # --- no oscillation ---------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_repair_that_passes_its_test_is_progress_even_when_the_reader_repeats_the_finding(tmp_path: Path) -> None:
-    """Progress is what FI's own test runs show, not the reader's list: the repair made the finding's failing test pass, so
-    the round counts, though the next reading flags the same finding again (it is tested again in the next round)."""
-    engine = _engine(tmp_path)
-    script = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: attempt(n))
-    engine._client = script
-    assert await engine._code_review_gate(WITH_PLAN) is None
-    record = cr.load(engine.quest_root)
-    assert [(r["open"], r["high"]) for r in record["readings"]] == [(1, 1), (1, 1)]
-    assert record["readings"][1]["fixed_in_round"] == 1 and record["readings"][1]["improved"] is True
-    assert record["converged"] is True
-    assert len(script.test_prompts) == 2 and len(script.repair_prompts) == 2, "shown and repaired again in the second round"
-    assert record["send_backs"] == 2 == cr.MAX_SEND_BACKS, "bounded at two rounds"
-
-
 def test_a_round_that_made_no_shown_fault_pass_its_test_did_not_converge() -> None:
     def record(fixed: int) -> dict[str, Any]:
         rec: dict[str, Any] = {"repaired": True, "round_fixed": fixed, "readings": [{"n": 1, "open": 1, "high": 1, "changing": 1}]}
@@ -208,38 +193,20 @@ def test_a_round_that_made_no_shown_fault_pass_its_test_did_not_converge() -> No
     assert record(2)["converged"] is True and "round_fixed" not in record(2)
 
 
-@pytest.mark.asyncio
-async def test_repairs_that_keep_reducing_the_findings_go_on_up_to_their_bound(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "severity": "high", "quantity": f"quantity_{i}"} for i in range(3)]
-
-    def decide(n: int, code: str) -> list[dict[str, Any]]:
-        return three[: max(0, 3 - code.count("# attempt"))]
-
-    script = _Script(decide, lambda rel, n: attempt(n))
-    engine._client = script
-    await engine._code_review_gate(WITH_PLAN)
-    record = cr.load(engine.quest_root)
-    assert [r["high"] for r in record["readings"]] == [3, 2], "the third reading is the reserved one: not made by this call"
-    assert record["converged"] is True and record["send_backs"] == 2 == cr.MAX_SEND_BACKS, "bounded at two rounds"
-    assert len(script.repair_prompts) == 3 + 2, "three findings in the first pass, the two still flagged in the second"
-    assert record["reviews_total"] == cr.MAX_REVIEWS - cr.RESERVED_FOR_FINAL
-
-
 # --- a round cut short is not counted -------------------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_a_quest_killed_in_the_middle_of_a_repair_round_gets_that_round_again_on_resume(tmp_path: Path) -> None:
-    """Replay of a quest killed during its second round of repair (round 1 done, round 2's first request in flight): the
-    round was counted when it started, so the resumed quest found both rounds spent and went on with the finding open."""
+    """Replay of a quest killed during its round of repair (the first request in flight): the round was counted when it
+    started, so the resumed quest found the round spent and went on with the finding open."""
     import asyncio
 
     engine = _engine(tmp_path)
 
     def killed(rel: str, n: int) -> str | None:
-        if n == 2:
-            raise asyncio.CancelledError()  # the process is killed while round 2 waits for its model
+        if n == 1:
+            raise asyncio.CancelledError()  # the process is killed while the round waits for its model
         return attempt(n)
 
     first = _Script(lambda n, code: [HEADLINE_FINDING], killed)
@@ -247,14 +214,14 @@ async def test_a_quest_killed_in_the_middle_of_a_repair_round_gets_that_round_ag
     with pytest.raises(asyncio.CancelledError):
         await engine._code_review_gate(WITH_PLAN)
     record = cr.load(engine.quest_root)
-    assert record["send_backs"] == 1, "only the finished round is counted"
-    assert cr.may_repair(record) == "", "the second round is still allowed"
+    assert record["send_backs"] == 0, "only a finished round is counted"
+    assert cr.may_repair(record) == "", "the round is still allowed"
     resumed = _Script(lambda n, code: [HEADLINE_FINDING], lambda rel, n: attempt(10 + n))
     engine._client = resumed
     await engine._code_review_gate(WITH_PLAN)
     record = cr.load(engine.quest_root)
     assert resumed.repair_prompts, "the resumed quest repaired again"
-    assert record["send_backs"] == 2 == cr.MAX_SEND_BACKS
+    assert record["send_backs"] == 1 == cr.MAX_SEND_BACKS
 
 
 def test_a_round_that_keeps_being_cut_short_still_ends() -> None:
@@ -266,28 +233,6 @@ def test_a_round_that_keeps_being_cut_short_still_ends() -> None:
 
 
 # --- the last reading is for the version that will run --------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_the_final_version_is_always_read_even_after_repairs_used_the_other_readings(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    three = [{**HEADLINE_FINDING, "what": f"fault {i}", "quantity": f"quantity_{i}"} for i in range(3)]
-
-    def decide(n: int, code: str) -> list[dict[str, Any]]:
-        return three[: max(0, 3 - code.count("# attempt"))]
-
-    script = _Script(decide, lambda rel, n: attempt(n))
-    engine._client = script
-    await engine._code_review_gate(WITH_PLAN)
-    # Two intermediate readings were made; the repaired version after the second is not read by this early call.
-    assert len(script.prompts) == cr.MAX_REVIEWS - 1
-    assert cr.load(engine.quest_root)["final_read"] is False
-    # An oracle or equation repair may change it again; whatever version will run is read with the reserved reading.
-    (engine.quest_root / "code" / "simulate.py").write_text(attempt(1) + "# gate\n", encoding="utf-8")
-    assert await engine._code_review_gate(WITH_PLAN, final=True) is None
-    record = cr.load(engine.quest_root)
-    assert len(script.prompts) == cr.MAX_REVIEWS and len(script.repair_prompts) == 5, "no repair of a version nobody reads"
-    assert record["final_read"] is True and record["read_version"] == cr.version(engine.quest_root / "code")
 
 
 @pytest.mark.asyncio
@@ -326,18 +271,6 @@ async def test_a_high_finding_about_the_main_quantity_that_the_results_cannot_se
     assert engine._no_results_verdict(results) is None
     note = cr.write_note(engine.quest_root, engine.quest_root / "code")
     assert "quality_factor ignores the damping" in note and "not resolved" in note and "[high]" in note
-
-
-@pytest.mark.asyncio
-async def test_a_constant_claim_the_results_cannot_settle_does_not_stop_but_one_they_confirm_does(tmp_path: Path) -> None:
-    constant = {**HEADLINE_FINDING, "what": "quality_factor does not depend on the damping", "constant": True}
-    engine = _engine(tmp_path)
-    engine._client = _Script(lambda n, code: [constant])
-    await engine._code_review_gate(WITH_PLAN, final=True)
-    assert engine._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}}) is None, "it appears once: undecided"
-    flat = {**STATE, "result_json": {"cells": [{"quality_factor": 1.0}, {"quality_factor": 1.0}]}}
-    verdict = engine._no_results_verdict(flat)
-    assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
 
 
 @pytest.mark.asyncio

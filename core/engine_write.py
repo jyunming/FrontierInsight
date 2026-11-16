@@ -148,8 +148,8 @@ class WriteStageMixin:
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if audit_note := _audit_open.writer_note(self.quest_root):
             evidence_note = f"{evidence_note}\n\n{audit_note}".strip()
-        if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
-            evidence_note = f"{evidence_note}\n\n{code_note}".strip()
+        # The code reader's findings are not given to the writer: they are a model's opinion of the code, listed in
+        # QUALITY.md, not a fact of FI's the paper states.
         if topic_note := _topic_req.write_note(self.quest_root):
             evidence_note = f"{evidence_note}\n\n{topic_note}".strip()
         if core_note := _equation_tests.write_note(self._protocol_block(state)):

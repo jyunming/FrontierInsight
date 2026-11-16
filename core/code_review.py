@@ -3,8 +3,8 @@
 A script can run to the end, print a plausible ``RESULT_JSON`` and still leave out a quantity the plan requires (a
 dependent variable, a metric, a planned figure, a swept parameter, the equation a function was meant to compute), or
 compute it wrongly. The model that wrote the code reads its own code as the plan says; nothing else checks it. Here,
-after the code is written (and the model's functions are checked one at a time) and before the equation tests and the
-oracle gate, the model named for ``code_review`` (while no model is set for it, the one named for ``oracle_review``, so it
+once, on the version about to run (after the checks and the figure check, before the run), the model named for
+``code_review`` (while no model is set for it, the one named for ``oracle_review``, so it
 is the other provider when one is configured) reads the plan's required outputs against the scripts and says, per
 requirement, whether it is **implemented**, **missing** or **implemented differently**, with the file and line.
 
@@ -13,10 +13,8 @@ what, why, how to fix and how serious): that each ``# E<n>`` function matches it
 factors), that a statistic is computed as the plan defines it, that a quantity the plan says depends on a setting uses that
 setting, that a step the plan's model names is not skipped, that nothing reported is a constant, and that a check's case
 is the plan's. Its findings go to a repair request of their own, each naming the place and the fault, never a value;
-whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`). A finding the run's own results
-confirm (a quantity the reviewer calls constant that the results hold at one value, :func:`constant_in`) about a headline quantity
-ends in the honest stop after the run; every other open finding is said in the paper's limitations as unresolved (one that
-can change a reported result as an item FI fills in and checks is there, :mod:`core.paper_facts`).
+whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`).
+What is open afterwards is listed in ``QUALITY.md``; it is not stated in the paper and stops nothing.
 
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
@@ -25,24 +23,17 @@ can change a reported result as an item FI fills in and checks is there, :mod:`c
   for every finding (no cap) ranked by effect on the reported results, and :mod:`core.finding_repair` takes the issues one
   at a time, the ones that can change a reported result first: a test that must fail on the current code is asked for (a
   finding it does not show is "not demonstrated" and left alone), then a repair of the function(s) involved, kept only
-  when the new test passes and nothing that passed before fails. A request of its own (``agents/code_review_repair.md``)
-  holds the topic, the plan's equations (never an expected value) and the finding IN FULL. At most
-  :data:`MAX_SEND_BACKS` passes and :data:`MAX_FINDING_CALLS` requests in a quest. After a pass the changed version is read
-  again (against the findings still open, and anything new); when the open issues that change a result did not drop,
-  repairing stops (no oscillation). A finding that says the PLAN contradicts itself is not sent to the code at all.
-* One reading per code version (:func:`version`), at most :data:`MAX_REVIEWS` in a quest, and the last of them is
-  reserved for the version that will run the full study: an intermediate version never spends it. The final version is
-  read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
-  converged. A version that a repair of the run itself (a crash, a result the protocol's contract refuses) changed after
-  that reading is read again before its results are used, within :data:`RUN_REPAIR_READS` more readings.
-* What is still open afterwards is said in the paper's limitations by the writer (:func:`write_note`); an open finding that
-  can change a reported result is also an item FI fills into the Limitations itself and checks is there
-  (:mod:`core.paper_facts`, ``{{not_done:<id>}}``). A high-severity finding about
-  a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
-  final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
-  contradict it (a quantity the reviewer calls missing that the results hold, one it calls constant that they show
-  varying); that disagreement is recorded and the paper is not told it was not computed. A reviewer's word alone never
-  stops a quest before the run.
+  when the new test passes and nothing that passed before fails, and FI's analysis on its small run's trials still gives
+  every result and figure it gave (core/run_checks.py ``_finding_gate``). A request of its own
+  (``agents/code_review_repair.md``) holds the topic, the plan's equations (never an expected value) and the finding IN
+  FULL. Only a finding of :data:`REPAIR_SEVERITY` that can change a reported result is repaired; the others are listed.
+  One round (:data:`MAX_SEND_BACKS`) and at most :data:`MAX_FINDING_CALLS` requests in a quest. A finding that says the
+  PLAN contradicts itself is not sent to the code, and is listed.
+* One reading in a quest (:data:`MAX_REVIEWS`), of the version about to run; the repaired version runs without a second
+  reading, and a later change of the code (a crash repair) is not read (:data:`RUN_REPAIR_READS`). The record says what
+  was read (``read_version``), the open findings and whether the code changed after the reading.
+* A reader's finding is a model's opinion of the code: ``QUALITY.md`` lists every one, and none of them goes into the
+  paper, holds a result out, marks a check of FI's as not shown, or stops the quest.
 """
 
 from __future__ import annotations
@@ -65,13 +56,17 @@ _LOG = logging.getLogger(__name__)
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
 #: rounds of repair of what a review found, the findings in one repair request, and all repair requests in a quest.
-MAX_REVIEWS = 3
-RESERVED_FOR_FINAL = 1
-#: Further readings for the version that runs when a run that crashed or broke the protocol's contract was repaired by
-#: ``execute_reflect`` AFTER the reserved reading was spent: that script is the one whose results are reported, so it is
-#: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
-RUN_REPAIR_READS = 3
-MAX_SEND_BACKS = 2
+#: One reading, of the version about to run. Its serious findings (:data:`REPAIR_SEVERITY`, changing a reported result) get
+#: one round of test-first repair, and the repaired version runs without being read again; every finding is listed in
+#: QUALITY.md, and none holds a result back or stops the quest (the reading is a model's opinion, not FI's own evidence).
+MAX_REVIEWS = 1
+RESERVED_FOR_FINAL = 0
+#: The severity a finding must have to be repaired (with ``changes_result``); the others are listed only.
+REPAIR_SEVERITY = "high"
+#: Further readings for a version a crash repair (``execute_reflect``) produced after the one reading: none, the code is
+#: read once and a later change of it is not read again (``.fi/code_review.json`` says so).
+RUN_REPAIR_READS = 0
+MAX_SEND_BACKS = 1
 #: Rounds of repair that may be started again after one was cut short (a kill, a crash) before it finished: a round is counted in
 #: ``send_backs`` when it ends, so only this bounds a round that keeps dying.
 MAX_ROUND_RESTARTS = 2
@@ -1248,8 +1243,7 @@ def may_repair(record: dict[str, Any]) -> str:
         return f"{MAX_ROUND_RESTARTS} rounds of repair were cut short and started again; no more are started"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
         return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
-    if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
-        return "no reading is left to read a repaired version"
+    # (the repaired version runs without a second reading: the one reading is spent before the repairs)
     if record.get("converged") is False:
         return "the last round of repairs made no fault a failing test showed pass its test"
     return ""
@@ -2308,6 +2302,21 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
             "These points were still open on the version that ran. The second model can be wrong, and none of them was "
             f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"
             + "\n\n".join(f"- {p}" for p in points))
+
+
+def second_version_block(quest_root: Path) -> str:
+    """FI's own comparison of two independently written versions of key functions (:mod:`core.second_impl`), the only
+    point about the code that the claim check and the review are given: a second reading's findings are its opinion and
+    go to the quality report only. ``""`` when every function agreed or no comparison was made."""
+    sentences = second_version_sentences(quest_root)
+    if not sentences:
+        return ""
+    return ("**Open points in the code that produced these results.** FI compared two independently written versions of "
+            "key functions of the model. The points below were still open on the version that ran, and none of them was "
+            f"settled by the run; the full record is in `{_second_record()}`.\n\n"
+            "- **A second, independent version of a key function was not settled.** FI had these functions written a "
+            "second time from the plan's description alone and compared the two on many inputs: "
+            f"{_listed(sentences, BLOCK_CAP)}.")
 
 
 def review_block(quest_root: Path, code_dir: Path) -> str:

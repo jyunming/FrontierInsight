@@ -53,35 +53,18 @@ def _claimed(tmp_path: Path, monkeypatch: Any, *, shown: bool, verdict: Verdict 
     return engine, record
 
 
-def _gate_crashes(engine: Any, monkeypatch: Any) -> None:
-    async def boom(state: Any) -> Any:
-        raise RuntimeError("the gate's own code failed")
-
-    monkeypatch.setattr(engine, "_shown_fault_verdict", boom)
-
-
 def _run_gate(engine: Any) -> Any:
     state = {"design": None, "result_json": RESULT, "exec_result": {"returncode": 0}, "literature": [], "analysis": {}}
     return asyncio.run(engine._node_evidence_gate(state))
 
 
-# ---- (1) a gate that raised decides like one that could not measure ---------------------------------------------------------
-def test_a_gate_that_crashed_still_takes_out_a_claim_whose_test_failed(tmp_path, monkeypatch) -> None:
+# ---- (1) a reader's claim the gate has not decided leaves nothing out
+def test_a_claim_the_gate_has_not_decided_leaves_nothing_out_of_the_results(tmp_path, monkeypatch) -> None:
     engine, _ = _claimed(tmp_path, monkeypatch, shown=True, verdict=None)
-    _gate_crashes(engine, monkeypatch)
     _run_gate(engine)
     rc = _rc(engine.quest_root)
-    assert rc["removed_quantities"] == ["cover"] and rc["checks"][0]["measured"]["status"] == "could_not"
-    assert "cover" in result_checks.left_out_by_record(engine.quest_root)
-
-
-def test_a_gate_that_crashed_keeps_and_discloses_a_claim_no_test_shows(tmp_path, monkeypatch) -> None:
-    engine, _ = _claimed(tmp_path, monkeypatch, shown=False, verdict=None)
-    _gate_crashes(engine, monkeypatch)
-    _run_gate(engine)
-    rc = _rc(engine.quest_root)
-    assert rc["removed_quantities"] == [] and rc["kept_differences"][0]["measured"]["status"] == "not_shown"
-    assert "could not show it" in rc["say"]
+    assert rc["removed_quantities"] == [] and rc["removed_figures"] == []
+    assert result_checks.left_out_by_record(engine.quest_root) == {}, "a reader's opinion takes no quantity out"
 
 
 # ---- (2) the figures that draw a quantity left out are left out with it -----------------------------------------------------
@@ -125,51 +108,3 @@ def test_a_claimed_check_that_leaves_nothing_out_is_not_listed_as_left_out(tmp_p
     q = quality_report._Quest.__new__(quality_report._Quest)
     q.result_check = _rc(root)
     assert quality_report._left_out_of_paper(q) == []
-
-
-# ---- fail closed: when settling the claims itself fails ------------------------------------------------------------------------
-def test_a_failure_in_settling_the_claims_leaves_every_undecided_claim_out(tmp_path, monkeypatch) -> None:
-    engine, _ = _claimed(tmp_path, monkeypatch, shown=False, verdict=None, figure=True)
-    _gate_crashes(engine, monkeypatch)
-
-    def broken(state: Any) -> None:
-        raise RuntimeError("settling failed")
-
-    monkeypatch.setattr(engine, "_settle_undecided_reader_claims", broken)
-    _run_gate(engine)
-    rc = _rc(engine.quest_root)
-    assert rc["removed_quantities"] == ["cover"] and rc["removed_figures"] == ["fig1_made_up.png"]
-    assert "Do NOT report" in rc["say"] and "stays in the results" not in rc["say"]
-    assert "could not decide" in rc["checks"][0]["note"]
-    q = quality_report._Quest.__new__(quality_report._Quest)
-    q.result_check = rc
-    assert "could not decide" in quality_report._left_out_of_paper(q)[0]["why"]
-
-
-def test_a_failed_lookup_of_the_finding_does_not_keep_a_claim_whose_test_failed(tmp_path, monkeypatch) -> None:
-    engine, _ = _claimed(tmp_path, monkeypatch, shown=True, verdict=None)
-    _gate_crashes(engine, monkeypatch)
-
-    def lookup_fails(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("lookup failed")
-
-    monkeypatch.setattr(code_review, "differing_quantities", lookup_fails)
-    _run_gate(engine)
-    rc = _rc(engine.quest_root)
-    assert rc["removed_quantities"] == ["cover"] and "kept_differences" not in rc
-
-
-def test_a_leave_out_that_cannot_be_recorded_stops_the_quest(tmp_path, monkeypatch) -> None:
-    engine, _ = _claimed(tmp_path, monkeypatch, shown=True, verdict=None)
-    _gate_crashes(engine, monkeypatch)
-    real = Path.write_text
-
-    def write(self: Path, *a: Any, **k: Any) -> Any:
-        if self.name == "RESULT_CHECK.json":
-            raise OSError("disk full")
-        return real(self, *a, **k)
-
-    monkeypatch.setattr(Path, "write_text", write)
-    out = _run_gate(engine)
-    assessment = out["evidence_assessment"]
-    assert assessment["verdict"] == "insufficient" and assessment["status"] == "ok" and "stops here" in json.dumps(assessment)

@@ -2460,16 +2460,14 @@ class CodeStageMixin:
         return same, reader or "the provider's default model", planner or "the provider's default model", bool(answered.get("reported"))
 
     async def _code_review_gate(self, state: QuestState, *, final: bool = False) -> QuestState | None:
-        """A different model reads the plan's required outputs and its logic against the scripts, and what it finds is
-        repaired (core/code_review.py). Called twice in ``_node_execute``: early (``final=False``), where a version is read,
-        its findings are kept by stable id and repaired test first, one at a time (:meth:`_repair_review_findings`), the
-        changed version is read again against the findings still open, and so on while the open issues that change a
-        result keep dropping, within ``code_review.MAX_SEND_BACKS`` passes; and just before the run
-        (``final=True``), where the version that will run is read with the one reading the early call may not spend, and
-        nothing is repaired any more (a repaired version would be unread). ``.fi/code_review.json`` keeps the readings, the
-        open findings in each, whether the repairs converged and whether the final version was read, so a resume does not
-        repeat a reading. What is open at the end is said in the limitations; a high-severity finding about a headline
-        quantity ends in the honest stop after the run unless the results contradict it. Always ``None``: the code goes on."""
+        """A different model reads the plan's required outputs and its logic against the scripts, and its serious findings
+        are repaired (core/code_review.py). Called once in ``_node_execute``, on the version about to run: the version is
+        read, its findings are kept by stable id, those of ``code_review.REPAIR_SEVERITY`` that can change a result are
+        repaired test first, one at a time, in one round (:meth:`_repair_review_findings`), and the repaired version runs
+        without a second reading. ``.fi/code_review.json`` keeps the reading and the open findings, so a resume does not
+        repeat it; a later call finds the reading spent and reads nothing. Every finding is listed in ``QUALITY.md``; none
+        stops the quest. No caller passes ``final=True`` now (a reading that repairs nothing). Always ``None``: the code
+        goes on."""
         code = self.quest_root / "code"
         if (self.config.engine.oracle_check == "off" or not self._runs_code(state)
                 or not (code / "experiment.py").is_file() or self.config.execution.background_jobs):
@@ -2522,8 +2520,8 @@ class CodeStageMixin:
                                       "last reading left open stays open" if record.get("read_version") else "")
                     self._code_review_outcome(record)
                 else:
-                    self._log.info("[code_review] the code was repaired; the last reading is kept for the version that will "
-                                   "run, so it is read just before the run")
+                    self._log.info("[code_review] the code was repaired after the one reading; the repaired version runs "
+                                   "without a second reading, and what was found is listed in QUALITY.md")
                 break
             if not await self._read_code_for_review(state, record, version, reqs, protocol, design, review_node):
                 break
@@ -2772,7 +2770,7 @@ class CodeStageMixin:
         function that still fails may be rewritten once by the other model configured for review. Every request is counted
         in ``.fi/code_review.json`` before it is made. ``True`` when a file changed (the next reading reads it)."""
         code = self.quest_root / "code"
-        await self._route_plan_conflicts(state, record, review_node)
+        # A contradiction inside the plan is listed in QUALITY.md; the plan is not rewritten from a finding.
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
         package = self._package_in_use(state) or ""
         ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
@@ -2808,6 +2806,7 @@ class CodeStageMixin:
             if Path(rel).name == "experiment.py":
                 self._review_experiment_changed = True
             self._gate_commit(state)  # the analysis gate's baseline is the code that is kept (nothing with the switch off)
+            self._finding_analysis_commit()  # and what FI's analysis gives on the small run's trials
             self._record(_attempts.LEDGER, lambda: {
                 "kind": "repair", "script": Path(rel).name, "attempt": int(record.get("repair_calls") or 0),
                 "parent_sha256": _attempts._sha(old.encode("utf-8")), "sha256": _attempts._sha(new.encode("utf-8")),
@@ -2830,6 +2829,7 @@ class CodeStageMixin:
             known_answers=lambda: self._finding_known_answers(protocol, notes),
             design_response=lambda: self._finding_design_response(protocol, notes), notes=notes)
         await self._gate_baseline(state)
+        await self._finding_analysis_start(state)
         with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
             changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)

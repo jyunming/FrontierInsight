@@ -2531,7 +2531,9 @@ async def repair_issues(env: Env) -> list[str]:
     from . import code_review as _review
 
     order = _issues.ranked(env.record)
-    todo = [i for i in order if i.get("outcome") in (_issues.OPEN, _issues.REOPENED) and not i.get("plan_conflict")]
+    # only the serious findings that change a reported result are repaired; the others are listed in QUALITY.md
+    todo = [i for i in order if i.get("outcome") in (_issues.OPEN, _issues.REOPENED) and not i.get("plan_conflict")
+            and i.get("severity") == _review.REPAIR_SEVERITY and i.get("changes_result") is True]
     if not todo:
         return []
     env.baseline = await env.snapshot()

@@ -508,33 +508,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
             + (f" (in {where})" if where else "") + (f": {text}" if text else "")
             + "; the test no longer runs on the code that produced the results, so it is not confirmed that the fault is "
             "fixed"), key=fid)
-    # Open problems in the code, flagged by a second reading, that can change a reported result (one about a function the
-    # run never calls cannot: core/code_review.py:open_findings leaves those out).
-    try:
-        from . import code_review as _code_review
-
-        found = _code_review.open_findings(root, root / "code")
-        for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
-            fid = str(v.get("fid") or "")
-            if fid in gated:
-                continue
-            issue = issues.get(fid) if fid else None
-            changes = (issue.get("changes_result") if isinstance(issue, dict) and issue.get("changes_result") is not None
-                       else _code_findings.changes_result(v))
-            if not changes:
-                continue
-            text = _code_review._plain_text(v.get("text"))
-            if text and v in found["not_rechecked"]:
-                # The code was changed after the review, and every test written for it errored: only the review's word.
-                add(CODE_FINDING, text[:80], _sentence(
-                    f"A review of the code flagged a possible problem with {text}; no test could show it (every test "
-                    "written for it failed to run), and the code was changed afterwards and not checked again for it"),
-                    key=fid or text)
-            elif text:
-                add(CODE_FINDING, text[:80], _sentence("A review of the code flagged a problem that can change a "
-                                                       f"reported result and was not resolved: {text}"), key=fid or text)
-    except Exception:  # noqa: BLE001
-        pass
+    # The open problems a second reading of the code flagged are its opinion: QUALITY.md lists them (core/quality_report.py);
+    # the paper's Limitations state FI's own records only.
     rows = _disclosure._ledger_rows(root)
     if rows:
         statuses = [status for status, _seed in rows[1].values()]
@@ -2016,7 +1991,7 @@ def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         # "It" is the delivered code, only when the sentence just before is the one about it
         delivered = wall is not None and reader is not None and reader["at_once"] != 1
         parts.append(_verdict_sentence(met, limit, "It" if delivered else "The run"))
-    parts += list(touched_sentences(root, paper_md).values())
+    # a second reading's open findings are its opinion: QUALITY.md lists them; the run facts state FI's records only
     return "**Run.** " + " ".join(parts) if parts else ""
 
 
