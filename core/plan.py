@@ -723,7 +723,7 @@ def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault
         derived = out.get("derived")
         derived_ids = {str(d.get("id")).strip() for d in derived if isinstance(d, dict) and d.get("id")} \
             if isinstance(derived, list) else set()
-        for index, metric in enumerate(metrics if isinstance(metrics, list) else [], start=1):
+        for index, metric in enumerate(fixed_metrics, start=1):  # as read: one metric written alone is a list of one
             rid = str(metric.get("id") or "").strip() if isinstance(metric, dict) else ""
             if rid and rid in derived_ids:
                 return None, _fault(_reading.join("protocol.metrics", index), (
@@ -1282,7 +1282,7 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                 notes.append(note)
                 continue
             # A metric that is also a derived result is left out, not the list it is in: the derived result stands.
-            listed_now = out["metrics"]
+            listed_now = [out["metrics"]] if isinstance(out["metrics"], dict) else out["metrics"]
             if fault.kind == "duplicate" and len(steps) == 3 and isinstance(steps[2], int) and isinstance(listed_now, list) \
                     and 1 <= steps[2] <= len(listed_now):
                 faults.append(fault)

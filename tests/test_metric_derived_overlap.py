@@ -94,3 +94,14 @@ def test_a_derived_part_that_is_not_a_list_does_not_break_the_names_step() -> No
 
     p = {**PROTOCOL, "derived": {"id": "peak", "inputs": ["growth"]}}
     contract_parts._apply_names(p, {})  # no AttributeError on a part a plan wrote as one table
+
+
+def test_one_metric_written_alone_is_read_as_a_list_of_one_for_the_overlap() -> None:
+    alone = {**PROTOCOL, "metrics": {"id": "peak", "kind": "mean", "role": "result", "estimand": "the mean peak",
+                                     "unit": "one run"}}
+    fixed, fault = plan.protocol_fault(alone)
+    assert fixed is None and fault is not None
+    assert fault.path == "protocol.metrics[1]" and fault.kind == "duplicate"
+    reading = plan.read_protocol(alone)  # the only metric stays; the derived entry of its name goes
+    assert reading.kept is not None and [m["id"] for m in reading.kept["metrics"]] == ["peak"]
+    assert "peak" not in [d["id"] for d in reading.kept["derived"]]
