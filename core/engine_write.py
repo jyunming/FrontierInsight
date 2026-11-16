@@ -2948,7 +2948,12 @@ class WriteStageMixin:
         section = _supplement.writer_section(root)
         changed = False
         kept = places
+        held: dict[Path, bytes | None] = {}
         try:
+            # the paper and its receipts as they were: a failure below puts them back with the supplement records, so a
+            # sentence put back into the paper is never also in the restored supplement
+            held = {f: (f.read_bytes() if f.is_file() else None)
+                    for f in (paper_path, _receipts.path(root, "claim_check"), _receipts.path(root, "citation_check"))}
             text = new = paper_path.read_text(encoding="utf-8")
             if places:
                 # the sentences the page trim moved go back where the text around them is unchanged (the trim ran last,
@@ -2974,22 +2979,24 @@ class WriteStageMixin:
                                          "FI put back what it had moved to the supplement, unchanged, and added no claim")
                 changed = True
         except (OSError, UnicodeDecodeError) as e:
-            # the record stays: what moved is still in the supplement, and the next page check tries again
+            # the record stays: what moved is still in the supplement, and the next page check tries again; the paper
+            # goes back to the one without what was put back
+            self._restore_files(held)
             self._log.warning("[page_limit] what moved to the supplement could not be put back (%s)", e)
             return False
-        held = {f: (f.read_bytes() if f.is_file() else None)
-                for f in (root / _supplement.RECORD, root / _supplement.FILE, root / _supplement.TRIM_RECORD)}
-        _supplement.save(root, [], limit=0)
-        _supplement.save_sentences(root, kept)
+        held.update({f: (f.read_bytes() if f.is_file() else None)
+                     for f in (root / _supplement.RECORD, root / _supplement.FILE, root / _supplement.TRIM_RECORD)})
         try:
+            _supplement.save(root, [], limit=0)
+            _supplement.save_sentences(root, kept)
             return self._restate_limitations(state, "FI wrote its own blocks in full again and added no claim",
                                              path=paper_path, strict=True) or changed
         except (OSError, UnicodeDecodeError) as e:
-            # the paper still holds FI's pointers: the record and the supplement they point to stay
+            # all goes back as it was before the reset: the paper with FI's pointers, the record and the supplement
             self._restore_files(held)
             self._log.warning("[page_limit] FI's blocks could not be written in full again (%s); what moved stays in "
                               "the supplement", e)
-            return changed
+            return False
 
     async def _fit_with_supplement(
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
@@ -3175,10 +3182,19 @@ class WriteStageMixin:
                 if found is None:
                     return None
                 if int(found["pages"]) <= limit:
-                    fitted = self._write_supplement(state, limit)
-                    if not fitted:  # the paper cannot point to a supplement that is not there: it stays as it was
+                    held = {f: (f.read_bytes() if f.is_file() else None)
+                            for f in (paper_path, *(self.quest_root / x for x in (_supplement.RECORD, _supplement.FILE)))}
+                    if not self._write_supplement(state, limit):
+                        return None  # the paper cannot point to a supplement that is not there: it stays as it was
+                    try:
+                        paper_path.write_text(current, encoding="utf-8")
+                    except OSError as e:
+                        # the paper (as it was, with the sentences) and the supplement it points to go back
+                        self._restore_files(held)
+                        self._log.warning("[page_limit] the shortened paper could not be written (%s); it stays as "
+                                          "it was", e)
                         return None
-                    paper_path.write_text(current, encoding="utf-8")
+                    fitted = True
                     return found, paper_trim.Trimmed(current, tuple(taken), spent)
                 need = _words_to_cut(int(found["pages"]), limit, float(found.get("last_page_empty") or 0.0))
         finally:

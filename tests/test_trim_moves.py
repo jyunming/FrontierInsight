@@ -114,3 +114,59 @@ def test_the_pointer_line_counts_the_moved_sentences() -> None:
     both = supplement.limitations_pointer(3, [], moved_sentences=2)
     assert both.endswith(". The supplement also holds 2 sentences of the paper's text, moved there for length.")
     assert "also holds" not in supplement.limitations_pointer(3, [])
+
+
+def test_a_reset_that_fails_after_putting_sentences_back_leaves_the_paper_and_the_supplement_as_they_were(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    eng, paper, _written, moved = _trimmed(tmp_path, monkeypatch)
+    before = {f: f.read_bytes() for f in (paper, tmp_path / "paper" / "supplement.md", tmp_path / supplement.TRIM_RECORD)}
+
+    def _fails(*_a, **_k):  # noqa: ANN002, ANN003, ANN202 - FI's blocks cannot be written again (a full disk)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(eng, "_restate_limitations", _fails)
+    assert eng._supplement_reset({"paper_md": str(paper)}, paper) is False  # type: ignore[attr-defined]
+    assert {f: f.read_bytes() for f in before} == before
+    shown = (tmp_path / "paper" / "supplement.md").read_text(encoding="utf-8")
+    now = paper.read_text(encoding="utf-8")
+    for sentence in moved:  # once, in the supplement only: never in both
+        assert now.count(sentence) + shown.count(f"- {' '.join(sentence.split())}") == 1, sentence
+
+
+def test_a_shortened_paper_that_cannot_be_written_leaves_no_sentence_in_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    import inspect
+
+    eng = _engine(tmp_path)
+    written = _delivered(_paper(with_lists=False))
+    paper = _put(tmp_path, written)
+    _render_by_words(monkeypatch, fits_at=len(written.split()) - 100, last_page_empty=0.8)
+    _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)][::-1]}))
+    _quiet_log(eng)
+    real = Path.write_text
+
+    def _write(self: Path, *a, **k):  # noqa: ANN002, ANN003, ANN202 - the trimmed paper cannot be written (a full disk)
+        if self == paper and inspect.stack()[1].function == "_trim_body_to_fit":
+            raise OSError("disk full")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", _write)
+    _review(eng, tmp_path)
+    now = paper.read_text(encoding="utf-8")
+    for c in _cands(written):  # every offered sentence still in the paper, and none in the supplement
+        assert c.text in now
+    shown = tmp_path / "paper" / "supplement.md"
+    assert not shown.exists() or "Sentences moved for length" not in shown.read_text(encoding="utf-8")
+    assert supplement.sentence_count(tmp_path) == 0
+
+
+def test_a_reset_whose_records_cannot_be_cleared_leaves_everything_as_it_was(tmp_path: Path, monkeypatch) -> None:
+    eng, paper, _written, _moved = _trimmed(tmp_path, monkeypatch)
+    before = {f: f.read_bytes() for f in (paper, tmp_path / "paper" / "supplement.md", tmp_path / supplement.TRIM_RECORD)}
+
+    def _fails(*_a, **_k):  # noqa: ANN002, ANN003, ANN202 - the supplement's record cannot be cleared (access denied)
+        raise OSError("access denied")
+
+    monkeypatch.setattr(supplement, "save_sentences", _fails)
+    assert eng._supplement_reset({"paper_md": str(paper)}, paper) is False  # type: ignore[attr-defined]
+    assert {f: f.read_bytes() for f in before} == before
