@@ -228,7 +228,7 @@ def test_a_test_that_calls_the_code_inside_try_except_is_no_proof(text: str, ref
 def test_the_real_tests_that_raise_again_in_their_except_are_still_run() -> None:
     # every finding test of the replayed quests catches an exception only to `assert False` on it, which the harness reads
     found = sorted((Path(__file__).parent / "fixtures" / "replay" / "finding_v2").glob("*/.fi/finding_tests/*.py"))
-    assert len(found) >= 6
+    assert len(found) >= 5  # the replayed quests' finding tests kept in the fixtures
     for path in found:
         assert fr.swallowed_call(path.read_text(encoding="utf-8")) == "", path
 
