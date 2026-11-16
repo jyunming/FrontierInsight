@@ -2808,6 +2808,7 @@ class CodeStageMixin:
             if Path(rel).name == "experiment.py":
                 self._review_experiment_changed = True
             self._gate_commit(state)  # the analysis gate's baseline is the code that is kept (nothing with the switch off)
+            self._finding_analysis_commit()  # and what FI's analysis gives on the small run's trials
             self._record(_attempts.LEDGER, lambda: {
                 "kind": "repair", "script": Path(rel).name, "attempt": int(record.get("repair_calls") or 0),
                 "parent_sha256": _attempts._sha(old.encode("utf-8")), "sha256": _attempts._sha(new.encode("utf-8")),
@@ -2830,6 +2831,7 @@ class CodeStageMixin:
             known_answers=lambda: self._finding_known_answers(protocol, notes),
             design_response=lambda: self._finding_design_response(protocol, notes), notes=notes)
         await self._gate_baseline(state)
+        await self._finding_analysis_start(state)
         with self._hold_code_runs():  # each try is its own commit or side reference (finding_repair.keep_try)
             changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)

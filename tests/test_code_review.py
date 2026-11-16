@@ -121,7 +121,8 @@ class _Reader:
             gone = any(m in r["text"] for m in self.missing) and not mended
             out.append({"id": r["id"], "status": "missing" if gone else "implemented",
                         "file": "" if gone else "simulate.py", "line": None if gone else 2,
-                        "note": "nothing in the code computes it" if gone else ""})
+                        "note": "nothing in the code computes it" if gone else "",
+                        "changes_result": True if gone else None})
         return json.dumps({"requirements": out, "summary": "s"})
 
     async def aclose(self) -> None:
@@ -152,35 +153,33 @@ def test_the_reply_is_read_strictly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_missing_quantity_goes_to_a_repair_request_of_its_own_and_the_changed_code_is_read_again(tmp_path: Path) -> None:
+async def test_a_missing_headline_quantity_goes_to_a_repair_request_of_its_own_and_the_repaired_code_is_not_read_again(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    reader = _Reader(missing=("settling_time",), fixed_by="# settling_time is computed")
-    reader.repaired["experiment.py"] = ANALYSIS + "# settling_time is computed\n"
+    reader = _Reader(missing=("quality_factor",), fixed_by="# quality_factor is computed")
+    reader.repaired["experiment.py"] = ANALYSIS + "# quality_factor is computed\n"
     engine._client = reader
     assert await engine._code_review_gate(WITH_PLAN) is None, "the code goes on: nothing is returned as a failed run"
-    assert len(reader.prompts) == 2 and len(reader.repair_prompts) == 1
+    assert len(reader.prompts) == 1 and len(reader.repair_prompts) == 1, "the code is read once; the repaired version is not read"
     asked = reader.repair_prompts[0]
     assert asked.lstrip().startswith(REPAIR_HEAD) and "has NOT crashed" in asked
     assert "a mass on a damped spring" in asked, "the writer of the repair sees the topic"
     assert "Q = m * w / c" in asked, "and the plan's equations"
-    assert "settling_time" in asked and "is missing from the code" in asked and "### experiment.py" in asked
+    assert "quality_factor" in asked and "is missing from the code" in asked and "### experiment.py" in asked
     assert "0.123456789" not in asked and "expected" not in asked.split("# The plan's equations", 1)[1].split("# The findings", 1)[0]
     assert "just failed" not in asked and "crash" not in asked.replace("has NOT crashed", "").replace("not crashed", "")
     record = cr.load(engine.quest_root)
     assert record["send_backs"] == 1 and record["repair_calls"] == 1 and record["same_model"] is False
-    assert [r["open"] for r in record["readings"]] == [1, 0], "both requirements are one issue"
-    assert record["converged"] is True
-    assert record["final"] is True and record["final_read"] is True and cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
-    assert "# settling_time is computed" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
-    assert "open issues per reading" in cr.metrics_line(record) and "1 issue(s) were repaired" in cr.metrics_line(record)
-    # The version that will run is already read: the late call asks nothing.
-    assert await engine._code_review_gate(WITH_PLAN, final=True) is None and len(reader.prompts) == 2
+    assert [r["open"] for r in record["readings"]] == [1], "the one reading found the quantity open"
+    assert "# quality_factor is computed" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+    assert "1 issue(s) were repaired" in cr.metrics_line(record)
+    # A later call finds the one reading spent: the repaired version is not read and nothing more is asked.
+    assert await engine._code_review_gate(WITH_PLAN, final=True) is None and len(reader.prompts) == 1 and len(reader.repair_prompts) == 1
 
 
 @pytest.mark.asyncio
 async def test_a_repair_that_changes_nothing_ends_the_repairs_and_what_is_open_stands(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    reader = _Reader(missing=("settling_time",))  # the repair answers with no file
+    reader = _Reader(missing=("quality_factor",))  # the repair answers with no file
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
     assert len(reader.prompts) == 1 and len(reader.test_prompts) == 1, "one test shows it"
@@ -315,41 +314,24 @@ async def test_a_code_version_that_ran_without_a_successful_reading_is_disclosed
 
 
 @pytest.mark.asyncio
-async def test_code_changed_after_the_reading_is_read_again_before_the_run_and_nothing_is_repaired_then(tmp_path: Path) -> None:
+async def test_a_finding_of_medium_severity_is_listed_and_not_repaired_and_code_changed_later_is_not_read_again(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    reader = _Reader()
+    reader = _Reader(missing=("planned figure",))  # a planned figure is not a headline quantity: a finding of medium severity
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None and len(reader.prompts) == 1
-    # A repair of a gate rewrote the code: the version that will run has not been read.
+    assert reader.repair_prompts == [] and reader.test_prompts == [], "only a high-severity finding that changes a result is repaired"
+    assert [v["kind"] for v in cr.not_computed(engine.quest_root, engine.quest_root / "code")] == ["figure"], "it is listed"
+    # The code changes after the one reading (a repair of a gate): the version that will run is not read again.
     (engine.quest_root / "code" / "simulate.py").write_text(SIM_OTHER, encoding="utf-8")
-    reader.missing = ("planned figure",)
+    reader.missing = ()
     assert await engine._code_review_gate(STATE, final=True) is None
-    assert len(reader.prompts) == 2 and reader.repair_prompts == [], "the version that runs is not repaired: nobody would read it"
+    assert len(reader.prompts) == 1 and reader.repair_prompts == [], "the code is read once"
     record = cr.load(engine.quest_root)
-    assert record["read_version"] == cr.version(engine.quest_root / "code") and record["final_read"] is True
-    assert [v["kind"] for v in cr.not_computed(engine.quest_root, engine.quest_root / "code")] == ["figure"]
+    assert record["read_version"] != cr.version(engine.quest_root / "code") and record["final_read"] is False
 
 
 @pytest.mark.asyncio
-async def test_the_last_reading_is_kept_for_the_version_that_will_run(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    reader = _Reader()
-    engine._client = reader
-    sim = engine.quest_root / "code" / "simulate.py"
-    for i in range(cr.MAX_REVIEWS):  # versions that are not the last: the early call never spends the reserved reading
-        sim.write_text(SIM_FULL + f"# v{i}" + chr(10), encoding="utf-8")
-        await engine._code_review_gate(STATE)
-    assert len(reader.prompts) == cr.MAX_REVIEWS - cr.RESERVED_FOR_FINAL
-    record = cr.load(engine.quest_root)
-    assert record["final_read"] is False, "the last version was not read yet"
-    # The version that will run is read, with the reserved reading, however many versions came before.
-    assert await engine._code_review_gate(STATE, final=True) is None
-    assert len(reader.prompts) == cr.MAX_REVIEWS
-    assert cr.load(engine.quest_root)["final_read"] is True and cr.load(engine.quest_root)["read_version"] == cr.version(sim.parent)
-
-
-@pytest.mark.asyncio
-async def test_after_the_cap_the_final_version_is_said_not_to_have_been_read_again(tmp_path: Path) -> None:
+async def test_after_the_one_reading_a_later_version_is_said_not_to_have_been_read(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._client = _Reader()
     for i in range(cr.MAX_REVIEWS):
@@ -357,14 +339,14 @@ async def test_after_the_cap_the_final_version_is_said_not_to_have_been_read_aga
         await engine._code_review_gate(STATE, final=True)
     (engine.quest_root / "code" / "simulate.py").write_text(SIM_FULL + "# final" + chr(10), encoding="utf-8")
     await engine._code_review_gate(STATE, final=True)
-    assert len(engine._client.prompts) == cr.MAX_REVIEWS == 3
+    assert len(engine._client.prompts) == cr.MAX_REVIEWS == 1
     record = cr.load(engine.quest_root)
     assert "allowed in a quest" in record["skipped"] and record["final_read"] is False
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert "not read by another model" in cr.findings_block(engine.quest_root, engine.quest_root / "code")
     assert "final version of the code was not read again" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     again = Engine(engine.config, resume_quest_id=engine.quest_id)
-    assert cr.load(again.quest_root)["reviews_total"] == 3, "a resume keeps the count"
+    assert cr.load(again.quest_root)["reviews_total"] == 1, "a resume keeps the count"
 
 
 @pytest.mark.asyncio
@@ -390,30 +372,6 @@ async def test_what_the_last_reading_left_open_stays_open_for_a_version_no_one_r
     block = cr.findings_block(engine.quest_root, sim.parent)
     assert read[0] in block and "final code was not read again" in block
     assert "stays open" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
-async def test_a_reading_that_fails_keeps_what_the_last_one_left_open(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    reader = _Reader()
-    reader.missing = ("planned figure",)
-    engine._client = reader
-    sim = engine.quest_root / "code" / "simulate.py"
-    sim.write_text(SIM_FULL + "# v0" + chr(10), encoding="utf-8")
-    await engine._code_review_gate(STATE, final=True)
-    read = [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)]
-    assert read
-
-    async def broken(messages, **kw):  # noqa: ANN001
-        raise RuntimeError("the provider is down")
-
-    reader.chat = broken  # type: ignore[method-assign]
-    sim.write_text(SIM_FULL + "# v1" + chr(10), encoding="utf-8")
-    await engine._code_review_gate(STATE, final=True)
-    record = cr.load(engine.quest_root)
-    assert "failed" in record.get("error", "") and record["final_read"] is False
-    assert [v["text"] for v in cr.not_computed(engine.quest_root, sim.parent)] == read
-    assert read[0] in cr.write_note(engine.quest_root, sim.parent)
 
 
 class _Partial(_Reader):
@@ -725,7 +683,7 @@ def test_a_flag_sticks_to_later_versions_until_a_newer_reading_clears_it(tmp_pat
     assert list(cr.flagged_checks(root2, code2, CHECKS)) == ["Grid_Convergence_Check"]
 
 
-def test_an_improve_round_cannot_keep_a_version_by_passing_a_flagged_check(tmp_path: Path) -> None:
+def test_a_reader_s_finding_about_a_check_leaves_fi_s_verdict_on_the_check_standing(tmp_path: Path) -> None:
     from core import criteria as crit
     from core import improve as imp
     from core.engine import _oracle_with_reader_flags
@@ -736,8 +694,9 @@ def test_an_improve_round_cannot_keep_a_version_by_passing_a_flagged_check(tmp_p
                "measured_by": "engine"}]
     items = [{"name": "grid", "oracle": "Grid_Convergence_Check", "use": "error", "direction": "lower", "tolerance": 0.01,
               "target": 0.0}]
+    assert _oracle_with_reader_flags(root, judged) == judged, "a reader's opinion does not mark the check"
     rows = crit.evaluate(items, judged=_oracle_with_reader_flags(root, judged), series={})
-    assert rows[0]["counts"] is True and rows[0]["met"] is False and not imp.all_met(rows)
+    assert rows[0]["counts"] is True and rows[0]["met"] is True and imp.all_met(rows), "FI's own verdict on the check stands"
 
 
 def test_a_finding_a_repair_settled_no_longer_flags_its_check(tmp_path: Path) -> None:

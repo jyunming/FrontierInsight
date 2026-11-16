@@ -72,9 +72,8 @@ MAX_REVIEWS = 1
 RESERVED_FOR_FINAL = 0
 #: The severity a finding must have to be repaired (with ``changes_result``); the others are listed only.
 REPAIR_SEVERITY = "high"
-#: (None now: the one reading is after the last run.) Further readings for the version that runs when a run that crashed or broke the protocol's contract was repaired by
-#: ``execute_reflect`` AFTER the reserved reading was spent: that script is the one whose results are reported, so it is
-#: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
+#: Further readings for a version a crash repair (``execute_reflect``) produced after the one reading: none, the code is
+#: read once and a later change of it is not read again (``.fi/code_review.json`` says so).
 RUN_REPAIR_READS = 0
 MAX_SEND_BACKS = 1
 #: Rounds of repair that may be started again after one was cut short (a kill, a crash) before it finished: a round is counted in

@@ -1246,7 +1246,7 @@ def test_method_block_carries_the_engines_check_verdicts(tmp_path: Path) -> None
     assert "energy_conserved: measured 1.0001, expected 1 within 0.01: passed" in block
 
 
-def test_a_check_the_reader_flagged_is_marked_not_shown(tmp_path: Path, monkeypatch) -> None:
+def test_a_check_the_reader_flagged_keeps_the_verdict_fi_gave_it(tmp_path: Path, monkeypatch) -> None:
     from core import engine as _eng
 
     (tmp_path / "needs").mkdir()
@@ -1255,30 +1255,26 @@ def test_a_check_the_reader_flagged_is_marked_not_shown(tmp_path: Path, monkeypa
          "measured_by": "engine"}]}]}), encoding="utf-8")
     monkeypatch.setattr(_eng._code_review, "flagged_checks", lambda *a, **k: {"energy_conserved": "the check is a constant"})
     block = _eng._claim_method_block(tmp_path, {})  # type: ignore[arg-type]
-    assert "do not say this check passed" in block and "passed_by_engine" not in block
-    assert "energy_conserved: measured 1, expected 1 within 0.01: passed" not in block
+    assert "do not say this check passed" not in block and "not shown" not in block
+    assert "energy_conserved: measured 1, expected 1 within 0.01: passed" in block, "a reader's opinion does not change FI's verdict"
 
 
-def test_method_block_open_findings_header_only_when_there_are_some(tmp_path: Path) -> None:
+def test_method_block_carries_nothing_of_a_second_model_s_reading(tmp_path: Path) -> None:
     from core import code_review as _cr
     from core.engine import _claim_method_block
 
     _code_tree(tmp_path)
     plain = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
     assert "SECOND MODEL" not in plain and "No second model" not in plain
-    # a reading that was never made: one neutral line, no reviewer instructions, no header
+    # a reading that was never made: nothing about it reaches the claim check
     _cr.save(tmp_path, {"skipped": "the same model wrote the code", "read_version": ""})
     skipped = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
-    assert "No second model compared the code with the plan" in skipped
-    assert "A SECOND MODEL'S READING" not in skipped and "Open points" not in skipped
-    assert "do not ask for it to be changed" not in skipped
-    # a real reading with something open: our header, the engine's list, no duplicated heading
+    assert "No second model" not in skipped and "A SECOND MODEL'S READING" not in skipped and "Open points" not in skipped
+    # a real reading with something open: its findings are its opinion, listed in the quality report only
     _cr.save(tmp_path, {"read_version": _cr.version(tmp_path / "code"), "version": _cr.version(tmp_path / "code"),
                         "not_reviewed": ["R1 the model computes the aerial image"]})
     read = _claim_method_block(tmp_path, {})  # type: ignore[arg-type]
-    assert "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong)" in read
-    assert "R1 the model computes the aerial image" in read
-    assert "## Open points" not in read and "do not ask for it to be changed" not in read
+    assert "A SECOND MODEL'S READING" not in read and "R1 the model computes the aerial image" not in read
 
 
 def test_claim_check_template_fills_every_placeholder() -> None:

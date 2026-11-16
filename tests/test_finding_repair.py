@@ -340,7 +340,7 @@ def test_every_request_is_counted_before_it_is_made_and_the_quest_total_is_a_bou
     assert len(run2.asked) == 2 and run2.record["finding_calls"] == 2
 
 
-def test_issues_are_taken_in_rank_order_and_one_that_changes_nothing_waits_for_the_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_only_a_high_finding_that_changes_a_result_is_repaired_and_the_others_are_listed(tmp_path: Path) -> None:
     items = [{"id": "F-minor", "changes_result": False, "severity": "high", "function": "helper"},
              {"id": "F-low", "changes_result": True, "severity": "low", "function": "damping"},
              {"id": "F-top", "changes_result": True, "severity": "high", "function": "quality"}]
@@ -360,15 +360,9 @@ def test_issues_are_taken_in_rank_order_and_one_that_changes_nothing_waits_for_t
 
     run = Ordered(tmp_path, items, {})
     run.go()
-    assert order == ["quality", "damping", "helper"], "what changes a result first, the one that changes nothing last"
-    # The ones that change nothing are repaired only while the quest has used less than half its requests.
-    monkeypatch.setattr(fr, "MINOR_LIMIT", 0)
-    order.clear()
-    run2 = Ordered(tmp_path / "b", items, {})
-    run2.go()
-    assert order == ["quality", "damping"]
-    assert "recorded, not repaired" in run2.record["issues"]["F-minor"]["note"]
-    assert run2.record["issues"]["F-minor"]["outcome"] == "open"
+    assert order == ["quality"], "a low finding and one that changes nothing are not asked for a test or a repair"
+    for listed in ("F-minor", "F-low"):
+        assert run.record["issues"][listed]["outcome"] == "open", "listed, not repaired"
 
 
 def test_a_contradiction_of_the_plan_is_never_an_issue_for_the_code(tmp_path: Path) -> None:
@@ -391,7 +385,8 @@ def test_a_finding_that_names_no_function_is_repaired_in_its_file_as_a_whole(tmp
 
 
 def test_the_accepted_state_is_the_baseline_for_the_next_issue(tmp_path: Path) -> None:
-    items = [{"id": "F-a", "function": "quality"}, {"id": "F-b", "function": "damping", "severity": "medium"}]
+    items = [{"id": "F-a", "function": "quality", "severity": "high", "changes_result": True},
+             {"id": "F-b", "function": "damping", "severity": "high", "changes_result": True}]
     second = "import spring\n\ndef test_d():\n    assert spring.damping(1, 1, 1) == 99\n"
     damp = "def damping(m, k, c):\n    return 99\n"
     run = Run(tmp_path, items, {"code:repair": [_block(GOOD), _block(damp)]})

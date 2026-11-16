@@ -2869,6 +2869,20 @@ class RunChecksMixin:
         ``.fi/small_run/raw``), whatever ``engine.pipeline_gate`` says, and split by evidence (core/small_run.py
         ``analysis_split``, ``no_value``): the :class:`core.small_run.Fault` s it gives. Only when FI writes the analysis
         and the small run recorded its trials. The result is kept in the small run's record for the same code."""
+        from . import small_run as _small
+
+        got = await self._small_analysis(state, protocol, record, search=search)
+        if got is None:
+            return []
+        result, missing = got
+        split = _small.analysis_split(result, docker=self.config.execution.sandbox == "docker")  # type: ignore[attr-defined]
+        return [*([split] if split is not None else []), *_small.no_value(missing)]
+
+    async def _small_analysis(self, state: Any, protocol: dict[str, Any], record: dict[str, Any], *,
+                              search: bool) -> tuple[Any, list[dict[str, Any]]] | None:
+        """FI's analysis on FI's small run's trials for the code as it is now: its ``GateResult`` and the declared results
+        FI's record of that run holds no value of, kept in the small run's record for the same code. ``None`` when FI does
+        not write the analysis, the small run recorded no trials, or the analysis could not be run."""
         import shutil
 
         from . import analysis_frame as _analysis
@@ -2879,8 +2893,7 @@ class RunChecksMixin:
         code = self.quest_root / "code"  # type: ignore[attr-defined]
         if state.get("no_simulation_resolved") or not self._analysis_on() or not raw.is_file() \
                 or not (code / "derive.py").is_file():
-            return []
-        docker = self.config.execution.sandbox == "docker"  # type: ignore[attr-defined]
+            return None
         h = hashlib.sha256(str(record.get("key") or "").encode())
         for path in sorted(code.rglob("*.py")):
             if not ({".git", "__pycache__", "tests"} & set(path.relative_to(code).parts)):
@@ -2888,7 +2901,9 @@ class RunChecksMixin:
                 h.update(path.read_bytes().replace(b"\r\n", b"\n"))
         key = h.hexdigest()[:20]
         kept = record.get("analysis") if isinstance(record.get("analysis"), dict) else {}
-        if kept.get("key") == key:
+        # a kept result without what the analysis gave (``held``: recorded since the repair guard) is made again, so a
+        # repair is never compared with nothing
+        if kept.get("key") == key and "held" in kept:
             got = _gate.GateResult(**{k: v for k, v in kept.items() if k in _gate.GateResult.__dataclass_fields__})
             missing = [m for m in kept.get("no_value") or [] if isinstance(m, dict)]
         else:
@@ -2903,13 +2918,24 @@ class RunChecksMixin:
                 missing = [m for m in _analysis.not_computed(_analysis.read_record(work)) if m["status"] == "missing"]
             except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
                 self._log.warning("[execute] FI's analysis could not be run on the small run's trials: %s", exc)  # type: ignore[attr-defined]
-                return []
+                return None
             finally:
                 shutil.rmtree(work, ignore_errors=True)
             _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing})  # type: ignore[attr-defined]
             self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]
-        split = _small.analysis_split(got, docker=docker)
-        return [*([split] if split is not None else []), *_small.no_value(missing)]
+        return got, missing
+
+    async def _small_analysis_now(self, state: Any) -> Any:
+        """:meth:`_small_analysis` for the code on disk and the small run's record as it is now (``None``: none)."""
+        from . import optimise as _optimise
+        from . import small_run as _small
+
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        if not isinstance(protocol, dict):
+            return None
+        got = await self._small_analysis(state, protocol, _small.read_record(self.quest_root),  # type: ignore[attr-defined]
+                                         search=_optimise.block_of(protocol) is not None)
+        return got[0] if got else None
 
     # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
     # The baseline of a change is the gate's result for the code that is KEPT (``_gate_kept``: the key of that code and its
@@ -3106,8 +3132,34 @@ class RunChecksMixin:
         return ""
 
     async def _finding_gate(self, state: Any) -> str:
-        """The gate for a repair of a reader's finding (``finding_repair.Env.gate``), after the small run."""
-        return await self._gate_refusal(state)
+        """The gate for a repair of a reader's finding (``finding_repair.Env.gate``), after the small run: the analysis gate
+        (``engine.pipeline_gate``), then FI's analysis on the small run's trials, whatever the switch says: a repair that
+        leaves a declared result with no value where the kept code gave one, or a figure undrawn that the kept code drew,
+        cannot stay (core/pipeline_gate.py ``results_lost``). When the analysis gate ran on the recorded trials (every
+        setting, a few trials each) the same comparison is made of its result too: a figure that stops only at settings the
+        small run does not have shows there, and the gate itself only refuses a fault, never a stop it reads as small data."""
+        if refused := await self._gate_refusal(state):
+            return refused
+        from . import pipeline_gate as _gate
+
+        if self.config.engine.pipeline_gate:  # type: ignore[attr-defined]
+            recorded = await self._analysis_gate(state)  # the result kept for this code: no second run
+            kept = self.__dict__.get("_gate_kept")
+            if recorded is not None and kept and (lost := _gate.results_lost(kept[1], recorded)):
+                return lost
+        after = await self._small_analysis_now(state)
+        self._finding_analysis_seen = after
+        return _gate.results_lost(self.__dict__.get("_finding_analysis_kept"), after)
+
+    async def _finding_analysis_start(self, state: Any) -> None:
+        """Where a round of repairs of a reader's findings starts: what FI's analysis gives on the small run's trials for
+        the code on disk, the baseline :meth:`_finding_gate` compares each repair with."""
+        self._finding_analysis_kept = await self._small_analysis_now(state)
+        self._finding_analysis_seen = None
+
+    def _finding_analysis_commit(self) -> None:
+        """A repair was kept: what the analysis gave on its code (seen by :meth:`_finding_gate`) is the new baseline."""
+        self._finding_analysis_kept = self.__dict__.get("_finding_analysis_seen")
 
     async def _gate_first(self, state: Any) -> dict[str, Any] | None:
         """Before the long run, once the small run has passed: the analysis is run on the recorded results and its result

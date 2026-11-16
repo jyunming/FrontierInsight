@@ -17,7 +17,7 @@ import pytest
 from core import code_findings as cf
 from core import code_review as cr
 from core import finding_repair as fr
-from tests.test_code_review import DESIGN, PROTOCOL, STATE, WITH_PLAN, _engine
+from tests.test_code_review import DESIGN, PROTOCOL, WITH_PLAN, _engine
 
 pytestmark = pytest.mark.usefixtures("this_python")
 FIXTURES = Path(__file__).parent / "fixtures" / "replay"
@@ -158,7 +158,7 @@ async def test_a_real_finding_is_shown_by_a_failing_test_then_repaired_in_its_fu
     assert issue["demonstrated"] is True and issue["outcome"] == "fixed" and issue["fixed_by"] == "planner-model"
     assert issue["repairs"][0]["outcome"] == "accepted" and issue["test"].startswith(".fi/finding_tests/")
     assert record["accepted_tests"] == [issue["test"]] and (engine.quest_root / issue["test"]).is_file()
-    assert [r["open"] for r in record["readings"]] == [1, 0] and record["converged"] is True
+    assert [r["open"] for r in record["readings"]] == [1] and len(models.readings) == 1, "the repaired version is not read again"
 
 
 @pytest.mark.asyncio
@@ -168,15 +168,9 @@ async def test_a_finding_whose_test_passes_on_the_code_is_not_demonstrated_and_n
     false_one = next(p for p in _record(CONFLICT)["problems"] if p["id"] == info["false_finding"])
     assert false_one["status"] == "different" and info["false_name"] in false_one["text"]
 
-    def verdicts(reqs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        out = []
-        for r in reqs:
-            hit = r["kind"] == "sweep"
-            out.append({"id": r["id"], "status": "different" if hit else "implemented", "file": "experiment.py",
-                        "line": info["line"], "note": "the settings are not all varied" if hit else "", "changes_result": True})
-        return out
-
-    models = Models(lambda n, code: [], lambda prompt: _script(CONFLICT, "grid_test"), lambda who, prompt: "", verdicts=verdicts)
+    finding = {"where": f"experiment.py:{info['line']}", "what": false_one["text"], "why": "the settings are not all varied",
+               "fix": "vary every setting", "severity": "high", "changes_result": True}
+    models = Models(lambda n, code: [finding], lambda prompt: _script(CONFLICT, "grid_test"), lambda who, prompt: "")
     engine = _engine_with(tmp_path, CONFLICT, models)
     before = {p.name: p.read_text(encoding="utf-8") for p in (engine.quest_root / "code").glob("*.py")}
     assert await engine._code_review_gate(WITH_PLAN) is None
@@ -195,7 +189,7 @@ async def test_a_reply_that_also_redefines_an_earlier_fixed_function_does_not_un
     first = _finding(_logic(SMALL, FIRST["finding"]), severity="high")
     line = next(n for n, text in enumerate((SMALL / "code" / MODEL_PY).read_text(encoding="utf-8").splitlines(), 1)
                 if SECOND["line_marker"] in text)
-    second = {"where": f"{MODEL_PY.as_posix()}:{line}", "what": SECOND["what"], "why": "w", "fix": "f", "severity": "medium",
+    second = {"where": f"{MODEL_PY.as_posix()}:{line}", "what": SECOND["what"], "why": "w", "fix": "f", "severity": "high",
               "quantity": SECOND["quantity"], "changes_result": True}
 
     def findings(n: int, code: str) -> list[dict[str, Any]]:
@@ -309,8 +303,10 @@ def _readable_plan(engine: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_contradiction_in_the_plan_is_put_to_the_plan_and_never_to_the_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A real finding: the metric is defined one way in one part of the plan and another way in another."""
+async def test_a_contradiction_in_the_plan_is_listed_and_sent_neither_to_the_code_nor_to_the_plan_s_model(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real finding: the metric is defined one way in one part of the plan and another way in another. The reader's word
+    does not rewrite the plan: it is listed in QUALITY.md."""
     info = _info(CONFLICT)
     conflict = _finding(_logic(CONFLICT, info["conflict_finding"]), plan_conflict=True, why=info["conflict_why"])
     models = Models(lambda n, code: [conflict], lambda prompt: "def test_x():\n    assert False\n", lambda who, prompt: "")
@@ -325,49 +321,10 @@ async def test_a_contradiction_in_the_plan_is_put_to_the_plan_and_never_to_the_c
     monkeypatch.setattr(engine, "_ask_plan_to_complete", fake_ask)
     assert await engine._code_review_gate(WITH_PLAN) is None
     assert models.tests == [] and models.repairs == [], "nothing is sent to the code for it"
-    assert len(asked) == 1 and asked[0]["file"] == "code_plan_conflict_asked.json"
-    assert info["conflict_why"] in asked[0]["request"](None, "") and "contradicts itself" in asked[0]["request"](None, "")
+    assert asked == [], "and nothing is sent to the plan's model: the plan is not rewritten from a finding"
     record = cr.load(engine.quest_root)
     (issue,) = record["issues"].values()
-    assert issue["outcome"] == "plan problem" and issue["plan_conflict"] is True and issue["plan_asked"] is True
-    assert issue["plan_changed"] is False and record["plan_conflicts"][0]["id"] == issue["id"]
-    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
-    assert "the PLAN contradicts itself" in note and "not a fault of the code" in note
-    # What the plan's model may rewrite is bounded: only definitions, never a check or a tolerance.
-    before = (engine.quest_root / "plan.md").read_text(encoding="utf-8")
-    from core import plan as _plan
-
-    revised = _plan.edit_design_block(before, lambda d: {**d, "protocol": {
-        **d["protocol"], "metrics": [{**m, "estimand": "the spread of the estimate"} for m in d["protocol"]["metrics"]]}})
-    kept = asked[0]["keep"](before, _plan.raw_design_block(revised))  # the model's answer is JSON shaped like the design block
-    assert "the spread of the estimate" in kept
-    loosened = _plan.edit_design_block(before, lambda d: {**d, "protocol": {
-        **d["protocol"], "oracles": [{**o, "tolerance": 1.0} for o in d["protocol"]["oracles"]]}})
-    with pytest.raises(ValueError):
-        asked[0]["keep"](before, _plan.raw_design_block(loosened))
-
-
-@pytest.mark.asyncio
-async def test_once_the_protocol_is_frozen_a_contradiction_of_the_plan_is_only_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from core import frozen_protocol as _frozen
-
-    info = _info(CONFLICT)
-    conflict = _finding(_logic(CONFLICT, info["conflict_finding"]), plan_conflict=True)
-    models = Models(lambda n, code: [conflict], lambda prompt: "", lambda who, prompt: "")
-    engine = _engine_with(tmp_path, CONFLICT, models)
-    _readable_plan(engine)
-    monkeypatch.setattr(_frozen, "load", lambda root: {"protocol": PROTOCOL})
-    called: list[Any] = []
-
-    async def fake_ask(*a: Any, **kw: Any) -> tuple[Any, str]:
-        called.append(1)
-        return a[0], a[1]
-
-    monkeypatch.setattr(engine, "_ask_plan_to_complete", fake_ask)
-    assert await engine._code_review_gate(WITH_PLAN) is None
-    assert called == [] and models.tests == []
-    (issue,) = cr.load(engine.quest_root)["issues"].values()
-    assert issue["outcome"] == "plan problem" and issue["plan_asked"] is False
+    assert issue["plan_conflict"] is True and not issue.get("plan_asked")
 
 
 def test_duplicates_in_the_real_readings_merge_into_stable_ids() -> None:
@@ -418,24 +375,3 @@ def test_the_reader_s_list_is_no_longer_cut_at_twelve() -> None:
     reply = {"findings": [{"where": p["where"], "what": p["text"]} for p in logic] +
                          [{"where": f"experiment.py:{i}", "what": f"another {i}"} for i in range(1, 9)]}
     assert len(cr.parse_logic(reply, [])) == 20
-
-
-@pytest.mark.asyncio
-async def test_what_was_found_is_kept_in_the_record_with_its_history_across_the_readings_of_a_quest(tmp_path: Path) -> None:
-    """The reader flags a repaired issue again in other words: it keeps its id, its first reading and both statuses, and is
-    reopened rather than counted as a new finding. The round that fixed it was progress (its failing test passed), so it is
-    tested again in the next round; that test passes on the repaired code, and the reader's repeat is not demonstrated."""
-    first = _finding(_logic(SMALL, FIRST["finding"]), severity="high")
-    reworded = {**first, "what": INFO["reworded_what"], "where": f"{INFO['module']}:19"}
-    models = Models(lambda n, code: [first if n == 1 else reworded], lambda prompt: FIRST_TEST, lambda who, prompt: _block(FIRST_GOOD))
-    engine = _engine_with(tmp_path, SMALL, models)
-    await engine._code_review_gate(WITH_PLAN)
-    record = cr.load(engine.quest_root)
-    assert len(record["issues"]) == 1, "the reworded finding is the same issue"
-    (issue,) = record["issues"].values()
-    assert [r["n"] for r in issue["readings"]] == [1, 2] and issue["first_seen"] == 1
-    assert len(issue["wordings"]) == 2 and issue["rounds"] == 1 and issue["outcome"] == "not demonstrated"
-    assert [r["outcome"] for r in issue["repairs"]] == ["accepted"]
-    assert record["converged"] is True, "progress is the fault's failing test passing, not the reader's list"
-    assert record["readings"][1]["fixed_in_round"] == 1
-    assert DESIGN and STATE  # (kept imported: the neutral fixtures of the code-review tests)
