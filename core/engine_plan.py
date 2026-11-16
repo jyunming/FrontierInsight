@@ -1645,10 +1645,7 @@ class PlanStageMixin:
             return design, plan_sha
 
         def with_answers(block: dict[str, Any]) -> dict[str, Any]:
-            p = {**(block.get("protocol") or {}), "topic_map": new_map}
-            if made:
-                have = {str(d.get("id")) for d in p.get("derived") or [] if isinstance(d, dict)}
-                p["derived"] = [*(p.get("derived") or []), *(d for d in made if str(d["id"]) not in have)]
+            p = _contract_parts.with_new_results({**(block.get("protocol") or {}), "topic_map": new_map}, made)
             return {**block, "protocol": p}
 
         path = _plan.plan_path(self.quest_root)

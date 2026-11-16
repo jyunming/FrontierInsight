@@ -471,7 +471,14 @@ def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str,
         return value, [], [], []
     p = design["protocol"]
     ids = _dependents.declared_ids(p)
-    settings = _contract.varied_settings(p) + [str(k) for k in (p.get("grid") or {}) if isinstance(p.get("grid"), dict)]
+    # every other name the plan already uses: the settings and constants of each block, the forms a result is returned
+    # under (`<id>_values`, ...), the sub-studies, the oracle cases, and a named result that is not a number of its own
+    used = {_dependents._norm(n) for n in _contract._declared_names(p)} | {
+        _dependents._norm(n["id"]) for n in p.get("named_results") or []
+        if isinstance(n, dict) and n.get("id") and n.get("answer") != "result"}
+    # a number the plan lists but declares nowhere, by the name as the plan spells it: a new result of that name is it
+    listed = {_dependents._norm(n["id"]): str(n["id"]) for n in p.get("named_results") or []
+              if isinstance(n, dict) and n.get("id") and n.get("answer") == "result"}
     out, new, problems, left_out = dict(value), [], [], []
     taken: set[str] = set()
     for ident, q in asked.items():
@@ -484,8 +491,8 @@ def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str,
                if not _dependents._CODE_NAME.fullmatch(name) else
                f"`{name}` is already a number of the study; answer `metric:{name}`"
                if any(_dependents._norm(i) == _dependents._norm(name) for i in ids) else
-               f"`{name}` is a setting the study changes; give the new result a name of its own"
-               if any(_dependents._norm(s) == _dependents._norm(name) for s in settings) else
+               f"`{name}` is already a name in the plan (a setting, a constant or a form a result is returned under); "
+               "give the new result a name of its own" if _dependents._norm(name) in used else
                f"`{name}` is given twice; each new result has its own name" if _dependents._norm(name) in taken else
                "`new` needs `what`, what the number is, in a few words" if not what else "")
         if why:
@@ -495,12 +502,28 @@ def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str,
             else:
                 problems.append(f"`{ident}`: {why}")
             continue
+        name = listed.get(_dependents._norm(name), name)
         taken.add(_dependents._norm(name))
         shared = _ref_id(q.get("by"))
         inputs = _worked_from(p, shared) or ([shared] if shared else [])
         new.append({**_dependents._new_derived({"id": name, "inputs": inputs, "what": what}), "for_question": ident})
         out[ident] = {**{k: v for k, v in row.items() if k not in ("id", "what")}, "by": f"metric:{name}"}
     return out, new, problems, left_out
+
+
+def with_new_results(protocol: dict[str, Any], made: list[dict[str, Any]]) -> dict[str, Any]:
+    """The protocol with the derived results FI declared for a `"by": "new"` (:func:`_new_results`) added, each once. A
+    named result of the same name (one the plan said the study returns but declared nowhere) is now that result, so it
+    leaves ``named_results``, as :func:`_apply_figures` does when it declares one."""
+    if not made:
+        return protocol
+    norm = _dependents._norm
+    have = {norm(d.get("id")) for d in protocol.get("derived") or [] if isinstance(d, dict)}
+    names = {norm(d["id"]) for d in made}
+    named = [n for n in protocol.get("named_results") or [] if not (isinstance(n, dict) and norm(n.get("id")) in names)]
+    rest = {k: v for k, v in protocol.items() if k != "named_results"}
+    return {**rest, "derived": [*(protocol.get("derived") or []), *(d for d in made if norm(d["id"]) not in have)],
+            **({"named_results": named} if named else {})}
 
 
 def _answers_question(protocol: dict[str, Any], ident: str, question: str) -> bool:
@@ -955,8 +978,7 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                     if left_new:
                         record["new_left_out"] = left_new
                     if made:
-                        checking = {**current, "protocol": {**current["protocol"],
-                                                            "derived": [*(current["protocol"].get("derived") or []), *made]}}
+                        checking = {**current, "protocol": with_new_results(current["protocol"], made)}
                 problems = new_problems + (_dependents.check(value, entries, current, taken)
                             + _dependents.check_uncertainties(unsure, current, taken) if part == "dependents" else
                             _check_formulas(value, faults, current) if part == "formulas" else
