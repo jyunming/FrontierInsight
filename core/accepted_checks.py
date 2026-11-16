@@ -506,14 +506,15 @@ def failing_disclosure(record: Any) -> str:
     if disagree:
         out.append(f"For these known-answer checks the simulation and the plan's own working of the expected value "
                    f"disagree, and neither is confirmed: {'; '.join(gap(e) for e in disagree)}. Say so plainly where the "
-                   "checks are described and in the limitations, with both values: it is not a failure of the code shown, "
-                   "and nothing here may be described as checked against these known answers.")
+                   "checks are described, with both values (FI states each in the limitations itself): it is not a "
+                   "failure of the code shown, and nothing here may be described as checked against these known answers.")
     if failed:
         out.append(f"These known-answer checks FAILED and the run went on anyway: {'; '.join(gap(e) for e in failed)}. "
-                   "Say so plainly where the checks are described and in the limitations: the result is not validated "
-                   "against these known answers, and nothing here may be described as checked against them.")
+                   "Say so plainly where the checks are described (FI states each in the limitations itself): the result is not "
+                   "validated against these known answers, and nothing here may be described as checked against them.")
     if undecided:
         out.append(f"These known-answer checks could not be decided at the precision their tolerance needs, and the run "
-                   f"went on: {'; '.join(gap(e) for e in undecided)}. Say plainly where the checks are described and in "
-                   "the limitations that each check was not decided, so the result is not validated against it.")
+                   f"went on: {'; '.join(gap(e) for e in undecided)}. Say plainly where the checks are described that "
+                   "each check was not decided (FI states each in the limitations itself), so the result is not validated "
+                   "against it.")
     return " ".join(out)

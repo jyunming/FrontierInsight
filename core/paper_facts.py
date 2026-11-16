@@ -102,6 +102,9 @@ FIGURE_LEFT_OUT = "figure_left_out"
 FIGURE_PASS_FAULT = "figure_pass_fault"
 FIGURE_REFERENCE = "figure_reference"
 METHOD_DIFFERS = "method_differs"
+#: A check of the code against a known answer that the quest went on without (``needs/ORACLE_CHECK.json``: it failed,
+#: could not be run on its case, or the trials could not decide it).
+KNOWN_ANSWER = "known_answer"
 #: Kept while the check of the sentences about the figures stopped with an error of FI's own on the paper last written.
 FIGURE_PASS_RECORD = Path(".fi") / "figure_pass_fault.json"
 FIGURE_PASS_SENTENCE = ("FI could not check the sentences about the figures: its check stopped with an error of its own, so "
@@ -127,7 +130,8 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               FEWER_RUNS: "fewer", CUT_SHORT: "cut-short", RUN_DIFFERENCE: "difference", SHARED_SEEDS: "shared-seeds",
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
               FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault",
-              FIGURE_REFERENCE: "figure-reference", METHOD_DIFFERS: "method-differs"}
+              FIGURE_REFERENCE: "figure-reference", METHOD_DIFFERS: "method-differs",
+              KNOWN_ANSWER: "known-answer"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -462,6 +466,8 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 add(METHOD_DIFFERS, q, _sentence(f"A second model claims that the code computes {_said(root, q)} by a method that "
                                                  "differs from the plan's definition; no test FI wrote could show it, so the claim is "
                                                  "not shown and the value is kept"))
+    for key, name, said in known_answer_items(root):
+        add(KNOWN_ANSWER, name, said, key=key)
     _precision_items(root, add)
     # A key function whose second, independently written version still gives different results (not one that could not
     # be compared: that is in the quality report only).
@@ -572,6 +578,57 @@ def required_items(quest_root: Path | str) -> list[Item]:
     if points:
         add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
     return items
+
+
+def _number_said(value: Any) -> str:
+    return f"{value:.4g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+
+
+def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
+    """``(key, name, sentence)`` for each check of the code against a known answer the quest went on without, from FI's own
+    record (``needs/ORACLE_CHECK.json`` with status ``went_on_failing``), in the paper's words: the plan's own words for what
+    the check compares (the first sentence of its ``check``), FI's numbers, and what happened (it failed, it could not be run on its case, the trials
+    could not decide it, or the simulation and the plan's own working of the known value disagree). The writer is told the
+    same, but whether the paper says it never rests on the writer. More than :data:`_MAX_SETTING_ITEMS` are one item."""
+    from . import accepted_checks as _accepted
+
+    record = _read(root, f"needs/{_accepted.ORACLE_RECORD}")
+    if not isinstance(record, dict) or record.get("status") != _accepted.WENT_ON:
+        return []
+    frozen = _read(root, "needs/FROZEN_PROTOCOL.json")
+    oracles = (frozen.get("protocol") or {}).get("oracles") if isinstance(frozen, dict) else None
+    # the plan's first sentence of what the check compares (the rest is how the plan sized it), else the check's name
+    words = {str(o.get("name")): re.split(r"(?<=[.;])\s+(?=[A-Z])", _one(o.get("check")))[0].rstrip(".;")
+             for o in oracles or [] if isinstance(o, dict) and o.get("name")}
+    out: list[tuple[str, str, str]] = []
+    for e in record.get("went_on") or []:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        name = str(e["name"])
+        what = words.get(name) or name
+        lead = f'The check of the code against a known answer "{what}"'
+        tol = e.get("tolerance")
+        known = (f"the known value is {_number_said(e.get('expected'))}"
+                 + (f" within {_number_said(tol)}" + (" (relative)" if e.get("tolerance_mode") == "relative" else "")
+                    if tol is not None else ""))
+        gave = f"the run gave {_number_said(e.get('measured'))}, {known}" if e.get("measured") is not None else known
+        if e.get("disagreement"):
+            said = (f"{lead} could not be judged: the simulation and the plan's own working of the known value disagree, and "
+                    "neither is confirmed")
+        elif e.get("undecided"):
+            said = f"{lead} could not be decided with the trials the study ran ({gave})"
+        elif e.get("measured") is None:
+            said = f"{lead} could not be run on its case"
+        else:
+            said = f"{lead} did not pass ({gave})"
+        out.append((name, f"known-answer check {name}", _sentence(f"{said}; the results are not validated against it")))
+    if len(out) > _MAX_SETTING_ITEMS:
+        listed = "; ".join(f'"{words.get(k) or k}"' for k, _n, _s in out)
+        return [("checks", "known-answer checks", _sentence(
+            f"{len(out)} checks of the code against a known answer failed, could not be run on their case or could not be "
+            f"decided, and the study went on: {listed}; the results are not validated against them (the quality report "
+            "gives each with its numbers)"))]
+    return out
 
 
 def shared_seeds_text(root: Path) -> str:
@@ -2075,7 +2132,8 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
             return _supplement.table_pointer()
         items = [i for i in required_items(quest_root) if i.kind != CODE_FINDING]
         return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
-                                               discussion=bool(_supplement.writer_text(quest_root)))
+                                               discussion=bool(_supplement.writer_text(quest_root)),
+                                               known_answers=len(known_answer_items(Path(quest_root))))
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":

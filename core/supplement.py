@@ -250,10 +250,11 @@ def table_pointer() -> str:
             f"supplement (`{SHOWN}`; every number also in `paper/results_by_setting.csv`).")
 
 
-def limitations_pointer(n_items: int, topic_parts: list[str], *, discussion: bool = False) -> str:
+def limitations_pointer(n_items: int, topic_parts: list[str], *, discussion: bool = False, known_answers: int = 0) -> str:
     """The one line the Limitations keep: how many things FI recorded, each part of the topic the study did not do by
-    name (a reader is told in the paper itself what it leaves out), and where they all are; ``discussion``: the paper's
-    own paragraphs of that section are there too."""
+    name and how many checks of the code against a known answer did not confirm the results (``known_answers``: a reader
+    is told in the paper itself what it leaves out and what is not validated), and where they all are; ``discussion``: the
+    paper's own paragraphs of that section are there too."""
     if n_items <= 0:
         return ""
     line = f"FI recorded {n_items} limitation{'s' if n_items != 1 else ''} of this study"
@@ -261,5 +262,9 @@ def limitations_pointer(n_items: int, topic_parts: list[str], *, discussion: boo
         shown = "; ".join(topic_parts)  # every one by name: a reader is told in the paper what the study leaves out
         k = len(topic_parts)
         line += f", among them {k} part{'s' if k != 1 else ''} of the topic it did not do ({shown})"
+    if known_answers > 0:
+        checks = (f"{known_answers} check{'s' if known_answers != 1 else ''} of the code against a known answer that did "
+                  "not confirm the results")
+        line += f" and {checks}" if topic_parts else f", among them {checks}"
     where = f"the supplement (`{SHOWN}`)" + (", with the paper's own discussion of them" if discussion else "")
     return line + f"; each is stated in full in {where}."
