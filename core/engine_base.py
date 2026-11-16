@@ -5734,10 +5734,11 @@ def _without_reviewer_page_limit_hits(hits: list[Any], log: Any = None) -> list[
 def _words_to_cut(pages: int, limit: int, last_page_empty: float) -> int:
     """About how many words take a draft of ``pages`` pages down to ``limit``:
     a page's worth for each full page past the first one over, and the filled
-    part of the last page. At least 100, in steps of 50."""
+    part of the last page. At least 50, in steps of 50 (a few lines over asks for few sentences: tested 2026-11-16,
+    a floor of 100 made the trim take sentences that state what the study did not do)."""
     filled = 1.0 - min(1.0, max(0.0, last_page_empty))
     over = max(0.0, (pages - limit - 1) + filled)
-    return max(100, int(over * _WORDS_PER_PAGE / 50.0 + 0.5) * 50)
+    return max(50, int(over * _WORDS_PER_PAGE / 50.0 + 0.5) * 50)
 
 
 def _paper_figure_count(state: QuestState) -> int:

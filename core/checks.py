@@ -1346,8 +1346,9 @@ CHECKS: tuple[Check, ...] = (
           'paper/supplement.md, in that order, until it fits; no model call'),
     Check('page_limit_body_trim', 'core.engine', 'Engine._trim_body_to_fit',
           'review', 'model_judge', 'strip',
-          'a model ranks sentences, FI cuts background/discussion sentences (never the last citation of a '
-          'source or last statement of a number; paper_trim.choose) to fit'),
+          'a model ranks sentences, FI moves background/discussion sentences to paper/supplement.md (never one '
+          'that cites a source or holds the last statement of a number; paper_trim.choose) to fit; they come back '
+          'into a later draft where the text around them is unchanged'),
     Check('claim_grounding_unsupported', 'core.engine', 'Engine._node_claim_check',
           'claim_check', 'model_judge', 'repair',
           'a model grounds each paper claim in run results or one cited source, else unsupported; forces '

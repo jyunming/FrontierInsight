@@ -255,24 +255,25 @@ def test_the_spaces_around_a_sentence_taken_out_go_with_it() -> None:
     assert paper_trim._delete(text, both) == "Alpha one is here.\nDelta four is here."
 
 
-def test_the_only_citation_of_a_source_and_the_only_statement_of_a_number_are_never_taken() -> None:
+def test_a_sentence_that_cites_a_source_or_alone_states_a_number_is_never_offered_or_taken() -> None:
     paper = (
         "# T\n\n## Introduction\n\nOpening sentence of the paragraph is here. "
         "One background sentence that cites a source found nowhere else in the paper [3]. "
         "Another background sentence that cites the first source again in the same way [1]. "
-        "A third background sentence that also cites the first source once more [1]. "
-        "A fourth sentence about the number 7.5 which the paper states only here.\n\n## References\n\n"
+        "A fourth sentence about the number 7.5 which the paper states only here. "
+        "A plain background sentence that cites nothing and states no number at all.\n\n## References\n\n"
     )
     end = paper.index("## References")
     cands = paper_trim.candidates(paper, end)
-    # The 7.5 sentence is never offered, and the [3] one is offered but never taken.
-    assert all("7.5" not in c.text for c in cands)
-    order = [c.n for c in cands]
-    got = paper_trim.choose(paper, end, cands, order, 10)
-    assert got is not None
-    assert all("[3]" not in s.text for s in got.taken)
-    # Both sentences citing [1] cannot go: the second would leave it cited nowhere.
-    assert sum("[1]" in s.text for s in got.taken) == 1
+    # A taken sentence moves to the supplement, where a citation label would go stale: no cited sentence is offered,
+    # and the 7.5 sentence is not either (its number is stated nowhere else).
+    assert [c.text for c in cands] == ["A plain background sentence that cites nothing and states no number at all."]
+    # choose still never takes a source's only citation, whatever it is handed.
+    cited = [paper_trim.Sentence(1, paper.index("One background"), paper.index("[3].") + 4,
+                                 paper[paper.index("One background"):paper.index("[3].") + 4], 12, ("3",), ()),
+             *[paper_trim.Sentence(2, c.start, c.end, c.text, c.words, c.cites, c.numbers) for c in cands]]
+    got = paper_trim.choose(paper, end, cited, [1, 2], 5)
+    assert got is not None and all("[3]" not in s.text for s in got.taken) and "[3]" in got.text
 
 
 def test_a_list_that_cannot_reach_the_words_is_refused_and_so_is_a_target_over_the_cap() -> None:
@@ -284,6 +285,11 @@ def test_a_list_that_cannot_reach_the_words_is_refused_and_so_is_a_target_over_t
 
 
 # --- the review: a draft a few sentences over ------------------------------------------------
+
+#: About the words of the Limitations line that says how many sentences moved to the supplement and where (with its
+#: block's markers): the draft with the sentences out and that line in must fit.
+_POINTER = 40
+
 
 def _put(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "paper" / "paper.md"
@@ -340,7 +346,7 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     cands = _cands(written)
     total = len(written.split())
     # One trim's worth over: the draft fits once about 100 words are gone.
-    rendered = _render_by_words(monkeypatch, fits_at=total - 100)
+    rendered = _render_by_words(monkeypatch, fits_at=total - 100 + _POINTER, last_page_empty=0.8)
     calls = _with_chat(eng, json.dumps({"delete": [c.n for c in cands][::-1]}))
     warnings = _quiet_log(eng)
 
@@ -354,7 +360,7 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     cut = record["trimmed"]
     assert cut["words"] >= 100 and len(cut["sentences"]) >= 2
     now = paper.read_text(encoding="utf-8")
-    assert len(now.split()) <= total - 100
+    assert len(now.split()) <= total - 100 + _POINTER
     for sentence in cut["sentences"]:
         assert sentence not in now and sentence in written
     # Only background and discussion lost anything: the rest is character for character as written.
@@ -371,7 +377,8 @@ def test_a_draft_a_few_sentences_over_the_limit_loses_them_and_is_not_sent_back(
     assert "## References" not in trim[0].split("<paper>")[1]
     assert [node for node, _p in calls].count("write") == 0
     assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
-    assert any("took" in w and "instead of writing the paper again" in w for w in warnings)
+    assert any("moved" in w and "to the supplement" in w and "instead of writing the paper again" in w
+               for w in warnings)
     assert rendered[0] == written  # measured as written first, then the trial(s)
 
 
@@ -379,7 +386,7 @@ def test_the_trim_is_tried_whatever_the_state_of_the_review(tmp_path: Path, monk
     eng = _engine(tmp_path)
     written = _delivered(_paper(with_lists=False))
     _put(tmp_path, written)
-    _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
+    _render_by_words(monkeypatch, fits_at=len(written.split()) - 100, last_page_empty=0.8)
     _with_chat(eng, json.dumps({"delete": [c.n for c in _cands(written)]}))
     patch = _review(eng, tmp_path)
     record = patch["review"]["page_limit"]
@@ -396,7 +403,7 @@ def test_a_list_that_falls_short_is_asked_for_again_on_the_paper_as_it_now_stand
     written = _delivered(_paper(with_lists=False))
     paper = _put(tmp_path, written)
     first = [c.n for c in _cands(written)][:2]
-    rendered = _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
+    rendered = _render_by_words(monkeypatch, fits_at=len(written.split()) - 100 + _POINTER, last_page_empty=0.8)
     asked: list[str] = []
 
     async def chat(prompt, *, node=None):  # noqa: ANN001
@@ -416,7 +423,7 @@ def test_a_list_that_falls_short_is_asked_for_again_on_the_paper_as_it_now_stand
     cut = patch["review"]["page_limit"]["trimmed"]
     assert len(cut["sentences"]) > 2 and cut["words"] >= 100
     assert len(rendered) == 2  # the draft as written, then one render of the whole trim
-    assert len(paper.read_text(encoding="utf-8").split()) <= len(written.split()) - 100
+    assert len(paper.read_text(encoding="utf-8").split()) <= len(written.split()) - 100 + _POINTER
 
 
 def test_a_draft_still_over_after_the_first_round_is_trimmed_again(tmp_path: Path, monkeypatch) -> None:
@@ -432,7 +439,7 @@ def test_a_draft_still_over_after_the_first_round_is_trimmed_again(tmp_path: Pat
     paper = _put(tmp_path, written)
     total = len(written.split())
     # The first hundred words are not enough: the draft fits only once 150 are gone.
-    _render_by_words(monkeypatch, fits_at=total - 150)
+    _render_by_words(monkeypatch, fits_at=total - 150, last_page_empty=0.8)
     asked: list[str] = []
 
     async def chat(prompt, *, node=None):  # noqa: ANN001
@@ -541,7 +548,7 @@ def test_the_review_reads_the_grounding_of_the_paper_it_reads(tmp_path: Path, mo
     _put(tmp_path, written)
     cands = _cands(written)
     target = next(c for c in cands if c.text.startswith("Small populations may still"))
-    _render_by_words(monkeypatch, fits_at=len(written.split()) - 100)
+    _render_by_words(monkeypatch, fits_at=len(written.split()) - 100 + _POINTER, last_page_empty=0.8)
     prompts: list[str] = []
     # The claim's sentence first, then enough others to reach the hundred words to cut.
     calls = _with_chat(eng, json.dumps({"delete": [target.n] + [c.n for c in cands if c.n != target.n]}))
@@ -561,7 +568,8 @@ def test_the_review_reads_the_grounding_of_the_paper_it_reads(tmp_path: Path, mo
     # The reviewer is not told to flag a claim the paper no longer makes.
     reviews = [p for p in prompts if "substantive claims trace" in p]
     assert reviews and all(
-        "UNSUPPORTED CLAIMS (" not in p and "No unsupported claims were detected" in p and claim not in p
+        "UNSUPPORTED CLAIMS (" not in p and "No unsupported claims were detected" in p
+        and claim not in p.split("The supplement that ships with this paper")[0]
         for p in reviews
     )
     ledger = json.loads((tmp_path / "paper" / "claims.json").read_text(encoding="utf-8"))

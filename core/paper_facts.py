@@ -2157,11 +2157,14 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
                                                discussion=bool(_supplement.writer_text(quest_root)),
                                                known_answers=sum(1 for e in went_on if e.get("name")),
-                                               none_judged=any(not e.get("name") for e in went_on))
+                                               none_judged=any(not e.get("name") for e in went_on),
+                                               moved_sentences=_supplement.sentence_count(quest_root))
     if name == "run_facts":
         return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
     if name == "limitations":
-        return limitations_text(quest_root)
+        # the paper's own Limitations also say where the sentences the page trim moved are (not the supplement's copy)
+        moved = "" if full else _supplement.moved_sentences_line(_supplement.sentence_count(quest_root))
+        return "\n".join(x for x in (limitations_text(quest_root), f"- {moved}" if moved else "") if x)
     if name == "answers":
         return answers_text(quest_root)
     rel = _BLOCK_FILES.get(name)
@@ -2262,8 +2265,9 @@ def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = Tru
     a heading of any level that is just "Limitations"; with none, the paragraph that opens with a bold run-in
     ``**Limitations.**``. A paper with none gets ``## Limitations`` before its Conclusion, else its References, else at
     the end (``heading=False``, for a paper whose format forbids that heading: a ``**Limitations.**`` paragraph there).
-    With nothing to state there is no block, and no heading for it."""
-    if not limitations_text(quest_root):
+    With nothing to state there is no block, and no heading for it; sentences the page trim moved to the supplement are
+    something to state (the block says how many and where)."""
+    if not limitations_text(quest_root) and not _supplement.sentence_count(quest_root):
         return _drop_limitations(text) if _limitations_in(text) else text
     if _limitations_in(text):
         return text

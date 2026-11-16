@@ -350,12 +350,8 @@ class WriteStageMixin:
             return False
         try:
             before = Path(path).read_text(encoding="utf-8")
-            after = self._render_paper_facts(
-                _paper_facts.place_blocks(_disclosure.without_block(before), self.quest_root,
-                                          topic=str(self.config.topic or ""),
-                                          fallback_s=(state.get("exec_result") or {}).get("duration_s"),
-                                          limitations_heading=self._limitations_heading(state)), state)
-            if _supplement.read(self.quest_root):
+            after = self._with_fi_blocks(before, state)
+            if _supplement.anything(self.quest_root):
                 # the supplement says what the records say now, as the pointer in the paper does
                 self._write_supplement(state, _supplement.read(self.quest_root).get("limit"))
             if after == before:
@@ -370,6 +366,14 @@ class WriteStageMixin:
                 raise
             self._log.warning("[review] the paper's Limitations could not be written again from FI's records (%s)", e)
             return False
+
+    def _with_fi_blocks(self, text: str, state: QuestState) -> str:
+        """``text`` with FI's blocks written into it from its records as they are now (the Limitations among them)."""
+        return self._render_paper_facts(
+            _paper_facts.place_blocks(_disclosure.without_block(text), self.quest_root,
+                                      topic=str(self.config.topic or ""),
+                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"),
+                                      limitations_heading=self._limitations_heading(state)), state)
 
     def _verify_value_marks(self, markdown: str, state: QuestState) -> str:
         """``markdown`` with every FI value mark worked out again from FI's record (core/paper_values.py::verify_marks): a
@@ -1605,7 +1609,7 @@ class WriteStageMixin:
             now: QuestState = {**state, **out}  # type: ignore[assignment]
             # The supplement holds what the records say now (the Limitations were just written again); one that cannot
             # be written is no place to point to, so what moved comes back into the paper.
-            if _supplement.read(self.quest_root) and not self._write_supplement(now, limit):
+            if _supplement.anything(self.quest_root) and not self._write_supplement(now, limit):
                 self._supplement_reset(now, Path(paper_path))
             measured = await self._measure_draft_pages(Path(paper_path), now)
             if measured is not None and int(measured["pages"]) > limit:
@@ -2921,6 +2925,8 @@ class WriteStageMixin:
                                               + _paper_facts.limitations_text(root)).strip()
         if _supplement.FURTHER_READING in moved:
             parts[_supplement.FURTHER_READING] = _supplement.further_text(root)
+        if _supplement.sentences(root):
+            parts[_supplement.SENTENCES] = _supplement.sentences_text(root)
         try:
             _supplement.write(root, limit, {k: _paper_facts.without_marks(v) for k, v in parts.items()})
             return True
@@ -2935,13 +2941,27 @@ class WriteStageMixin:
         that wrote its own does not get the old ones too) and the record and the file go. Returns whether the paper
         changed."""
         root = self.quest_root
-        if not _supplement.read(root):
+        places = _supplement.sentences(root)
+        if not _supplement.read(root) and not places:
             return False
         lines = _supplement.further_text(root)
         section = _supplement.writer_section(root)
         changed = False
+        kept = places
+        held: dict[Path, bytes | None] = {}
         try:
+            # the paper and its receipts as they were: a failure below puts them back with the supplement records, so a
+            # sentence put back into the paper is never also in the restored supplement
+            held = {f: (f.read_bytes() if f.is_file() else None)
+                    for f in (paper_path, _receipts.path(root, "claim_check"), _receipts.path(root, "citation_check"))}
             text = new = paper_path.read_text(encoding="utf-8")
+            if places:
+                # the sentences the page trim moved go back where the text around them is unchanged (the trim ran last,
+                # so they come back first); one that cannot be placed stays in the supplement, never lost
+                new, kept = _supplement.put_back_sentences(new, places)
+                if kept:
+                    self._log.info("[page_limit] %d of the sentences moved to the supplement could not be put back into "
+                                   "this draft (the text around them changed); they stay in the supplement", len(kept))
             if section is not None:
                 back = _supplement.put_back_writer_limitations(new, *section)
                 if back is None:
@@ -2959,20 +2979,24 @@ class WriteStageMixin:
                                          "FI put back what it had moved to the supplement, unchanged, and added no claim")
                 changed = True
         except (OSError, UnicodeDecodeError) as e:
-            # the record stays: what moved is still in the supplement, and the next page check tries again
+            # the record stays: what moved is still in the supplement, and the next page check tries again; the paper
+            # goes back to the one without what was put back
+            self._restore_files(held)
             self._log.warning("[page_limit] what moved to the supplement could not be put back (%s)", e)
             return False
-        held = {f: (f.read_bytes() if f.is_file() else None) for f in (root / _supplement.RECORD, root / _supplement.FILE)}
-        _supplement.save(root, [], limit=0)
+        held.update({f: (f.read_bytes() if f.is_file() else None)
+                     for f in (root / _supplement.RECORD, root / _supplement.FILE, root / _supplement.TRIM_RECORD)})
         try:
+            _supplement.save(root, [], limit=0)
+            _supplement.save_sentences(root, kept)
             return self._restate_limitations(state, "FI wrote its own blocks in full again and added no claim",
                                              path=paper_path, strict=True) or changed
         except (OSError, UnicodeDecodeError) as e:
-            # the paper still holds FI's pointers: the record and the supplement they point to stay
+            # all goes back as it was before the reset: the paper with FI's pointers, the record and the supplement
             self._restore_files(held)
             self._log.warning("[page_limit] FI's blocks could not be written in full again (%s); what moved stays in "
                               "the supplement", e)
-            return changed
+            return False
 
     async def _fit_with_supplement(
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
@@ -3062,8 +3086,12 @@ class WriteStageMixin:
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
     ) -> tuple[dict[str, Any], paper_trim.Trimmed] | None:
         """Bring a draft whose body is a little over the page limit within it by
-        taking whole sentences out of its background and discussion, when that
-        alone does it, and write the result over ``paper_path``.
+        moving whole sentences of its background and discussion to the supplement
+        (core/supplement.py: each with the section it came from, and the paper's
+        Limitations say how many), when that alone does it, and write the result
+        over ``paper_path``. Nothing is lost: a later draft gets each sentence back
+        where the text around it is unchanged, and one that cannot be placed stays
+        in the supplement.
 
         The alternative is the whole-paper rewrite the review forces, the largest
         part of the revise loop (:mod:`core.paper_trim` has the numbers) and the
@@ -3091,6 +3119,11 @@ class WriteStageMixin:
         self.fi_dir.mkdir(parents=True, exist_ok=True)
         spent = 0
         taken: list[paper_trim.Sentence] = []
+        # what earlier trims moved and could not be put back stays; this trim's sentences join it only when the paper fits
+        prior = _supplement.sentences(self.quest_root)
+        places: list[dict[str, Any]] = []
+        step = _supplement.next_step(prior)
+        fitted = False
         try:
             for _ in range(_TRIM_ROUNDS):
                 if spent + need > paper_trim.MAX_WORDS:
@@ -3136,19 +3169,39 @@ class WriteStageMixin:
                     return None
                 current, spent = cut.text, spent + cut.words
                 taken += cut.taken
+                places += _supplement.places_of(cut.text, cut.gaps, step=step)
+                step += 1
                 if cut.words < need:
                     need -= cut.words  # the list fell short of the words: ask again on what is left
                     continue
+                # measured as it would go out: the Limitations say how many sentences moved and where
+                _supplement.save_sentences(self.quest_root, [*prior, *places])
+                current = self._with_fi_blocks(current, state)
                 trial.write_text(current, encoding="utf-8")
                 found = await self._measure_draft_pages(trial, state)
                 if found is None:
                     return None
                 if int(found["pages"]) <= limit:
-                    paper_path.write_text(current, encoding="utf-8")
+                    held = {f: (f.read_bytes() if f.is_file() else None)
+                            for f in (paper_path, *(self.quest_root / x for x in (_supplement.RECORD, _supplement.FILE)))}
+                    if not self._write_supplement(state, limit):
+                        self._restore_files(held)  # a supplement written in part goes back to the one before
+                        return None  # the paper cannot point to a supplement that is not there: it stays as it was
+                    try:
+                        paper_path.write_text(current, encoding="utf-8")
+                    except OSError as e:
+                        # the paper (as it was, with the sentences) and the supplement it points to go back
+                        self._restore_files(held)
+                        self._log.warning("[page_limit] the shortened paper could not be written (%s); it stays as "
+                                          "it was", e)
+                        return None
+                    fitted = True
                     return found, paper_trim.Trimmed(current, tuple(taken), spent)
                 need = _words_to_cut(int(found["pages"]), limit, float(found.get("last_page_empty") or 0.0))
         finally:
             trial.unlink(missing_ok=True)
+            if not fitted:
+                _supplement.save_sentences(self.quest_root, prior)
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
@@ -3335,11 +3388,12 @@ class WriteStageMixin:
                 before, (measured, taken) = pages, cut
                 pages = int(measured["pages"])
                 record["pages"] = pages
-                record["trimmed"] = {"words": taken.words, "sentences": [sentence.text for sentence in taken.taken]}
+                record["trimmed"] = {"words": taken.words, "sentences": [sentence.text for sentence in taken.taken],
+                                     "moved_to": _supplement.SHOWN}
                 self._log.warning(
-                    "[page_limit] the draft renders to %d pages, over the limit of %d: took %d sentences "
-                    "(%d words) out of its background and discussion instead of writing the paper again; "
-                    "it now renders to %d pages. Taken out: %s",
+                    "[page_limit] the draft renders to %d pages, over the limit of %d: moved %d sentences "
+                    "(%d words) of its background and discussion to the supplement (paper/supplement.md) instead of "
+                    "writing the paper again; it now renders to %d pages. Moved: %s",
                     before, limit, len(taken.taken), taken.words, pages, paper_trim.summary(taken),
                 )
         if pages <= limit:
