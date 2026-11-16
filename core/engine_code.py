@@ -2974,7 +2974,7 @@ class CodeStageMixin:
 
         await self._ask_plan_to_complete(
             design, sha, lacks=lacks, request=request, keep=keep, file="code_plan_conflict_asked.json",
-            what="a plan that does not contradict itself", short="a contradiction in the plan",
+            what="what makes its parts agree", short="a contradiction in the plan",
             note="a contradiction found by the code reader, resolved by the plan's model")
         try:
             after = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
