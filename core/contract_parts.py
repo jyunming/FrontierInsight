@@ -825,7 +825,10 @@ def _apply_names(p: dict[str, Any], answer: dict[str, Any],
             named.append({"id": name, "answer": row["answer"], "what": what,
                           **({"equation": str(row["equation"]).strip()} if row.get("equation") else {})})
     kept = {**p, **({"derived": derived} if derived else {}), **({"named_results": named} if named else {})}
-    return kept, {**kept, "metrics": [*(p.get("metrics") or []), *temp]}
+    # while a formula is judged as a temporary metric, its derived entry is not beside it (a result is one or the other)
+    temp_ids = {t["id"] for t in temp}
+    return kept, {**kept, "derived": [d for d in derived if d.get("id") not in temp_ids],
+                  "metrics": [*(p.get("metrics") or []), *temp]}
 
 
 def _apply_comparisons(p: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:

@@ -715,6 +715,20 @@ def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault
                     return None, _fault(_reading.join("protocol.metrics", index), str(why), as_written=metric)
             return None, _fault("protocol.metrics", str(why), as_written=None)
         out["metrics"] = fixed_metrics
+        # A result each run returns is never also one worked out after the runs: the analysis reads a derived name from its
+        # formula, so the trials' value of the same name is never read and the result leaves the paper. On the stored
+        # plans every such overlap came from a revision that added a derived result to the metrics, so the fault is put at
+        # that metric entry (the reading leaves it out and the derived result stands).
+        derived = out.get("derived")
+        derived_ids = {str(d.get("id")).strip() for d in derived if isinstance(d, dict) and d.get("id")} \
+            if isinstance(derived, list) else set()
+        for index, metric in enumerate(metrics if isinstance(metrics, list) else [], start=1):
+            rid = str(metric.get("id") or "").strip() if isinstance(metric, dict) else ""
+            if rid and rid in derived_ids:
+                return None, _fault(_reading.join("protocol.metrics", index), (
+                    f"`{rid}` is in `protocol.metrics` (a result each run returns) and also in `protocol.derived` (a "
+                    "result worked out from the runs' results after they finish): a result is one or the other, so give "
+                    f"`{rid}` in only one of them"), "duplicate", metric)
         subset = [str(m.get("id")) for m in fixed_metrics if isinstance(m, dict) and m.get("given")]
         if subset and out.get("in_each_run"):
             return None, _fault("protocol.metrics", (
@@ -1265,6 +1279,14 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                 out = without
                 faults.append(fault)
                 notes.append(note)
+                continue
+            # A metric that is also a derived result is left out, not the list it is in: the derived result stands.
+            listed_now = out["metrics"]
+            if fault.kind == "duplicate" and len(steps) == 3 and isinstance(steps[2], int) and isinstance(listed_now, list) \
+                    and 1 <= steps[2] <= len(listed_now):
+                faults.append(fault)
+                notes.append(f"a `protocol.metrics` entry was left out of the plan: {why}")
+                out["metrics"] = [m for i, m in enumerate(listed_now, start=1) if i != steps[2]]
                 continue
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec
