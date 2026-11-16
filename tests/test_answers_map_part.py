@@ -480,3 +480,150 @@ def test_a_plan_map_naming_its_result_worked_out_once_per_setting_without_a_pref
     assert refused and "worked out once per setting" in refused[0]
     again = cp._check_answers({"Q1": {"by": "metric:peak_spread", "statistic": "sd"}}, asked, design)
     assert again and "worked out once per setting" in again[0], "the same result named with its prefix is the plan's result"
+
+
+# A shared result the plan works out once per setting from algae_peak: two thresholds given one number.
+CROSS = [{"id": "nutrient_cross", "inputs": ["algae_peak"], "role": "result", "label": "nutrient where algae pass 100 and 500",
+          "asked": True}]
+PLAN_TWO_D = {**PROTOCOL, "derived": CROSS, "topic_map": [{"item": "Q1", "by": "metric:nutrient_cross", "at": {}},
+                                                          {"item": "Q2", "by": "metric:nutrient_cross", "at": {}},
+                                                          {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+
+
+def _new_of(out, ident):
+    return next((d for d in out.design["protocol"].get("derived") or [] if d.get("for_question") == ident), None)
+
+
+def test_a_shared_quantity_with_no_number_of_its_own_gets_a_new_result_worked_out_from_what_the_shared_one_is() -> None:
+    # Recorded on a real plan: two thresholds of one curve were one derived result; the answers step could only name an
+    # existing result, and the second threshold had none, so the paper could answer only one of the two questions.
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO_D)
+    reply = {"answers": {"Q1": {"by": "metric:nutrient_cross"},
+                         "Q2": {"by": "new", "id": "nutrient_500", "what": "nutrient where algae pass 500",
+                                "inputs": ["metric:nutrient_cross"]}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO_D}, [reply], asked)
+    assert out.parts["answers"]["valid"] and len(seen) == 1 and out.parts["answers"]["new_results"] == ["nutrient_500"]
+    new = _new_of(out, "Q2")
+    assert new["id"] == "nutrient_500" and new["inputs"] == ["algae_peak"], "FI's record of what the shared one is worked from"
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows == {"Q1": "metric:nutrient_cross", "Q2": "metric:nutrient_500", "Q3": "metric:bloom"}
+    assert "same_number" not in out.parts["answers"]
+    assert '"by": "new"' in seen[0]
+
+
+def test_a_new_result_for_a_shared_reported_number_is_worked_out_from_that_number() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"}}}
+    out, _seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [reply], asked)
+    assert _new_of(out, "Q2")["inputs"] == ["algae_peak"]
+
+
+def test_new_is_refused_for_a_quantity_not_shared_and_for_a_name_given_twice() -> None:
+    asked = tr.quantities_to_place(REQ, PROTOCOL)
+    first = next(iter(asked))
+    bad = {"answers": {i: {"by": "none"} for i in asked}}
+    bad["answers"][first] = {"by": "new", "id": "x_new", "what": "w"}
+    good = {"answers": {i: {"by": "none"} for i in asked}}
+    out, seen = _ask(DESIGN, [bad, good], asked)
+    assert len(seen) == 2 and "`new` is only for a quantity the plan gives the same number as another" in seen[1]
+    assert not out.design["protocol"].get("derived")
+    asked2 = tr.quantities_to_place(REQ_TWO, PLAN_TWO_D)
+    twice = {"answers": {"Q1": {"by": "new", "id": "n_cross", "what": "a"}, "Q2": {"by": "new", "id": "n_cross", "what": "b"}}}
+    problems = cp._new_results(twice["answers"], asked2, {**DESIGN, "protocol": PLAN_TWO_D}, False)[2]
+    assert problems == ["`Q2`: `n_cross` is given twice; each new result has its own name"]
+    taken = cp._new_results({"Q2": {"by": "new", "id": "algae_peak", "what": "w"}}, asked2, {**DESIGN, "protocol": PLAN_TWO_D}, False)[2]
+    assert taken and "already a number of the study" in taken[0]
+
+
+def test_an_unusable_new_at_the_last_ask_keeps_the_plans_map_for_it_and_the_other_answers() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO)
+    reply = {"answers": {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "new", "what": "no name given"}}}
+    out, seen = _ask({**DESIGN, "protocol": PLAN_TWO}, [reply] * cp.MAX_ASKS, asked)
+    assert len(seen) == cp.MAX_ASKS and out.parts["answers"]["valid"] and out.parts["answers"]["new_left_out"] == ["Q2"]
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows["Q1"] == "metric:bloom" and rows["Q2"] == "metric:algae_peak"
+
+
+def test_the_spread_over_trials_of_a_new_result_is_refused_like_any_result_worked_out_once_per_setting() -> None:
+    asked = tr.quantities_to_place(REQ_TWO, PLAN_TWO_D)
+    reply = {"answers": {"Q1": {"by": "metric:nutrient_cross"},
+                         "Q2": {"by": "new", "id": "nutrient_500", "what": "w", "statistic": "sd"}}}
+    problems = cp._check_answers(*cp._new_results(reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO_D}, False)[:1], asked,
+                                 {**DESIGN, "protocol": {**PLAN_TWO_D, "derived": [*CROSS, *cp._new_results(
+                                     reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO_D}, False)[1]]}})
+    assert any("worked out once per setting" in p for p in problems)
+
+
+def test_the_plan_step_writes_a_new_result_into_the_plan_with_the_map_that_names_it(tmp_path: Path) -> None:
+    # Recorded: the plan step's answers path wrote only the map back to plan.md, so the second question was mapped to a
+    # result the plan did not have.
+    from unittest.mock import AsyncMock
+
+    from core import dependent_map as dm
+    from core import plan
+    from tests.test_plan_optimisation import _engine
+
+    eng = _engine(tmp_path, [])
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("t", None, {**DESIGN, "protocol": PLAN_TWO_D}), encoding="utf-8")
+    reply = {"answers": {"Q1": {"by": "metric:nutrient_cross"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"}}}
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps(reply))})()
+    design, sha = eng._design_from_plan()
+    out, new_sha = asyncio.run(eng._ask_plan_for_the_answers(design, sha, REQ_TWO))
+    written = plan.parse(path.read_text(encoding="utf-8")).design["protocol"]
+    assert new_sha != sha and out["protocol"] == written
+    assert [d["id"] for d in written["derived"] if d.get("for_question") == "Q2"] == ["nutrient_500"]
+    ids = {dm._norm(i) for i in dm.declared_ids(written)}
+    assert all(dm._norm(m["by"].split(":", 1)[1]) in ids for m in written["topic_map"] if m["by"].startswith("metric:"))
+
+
+def test_new_on_a_quantity_not_shared_at_the_last_ask_keeps_its_plan_map_and_the_other_answers() -> None:
+    # Recorded with the real prompt: one plan's model answered `new` for a question the plan does not give another's number.
+    plan_q3 = {**PLAN_TWO, "topic_map": [r for r in PLAN_TWO["topic_map"] if r["item"] != "Q3"]}
+    asked = tr.quantities_to_place(REQ_TWO, plan_q3)
+    assert sorted(asked) == ["Q1", "Q2", "Q3"] and not asked["Q3"].get("shared")
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"},
+                         "Q3": {"by": "new", "id": "bloom_new", "what": "w"}}}
+    out, seen = _ask({**DESIGN, "protocol": plan_q3}, [reply] * cp.MAX_ASKS, asked)
+    part = out.parts["answers"]
+    assert len(seen) == cp.MAX_ASKS and part["valid"] and part["new_left_out"] == ["Q3"] and part["new_results"] == ["nutrient_500"]
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows["Q2"] == "metric:nutrient_500" and rows.get("Q3") != "metric:bloom_new"
+
+
+def test_a_new_result_named_like_a_setting_a_constant_or_a_form_a_result_is_returned_under_is_refused() -> None:
+    # Review of the change: a name was checked only against the plan's results, so `algae_peak_values` (a form a run returns
+    # algae_peak under) or a threshold's name was taken as a new result's name.
+    plan = {**PLAN_TWO_D, "thresholds": {"bloom_level": 500}, "constants": {"depth_m": 2},
+            "named_results": [{"id": "peak_alias", "answer": "label", "of": ["algae_peak"]}]}
+    asked = tr.quantities_to_place(REQ_TWO, plan)
+    for name in ("algae_peak_values", "bloom_level", "depth_m", "temp", "peak_alias"):
+        problems = cp._new_results({"Q2": {"by": "new", "id": name, "what": "w"}}, asked, {**DESIGN, "protocol": plan},
+                                   False)[2]
+        assert problems and "already a name in the plan" in problems[0], (name, problems)
+    ok = cp._new_results({"Q2": {"by": "new", "id": "nutrient_500", "what": "w"}}, asked, {**DESIGN, "protocol": plan}, False)
+    assert not ok[2] and [d["id"] for d in ok[1]] == ["nutrient_500"], "a name of its own is still taken"
+
+
+def test_a_new_result_takes_the_name_of_a_number_the_plan_lists_but_declares_nowhere() -> None:
+    # Recorded on the real plan: the plan listed the two thresholds as numbers the study returns (named results) but declared
+    # one shared result; the model's `new` names were those two. The new result is that number now, and leaves the list.
+    plan = {**PLAN_TWO_D, "named_results": [{"id": "nutrient_500", "answer": "result", "what": "nutrient where algae pass 500"},
+                                            {"id": "peak_alias", "answer": "label", "of": ["algae_peak"]}]}
+    asked = tr.quantities_to_place(REQ_TWO, plan)
+    reply = {"answers": {"Q1": {"by": "metric:nutrient_cross"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"}}}
+    out, _seen = _ask({**DESIGN, "protocol": plan}, [reply], asked)
+    p = out.design["protocol"]
+    assert out.parts["answers"]["new_results"] == ["nutrient_500"]
+    assert [n["id"] for n in p.get("named_results") or []] == ["peak_alias"], "the named entry is now the derived result"
+    assert [d["id"] for d in p["derived"]].count("nutrient_500") == 1
+    # the same name spelled another way is the plan's own spelling: one number, never declared twice
+    other = {"answers": {"Q1": {"by": "metric:nutrient_cross"}, "Q2": {"by": "new", "id": "Nutrient_500", "what": "w"}}}
+    out, _seen = _ask({**DESIGN, "protocol": plan}, [other], asked)
+    p = out.design["protocol"]
+    assert [d["id"] for d in p["derived"] if d.get("for_question")] == ["nutrient_500"]
+    assert [n["id"] for n in p.get("named_results") or []] == ["peak_alias"]
+    assert {r["item"]: r["by"] for r in p["topic_map"]}["Q2"] == "metric:nutrient_500"
+    assert cp.with_new_results(plan, []) is plan
