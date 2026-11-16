@@ -461,8 +461,8 @@ def changing_open(record: dict[str, Any]) -> list[dict[str, Any]]:
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 
-#: The most shown issues whose test is run again at the evidence gate, and each run's time limit (a test runs at most twice).
-MAX_SHOWN_RERUNS = 10
+
+
 SHOWN_TEST_TIMEOUT_S = 60
 
 
@@ -478,18 +478,6 @@ def shown_by_assertion(issue: dict[str, Any]) -> bool:
     return issue.get("demonstrated") is True and issue.get("failure_kind") == ASSERTION
 
 
-def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
-    """Open issues that change a reported result and were shown by a test's own assertion about values, most urgent first:
-    the candidates for the evidence gate's stop. An issue the reading no longer flags, one repaired, one whose test passed
-    on the code, one whose test only errored (an exception, in the code or in the test, shows nothing), one never tested
-    and a contradiction inside the plan are left out. The reader's word is not enough to stop a quest: the gate runs each
-    one's test again on the code that produced the results, and only a failing assertion there counts.
-
-    Repaired and no-longer-flagged issues are left out on purpose: after a repair changes a function's interface, its old
-    test can fail on correct code. Re-running them stopped both trustworthy papers of the suite (a fixed fault whose test
-    now indexes a shorter return value)."""
-    return sorted((i for i in open_issues(record) if i.get("changes_result") is True and shown_by_assertion(i)
-                   and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 
 def summary(record: dict[str, Any]) -> dict[str, Any]:
@@ -526,26 +514,3 @@ def convergence_line(record: dict[str, Any]) -> str:
             f"those were shown by a failing test and {s['fixed']} issue(s) were repaired; "
             f"{s['open_result_changing_demonstrated']} shown result-changing issue(s) are still open")
 
-
-#: The parts of the plan's protocol in which a contradiction about a definition can sit, and so the only parts the plan's
-#: model may rewrite to resolve one. A check, a threshold, a tolerance and a precision target are never among them.
-PLAN_PARTS = ("metrics", "ci_method", "model")
-
-
-def plan_conflict_request(topic: Any, conflicts: list[tuple[str, str]], values: list[float] | None = None) -> str:
-    """The request to the plan's model to make the plan consistent: each contradiction as the reader found it (what and
-    why, with the plan's own check values taken out), the topic as the specification, and what it may change."""
-    from . import review_pairs as _pairs
-
-    lines = []
-    for n, (what, why) in enumerate(conflicts, 1):
-        lines.append(f"{n}. {_pairs.scrub(what, values)}" + (f" ({_pairs.scrub(why, values)})" if why else ""))
-    return (
-        "A second model read the study's code against this plan and found that the plan contradicts itself: two parts of "
-        "it define the same thing differently, so no code can satisfy both.\n\n"
-        + "\n".join(lines)
-        + "\n\nThe topic is the specification:\n\n" + str(topic or "")[:1500]
-        + "\n\nWrite `protocol.metrics`, `protocol.ci_method` and `protocol.model` again so that each of these is defined in "
-        "ONE way, the way the topic asks for, and say that definition in every place those parts mention it. Answer with "
-        "those parts only (the ones that need to change). Do not change a check, a threshold, a "
-        "tolerance, an expected value, a precision target, the grid or the number of runs.")

@@ -227,12 +227,6 @@ def plan_defines_twice(design: dict[str, Any] | None, protocol: dict[str, Any] |
     return out
 
 
-def double_definition_gaps(design: dict[str, Any] | None, protocol: dict[str, Any] | None = None) -> list[str]:
-    """One plain sentence per name ``design`` still appears to define twice (:func:`plan_defines_twice`), for the check that
-    the plan's model resolved a contradiction: complete only when none is left. ``protocol`` defaults to the design's own."""
-    if protocol is None and isinstance(design, dict):
-        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
-    return [f"{v['id']} is defined as `{v['dependent']}` and as `{v['metric']}`" for v in plan_defines_twice(design, protocol).values()]
 
 
 def plan_defined_twice(quest_root: Path) -> dict[str, dict[str, str]]:
@@ -253,9 +247,6 @@ def plan_defined_twice(quest_root: Path) -> dict[str, dict[str, str]]:
     return plan_defines_twice(design, protocol)
 
 
-def is_defined_twice(name: Any, twice: dict[str, dict[str, str]]) -> bool:
-    """Whether the quantity ``name`` (a plan name, possibly written with its formula) is one of ``twice``."""
-    return bool(twice) and _norm(leading_id(name)) in twice
 
 
 def passing_checks(quest_root: Path, name: Any) -> list[str]:
@@ -1537,24 +1528,6 @@ def named_in_results(name: str, result: Any) -> set[str]:
     return found
 
 
-def reported_under_another_name(record: dict[str, Any], issue: dict[str, Any], result: Any) -> list[str]:
-    """The keys under which the run's results hold what an issue calls missing, when that is all the issue says: every
-    requirement it stands for in the latest reading is a quantity of the plan (a dependent variable, a metric) the reader
-    called missing, and the results hold each one (:func:`named_in_results`: the name itself, or a longer key such as
-    ``k_relative_bias_by_temp`` for ``k_relative_bias``). The reader is then contradicted by the results: the number is
-    reported, under another name. ``[]`` otherwise -- a quantity said to be computed differently, a problem of logic, a
-    figure, a check, an issue the latest reading does not list, or a quantity the results do not hold.
-
-    A real run stopped without a paper on such an issue: its test asserted the plan's key in a dictionary that held the
-    same per-temperature values under ``k_relative_bias_by_temp``."""
-    names = missing_quantities(record, issue)
-    keys: set[str] = set()
-    for name in names:
-        found = named_in_results(name, result)
-        if not found:
-            return []
-        keys |= found
-    return sorted(keys)
 
 
 def _requirements_of(record: dict[str, Any], issue: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1591,24 +1564,6 @@ def quantity_names(record: dict[str, Any], issue: dict[str, Any]) -> list[str]:
     return names
 
 
-def untied_dependents(record: dict[str, Any], issue: dict[str, Any], ids: list[str], headline: list[str]) -> list[str]:
-    """The plan's dependent variables an issue is about when it is about nothing else and FI placed none of them on a declared
-    result: every requirement the issue stands for (its stored reading) is a dependent variable the reader called missing, and
-    the name is no declared result's id (``ids``: the metrics and derived results of the frozen plan), equal to none by case and
-    punctuation, and is not the plan's main quantity (``headline``). No tie is made from a prefix or a contained id: a name is
-    placed only by being exactly an id. ``[]`` otherwise."""
-    reqs = _requirements_of(record, issue)
-    if not reqs or not missing_quantities(record, issue):
-        return []
-    declared = {_norm(i) for i in ids} - {""}
-    main = {_norm(h) for h in headline} - {""}
-    names: list[str] = []
-    for v in reqs:
-        name = str(v.get("name") or "").strip()
-        if v.get("kind") != "dependent variable" or v.get("headline") or not _norm(name) or _norm(name) in declared | main:
-            return []
-        names.append(name)
-    return list(dict.fromkeys(names))
 
 
 def unplaced_dependents(design: Any, protocol: Any, contract_only: bool = True) -> list[str]:
@@ -1627,10 +1582,6 @@ def unplaced_dependents(design: Any, protocol: Any, contract_only: bool = True) 
     return list(dict.fromkeys(_text(d, 120) for d in dependent if _text(d) and _norm(d) not in declared))
 
 
-def headline_names(design: Any, protocol: Any) -> list[str]:
-    """The names of the plan's main quantity: its first dependent variable and the metric its precision target is for."""
-    reqs = requirements(design if isinstance(design, dict) else None, protocol if isinstance(protocol, dict) else None)
-    return [str(r["name"]) for r in reqs if r.get("headline") and str(r.get("name") or "").strip()]
 
 
 def headline_ids(headline: list[str], ids: list[str], labels: dict[str, str] | None = None,
@@ -1722,22 +1673,6 @@ def declared_names(design: Any, protocol: Any, derived: Any = None) -> list[str]
 DECLARED_RESULTS = Path(".fi") / "declared_results.json"
 
 
-def write_declared_results(quest_root: Path, design: Any, protocol: Any) -> list[str]:
-    """Keep the names of the results the plan declares (:func:`declared_names`) with the hash of the frozen protocol they
-    were read with, so the paper's side reads FI's own fact and not the design it no longer holds. Returns the names."""
-    names = declared_names(design, protocol)
-    from . import frozen_protocol as _frozen
-
-    frozen = _frozen.protocol_of(Path(quest_root))
-    record = {"names": names, "protocol_sha": _frozen.sha256(frozen) if frozen else None}
-    path = Path(quest_root) / DECLARED_RESULTS
-    try:
-        if _read_declared(path) != record:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record, indent=1) + chr(10), encoding="utf-8")
-    except OSError as exc:
-        _LOG.warning("[code_review] could not write %s (%r)", DECLARED_RESULTS, exc)
-    return names
 
 
 def _read_declared(path: Path) -> Any:
@@ -1748,7 +1683,7 @@ def _read_declared(path: Path) -> Any:
 
 
 def read_declared_results(quest_root: Path) -> list[str] | None:
-    """The names :func:`write_declared_results` kept; ``None`` when there is no record (a quest from before it) or when it
+    """The names kept in :data:`DECLARED_RESULTS` by the evidence gate of an earlier FI; ``None`` when there is no record or when it
     was made for another frozen protocol than the one now (a warning is logged)."""
     from . import frozen_protocol as _frozen
 
@@ -1762,39 +1697,8 @@ def read_declared_results(quest_root: Path) -> list[str] | None:
     return [str(n) for n in record["names"]]
 
 
-def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:
-    """The declared results an issue is about when FI's record of the run says no value was worked out for them
-    (``declared``: :func:`declared_names` with that record) and the run's results hold no number for any of them under any
-    name (the key absent altogether, which :func:`keys_of_issue` cannot find). Such a result was not obtained: no number of it can
-    reach the paper, so a fault shown in how it is computed leaves nothing wrong that can stand, and it is a part not
-    done, which the paper states. ``[]`` when the issue names nothing, when any name it is about is not one the plan
-    declares (FI then cannot tell what it changes), or when the results hold a number for one (:func:`named_in_results`)."""
-    wanted = {_norm(n) for n in declared or []} - {""}
-    names = quantity_names(record, issue)
-    if not names or not all(_norm(n) in wanted for n in names):
-        return []
-    if any(named_in_results(n, result) for n in names):
-        return []
-    return list({_norm(n): n for n in reversed(names)}.values())[::-1]  # one entry per name, as the plan writes it
 
 
-def holds_no_number(result: Any, keys: set[str]) -> bool:
-    """Whether every value under ``keys`` (at any depth of the results) holds no number: an empty list, null, a text."""
-    found = False
-
-    def walk(node: Any) -> None:
-        nonlocal found
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if str(k) in keys and _holds_numbers(v):
-                    found = True
-                walk(v)
-        elif isinstance(node, (list, tuple)):
-            for v in node:
-                walk(v)
-
-    walk(result)
-    return not found
 
 
 def _all_keys(result: Any) -> list[str]:
@@ -1863,21 +1767,6 @@ def reports_failure(result: Any) -> str:
 QUANTITY_KINDS = ("dependent variable", "metric")
 
 
-def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
-    """The quantities the plan names that a second model found the final version of the code computes differently (or not
-    at all) and that the repairs did not change: ``{"name", "kind", "status", "text", "note"}``, one per name. Only a finding
-    of the version that ran (:func:`not_computed`), only one the run's results did not contradict, and only a requirement
-    that names a quantity. A problem of logic is not one (its ``name`` lists several things)."""
-    seen: dict[str, dict[str, Any]] = {}
-    for v in not_computed(quest_root, code_dir):
-        name = str(v.get("name") or "").strip()
-        if (v.get("kind") not in QUANTITY_KINDS or v.get("status") not in (DIFFERENT, MISSING) or not name
-                or v.get("contradicted") or name in seen):
-            continue
-        seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
-                      "note": str(v.get("note") or ""), "fid": v.get("fid"), "file_rel": v.get("file_rel"),
-                      "function": v.get("function")}
-    return list(seen.values())
 
 
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
@@ -2037,7 +1926,7 @@ def open_findings(quest_root: Path, code_dir: Path) -> dict[str, Any]:
         out["not_reviewed"] = [str(x) for x in record["not_reviewed"]]
         out["not_reviewed_headline"] = bool(record.get("not_reviewed_headline"))
     issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
-    # A quantity the results hold under another name (reported_under_another_name, recorded at the evidence gate) is
+    # A quantity the results hold under another name (``reported_as``, recorded at the evidence gate of an earlier FI) is
     # computed: it is not "not computed". A finding the run's own results contradict is not open.
     def kept(v: dict[str, Any]) -> bool:
         return not v.get("contradicted") and not (issues.get(v.get("fid")) or {}).get("reported_as")
@@ -2185,39 +2074,6 @@ def _where(v: dict[str, Any], *, line: bool) -> str:
     return f" (in {v['file']}" + (f", line {v['line']}" if line and v.get("line") else "") + ")"
 
 
-def write_note(quest_root: Path, code_dir: Path) -> str:
-    """For the write prompt: what the code does not compute and what is still flagged, to be said plainly in the
-    limitations. ``""`` when nothing. A requirement not met, a plan that contradicts itself and what is still flagged are
-    named; a long list is cut for the prompt's size and says how many more there are. What the writer is not told, because a
-    reader of the paper cannot use it: that no second model read the code, that it was changed after it was read, which
-    requirements it did not check, that the repairs stopped, and the second version of a function that could not be
-    settled. Those are in the quality report (:func:`findings_block`), and the claim check and the review still read them."""
-    f = open_findings(quest_root, code_dir)
-    notes: list[str] = []
-    missing, different = f["missing"], f["different"]
-    if missing or different:
-        names = _listed([f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
-                         for v in [*missing, *different]], NOTE_CAP)
-        notes.append("A second model compared the code with what the plan requires, and the code was sent back to be "
-                     f"repaired; these requirements are still not met: {names}. Say so plainly (in the limitations): a "
-                     "quantity listed as not computed was not computed, and do not write a value, a figure or a claim for it.")
-    if f["conflicts"]:
-        listed = _listed([f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in f["conflicts"]], NOTE_CAP)
-        notes.append("A second model found that the PLAN contradicts itself: two of its parts define one thing differently "
-                     f"({listed}). This is not a fault of the code. The plan's model was asked to make the plan consistent "
-                     "and the code follows the plan as it stands now: say plainly in the limitations that the plan's own "
-                     "definitions disagreed, and which one the study used.")
-    if f["unshown"]:
-        listed = _listed([f"{v['text']}" for v in f["unshown"]], NOTE_CAP)
-        notes.append("A second model flagged these, and FI could not show any of them by a test that fails on the code, so "
-                     f"the code was left as it is: {listed}. Say plainly in the limitations that they are unconfirmed.")
-    if f["flagged"]:
-        listed = _listed([f"{v['text']}{_where(v, line=True)} [{v.get('severity', 'medium')}]" for v in f["flagged"]], NOTE_CAP)
-        notes.append("A second model read how the code computes what the plan says, and the code was sent back to be "
-                     f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
-                     "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
-                     "not present the quantities they concern as established.")
-    return " ".join(notes)
 
 
 # ---- the paper's block ---------------------------------------------------------------------------------------------
@@ -2234,7 +2090,7 @@ def _plain_text(text: Any) -> str:
 
 def findings_block(quest_root: Path, code_dir: Path) -> str:
     """The paragraph of what the second model's reading of the code left unresolved on the version that ran, in plain words,
-    from the same record the writer's note (:func:`write_note`) is built from. ``""`` when nothing is open (no record, or
+    from the code reading's record. ``""`` when nothing is open (no record, or
     every requirement met and no problem flagged). It is no longer put into the paper (graded papers carried states a reader
     cannot use): the quality report prints it (``core/quality_report.py``), and the review and the claim check read it.
     ``core/disclosure.py:mark_findings`` still puts such a block into a paper, and ``disclosure.without_block`` takes one out
@@ -2319,20 +2175,6 @@ def second_version_block(quest_root: Path) -> str:
             f"{_listed(sentences, BLOCK_CAP)}.")
 
 
-def review_block(quest_root: Path, code_dir: Path) -> str:
-    """For the paper's reviewer: the same open points as :func:`findings_block`, with how to weigh them (``""`` when none
-    are open). The paper does not carry them (the quality report does); this tells the reviewer what they mean for its
-    judgement."""
-    text = findings_block(quest_root, code_dir)
-    if not text:
-        return ""
-    return ("\n\n## Open points in the code (a second model's reading, not resolved)\n"
-            f"{text}\n\n"
-            "A claim, a figure or a number in the paper that rests on a quantity named here must not be presented as "
-            "established: treat it as a problem to report (a weakness, and a required fix when the paper states it as fact). "
-            "A quantity listed as not computed must not have a value anywhere in the paper. The list above is FI's own record, "
-            "kept in the quality report and not in the paper; do not ask for it to be pasted into the paper. The paper must "
-            "name a quantity that is not computed in its limitations.")
 
 
 def plain_lines(record: dict[str, Any]) -> str:

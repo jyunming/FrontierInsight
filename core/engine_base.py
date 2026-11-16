@@ -147,7 +147,6 @@ from . import equation_tests as _equation_tests
 from . import outside_run as _outside_run
 from . import code_reach as _code_reach
 from . import shown_reach as _shown_reach
-from . import rerun_check as _rerun_check
 from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report

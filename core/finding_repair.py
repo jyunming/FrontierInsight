@@ -1900,61 +1900,6 @@ def _error_problem(detail: str) -> str:
             "computes, on the current code; an exception in the test itself shows nothing.")
 
 
-async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -> TestRun | None:
-    """A shown issue's test now errors (in its own code or inside the program it called on made-up data): the code model is asked ONCE more, shown
-    the error, for a test written as an assertion about the values the code computes, and it is run twice. Its
-    ``TestRun``: ``fail`` (a failing assertion in both runs; the new test becomes the issue's test), ``pass``, or ``error``;
-    ``None`` when it was asked before for this issue, or no test came back. What happened is kept in ``issue["asked_again"]``.
-    Counted in the record's requests like every other; an error never stops anything."""
-    if issue.get("asked_again"):
-        return None
-    issue["asked_again"] = {"error": error.detail[:300], "at": error.at, "outcome": "no test came back"}
-    env.record["finding_calls"] = int(env.record.get("finding_calls") or 0) + 1
-    env.record["test_calls"] = int(env.record.get("test_calls") or 0) + 1
-    env.save()
-    env.last_spend = None  # this request is counted above, not by spend(): only its own handler gives it back
-    try:
-        reply = await _ask(env, _test_prompt(env, issue, rel, _error_problem(error.detail)), "code", "test")
-    except (ProviderUnusable, NotAsked) as e:
-        issue.pop("asked_again", None)  # counted above, never answered: a resume (or the next pass) asks again
-        for name in ("finding_calls", "test_calls"):
-            env.record[name] = max(0, int(env.record.get(name) or 0) - 1)
-        env.save()
-        if isinstance(e, NotAsked):
-            return None
-        raise
-    text = reply_test(reply)
-    if not text:
-        env.save()
-        return None
-    swallowed = swallowed_call(text)
-    if swallowed:
-        issue["asked_again"]["outcome"] = f"refused: {swallowed}"[:300]
-        env.save()
-        return None
-    issue["tests"] = int(issue.get("tests") or 0) + 1
-    while (env.root / test_path(issue)).exists():  # the test that errored is kept as it is
-        issue["tests"] += 1
-    path = test_path(issue)
-    try:
-        (env.root / path).parent.mkdir(parents=True, exist_ok=True)
-        (env.root / path).write_text(text, encoding="utf-8")
-    except OSError as e:
-        issue["asked_again"]["outcome"] = f"the test could not be written: {e!r}"[:200]
-        env.save()
-        return None
-    first = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
-    run = first
-    if first.status == "fail":
-        second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
-        if second.status != "fail":
-            run = second
-    issue["asked_again"].update(test=path, outcome=run.status, detail=run.detail[:300], at=run.at or error.at)
-    if run.status == "fail":
-        issue.update(test=path, failure=run.detail[:300], failure_kind=_issues.ASSERTION, assertion=run.line[:200],
-                     assertion_at=run.at)
-    env.save()
-    return run
 
 
 async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
@@ -2515,15 +2460,6 @@ async def repair_issue(env: Env, issue: dict[str, Any], rel: str) -> bool:
     return False
 
 
-async def repair_for_rerun(env: Env, issue: dict[str, Any], rel: str, detail: str = "") -> dict[str, str]:
-    """One repair of an issue, asked for with FI's own repair prompt, for the rerun of the study with it
-    (:mod:`core.rerun_check`): the files the model gave, ``{path: whole text}``, whether FI's own rules for keeping a repair
-    would have accepted it or not (a rule that keeps a result out of the delivered paper is not a reason to leave the number
-    unchecked). ``env.code`` is a COPY of the code: nothing of the quest is changed. Empty when the reply held no usable
-    code. Not counted as a try of the finding: the caller counts the request."""
-    env.tried = {}
-    await _attempt(env, issue, rel, "code", detail)
-    return dict(env.tried)
 
 
 async def repair_issues(env: Env) -> list[str]:

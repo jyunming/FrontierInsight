@@ -119,7 +119,7 @@ from .engine_base import (  # noqa: F401
     _refine, _refine_count, _refine_round, _rejudges_oracles_after, _rename_code_names, _render_auto_collected_md,
     _render_data_readme, _renumber_citations, _reorder_literature, _repair_reply_json, _repair_template_values,
     _replicate_assertions, _replicate_env, _replicate_line_figure, _replicate_metric_kinds,
-    _replicate_result_intervals, _replicate_seed_count, _replicate_seed_reaches_rng, _replicate_seeds, _rerun_check,
+    _replicate_result_intervals, _replicate_seed_count, _replicate_seed_reaches_rng, _replicate_seeds,
     _rerun_directive, _rerun_from, _resolve_selected_skills, _restore_primary_figures, _result_comparison_stats,
     _results_by_setting, _retractions, _review, _review_answer_problem, _review_decision, _review_items,
     _review_sends_the_experiment_back, _review_was_real, _rng_aliases, _rng_call_is_seeded, _rooted, _run_facts,

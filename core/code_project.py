@@ -929,7 +929,6 @@ def record_change(quest_root: Path, note: str, *, category: str = "changed", res
 
 
 REFUSED_KEPT = 200  # the newest refused tries kept under refs/fi/refused/; older ones are dropped
-RERUN_KEPT = 200  # the newest reruns' code kept under refs/fi/rerun/; older ones are dropped
 
 
 def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
@@ -945,14 +944,6 @@ def keep_refused(quest_root: Path, ref: str | None, files: dict[str, str], messa
     return _keep_side(quest_root, "refused", ref, files, message, extras=extras, log=log, kept=REFUSED_KEPT)
 
 
-def keep_rerun(quest_root: Path, ref: str | None, files: dict[str, str], message: str, *,
-               extras: dict[str, str] | None = None, log: Any = None) -> bool:
-    """Keep the code a rerun of the study with a repair ran (:func:`core.rerun_check.judge`) in ``code/``'s own git
-    repository, on ``refs/fi/rerun/<ref>`` (``ref``: the finding's id), as :func:`keep_refused` keeps a refused try: one
-    commit on HEAD with ``files`` set, ``.fi_rerun/reason.txt`` and ``extras`` (the verdict, the result record the rerun
-    wrote) under ``.fi_rerun/``, a second rerun of the same finding beside it (``<ref>-2``, ...), the branch, the index and
-    the working folder untouched, and only the newest :data:`RERUN_KEPT` kept. Best effort: ``False`` when git cannot."""
-    return _keep_side(quest_root, "rerun", ref, files, message, extras=extras, log=log, kept=RERUN_KEPT)
 
 
 def _keep_side(quest_root: Path, space: str, ref: str | None, files: dict[str, str], message: str, *,
@@ -1028,60 +1019,10 @@ def _keep_side(quest_root: Path, space: str, ref: str | None, files: dict[str, s
             pass
 
 
-def refused_patches(quest_root: Path, finding_id: str, *, log: Any = None) -> list[tuple[int, str]]:
-    """The repairs of a finding FI tried and refused (kept by :func:`keep_refused`), newest first, each as ``(try number,
-    patch)``: what the try changed against its parent (a refused try is HEAD-at-the-time plus the model's files, so the patch
-    is the model's own change, not a copy of files the code has since moved on from). Empty when none is kept."""
-    import re
-    import subprocess
-
-    code_dir = Path(quest_root) / "code"
-    if not (code_dir / ".git").is_dir() or not re.fullmatch(r"[A-Za-z0-9_-]+", str(finding_id or "")):
-        return []
-    out: list[tuple[int, str]] = []
-    try:
-        refs = _git(code_dir, "for-each-ref", "--format=%(refname)", f"refs/fi/refused/{finding_id}-*").stdout.split()
-        pattern = re.compile(rf"refs/fi/refused/{re.escape(finding_id)}-(\d+)")
-        for number, ref in sorted(((int(m.group(1)), r) for r in refs if (m := pattern.fullmatch(r))), reverse=True):
-            # as bytes: a line ending is part of the line a patch must match (text mode would turn CRLF into LF)
-            patch = _git(code_dir, "diff", "--no-color", "--ignore-cr-at-eol", f"{ref}^", ref, "--", ".", ":(exclude).fi_refused", raw=True)
-            if patch.returncode == 0 and patch.stdout.strip():
-                out.append((number, patch.stdout.decode("utf-8", errors="surrogateescape")))
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        if log is not None:
-            log.warning("[code] could not read a refused version from code/'s history: %s", exc)
-    return out
 
 
-def _in_line_endings_of(code_dir: Path, patch: bytes) -> bytes:
-    """The patch with each file's hunk lines ending the way that file in ``code_dir`` does (CRLF or LF): a patch read with
-    ``--ignore-cr-at-eol`` mixes both, and ``git apply`` matches a line's bytes. Nothing else about the lines changes."""
-    out: list[bytes] = []
-    crlf = False
-    in_hunk = False
-    for line in patch.splitlines(keepends=True):
-        if line.startswith(b"diff --git "):
-            in_hunk = False
-            target = line.split(b" b/", 1)[-1].strip().decode("utf-8", errors="surrogateescape")
-            try:
-                crlf = b"\r\n" in (Path(code_dir) / target).read_bytes()
-            except OSError:
-                crlf = False
-        elif line.startswith(b"@@"):
-            in_hunk = True
-        elif in_hunk and line[:1] in (b" ", b"-", b"+"):
-            line = line.rstrip(b"\r\n") + (b"\r\n" if crlf else b"\n")
-        out.append(line)
-    return b"".join(out)
 
 
-def apply_patch(code_dir: Path, patch: str) -> bool:
-    """Apply a patch from :func:`refused_patches` to a folder of code (a copy, not the quest's own ``code/``); ``False``
-    when it does not apply there, and nothing is changed. The lines must match exactly (a line ending of the file's own
-    kind is not a difference), so a patch never lands on text that only looks like what it was written against."""
-    done = _git(Path(code_dir), "apply", "--whitespace=nowarn", "--recount", "-",
-                stdin=_in_line_endings_of(Path(code_dir), patch.encode("utf-8", errors="surrogateescape")), raw=True)
-    return done.returncode == 0
 
 
 def _fingerprint(code_dir: Path) -> tuple[tuple[str, str], ...] | None:

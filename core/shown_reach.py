@@ -1,5 +1,5 @@
 """What a fault a failing test showed does to the study's results, read from FI's own records instead of from the words of the
-reader's finding (the evidence gate, ``Engine._shown_fault_outcome``).
+reader's finding.
 
 The gate used to look the finding's quantity up in the run's printed results. FI's frame writes the results of a study in two
 places: the trial-level numbers the run prints, and what ``derive_<id>`` works out afterwards, which lives only in
@@ -492,7 +492,7 @@ class Reach:
 
     def changed_keys(self, metrics: list[str]) -> set[str]:
         """The printed keys whose recorded value a rerun showed moved: ``metrics`` are the metric names of the rerun record's own
-        changed keys (``rerun_check.metric_of``), each as the declared result's id when it is one. Nothing is added to them (not
+        changed keys, each as the declared result's id when it is one. Nothing is added to them (not
         the interval, coverage or bias keys of the result, not the results worked out from it): the record says nothing of those."""
         return {self.by_norm.get(_norm(n), n) for n in metrics if n}
 

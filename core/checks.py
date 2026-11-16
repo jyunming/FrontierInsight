@@ -199,25 +199,10 @@ CHECKS: tuple[Check, ...] = (
     Check('code_review_repair_scope', 'core.code_review', 'repair_problem',
           'execute', 'model_code', 'repair',
           'Refuses a repaired file that changes what the findings name or no longer prints RESULT_JSON.'),
-    Check('code_review_plan_conflict', 'core.engine', 'Engine._route_plan_conflicts',
-          'execute', 'model_judge', 'repair',
-          "A finding saying the PLAN contradicts itself is sent to the plan's model, never to the code."),
     Check('code_review_finding_demonstrated', 'core.code_findings', 'shown_by_assertion',
           'execute', 'measured', 'note',
           'A finding counts as demonstrated only when its generated test fails by its own assertion about '
           'values; errors/no answer show nothing.'),
-    Check('code_review_shown_fault_gate', 'core.engine', 'Engine._shown_fault_verdict',
-          'evidence_gate', 'measured', 'stop',
-          'Re-runs the test of each shown, still-open fault on the code that ran (twice if failing); a failing '
-          'assertion on a headline quantity, or leaving out leaves no result, ends the quest.'),
-    Check('code_review_leave_out_shown', 'core.result_checks', 'ResultChecksMixin._leave_out_shown_faults',
-          'evidence_gate', 'measured', 'strip',
-          'Quantities a failing test is about are left out of the results the paper may use, and the paper says so: '
-          'that a repair changes the reported number, or that FI did not establish whether the value is wrong or missing.'),
-    Check('code_review_computed_differently', 'core.result_checks', 'ResultChecksMixin._code_reader_findings',
-          'execute', 'model_judge', 'strip',
-          'A quantity the second model found computed differently from the plan (not shown harmless, function '
-          'reached) is taken out of the results.'),
     Check('code_review_headline_constant', 'core.code_review', 'resolve_logic',
           'evidence_gate', 'measured', 'stop',
           "High-severity reader finding that the main quantity is constant, confirmed by the run's own results "
@@ -226,10 +211,6 @@ CHECKS: tuple[Check, ...] = (
           'evidence_gate', 'model_judge', 'note',
           'Reader says the main quantity is missing from the code and no result is named like it: the paper '
           'says it was not computed; quest goes on (reading only).'),
-    Check('code_review_open_findings', 'core.code_review', 'write_note',
-          'write', 'model_judge', 'note',
-          "Findings still open after repairs, and quantities not computed, are said in the paper's limitations "
-          '(also {{not_done:}} items).'),
     Check('results_report_failure', 'core.engine', 'Engine._reports_no_quantity',
           'evidence_gate', 'own_record', 'stop',
           "Run result says it failed (errors/status) and holds a number for none of the protocol's metrics: "
@@ -584,9 +565,6 @@ CHECKS: tuple[Check, ...] = (
           'evidence_gate', 'measured', 'note',
           'A check counts as independent evidence only when FI measured it itself and it passed; '
           'script-reported values do not count.'),
-    Check('oracle_reader_flagged', 'core.oracle_check', 'with_reader_flags',
-          'evidence_gate', 'model_judge', 'note',
-          "A check the second model's reading of the code flags is marked flagged and not counted as passed."),
     Check('oracle_partial_pass', 'core.oracle_check', 'partial_checks',
           'evidence_gate', 'measured', 'note',
           'A rule check that passed every trial judged but not all planned (time ran out) is a pass for stop '
@@ -1191,10 +1169,6 @@ CHECKS: tuple[Check, ...] = (
           "Run produced no number or none of the study's quantities, was stopped before the study, or never "
           'finished: code written again once, design asked again once, then stuck (also constant headline from '
           'a second model plus results)'),
-    Check('shown_fault_outcome', 'core.engine', 'Engine._shown_fault_outcome',
-          'evidence_gate', 'measured', 'stop',
-          'Decides stop vs leave out vs not computed for each shown fault from the records (headline, missing '
-          'quantity, keys that can be removed)'),
     Check('evidence_route', 'core.engine', 'Engine._route_after_evidence_gate',
           'evidence_gate', 'own_record', 'repair',
           "Routes the gate's decision to write, literature, design, implement, run-step crash repair or stuck; "

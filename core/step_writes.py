@@ -3,8 +3,7 @@
 FI runs a study in steps it starts itself: the simulation (or the search) and then the analysis. Around each run of them
 (``core/split_run.py``, ``core/trial_runner.py``, ``core/optimise.py``) FI looks at the result files (``data/results/*.json``)
 before the simulation, between the two steps and after the analysis, and keeps in ``.fi/step_writes.json`` which step
-wrote or rewrote each file: ``{file name: step}``. A rerun of the study (``core/rerun_check.py``) reads it to tell which
-delivered result files a changed step can affect. A file this record has no writer for is not known to be safe.
+wrote or rewrote each file: ``{file name: step}``. A file this record has no writer for is not known to be safe.
 
 When two runs overlap in one quest FI cannot tell which of them wrote a changed file, so nothing new is recorded (as for
 ``core/outside_run.py::record_finished``) and the old writer of every file that period may have touched is forgotten: a file

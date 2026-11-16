@@ -2763,7 +2763,7 @@ class CodeStageMixin:
                                       review_node: str) -> bool:
         """One pass of repair over what the last reading found, finding by finding and test first
         (:mod:`core.finding_repair`). The findings are folded into issues with stable ids (:mod:`core.code_findings`); a
-        contradiction inside the plan itself goes to the plan's model (:meth:`_route_plan_conflicts`), never to the code;
+        contradiction inside the plan itself is listed, never sent to the code;
         for each of the others, the ones that can change a reported result first, the code model is asked for a test that
         fails on the current code (a finding whose test passes is "not demonstrated" and left alone), then for a repair of
         the function(s) involved; a change is kept only when the new test passes and nothing that passed before fails. A
@@ -2921,69 +2921,6 @@ class CodeStageMixin:
                 counts[name] = 0
         return counts
 
-    async def _route_plan_conflicts(self, state: QuestState, record: dict[str, Any], review_node: str) -> None:
-        """A finding that says the plan contradicts itself (two parts define one thing differently) is not a fault of the
-        code. It is recorded as a plan problem and put to the plan's model through the same bounded request as the other
-        missing parts of the plan (:meth:`_ask_plan_to_complete`); nothing is sent to the code for it. Once the protocol is
-        frozen it is only recorded. The plan's model may rewrite only the definitions a contradiction can sit in (the
-        metrics, the interval method, the model's equations); a check, a threshold or a tolerance is never changed."""
-        conflicts = [i for i in _code_findings.open_issues(record) if i.get("plan_conflict")
-                     and i.get("outcome") in (_code_findings.OPEN, _code_findings.REOPENED)]
-        if not conflicts:
-            return
-        for issue in conflicts:
-            issue.update(outcome=_code_findings.PLAN_PROBLEM, demonstrated=None,
-                         reason="the plan contradicts itself; this is not a fault of the code")
-        record["plan_conflicts"] = [{"id": i["id"], "text": i.get("text"), "why": i.get("why")} for i in conflicts]
-        _code_review.save(self.quest_root, record)
-        self._log.warning("[code_review] %d finding(s) say the plan contradicts itself, so they are not sent to the code: %s",
-                          len(conflicts), "; ".join(str(i.get("text"))[:100] for i in conflicts[:3]))
-        design, sha = self._design_from_plan()
-        if (design is None or not sha or self._client is None or _frozen.load(self.quest_root) is not None
-                or not self._runs_code(state)):
-            for issue in conflicts:
-                issue["plan_asked"] = False
-            _code_review.save(self.quest_root, record)
-            return
-        started = {"sha": sha}
-        protocol_now = self._protocol_block(state)
-        values = _pairs.plan_values(protocol_now if isinstance(protocol_now, dict) else None)
-
-        twice_before = bool(_code_review.double_definition_gaps(design))  # the design's own protocol, as in lacks() below
-
-        def lacks(_now: Any) -> list[str]:
-            if twice_before:  # complete when the name defined two ways is defined once (FI's own fact, not a changed file)
-                return _code_review.double_definition_gaps(_now if isinstance(_now, dict) else None)
-            try:
-                changed = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8")) != started["sha"]
-            except OSError:
-                changed = True
-            return [] if changed else [_pairs.scrub(str(i.get("why") or i.get("text") or ""), values) for i in conflicts]
-
-        def request(_now: Any, _text: str) -> str:
-            return _code_findings.plan_conflict_request(
-                state.get("topic") or self.config.topic,
-                [(str(i.get("text") or ""), str(i.get("why") or "")) for i in conflicts], values)
-
-        def keep(before: str, answer: dict[str, Any]) -> str:
-            kept = self._keep_only_the_parts(before, answer, list(_code_findings.PLAN_PARTS))
-            if kept is None or _plan.sha256(kept) == _plan.sha256(before):
-                raise ValueError("your answer resolves none of the contradictions in a form that can be read; "
-                                 "plan.md is unchanged")
-            return kept
-
-        await self._ask_plan_to_complete(
-            design, sha, lacks=lacks, request=request, keep=keep, file="code_plan_conflict_asked.json",
-            what="what makes its parts agree", short="a contradiction in the plan",
-            note="a contradiction found by the code reader, resolved by the plan's model")
-        try:
-            after = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
-        except OSError:
-            after = sha
-        for issue in conflicts:
-            issue["plan_asked"] = True
-            issue["plan_changed"] = after != sha
-        _code_review.save(self.quest_root, record)
 
     def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""

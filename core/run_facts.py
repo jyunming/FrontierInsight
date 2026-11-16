@@ -150,7 +150,7 @@ def record_evaluations(quest_root: Path | str, *, evaluations: int, evaluations_
     """Keep, in the run record of a search for the best design, how many designs the search evaluated (the coarse scan's
     settings are the record's ``cells`` and ``trials``) and their process times added up (``evaluations_s``; ``None`` when
     none is known). Each evaluation ran in a process of its own, as a setting of the scan does, so a run of the delivered
-    ``code/run.py`` (which runs them one after another) needs this much as well (:func:`core.rerun_check.time_allowed`). A
+    ``code/run.py`` (which runs them one after another) needs this much as well. A
     record that holds only this part (the scan was taken from an earlier search) is kept as it is, with this added.
     ``keep_scan=False``: the search had no coarse scan, so an earlier run's record (of trials that are not this search's) is
     not kept."""

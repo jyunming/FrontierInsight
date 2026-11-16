@@ -1264,16 +1264,6 @@ def last_judged(record: Any) -> list[dict[str, Any]]:
     return [j for j in last.get("judged") or [] if isinstance(j, dict) and j.get("name")]
 
 
-def with_reader_flags(judged_list: list[dict[str, Any]], flagged: dict[str, str]) -> list[dict[str, Any]]:
-    """``judged_list`` with each check that the second model's reading of the code flags (``flagged``:
-    :func:`core.code_review.flagged_checks`) marked ``flagged_by_reader`` (the finding's words). The marked check is not
-    counted as passed anywhere: not as independent evidence, not as a criterion met, and the writer is not told it passed.
-    The list given is not changed."""
-    if not flagged:
-        return judged_list
-    by_name = {str(k).strip().lower(): v for k, v in flagged.items()}
-    return [{**j, "flagged_by_reader": by_name[str(j.get("name")).strip().lower()]}
-            if str(j.get("name")).strip().lower() in by_name else j for j in judged_list]
 
 
 def not_shown_words(finding: str) -> str:

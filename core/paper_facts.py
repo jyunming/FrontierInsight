@@ -1909,9 +1909,9 @@ def _reach(root: Path) -> Any:
 
 
 def _declared_results(root: Path, protocol: dict[str, Any]) -> list[str]:
-    """The results the plan declares, as the evidence gate named them (``.fi/declared_results.json``, written by
-    :func:`core.code_review.write_declared_results`: the plan's metrics and the design's dependent variables). A quest
-    from before that record has the result ids of the plan's contract only."""
+    """The results the plan declares, as the evidence gate of an earlier FI named them (``.fi/declared_results.json``:
+    the plan's metrics and the design's dependent variables). A quest without that record has the result ids of the
+    plan's contract only."""
     from . import code_review as _code_review
     from . import contract as _contract
 

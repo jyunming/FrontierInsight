@@ -119,41 +119,6 @@ def removed_figure_stems(quest_root: Path | str) -> set[str]:
     return {Path(str(n)).stem for n in record.get("removed_figures") or [] if str(n).strip()}
 
 
-def _keep_measured(record: dict[str, Any], kept: list[dict[str, Any]]) -> None:
-    """Change ``record`` (``needs/RESULT_CHECK.json``) in place for the checks of a second model's finding that no measurement
-    showed to move a number (``kept``, each with its ``measured`` answer: ``unchanged``, or ``not_shown`` when no test showed
-    the claim): their quantities are no longer taken out of the results. Only the keys that really return to the results are
-    said to (``kept_differences``, the writer's note and the Limitations item are made for those alone): a key another check
-    still takes out stays out, with that check's own words, and the kept check says nothing about it."""
-    if not kept:
-        return
-    gone = {id(c) for c in kept}
-    left = [c for c in record.get("checks") or [] if id(c) not in gone]
-    held = {str(k) for c in left for k in c.get("keys") or []}
-    back = {str(k) for c in kept for k in c.get("keys") or []} - held
-    keys = [k for k in record.get("removed_quantities") or [] if str(k) not in back]
-    names = {str(c["quantity"]) for c in kept}
-    paragraphs = [p for p in str(record.get("say") or "").split("\n\n")
-                  if p.strip() and not any(f"found that `{n}` is " in p for n in names)]
-    returned = [{"quantity": c["quantity"], "keys": [k for k in c.get("keys") or [] if str(k) in back],
-                 "note": c.get("note") or "", "measured": c.get("measured")} for c in kept]
-    returned = [d for d in returned if d["keys"]]
-    for d in returned:
-        why = f"A second model found that `{d['quantity']}` is computed differently from the plan ({str(d['note']).rstrip('.')}). "
-        if (d["measured"] or {}).get("status") == "unchanged":
-            paragraphs.append(why + "FI observed this: a test written for the claim failed on the code that produced the results, "
-                              "it passed on a repair, and the numbers the study reported with that repair did not move beyond their "
-                              f"allowance. The value of `{d['quantity']}` stays in the results. Report it, and say plainly, in the "
-                              "limitations, that a second model claims the method differs from the plan's definition and that these "
-                              "three things were observed; do not say that the plan's definition was run.")
-        else:
-            paragraphs.append(why + "FI asked for a test that shows it and none did, so the claim is not shown and the value stays in "
-                              f"the results. Report it, and say plainly, in the limitations, that a second model claims the code "
-                              f"computes `{d['quantity']}` differently from the plan's definition and that FI could not show it.")
-    record.update({"checks": left, "removed_quantities": keys,
-                   "removed_values": {k: v for k, v in (record.get("removed_values") or {}).items() if str(k) in keys},
-                   "kept_differences": [*(record.get("kept_differences") or []), *returned],
-                   "note": "; ".join(str(c.get("note")) for c in left if c.get("note")), "say": "\n\n".join(paragraphs)})
 
 
 def takes_out(record: dict[str, Any], check: dict[str, Any]) -> bool:
@@ -528,97 +493,6 @@ class ResultChecksMixin:
 
         return _analysis.read_record(self.quest_root)  # type: ignore[attr-defined]
 
-    def _leave_out_shown_faults(self, left_out: list[tuple[str, list[str], str]], not_done: list[tuple[str, str]],
-                                result_json: Any, figures: list[tuple[str, str]] | None = None,
-                                changed: dict[str, set[str]] | None = None) -> None:
-        """At the evidence gate: the quantities a failing test is about (``(quantity, keys, how)``) are left out of the
-        results the paper may use, the plan's quantities the code does not compute (``(quantity, how)``) are named, and the
-        figures a failing test is about (``(file, how)``) are taken out of ``figures/``, by adding them to
-        ``needs/RESULT_CHECK.json`` (what the run's checks left out stays). The words say only what FI's records show: that a
-        repair which passes the test changes the reported number (``changed``: per quantity, the printed keys the rerun of that finding showed changed; every other key left out gets the second),
-        else that the test failed and FI did not establish whether the value is wrong or missing. The same issues found again
-        add nothing."""
-        path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
-        record = _read_json(path)
-        found: list[Found] = []
-        for quantity, keys, how in left_out:
-            taken = ", ".join("`" + k + "`" for k in keys[:6])
-            mine = (changed or {}).get(quantity, set())
-            moved = [k for k in keys if k in mine]
-            rest = [k for k in keys if k not in mine]
-            said_moved = ", ".join("`" + k + "`" for k in moved[:6])
-            said_rest = ", ".join("`" + k + "`" for k in rest[:6])
-            if not rest:
-                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`, and a repair that passes "
-                        f"the test changes the reported number ({how})")
-                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). The study run again "
-                       f"with a repair that passes the test reports other numbers, so the repair changes the reported number. "
-                       f"FI took {taken} out of the results. Do NOT report, describe or quote any value for `{quantity}`, and do "
-                       f"not call another number by its name. Say plainly, in the limitations, that `{quantity}` is left out of "
-                       "this paper because a repair that passes a test of the code changes the reported number.")
-            elif not moved:
-                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`; FI did not establish "
-                        f"whether the value is wrong or missing ({how})")
-                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). FI did not "
-                       f"establish whether the value is wrong or missing. FI took {taken} out of the results. Do NOT report, "
-                       f"describe or quote any value for `{quantity}`, and do not call another number by its name. Say plainly, "
-                       f"in the limitations, that `{quantity}` is left out of this paper because a test of the code failed and "
-                       "FI did not establish whether the value is wrong or missing.")
-            else:  # the rerun showed some of what is left out changed, not all of it
-                note = (f"a test FI ran on the code that produced the results failed on `{quantity}`; a repair that passes the "
-                        f"test changes the reported number of {said_moved}, and FI did not establish whether the value of "
-                        f"{said_rest} is wrong or missing ({how})")
-                say = (f"A test FI ran on the code that produced the results failed on `{quantity}` ({how}). The study run again "
-                       f"with a repair that passes the test reports other numbers for {said_moved}, so the repair changes the "
-                       f"reported number of those. For {said_rest} FI did not establish whether the value is wrong or missing. "
-                       f"FI took {taken} out of the results. Do NOT report, describe or quote any value for them, and do not "
-                       "call another number by their names. Say plainly, in the limitations, that "
-                       f"{said_moved} is left out because a repair that passes a test of the code changes the reported number, "
-                       f"and {said_rest} because a test of the code failed and FI did not establish whether the value is wrong "
-                       "or missing.")
-            found.append(Found("shown_fault", ANALYSIS, "", note, say, keys=list(keys), quantity=quantity))
-        for quantity, how in not_done:
-            note = f"the code does not compute the plan's `{quantity}` ({how})"
-            say = (f"The code does not compute `{quantity}`, which the plan asks for ({how}). Do not report a value for it or "
-                   f"call another number by its name. Say plainly, in the limitations, that `{quantity}` was not computed.")
-            found.append(Found("not_computed", ANALYSIS, "", note, say, quantity=quantity))
-        for file, how in figures or []:
-            note = (f"a test FI ran on the code that produced the results failed on the figure `{file}`; FI did not establish "
-                    f"whether it is wrong or missing ({how})")
-            say = (f"A test FI ran on the code that produced the results failed on the figure `{file}` ({how}). FI did not "
-                   f"establish whether it is wrong or missing. FI took it out of the figures. Do NOT include it, refer to it or "
-                   f"describe what it showed. Say plainly, in the limitations, that `{file}` is left out of this paper because a "
-                   "test of the code failed and FI did not establish whether it is wrong or missing.")
-            found.append(Found("shown_fault_figure", ANALYSIS, "", note, say, figures=[file], quantity=file))
-        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
-        seen = {(c.get("kind"), c.get("quantity")) for c in checks}
-        new = [f for f in found if (f.kind, f.quantity) not in seen]
-        if not new:
-            return
-        gone_figures = sorted({n for f in new for n in f.figures})
-        if gone_figures:
-            self._drop_figures(gone_figures, {n: SHOWN_FAULT_FIGURE_WHY for n in gone_figures})
-        keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
-        why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
-        for f in new:
-            mine = (changed or {}).get(f.quantity, set())
-            for k in f.keys:
-                if k in mine:
-                    why[k] = SHOWN_FAULT_CHANGED_WHY  # only the finding whose own rerun moved the key says so
-                else:
-                    why.setdefault(k, SHOWN_FAULT_WHY)
-        record.update({
-            "removed_quantities": keys, "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
-            "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,
-            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys,
-                                  **({"contested": f.contested} if f.contested else {})} for f in new)],
-            "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
-            "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new)] if x)})
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
-        except OSError as exc:
-            self._log.warning("[evidence_gate] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
 
     def _kept_say(self) -> list[str]:
         """For the writer: the flat quantities the plan does not say are estimated from the data, kept and stated."""
