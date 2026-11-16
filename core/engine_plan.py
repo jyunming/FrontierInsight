@@ -1637,16 +1637,29 @@ class PlanStageMixin:
         except OSError as e:
             self._log.warning("[plan] couldn't write .fi/topic_answers.json: %r", e)
         new_map = out.design["protocol"].get("topic_map") if part.get("valid") else None
-        if new_map is None or new_map == protocol.get("topic_map"):
+        # A result FI declared for a quantity the plan gave the same number as another (`"by": "new"`) goes into the plan
+        # with the map that names it, or the map would name a result the plan does not have.
+        made = [d for d in out.design["protocol"].get("derived") or []
+                if isinstance(d, dict) and d.get("id") in (part.get("new_results") or [])] if new_map is not None else []
+        if new_map is None or (new_map == protocol.get("topic_map") and not made):
             return design, plan_sha
+
+        def with_answers(block: dict[str, Any]) -> dict[str, Any]:
+            p = {**(block.get("protocol") or {}), "topic_map": new_map}
+            if made:
+                have = {str(d.get("id")) for d in p.get("derived") or [] if isinstance(d, dict)}
+                p["derived"] = [*(p.get("derived") or []), *(d for d in made if str(d["id"]) not in have)]
+            return {**block, "protocol": p}
+
         path = _plan.plan_path(self.quest_root)
         text = path.read_text(encoding="utf-8")
-        edited = _plan.edit_design_block(text, lambda block: {**block, "protocol": {**(block.get("protocol") or {}),
-                                                                                    "topic_map": new_map}})
+        edited = _plan.edit_design_block(text, with_answers)
         if edited is None or _plan.parse(edited).design is None:
             return design, plan_sha
         path.write_text(edited, encoding="utf-8")
-        _plan.record_version(self.quest_root, edited, by="engine", note="which result answers each quantity the topic asks for")
+        _plan.record_version(self.quest_root, edited, by="engine", note="which result answers each quantity the topic asks for"
+                             + (f"; new result(s) for a quantity given another's number: {', '.join(d['id'] for d in made)}"
+                                if made else ""))
         again, sha = self._design_from_plan()
         return (again, sha) if again is not None and sha else (design, plan_sha)
 

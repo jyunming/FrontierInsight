@@ -552,3 +552,42 @@ def test_the_spread_over_trials_of_a_new_result_is_refused_like_any_result_worke
                                  {**DESIGN, "protocol": {**PLAN_TWO_D, "derived": [*CROSS, *cp._new_results(
                                      reply["answers"], asked, {**DESIGN, "protocol": PLAN_TWO_D}, False)[1]]}})
     assert any("worked out once per setting" in p for p in problems)
+
+
+def test_the_plan_step_writes_a_new_result_into_the_plan_with_the_map_that_names_it(tmp_path: Path) -> None:
+    # Recorded: the plan step's answers path wrote only the map back to plan.md, so the second question was mapped to a
+    # result the plan did not have.
+    from unittest.mock import AsyncMock
+
+    from core import dependent_map as dm
+    from core import plan
+    from tests.test_plan_optimisation import _engine
+
+    eng = _engine(tmp_path, [])
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("t", None, {**DESIGN, "protocol": PLAN_TWO_D}), encoding="utf-8")
+    reply = {"answers": {"Q1": {"by": "metric:nutrient_cross"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"}}}
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps(reply))})()
+    design, sha = eng._design_from_plan()
+    out, new_sha = asyncio.run(eng._ask_plan_for_the_answers(design, sha, REQ_TWO))
+    written = plan.parse(path.read_text(encoding="utf-8")).design["protocol"]
+    assert new_sha != sha and out["protocol"] == written
+    assert [d["id"] for d in written["derived"] if d.get("for_question") == "Q2"] == ["nutrient_500"]
+    ids = {dm._norm(i) for i in dm.declared_ids(written)}
+    assert all(dm._norm(m["by"].split(":", 1)[1]) in ids for m in written["topic_map"] if m["by"].startswith("metric:"))
+
+
+def test_new_on_a_quantity_not_shared_at_the_last_ask_keeps_its_plan_map_and_the_other_answers() -> None:
+    # Recorded with the real prompt: one plan's model answered `new` for a question the plan does not give another's number.
+    plan_q3 = {**PLAN_TWO, "topic_map": [r for r in PLAN_TWO["topic_map"] if r["item"] != "Q3"]}
+    asked = tr.quantities_to_place(REQ_TWO, plan_q3)
+    assert sorted(asked) == ["Q1", "Q2", "Q3"] and not asked["Q3"].get("shared")
+    reply = {"answers": {"Q1": {"by": "metric:algae_peak"}, "Q2": {"by": "new", "id": "nutrient_500", "what": "w"},
+                         "Q3": {"by": "new", "id": "bloom_new", "what": "w"}}}
+    out, seen = _ask({**DESIGN, "protocol": plan_q3}, [reply] * cp.MAX_ASKS, asked)
+    part = out.parts["answers"]
+    assert len(seen) == cp.MAX_ASKS and part["valid"] and part["new_left_out"] == ["Q3"] and part["new_results"] == ["nutrient_500"]
+    rows = {r["item"]: r["by"] for r in out.design["protocol"]["topic_map"]}
+    assert rows["Q2"] == "metric:nutrient_500" and rows.get("Q3") != "metric:bloom_new"

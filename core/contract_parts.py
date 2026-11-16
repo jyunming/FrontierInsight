@@ -464,7 +464,7 @@ def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str,
                  ) -> tuple[Any, list[dict[str, Any]], list[str], list[str]]:
     """``(value, new, problems, left_out)``: the answer with each `"by": "new"` turned into ``metric:<id>`` of a derived result
     FI declares itself, those new entries, why one cannot be used, and (at the last ask) the quantities whose `new` is still
-    unusable: their plan map is kept as it is, and the other quantities' answers are used. Only a quantity the plan gives the
+    unusable: their plan map is kept as it is (``none`` where the plan has none), and the other quantities' answers are used. Only a quantity the plan gives the
     same number as another (``shared``) may get one; its inputs are what FI's record says the shared result is worked out
     from (the shared result itself when the plan reports it directly), never the model's, and it is tied to its question."""
     if not isinstance(value, dict):
@@ -489,8 +489,8 @@ def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str,
                f"`{name}` is given twice; each new result has its own name" if _dependents._norm(name) in taken else
                "`new` needs `what`, what the number is, in a few words" if not what else "")
         if why:
-            if last and q.get("shared"):
-                out[ident] = {k: v for k, v in row.items() if k not in ("by", "id", "what")}  # the plan's map stays
+            if last:  # the plan's map for this quantity stays (none when it has none); the other answers are used
+                out[ident] = {**{k: v for k, v in row.items() if k not in ("by", "id", "what")}, "by": q.get("by") or "none"}
                 left_out.append(ident)
             else:
                 problems.append(f"`{ident}`: {why}")
