@@ -478,3 +478,5 @@ def test_a_plan_map_naming_its_result_worked_out_once_per_setting_without_a_pref
     assert row["by"] == "peak_spread" and "statistic" not in row
     refused = cp._check_answers({"Q1": {"by": "", "statistic": "sd"}}, asked, design)
     assert refused and "worked out once per setting" in refused[0]
+    again = cp._check_answers({"Q1": {"by": "metric:peak_spread", "statistic": "sd"}}, asked, design)
+    assert again and "worked out once per setting" in again[0], "the same result named with its prefix is the plan's result"

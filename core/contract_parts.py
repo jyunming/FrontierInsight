@@ -608,7 +608,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
             if _values.known_truth(design["protocol"], target) is None:
                 out.append(f"`{ident}`: `bias` needs a result with a known true value that the plan fixes; `{target or by}` has none "
                            "(answer `value` or `sd`, or another result)")
-        elif stat == "sd" and (not planned or by in ("", planned)):
+        elif stat == "sd" and (not planned or _ref_id(by) in ("", _ref_id(planned))):
             # A derived result is worked out once per setting from the trials' results: it has no spread over the trials.
             # (An `sd` the answer gives for another result than the plan's kept one is not put on the plan's derived result:
             # :func:`_apply_answers` answers it with its value.)
@@ -672,7 +672,7 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
             q = {**q, "by": by}
         stat = row.get("statistic") if row.get("statistic") in ("bias", "sd") else None
         planned = q.get("by", "")
-        if stat == "sd" and planned and by not in ("", planned) and _is_derived(p, planned):
+        if stat == "sd" and planned and _ref_id(by) not in ("", _ref_id(planned)) and _is_derived(p, planned):
             # The answer's `sd` is of the result it names; the plan's kept result is worked out once per setting and has no
             # spread over trials, so it answers with its value (the paper states both units where they differ).
             stat = None
