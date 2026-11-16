@@ -2522,8 +2522,8 @@ class CodeStageMixin:
                                       "last reading left open stays open" if record.get("read_version") else "")
                     self._code_review_outcome(record)
                 else:
-                    self._log.info("[code_review] the code was repaired; the last reading is kept for the version that will "
-                                   "run, so it is read just before the run")
+                    self._log.info("[code_review] the code was repaired after the one reading; the repaired version runs "
+                                   "without a second reading, and what was found is listed in QUALITY.md")
                 break
             if not await self._read_code_for_review(state, record, version, reqs, protocol, design, review_node):
                 break
@@ -2772,7 +2772,7 @@ class CodeStageMixin:
         function that still fails may be rewritten once by the other model configured for review. Every request is counted
         in ``.fi/code_review.json`` before it is made. ``True`` when a file changed (the next reading reads it)."""
         code = self.quest_root / "code"
-        await self._route_plan_conflicts(state, record, review_node)
+        # A contradiction inside the plan is listed in QUALITY.md; the plan is not rewritten from a finding.
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
         package = self._package_in_use(state) or ""
         ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)

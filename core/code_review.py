@@ -65,13 +65,18 @@ _LOG = logging.getLogger(__name__)
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
 #: rounds of repair of what a review found, the findings in one repair request, and all repair requests in a quest.
-MAX_REVIEWS = 3
-RESERVED_FOR_FINAL = 1
-#: Further readings for the version that runs when a run that crashed or broke the protocol's contract was repaired by
+#: One reading, of the version about to run. Its serious findings (:data:`REPAIR_SEVERITY`, changing a reported result) get
+#: one round of test-first repair, and the repaired version runs without being read again; every finding is listed in
+#: QUALITY.md, and none holds a result back or stops the quest (the reading is a model's opinion, not FI's own evidence).
+MAX_REVIEWS = 1
+RESERVED_FOR_FINAL = 0
+#: The severity a finding must have to be repaired (with ``changes_result``); the others are listed only.
+REPAIR_SEVERITY = "high"
+#: (None now: the one reading is after the last run.) Further readings for the version that runs when a run that crashed or broke the protocol's contract was repaired by
 #: ``execute_reflect`` AFTER the reserved reading was spent: that script is the one whose results are reported, so it is
 #: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
-RUN_REPAIR_READS = 3
-MAX_SEND_BACKS = 2
+RUN_REPAIR_READS = 0
+MAX_SEND_BACKS = 1
 #: Rounds of repair that may be started again after one was cut short (a kill, a crash) before it finished: a round is counted in
 #: ``send_backs`` when it ends, so only this bounds a round that keeps dying.
 MAX_ROUND_RESTARTS = 2
@@ -1248,8 +1253,7 @@ def may_repair(record: dict[str, Any]) -> str:
         return f"{MAX_ROUND_RESTARTS} rounds of repair were cut short and started again; no more are started"
     if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
         return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
-    if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
-        return "no reading is left to read a repaired version"
+    # (the repaired version runs without a second reading: the one reading is spent before the repairs)
     if record.get("converged") is False:
         return "the last round of repairs made no fault a failing test showed pass its test"
     return ""
@@ -2308,6 +2312,21 @@ def findings_block(quest_root: Path, code_dir: Path) -> str:
             "These points were still open on the version that ran. The second model can be wrong, and none of them was "
             f"settled by the run; the full record is in `{RECORD.as_posix()}`.\n\n"
             + "\n\n".join(f"- {p}" for p in points))
+
+
+def second_version_block(quest_root: Path) -> str:
+    """FI's own comparison of two independently written versions of key functions (:mod:`core.second_impl`), the only
+    point about the code that the claim check and the review are given: a second reading's findings are its opinion and
+    go to the quality report only. ``""`` when every function agreed or no comparison was made."""
+    sentences = second_version_sentences(quest_root)
+    if not sentences:
+        return ""
+    return ("**Open points in the code that produced these results.** FI compared two independently written versions of "
+            "key functions of the model. The points below were still open on the version that ran, and none of them was "
+            f"settled by the run; the full record is in `{_second_record()}`.\n\n"
+            "- **A second, independent version of a key function was not settled.** FI had these functions written a "
+            "second time from the plan's description alone and compared the two on many inputs: "
+            f"{_listed(sentences, BLOCK_CAP)}.")
 
 
 def review_block(quest_root: Path, code_dir: Path) -> str:

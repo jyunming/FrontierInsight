@@ -396,10 +396,10 @@ class RunStageMixin:
         # read (not run) and sent back to draw it from the saved results, a bounded number of times
         # (core/figure_data_check.py).
         figure_repairs, figure_rewrote = await self._figures_from_results(state)
-        # The code can have changed since it was read (a repair by the equation or oracle gate, the figures): the version
-        # that will run is read now, with the reading the early call keeps for it (at most code_review.MAX_REVIEWS in a
-        # quest). Nothing is repaired here: a repaired version would be one nobody has read.
-        await self._code_review_gate(state, final=True)
+        # The code is read once, the version about to run; its serious findings get one round of test-first repair and the
+        # repaired version runs (core/code_review.py: MAX_REVIEWS, REPAIR_SEVERITY). A later call (a crash repair, a kept
+        # improvement) finds the reading spent and reads nothing.
+        await self._code_review_gate(state)
         # The version that runs is the version the checks were made for: a figure repair may change only the drawing, and
         # anything else that changed the computation since the checks (a person's edit, a rewrite) is checked again here.
         stop, regated, regate_rewrote = await self._verify_gated_code(state, py, exec_env, seed_path)

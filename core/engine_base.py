@@ -2991,38 +2991,26 @@ def _rejudges_oracles_after(manifest_status: Any, failed_script: Any) -> bool:
 
 
 def _claim_findings_parts(quest_root: Path) -> list[str]:
-    """What the second model's reading of the code left open, for the claim check: the engine's own list (the same one
-    the paper's limitations carry) under a header that says how to weigh it; when no second model read the code and
-    nothing else is open, one neutral line."""
-    code_dir = quest_root / "code"
+    """FI's own comparison of two independently written versions of key functions, for the claim check, under a header that
+    says how to weigh it (:func:`core.code_review.second_version_block`); ``[]`` when none is open."""
+    # A second reading's findings are its opinion (QUALITY.md lists them): the claim check is given FI's own comparison of
+    # two independently written versions only.
     try:
-        f = _code_review.open_findings(quest_root, code_dir)
-        text = _code_review.findings_block(quest_root, code_dir).strip()
+        text = _code_review.second_version_block(quest_root).strip()
     except Exception:  # noqa: BLE001 - a record that cannot be read adds nothing; it never loosens a check
         return []
-    if not text:
-        return []
-    if f["unread"] and not any(f[k] for k in ("missing", "different", "flagged", "unshown", "conflicts", "not_reviewed", "second_version")):
-        return ["No second model compared the code with the plan, so no findings about the code are listed."]
-    if f["second_version"] and not f["reviewed"] and not any(f[k] for k in ("reread", "missing", "different", "flagged", "unshown",
-                                                       "conflicts", "not_reviewed", "stopped")):
+    if text:
         return [
-            "TWO INDEPENDENTLY WRITTEN VERSIONS OF KEY FUNCTIONS DISAGREED, or could not be compared (FI's own check; no second "
-            "model read the code). A claim that rests on a function named below is not confirmed by an independent version "
+            "TWO INDEPENDENTLY WRITTEN VERSIONS OF KEY FUNCTIONS DISAGREED, or could not be compared (FI's own check). "
+            "A claim that rests on a function named below is not confirmed by an independent version "
             "and is `unsupported` unless the results show it by themselves.\n" + text]
-    return [
-        "A SECOND MODEL'S READING OF THE CODE AGAINST THE PLAN (it can be wrong). A claim that a point below says the "
-        "code does not do, or does differently, is `unsupported` unless the code above plainly does it.\n" + text
-    ]
+    return []
 
 
 def _oracle_with_reader_flags(quest_root: Path, judged: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``judged`` with each check marked that an open finding of the second model's reading of the code concerns."""
-    try:
-        flagged = _code_review.flagged_checks(quest_root, quest_root / "code", [str(j.get("name")) for j in judged])
-    except Exception:  # noqa: BLE001 - a record that cannot be read marks nothing; it never loosens a check
-        return judged
-    return _oracle.with_reader_flags(judged, flagged)
+    """``judged`` as FI judged it. A second reading's open finding about the code behind a check is its opinion: QUALITY.md
+    lists it (core/quality_report.py), and it no longer marks FI's own verdict on the check as not shown."""
+    return judged
 
 
 def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str], *, readings: str = "") -> str:

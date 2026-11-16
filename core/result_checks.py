@@ -343,7 +343,11 @@ class ResultChecksMixin:
         """The quantities the plan names that the code computes differently (a second model's finding on the version that ran,
         left standing by the repairs) and that the run's results hold under a name that begins with the plan's. They are left
         out: the paper may not present a number under a definition the code does not compute. A finding about a quantity the
-        results do not hold has nothing to leave out (the writer's note about requirements not met covers it)."""
+        results do not hold has nothing to leave out (the writer's note about requirements not met covers it).
+
+        Off: the reader's findings are its opinion of the code, listed in QUALITY.md; they put no claim on a result
+        (nothing to test, rerun or leave out later). The rest is kept until the planted-fault ledger decides it."""
+        return []
         try:
             differing = _code_review.differing_quantities(self.quest_root, self.quest_root / "code")  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
