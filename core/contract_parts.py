@@ -460,6 +460,49 @@ def _is_derived(protocol: dict[str, Any], ref: Any) -> bool:
     return bool(ident) and any(isinstance(d, dict) and d.get("id") == ident for d in protocol.get("derived") or [])
 
 
+def _new_results(value: Any, asked: dict[str, dict[str, Any]], design: dict[str, Any], last: bool
+                 ) -> tuple[Any, list[dict[str, Any]], list[str], list[str]]:
+    """``(value, new, problems, left_out)``: the answer with each `"by": "new"` turned into ``metric:<id>`` of a derived result
+    FI declares itself, those new entries, why one cannot be used, and (at the last ask) the quantities whose `new` is still
+    unusable: their plan map is kept as it is, and the other quantities' answers are used. Only a quantity the plan gives the
+    same number as another (``shared``) may get one; its inputs are what FI's record says the shared result is worked out
+    from (the shared result itself when the plan reports it directly), never the model's, and it is tied to its question."""
+    if not isinstance(value, dict):
+        return value, [], [], []
+    p = design["protocol"]
+    ids = _dependents.declared_ids(p)
+    settings = _contract.varied_settings(p) + [str(k) for k in (p.get("grid") or {}) if isinstance(p.get("grid"), dict)]
+    out, new, problems, left_out = dict(value), [], [], []
+    taken: set[str] = set()
+    for ident, q in asked.items():
+        row = value.get(ident)
+        if not isinstance(row, dict) or str(row.get("by") or "").strip() != "new":
+            continue
+        name, what = str(row.get("id") or "").strip(), " ".join(str(row.get("what") or "").split())
+        why = ("`new` is only for a quantity the plan gives the same number as another" if not q.get("shared") else
+               "`new` needs `id`, a name for it in code (letters, digits and underscores)"
+               if not _dependents._CODE_NAME.fullmatch(name) else
+               f"`{name}` is already a number of the study; answer `metric:{name}`"
+               if any(_dependents._norm(i) == _dependents._norm(name) for i in ids) else
+               f"`{name}` is a setting the study changes; give the new result a name of its own"
+               if any(_dependents._norm(s) == _dependents._norm(name) for s in settings) else
+               f"`{name}` is given twice; each new result has its own name" if _dependents._norm(name) in taken else
+               "`new` needs `what`, what the number is, in a few words" if not what else "")
+        if why:
+            if last and q.get("shared"):
+                out[ident] = {k: v for k, v in row.items() if k not in ("by", "id", "what")}  # the plan's map stays
+                left_out.append(ident)
+            else:
+                problems.append(f"`{ident}`: {why}")
+            continue
+        taken.add(_dependents._norm(name))
+        shared = _ref_id(q.get("by"))
+        inputs = _worked_from(p, shared) or ([shared] if shared else [])
+        new.append({**_dependents._new_derived({"id": name, "inputs": inputs, "what": what}), "for_question": ident})
+        out[ident] = {**{k: v for k, v in row.items() if k not in ("id", "what")}, "by": f"metric:{name}"}
+    return out, new, problems, left_out
+
+
 def _answers_question(protocol: dict[str, Any], ident: str, question: str) -> bool:
     """Whether FI's record of the names step says the derived result ``ident`` was made for the question ``question``
     (``for_question`` on the entry, written by :func:`_apply_names` from the names step's own reply)."""
@@ -904,11 +947,21 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                         record["uncertainties_left_out"] = unusable
                         unsure = None
                 taken.clear()
-                problems = (_dependents.check(value, entries, current, taken)
+                made: list[dict[str, Any]] = []  # answers: the derived results FI declares for a `"by": "new"`
+                new_problems: list[str] = []
+                checking = current
+                if part == "answers":
+                    value, made, new_problems, left_new = _new_results(value, faults, current, record["asks"] >= MAX_ASKS)
+                    if left_new:
+                        record["new_left_out"] = left_new
+                    if made:
+                        checking = {**current, "protocol": {**current["protocol"],
+                                                            "derived": [*(current["protocol"].get("derived") or []), *made]}}
+                problems = new_problems + (_dependents.check(value, entries, current, taken)
                             + _dependents.check_uncertainties(unsure, current, taken) if part == "dependents" else
                             _check_formulas(value, faults, current) if part == "formulas" else
                             _check_figures(value, faults, current) if part == "figures" else
-                            _check_answers(value, faults, current, *((conflicts, same) if record["asks"] >= MAX_ASKS else ()))
+                            _check_answers(value, faults, checking, *((conflicts, same) if record["asks"] >= MAX_ASKS else ()))
                             if part == "answers" else
                             _contract.check_part(part, value, current))
                 if problems:
@@ -923,7 +976,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                 elif part == "figures":
                     kept, checked = _apply_figures(p, current, value, faults), None
                 elif part == "answers":
-                    kept, checked = _apply_answers(p, current, value, faults, conflicts), None
+                    kept, checked = _apply_answers(checking["protocol"], checking, value, faults, conflicts), None
+                    if made:
+                        record["new_results"] = [d["id"] for d in made]
                     if same:
                         record["same_number"] = sorted(same)
                 elif part == "names":
