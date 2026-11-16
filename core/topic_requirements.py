@@ -464,12 +464,21 @@ def map_entries(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict
 
 def answer_key(entry: dict[str, Any]) -> tuple[str, str, str] | None:
     """What one map entry makes the paper print: the result, the setting it is read at and the statistic, ``None`` for an
-    entry that names no result. Two quantities with the same key are given the same number."""
+    entry that names no result. Two quantities with the same key are given the same number (a setting's value ``10`` and
+    ``10.0`` are one value, as in the paper's own check, ``core.paper_facts._number_place``)."""
     by = str(entry.get("by") or "").strip()
     if not by or by == "none":
         return None
     at = entry.get("at") if isinstance(entry.get("at"), dict) else {}
-    return by, json.dumps(at, sort_keys=True, default=str), str(entry.get("statistic") or "value")
+    return by, json.dumps({str(k): _one_value(v) for k, v in at.items()}, sort_keys=True), str(entry.get("statistic") or "value")
+
+
+def _one_value(value: Any) -> Any:
+    """A setting's value as one number where it is one, else its text."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
 
 
 def shared_answers(req: dict[str, Any], protocol: dict[str, Any]) -> dict[str, list[str]]:

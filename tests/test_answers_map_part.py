@@ -290,6 +290,11 @@ def test_quantities_the_plan_gives_one_number_are_asked_again_and_the_others_are
                                        {"item": "Q2", "by": "metric:algae_peak", "at": {"temp": 20}},
                                        {"item": "Q3", "by": "metric:bloom", "at": {}}]}
     assert tr.quantities_to_place(REQ_TWO, apart) == {}
+    # one setting value written two ways is one number: asked again
+    written = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {"temp": 10}},
+                                         {"item": "Q2", "by": "metric:algae_peak", "at": {"temp": 10.0}},
+                                         {"item": "Q3", "by": "metric:bloom", "at": {}}]}
+    assert list(tr.quantities_to_place(REQ_TWO, written)) == ["Q1", "Q2"]
 
 
 def test_an_answer_that_still_gives_two_questions_one_number_is_asked_again_and_a_none_leaves_one_unanswered() -> None:
