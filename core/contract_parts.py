@@ -447,6 +447,19 @@ def _worked_from(protocol: dict[str, Any], ident: str) -> list[str]:
                  if isinstance(d, dict) and d.get("id") == ident and d.get("role", "result") == "result"), [])
 
 
+def _ref_id(ref: Any) -> str:
+    """The id a map's ``by`` names: ``metric:x`` and a bare ``x`` (a plan's own map may write either) alike."""
+    text = str(ref or "").strip()
+    return (text.partition(":")[2] if ":" in text else text).strip()
+
+
+def _is_derived(protocol: dict[str, Any], ref: Any) -> bool:
+    """Whether ``ref`` (``metric:<id>`` or a bare id) names a derived result of the plan: worked out once per setting from the
+    trials' results."""
+    ident = _ref_id(ref)
+    return bool(ident) and any(isinstance(d, dict) and d.get("id") == ident for d in protocol.get("derived") or [])
+
+
 def _answers_question(protocol: dict[str, Any], ident: str, question: str) -> bool:
     """Whether FI's record of the names step says the derived result ``ident`` was made for the question ``question``
     (``for_question`` on the entry, written by :func:`_apply_names` from the names step's own reply)."""
@@ -595,6 +608,17 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
             if _values.known_truth(design["protocol"], target) is None:
                 out.append(f"`{ident}`: `bias` needs a result with a known true value that the plan fixes; `{target or by}` has none "
                            "(answer `value` or `sd`, or another result)")
+        elif stat == "sd" and (not planned or by in ("", planned)):
+            # A derived result is worked out once per setting from the trials' results: it has no spread over the trials.
+            # (An `sd` the answer gives for another result than the plan's kept one is not put on the plan's derived result:
+            # :func:`_apply_answers` answers it with its value.)
+            target = _ref_id(planned or by)
+            if _is_derived(design["protocol"], target):
+                inputs = _worked_from(design["protocol"], target)
+                out.append(f"`{ident}`: `sd` is the spread over the trials of a result each trial returns, but `{target}` is "
+                           "worked out once per setting" + (f" from {', '.join(f'`{i}`' for i in inputs)}" if inputs else "")
+                           + f", so it has none: answer `value` if `{target}` is already the spread the question asks for, "
+                           "else name the result each trial returns")
         at = row.get("at")
         if at in (None, ""):
             continue
@@ -648,6 +672,10 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
             q = {**q, "by": by}
         stat = row.get("statistic") if row.get("statistic") in ("bias", "sd") else None
         planned = q.get("by", "")
+        if stat == "sd" and planned and by not in ("", planned) and _is_derived(p, planned):
+            # The answer's `sd` is of the result it names; the plan's kept result is worked out once per setting and has no
+            # spread over trials, so it answers with its value (the paper states both units where they differ).
+            stat = None
         gone = unit_gaps(row, planned, design)["planned"] if planned and by not in ("", planned) else None
         for m in mine:
             m["at"] = at
