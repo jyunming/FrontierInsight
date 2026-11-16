@@ -18,15 +18,19 @@ need no model and no engine state:
   paragraph, a list item, a table row, a heading, a figure or a caption, a sentence
   that refers to a figure or a table, one that defines a term or a symbol, one that
   says what the paper sets out to do or finds, or (in an Introduction) why the work
-  is needed, one the next sentence points back at, or one that holds a number the
-  paper states nowhere else. The Abstract, the Methods and
+  is needed, one the next sentence points back at, one that cites a source, or one
+  that holds a number the paper states nowhere else. The Abstract, the Methods and
   the Results are as written, whatever the model answers;
 * reading the answer;
 * taking sentences out in the model's order until enough words are gone, skipping
   a sentence that would leave a source cited nowhere or a number stated nowhere,
   so that no citation number changes and no number is lost.
 
-Deleting a sentence changes no other character of the paper.
+Deleting a sentence changes no other character of the paper. What is taken out is not
+lost: FI moves it to the supplement (core/supplement.py), with the place it stood
+(:attr:`Trimmed.gaps`), so a later draft can get it back word for word. A sentence
+that cites a source is never offered: in the supplement its citation label would go
+stale when the paper's sources are numbered again.
 """
 
 from __future__ import annotations
@@ -111,6 +115,7 @@ class Sentence:
     words: int
     cites: tuple[str, ...]  # the source labels it cites, one entry per citation
     numbers: tuple[str, ...]  # the numbers it states, one entry per occurrence
+    section: str = ""  # the heading of the section it is in
 
 
 @dataclass(frozen=True)
@@ -118,6 +123,9 @@ class Trimmed:
     text: str  # the paper with the sentences taken out
     taken: tuple[Sentence, ...]
     words: int  # how many words those are
+    # (where in ``text`` the removed text stood, the exact text removed, the sentences in it), one per place: sentences
+    # next to each other are one place
+    gaps: tuple[tuple[int, str, tuple[Sentence, ...]], ...] = ()
 
 
 def _words(text: str) -> int:
@@ -201,10 +209,13 @@ def candidates(paper: str, end: int) -> list[Sentence]:
             continue
         if _FIGURE_OR_TABLE_RE.search(text) or _DEFINITION_RE.search(text) or _ABBREVIATION_RE.search(text):
             continue
+        if _labels(text):
+            continue  # it moves to the supplement, where a citation label goes stale when the sources are numbered again
         numbers = _numbers(text)
         if any(stated[n] - k < 1 for n, k in Counter(numbers).items()):
             continue  # a number this sentence alone states
-        out.append(Sentence(len(out) + 1, start, stop, text, _words(text), tuple(_labels(text)), tuple(numbers)))
+        out.append(Sentence(len(out) + 1, start, stop, text, _words(text), tuple(_labels(text)), tuple(numbers),
+                            section))
     return out
 
 
@@ -271,14 +282,19 @@ def choose(
             break
     if gone < words and not (partial and taken):
         return None
-    return Trimmed(_delete(paper, [(s.start, s.end) for s in taken]), tuple(taken), gone)
+    text, gaps = _delete_with_gaps(paper, [(s.start, s.end) for s in taken])
+    by_start = {s.start: s for s in taken}
+    return Trimmed(text, tuple(taken), gone,
+                   tuple((at, removed, tuple(by_start[x] for x in starts)) for at, removed, starts in gaps))
 
 
-def _delete(text: str, spans: list[tuple[int, int]]) -> str:
-    """``text`` without ``spans``, and the spaces that set each one off from its
-    neighbour: the ones after it, or, for the last sentence of a line, the ones
-    before it."""
+def _delete_with_gaps(text: str, spans: list[tuple[int, int]]) -> tuple[str, list[tuple[int, str, list[int]]]]:
+    """``text`` without ``spans`` (see :func:`_delete`), and for each place text was taken out: where it stood in the
+    result, the exact text removed there, and the starts of the spans in it. Spans next to each other are one place:
+    putting each place's text back at its position, the last place first, gives ``text`` again."""
+    cuts: list[tuple[int, str, int]] = []  # (start in the text as it was then, the text removed, the span's own start)
     for start, stop in sorted(spans, reverse=True):
+        own = start
         after = stop
         while after < len(text) and text[after] in " \t":
             after += 1
@@ -287,8 +303,24 @@ def _delete(text: str, spans: list[tuple[int, int]]) -> str:
         else:
             while start > 0 and text[start - 1] in " \t":
                 start -= 1
+        cuts.append((start, text[start:stop], own))
         text = text[:start] + text[stop:]
-    return text
+    places: list[tuple[int, str, list[int]]] = []
+    for i, (start, removed, own) in enumerate(cuts):
+        at = start - sum(len(r) for _s, r, _o in cuts[i + 1:])  # the cuts made after it all lie before it
+        hit = next((k for k, place in enumerate(places) if place[0] == at), None)
+        if hit is None:
+            places.append((at, removed, [own]))
+        else:  # next to a cut made before it, which stood just after it
+            places[hit] = (at, removed + places[hit][1], [own, *places[hit][2]])
+    return text, sorted(places)
+
+
+def _delete(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` without ``spans``, and the spaces that set each one off from its
+    neighbour: the ones after it, or, for the last sentence of a line, the ones
+    before it."""
+    return _delete_with_gaps(text, spans)[0]
 
 
 def summary(trimmed: Trimmed) -> str:

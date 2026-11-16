@@ -6,12 +6,13 @@ Every sentence you may choose has a marker just before it, like `<<12: 23 words>
 
 The sentences you choose must together be between **$words and $upper words** long: add up the lengths in the markers. Choose as few sentences as reach that, and take them from different places rather than all from one paragraph. Prefer, in this order:
 1. background a reader of this paper already has, and general statements the rest of the paper does not use;
-2. a sentence that repeats a result, a limitation or another sentence;
+2. a sentence that repeats a result or another sentence;
 3. hedging, and a sentence that only announces what the next one says.
 
 Never choose:
 - a sentence a later sentence depends on: one that introduces a term, a symbol or an abbreviation the text uses again, or that a later "this", "these", "such" or "the former" points back to;
-- the only sentence that gives a limitation or a conclusion the Abstract states;
+- a sentence that says what the study did not do, did not test or could not confirm, what its results do not show, or that a result is only a check of the code: a reader must still be told these, so the paper keeps them even where another sentence says something close;
+- the only sentence that gives a conclusion the Abstract states;
 - the sentence that gives the reason the study was done.
 
 # Formulas and headings

@@ -676,7 +676,7 @@ def test_a_real_render_records_a_long_draft_and_passes_a_short_one(tmp_path: Pat
 # --- the writer ------------------------------------------------------------------
 
 def test_words_to_cut() -> None:
-    assert _words_to_cut(5, 4, 0.95) == 100  # a few lines over
+    assert _words_to_cut(5, 4, 0.95) == 50  # a few lines over: a few sentences, not a hundred words
     assert _words_to_cut(5, 4, 0.0) == 450  # a full page over
     assert _words_to_cut(6, 4, 0.2) == 800
 
