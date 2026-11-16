@@ -236,7 +236,7 @@ def test_an_old_plan_with_no_statistic_gives_no_question_another_ones_number(tmp
     old = {**ESTIMATE_PROTOCOL, "topic_map": [{k: v for k, v in e.items() if k != "statistic"} for e in ESTIMATE_PROTOCOL["topic_map"]]}
     monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: old)
     text = pf.answers_text(root)
-    assert '- bias: not answered (the plan answers it with the same number as "spread of the estimates"; "x"' in text
+    assert '- bias: not answered (it would be given the same number as "spread of the estimates"; "x"' in text
     assert "{{v:x_hat" not in text and "diff ref" not in text and ":sd" not in text
     assert "- bias of y (measured as: Estimated y)" in text
 

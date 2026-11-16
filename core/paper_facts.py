@@ -1539,11 +1539,12 @@ def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> str:
     return f"FI holds no value for \"{plain(metric)}\""
 
 
-def answers_text(quest_root: Path | str) -> str:
+def answers_text(quest_root: Path | str, left_out: set[str] | None = None) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
     plan maps to nothing FI holds is said as not answered, and why. ``""`` when the topic asks for no main quantity or FI
-    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write."""
+    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write.
+    ``left_out``, when given, gets the name of each question left unanswered because another question prints its number."""
     from . import topic_requirements as _topic_req
 
     root = Path(quest_root)
@@ -1559,25 +1560,16 @@ def answers_text(quest_root: Path | str) -> str:
     varied = rec.varied()
     estimates = _known_estimates(protocol)
     plain = _plain_in(protocol, root)
-    # Two questions the map answers with one number (a frozen plan, a resumed quest, an answers step that failed): neither is
-    # given it, since the line would print one question's number as the other's answer (core/topic_requirements.py).
-    shared = _topic_req.shared_answers(req, protocol)
-    ids = {id(q): f"Q{i + 1}" for i, q in enumerate(req.get("quantities") or [])}
-    names = {f"Q{i + 1}": " ".join(str(q.get("name") or "").split()) for i, q in enumerate(req.get("quantities") or [])
-             if isinstance(q, dict)}
     lines: list[str] = []
     starts: list[int] = []  # the first line of each question, to find where one question's lines end
+    said_names: list[str] = []  # the question each start is
     unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
         if not name:
             continue
         starts.append(len(lines))
-        if ids.get(id(item)) in shared:
-            others = "; ".join(f'"{names.get(o) or o}"' for o in shared[ids[id(item)]])
-            lines.append(f"- {name}: not answered (the plan answers it with the same number as {others}, a different "
-                         "question, so that number is not given for it)")
-            continue
+        said_names.append(name)
         # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers part)
         # is still answered by that result: the line states both units, and FI converts nothing.
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
@@ -1712,7 +1704,55 @@ def answers_text(quest_root: Path | str) -> str:
         # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
         if start < end and "{{" in lines[end - 1]:
             lines[end - 1] += _unit_sentence(conflict, mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else "", rec, plain)
+    lines = _without_shared_numbers(lines, starts, said_names, left_out)
     return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
+
+
+_VALUE_KEY = re.compile(r"\{\{v:[^{}]*\}\}")
+
+
+def _same_value(value: Any) -> Any:
+    """A setting's value as one number where it is one (``1`` and ``1.0`` are the same setting)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _number_place(key_text: str) -> Any:
+    """Where the number a key prints is read from: the result, its statistic (with or without an interval, the same
+    number), the settings in any order, and what is done with it. A key FI cannot read is its own text."""
+    try:
+        key = _values.parse(key_text)
+    except Exception:  # noqa: BLE001 - an unreadable key is compared as written
+        return key_text
+    where = lambda w: tuple(sorted((a, p.kind, _same_value(p.value)) for a, p in (w or {}).items()))  # noqa: E731
+    return (key.metric, _values.FORM_STATISTIC.get(key.form, key.form), where(key.where), key.op, key.operand,
+            where(key.operand_where), key.operand_metric, key.reducer, key.word, key.percent, key.form_arg)
+
+
+def _without_shared_numbers(lines: list[str], starts: list[int], names: list[str],
+                            left_out: set[str] | None = None) -> list[str]:
+    """``lines`` with every question that prints exactly the numbers another question prints (the same places FI reads,
+    :func:`_number_place`) said as not answered instead: the topic asks them as different quantities, so one number cannot
+    be the answer to both. The places are the ones the lines print, so it holds whatever led two questions there (a map
+    with several entries, a result the analysis worked out once whatever the setting, a setting the record does not have).
+    A question whose numbers are only some of another's (one setting of a result the other gives for each setting) keeps
+    its answer: in 244 stored studies that case never occurred, and both answers may be right."""
+    spans = [(s, starts[i + 1] if i + 1 < len(starts) else len(lines)) for i, s in enumerate(starts)]
+    keys = [{_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))} for s, e in spans]
+    out: list[str] = []
+    for i, (s, e) in enumerate(spans):
+        others = [names[j] for j in range(len(spans)) if j != i and keys[i] and keys[i] == keys[j]]
+        if others:
+            if left_out is not None:
+                left_out.add(names[i])
+            out.append(f"- {names[i]}: not answered (it would be given the same number as "
+                       f"{'; '.join(chr(34) + o + chr(34) for o in others)}, a different question, so that number is not "
+                       "given for it)")
+        else:
+            out.extend(lines[s:e])
+    return out
 
 
 def _unit_words(conflict: dict[str, Any]) -> list[str]:
@@ -1737,15 +1777,19 @@ def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
     plan = _topic_req.view({}, protocol)
     rec = _values.records_of(root, protocol)
     out: list[dict[str, Any]] = []
+    shared: set[str] | None = None  # the questions the Answers block leaves out for another one's number (read once, if needed)
     for item in asked:
         name = " ".join(str(item.get("name") or "").split())
         conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item) if m.get("unit_conflict")), None)
         if not name or not conflict:
             continue
+        if shared is None:
+            shared = set()
+            answers_text(root, shared)
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
         valued = (isinstance(conflict, dict) and rec is not None and bool(rec.cells) and bool(metric) and metric not in rec.by_run
-                  and (metric in rec.metrics() or metric in rec.answers))
+                  and (metric in rec.metrics() or metric in rec.answers) and name not in shared)
         out.append({"name": name, "conflict": conflict, "metric": metric, "valued": valued})
     return out
 
