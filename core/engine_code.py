@@ -2460,16 +2460,14 @@ class CodeStageMixin:
         return same, reader or "the provider's default model", planner or "the provider's default model", bool(answered.get("reported"))
 
     async def _code_review_gate(self, state: QuestState, *, final: bool = False) -> QuestState | None:
-        """A different model reads the plan's required outputs and its logic against the scripts, and what it finds is
-        repaired (core/code_review.py). Called twice in ``_node_execute``: early (``final=False``), where a version is read,
-        its findings are kept by stable id and repaired test first, one at a time (:meth:`_repair_review_findings`), the
-        changed version is read again against the findings still open, and so on while the open issues that change a
-        result keep dropping, within ``code_review.MAX_SEND_BACKS`` passes; and just before the run
-        (``final=True``), where the version that will run is read with the one reading the early call may not spend, and
-        nothing is repaired any more (a repaired version would be unread). ``.fi/code_review.json`` keeps the readings, the
-        open findings in each, whether the repairs converged and whether the final version was read, so a resume does not
-        repeat a reading. What is open at the end is said in the limitations; a high-severity finding about a headline
-        quantity ends in the honest stop after the run unless the results contradict it. Always ``None``: the code goes on."""
+        """A different model reads the plan's required outputs and its logic against the scripts, and its serious findings
+        are repaired (core/code_review.py). Called once in ``_node_execute``, on the version about to run: the version is
+        read, its findings are kept by stable id, those of ``code_review.REPAIR_SEVERITY`` that can change a result are
+        repaired test first, one at a time, in one round (:meth:`_repair_review_findings`), and the repaired version runs
+        without a second reading. ``.fi/code_review.json`` keeps the reading and the open findings, so a resume does not
+        repeat it; a later call finds the reading spent and reads nothing. Every finding is listed in ``QUALITY.md``; none
+        stops the quest. No caller passes ``final=True`` now (a reading that repairs nothing). Always ``None``: the code
+        goes on."""
         code = self.quest_root / "code"
         if (self.config.engine.oracle_check == "off" or not self._runs_code(state)
                 or not (code / "experiment.py").is_file() or self.config.execution.background_jobs):
