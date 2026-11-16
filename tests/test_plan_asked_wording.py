@@ -30,3 +30,20 @@ def test_what_the_topic_asks_for_reads_plainly(tmp_path: Path) -> None:
 def test_a_part_of_the_plan_keeps_its_wording(tmp_path: Path) -> None:
     text = _ask(tmp_path, "settings the experiment needs")
     assert "the plan's settings the experiment needs was missing" in text
+
+
+def test_a_contradiction_the_code_reader_found_reads_plainly(tmp_path: Path) -> None:
+    text = _ask(tmp_path, "what makes its parts agree")
+    assert "the plan lacks what makes its parts agree: The topic says to vary" in text
+    assert "plan's a plan" not in text and "was missing" not in text
+
+
+def test_every_caller_names_a_part_of_the_plan_or_what_it_lacks() -> None:
+    import re
+    root = Path(__file__).resolve().parents[1] / "core"
+    whats = [m for f in sorted(root.glob("engine_*.py")) for call in f.read_text(encoding="utf-8").split(
+        "_ask_plan_to_complete(")[1:] for m in re.findall(r'\bwhat="([^"]+)"', call[:600])[:1]]
+    assert len(whats) >= 4, whats
+    # "the plan's <what> was missing" reads badly when <what> is itself a whole phrase about a plan
+    bad = [w for w in whats if not w.startswith("what ") and re.match(r"(a|an|the)\b|plan\b", w)]
+    assert not bad, bad
