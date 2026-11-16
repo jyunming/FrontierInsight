@@ -252,7 +252,7 @@ def anything(quest_root: Path | str) -> bool:
 
 def sentence_count(quest_root: Path | str) -> int:
     """How many sentences the page trim moved to the supplement."""
-    return sum(len(r.get("sentences") or [None]) for r in sentences(quest_root))
+    return sum(1 for r in sentences(quest_root) for x in r.get("sentences") or [] if isinstance(x, dict) and x.get("text"))
 
 
 def save_sentences(quest_root: Path | str, places: list[dict[str, Any]]) -> None:
@@ -339,7 +339,7 @@ def moved_sentences_line(n: int) -> str:
     """The line the paper's Limitations carry when the trim moved ``n`` sentences (``""`` for none)."""
     if n <= 0:
         return ""
-    return (f"FI moved {n} sentence{'s' if n != 1 else ''} of the paper's background and discussion to the supplement "
+    return (f"FI moved {n} sentence{'s' if n != 1 else ''} of the paper's text to the supplement "
             f"(`{SHOWN}`) to keep the paper within its page limit; {'each stands' if n != 1 else 'it stands'} there as "
             "written.")
 

@@ -170,3 +170,9 @@ def test_a_reset_whose_records_cannot_be_cleared_leaves_everything_as_it_was(tmp
     monkeypatch.setattr(supplement, "save_sentences", _fails)
     assert eng._supplement_reset({"paper_md": str(paper)}, paper) is False  # type: ignore[attr-defined]
     assert {f: f.read_bytes() for f in before} == before
+
+
+def test_a_record_without_sentences_counts_none(tmp_path: Path) -> None:
+    supplement.save_sentences(tmp_path, [{"text": "x", "left": "", "right": "", "step": 1, "sentences": []},
+                                         {"text": "y", "left": "", "right": "", "step": 1}])
+    assert supplement.sentence_count(tmp_path) == 0  # the Limitations never count a sentence the supplement does not show

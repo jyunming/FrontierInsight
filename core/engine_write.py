@@ -3185,6 +3185,7 @@ class WriteStageMixin:
                     held = {f: (f.read_bytes() if f.is_file() else None)
                             for f in (paper_path, *(self.quest_root / x for x in (_supplement.RECORD, _supplement.FILE)))}
                     if not self._write_supplement(state, limit):
+                        self._restore_files(held)  # a supplement written in part goes back to the one before
                         return None  # the paper cannot point to a supplement that is not there: it stays as it was
                     try:
                         paper_path.write_text(current, encoding="utf-8")
