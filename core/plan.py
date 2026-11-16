@@ -719,6 +719,7 @@ def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault
         # formula, so the trials' value of the same name is never read and the result leaves the paper. On the stored
         # plans every such overlap came from a revision that added a derived result to the metrics, so the fault is put at
         # that metric entry (the reading leaves it out and the derived result stands).
+        # Names are compared exactly, as the study's contract reads a result by its name (`a_b` and `ab` are two).
         derived = out.get("derived")
         derived_ids = {str(d.get("id")).strip() for d in derived if isinstance(d, dict) and d.get("id")} \
             if isinstance(derived, list) else set()
@@ -1285,8 +1286,15 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
             if fault.kind == "duplicate" and len(steps) == 3 and isinstance(steps[2], int) and isinstance(listed_now, list) \
                     and 1 <= steps[2] <= len(listed_now):
                 faults.append(fault)
-                notes.append(f"a `protocol.metrics` entry was left out of the plan: {why}")
-                out["metrics"] = [m for i, m in enumerate(listed_now, start=1) if i != steps[2]]
+                if len(listed_now) > 1:
+                    notes.append(f"a `protocol.metrics` entry was left out of the plan: {why}")
+                    out["metrics"] = [m for i, m in enumerate(listed_now, start=1) if i != steps[2]]
+                else:  # the study keeps a result each run returns: the derived entry of that name goes instead
+                    name = str(listed_now[0].get("id") or "").strip() if isinstance(listed_now[0], dict) else ""
+                    notes.append(f"a `protocol.derived` entry was left out of the plan, because the result is the plan's "
+                                 f"only metric: {why}")
+                    out["derived"] = [d for d in out.get("derived") or []
+                                      if not (isinstance(d, dict) and str(d.get("id") or "").strip() == name)]
                 continue
             # One metric the check refuses is left out, not the list it is in.
             from . import metric_spec

@@ -827,7 +827,7 @@ def _apply_names(p: dict[str, Any], answer: dict[str, Any],
     kept = {**p, **({"derived": derived} if derived else {}), **({"named_results": named} if named else {})}
     # while a formula is judged as a temporary metric, its derived entry is not beside it (a result is one or the other)
     temp_ids = {t["id"] for t in temp}
-    return kept, {**kept, "derived": [d for d in derived if d.get("id") not in temp_ids],
+    return kept, {**kept, "derived": [d for d in derived if not (isinstance(d, dict) and d.get("id") in temp_ids)],
                   "metrics": [*(p.get("metrics") or []), *temp]}
 
 

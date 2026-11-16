@@ -68,3 +68,29 @@ def test_a_revision_that_adds_a_derived_result_to_the_metrics_is_not_taken_and_t
     assert [m["id"] for m in protocol["metrics"]] == ["growth"]  # the metrics change was not taken
     assert protocol["ci_method"] == "percentile bootstrap over the runs of a setting"  # the other asked part was
     assert any("`peak` is in `protocol.metrics`" in str(r) for r in fake._answer_refused)
+
+
+def test_names_the_contract_reads_as_two_results_are_not_an_overlap() -> None:
+    # the study's contract reads a result by its exact name: `Peak` or `pe_ak` is not the derived `peak`
+    for other in ("Peak", "pe_ak"):
+        fixed, fault = plan.protocol_fault(_with_metrics(other))
+        assert fault is None and fixed is not None
+
+
+def test_the_plans_only_metric_stays_and_the_derived_entry_of_its_name_goes() -> None:
+    only = {**PROTOCOL, "metrics": [{"id": "peak", "kind": "mean", "role": "result", "estimand": "the mean peak",
+                                      "unit": "one run"}],
+            "derived": [{"id": "peak", "inputs": [], "role": "result"},
+                        {"id": "spread", "inputs": ["peak"], "role": "diagnostic", "formula": "peak / (rate * dose)"}]}
+    reading = plan.read_protocol(only)
+    assert reading.kept is not None
+    assert [m["id"] for m in reading.kept["metrics"]] == ["peak"]
+    assert [d["id"] for d in reading.kept["derived"]] == ["spread"]
+    assert [f.kind for f in reading.faults] == ["duplicate"]
+
+
+def test_a_derived_part_that_is_not_a_list_does_not_break_the_names_step() -> None:
+    from core import contract_parts
+
+    p = {**PROTOCOL, "derived": {"id": "peak", "inputs": ["growth"]}}
+    contract_parts._apply_names(p, {})  # no AttributeError on a part a plan wrote as one table
