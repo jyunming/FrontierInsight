@@ -253,29 +253,14 @@ def take_out_unsupported_numbers(
     ``holds_number(sentence)``: whether a placed sentence is cut (with FI's value marks still in it); ``plain(sentence)``
     is the sentence as a reader sees it; ``keyed(sentence)`` is the sentence with FI's values as the writer's keys;
     ``confirm(claim, sentence)``, when given, must also hold for a placed sentence (``sentence`` as a reader sees it)."""
-    from . import paper_patch
-
     wanted = [c for c in claims if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()]
     if not wanted or not paper_md:
         return paper_md, []
-    blocks = [m.span() for m in _FI_BLOCK.finditer(paper_md)] + _fenced(paper_md)
-    masked = _FI_MARK.sub(lambda m: "\x00" * len(m.group(0)), paper_md)
-    units: list[tuple[int, int, str, str]] = []  # start, end, as the reader sees it, with its keys
-    for start, end, _block in paper_patch.sentence_units(masked):
-        raw = paper_md[start:end]
-        if not raw.strip() or raw.lstrip().startswith(_NOT_PROSE) or any(a <= start < b for a, b in blocks):
-            continue
-        # A unit that is nothing but FI's own filled text (a value mark and its punctuation) is not the writer's sentence.
-        if not re.sub(r"[\s\x00.,;:!?()\-]+", "", masked[start:end]):
-            continue
-        units.append((start, end, plain(raw), " ".join((keyed(raw) if keyed else raw).split())))
+    units = _prose_units(paper_md, plain, keyed)
     chosen: dict[tuple[int, int], dict[str, Any]] = {}
     for claim in wanted:
         text = str(claim["claim"])
-        passages = {" ".join(str(w.get("passage") or "").split()) for w in claim.get("where") or [] if isinstance(w, dict)}
-        passages.discard("")
-        hits = [u for u in units if u[3] in passages]  # no passage, or none equal to a sentence: nothing is cut
-        for start, end, sentence, _k in hits:
+        for start, end, sentence, _k in _units_of_claim(claim, units):  # no passage equal to a sentence: nothing is cut
             if holds_number(paper_md[start:end]) and (confirm is None or confirm(claim, sentence)):
                 entry = {"claim": text.strip(), "evidence": str(claim.get("evidence") or "").strip(), "sentence": sentence}
                 # Why it went stays with it: the check's fault and the keys of FI's values it is about.
@@ -287,3 +272,41 @@ def take_out_unsupported_numbers(
     if not chosen:
         return paper_md, []
     return _cut(paper_md, list(chosen)), [chosen[k] for k in sorted(chosen)]
+
+
+def _prose_units(paper_md: str, plain: Callable[[str], str],
+                 keyed: Callable[[str], str] | None) -> list[tuple[int, int, str, str]]:
+    """The writer's sentences of ``paper_md``: ``(start, end, as a reader sees it, with its keys)``. Only running prose:
+    FI's blocks, fenced code, tables, headings and figure lines are not the writer's sentences."""
+    from . import paper_patch
+
+    blocks = [m.span() for m in _FI_BLOCK.finditer(paper_md)] + _fenced(paper_md)
+    masked = _FI_MARK.sub(lambda m: "\x00" * len(m.group(0)), paper_md)
+    units: list[tuple[int, int, str, str]] = []
+    for start, end, _block in paper_patch.sentence_units(masked):
+        raw = paper_md[start:end]
+        if not raw.strip() or raw.lstrip().startswith(_NOT_PROSE) or any(a <= start < b for a, b in blocks):
+            continue
+        # A unit that is nothing but FI's own filled text (a value mark and its punctuation) is not the writer's sentence.
+        if not re.sub(r"[\s\x00.,;:!?()\-]+", "", masked[start:end]):
+            continue
+        units.append((start, end, plain(raw), " ".join((keyed(raw) if keyed else raw).split())))
+    return units
+
+
+def _units_of_claim(claim: dict[str, Any],
+                    units: list[tuple[int, int, str, str]]) -> list[tuple[int, int, str, str]]:
+    """The units whose keyed text equals one of the claim's own passages (``where``): FI's exact identification."""
+    passages = {" ".join(str(w.get("passage") or "").split()) for w in claim.get("where") or [] if isinstance(w, dict)}
+    passages.discard("")
+    return [u for u in units if u[3] in passages]
+
+
+def placed_sentences(paper_md: str, claims: list[dict[str, Any]], *, plain: Callable[[str], str],
+                     keyed: Callable[[str], str] | None = None) -> list[tuple[int, int]]:
+    """``(start, end)`` of each writer's sentence of ``paper_md`` that one of ``claims`` names exactly (its keyed text equals
+    the claim's own passage, as for :func:`take_out_unsupported_numbers`), in order, each once. A claim with no passage
+    equal to a sentence names none."""
+    units = _prose_units(paper_md, plain, keyed) if paper_md and claims else []
+    found = {(u[0], u[1]) for c in claims if isinstance(c, dict) for u in _units_of_claim(c, units)}
+    return sorted(found)

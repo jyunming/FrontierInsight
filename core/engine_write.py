@@ -1603,7 +1603,9 @@ class WriteStageMixin:
         # refresh above may not have run): the paper that is delivered says what they say.
         self._restate_limitations(state, "FI wrote the Limitations from its records again and added no claim")
         # Before the page count is measured: its sentence is a few lines of the paper's own.
-        self._state_unsupported_claims({**state, **out})  # type: ignore[arg-type]
+        # The paper is delivered from here (out, or to a person): each sentence the Limitations list as unconfirmed is
+        # marked where it stands.
+        self._state_unsupported_claims({**state, **out}, mark=True)  # type: ignore[arg-type]
         limit = resolve_page_limit(self.config)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         if limit is not None and paper_path and Path(paper_path).is_file():
@@ -1647,7 +1649,8 @@ class WriteStageMixin:
         # filled (the claim check it runs again would otherwise change the paper after this check's receipt).
         self._refresh_paper_facts(state)
         started = _receipts.now()
-        paper = path.read_text(encoding="utf-8")
+        # FI's marks beside unconfirmed sentences are FI's words, placed again after this check (_state_unsupported_claims)
+        paper = _paper_facts.without_unconfirmed(path.read_text(encoding="utf-8"))
         sha = _cs.paper_hash(paper)
         record_path = self.fi_dir / _cs.FILE
         try:
@@ -3206,14 +3209,23 @@ class WriteStageMixin:
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
-    def _state_unsupported_claims(self, state: QuestState) -> int:
+    def _state_unsupported_claims(self, state: QuestState, *, mark: bool = False) -> int:
         """The paper as delivered: the sentences the last claim check found supported by neither the run's results nor a
         cited source are kept in ``.fi/unsupported_claims.json`` and stated in the Limitations (core/paper_facts.py
         ``UNSUPPORTED_CLAIMS``), sentence by sentence, from FI's own record: no model call and nothing taken out of the
         paper. Until now these findings were only in QUALITY.md, so a reader of the paper was not told. A claim the paper no
         longer holds is not listed; a record with none empties, and a sentence an earlier pass placed is taken out. A claim
         check that did not run to an answer leaves the record as it was. The sentence adds no claim, so the claim check's
-        and the citation check's receipts move to the paper that carries it. Returns how many claims are stated."""
+        and the citation check's receipts move to the paper that carries it. ``mark``: the paper is delivered from here (the
+        last step before delivery), so each sentence of a claim still standing that FI places exactly also gets FI's mark
+        where it stands (:meth:`_mark_unconfirmed`); every other call takes the marks out. Returns how many claims are
+        stated."""
+        if not mark:
+            # Only the last step before delivery places marks: any other call takes them out first, also when it then
+            # returns early (the claim check off or without an answer).
+            now = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+            if now and Path(now).is_file():
+                self._mark_unconfirmed(now, [])
         if not self.config.engine.claim_grounding:
             return 0
         grounding = state.get("claim_grounding") or {}
@@ -3260,9 +3272,13 @@ class WriteStageMixin:
                     confirm=lambda c, sentence: any(c is b for b in by_wording) or _claim_numbers_shown(c, sentence))
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
-                    _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
-                                         Path(paper_path).read_bytes(),
-                                         "FI took out sentences with a number its claim check found unsupported and added no claim")
+                    # Taking sentences out adds no claim and no citation: both checks' receipts move to the paper that is
+                    # left (at the last step before delivery the citation check has just read it).
+                    for check in ("claim_check", "citation_check"):
+                        _receipts.carry_over(self.quest_root, check, "paper", snapshot[Path(paper_path)] or b"",
+                                             Path(paper_path).read_bytes(),
+                                             "FI took out sentences with a number its claim check found unsupported and "
+                                             "added no claim")
                     self._prune_ledger_after_take_out([str(r["sentence"]) for r in removed], text, strict=True)
                     gone = {str(r["claim"]) for r in removed}
                     left = [c for c in standing if str(c.get("claim")) not in gone]
@@ -3290,6 +3306,10 @@ class WriteStageMixin:
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[claim_check] the paper could not be given its sentence on unsupported claims (%s)", e)
             return 0
+        marked = self._mark_unconfirmed(paper_path, standing if mark else [])
+        if marked:
+            self._log.info("[claim_check] %d sentence(s) the Limitations list as unconfirmed are marked where they stand",
+                           marked)
         if standing:
             self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; its "
                               "Limitations say so", len(standing))
@@ -3312,6 +3332,43 @@ class WriteStageMixin:
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_bytes(data)
 
+    @staticmethod
+    def _reader_sentence(raw: str) -> str:
+        """A sentence of the paper as a reader sees it, on one line."""
+        return " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split())
+
+    @staticmethod
+    def _keyed_sentence(raw: str) -> str:
+        """A sentence of the paper with FI's values as the writer's keys, on one line (how the claim check stores it)."""
+        return " ".join(_paper_facts.to_placeholders(raw).split())
+
+    def _mark_unconfirmed(self, paper_path: Path | str, claims: list[dict[str, Any]]) -> int:
+        """Put FI's mark (core/paper_facts.py ``UNCONFIRMED_MARK``) beside each sentence of the paper that one of ``claims``
+        (claims still standing, which the Limitations list as unconfirmed) names exactly, by its stored passage, as the
+        take-out finds a sentence; every earlier mark is taken out first, so a sentence no longer listed loses its mark and
+        ``[]`` only takes the marks out. A sentence FI cannot place exactly gets none (it stays listed). The mark adds no
+        claim, so the claim check's and the citation check's receipts move to the marked paper. Nothing is written when
+        nothing changes; a paper that cannot be read or written is left as it is. Returns how many sentences are marked."""
+        path = Path(paper_path)
+        try:
+            raw = path.read_bytes()
+            text = raw.decode("utf-8")
+            clean = _paper_facts.without_unconfirmed(text)
+            spans = _record_claims.placed_sentences(clean, claims, plain=self._reader_sentence, keyed=self._keyed_sentence)
+            new = _paper_facts.mark_unconfirmed(clean, spans)
+            if new != text:
+                path.write_bytes(new.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
+                after = path.read_bytes()
+                why = "FI marked the sentences its claim check found unconfirmed where they stand and added no claim"
+                for check in ("claim_check", "citation_check"):
+                    # the receipt is for the paper as it was read, or (a resume) for that paper without its old marks
+                    if not _receipts.carry_over(self.quest_root, check, "paper", raw, after, why):
+                        _receipts.carry_over(self.quest_root, check, "paper", clean.encode("utf-8"), after, why)
+            return len(spans)
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[claim_check] the sentences found unconfirmed could not be marked in the paper (%s)", e)
+            return 0
+
     def _plan_take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
                                            standing: list[dict[str, Any]], *, unnamed: list[dict[str, Any]] | None = None,
                                            confirm: Any = None) -> tuple[str, list[dict[str, Any]]]:
@@ -3322,14 +3379,10 @@ class WriteStageMixin:
         one goes by the rule that FI applied: when it holds a value FI filled in, or a number the writer typed that FI cannot
         trace to the plan or its records. Nothing is written here; :meth:`_state_unsupported_claims` writes the paper, the
         claim list, the receipt and the record together. ``confirm(claim, sentence)``: a further condition on a placed
-        sentence of ``standing`` (:func:`core.record_claims.take_out_unsupported_numbers`)."""
-        before = Path(paper_path).read_bytes().decode("utf-8")
-
-        def plain(raw: str) -> str:
-            return " ".join(_paper_facts.without_blocks(_paper_values.without_marks(raw)).split())
-
-        def keyed(raw: str) -> str:
-            return " ".join(_paper_facts.to_placeholders(raw).split())
+        sentence of ``standing`` (:func:`core.record_claims.take_out_unsupported_numbers`). The paper is read without FI's
+        marks beside unconfirmed sentences (placed again afterwards)."""
+        before = _paper_facts.without_unconfirmed(Path(paper_path).read_bytes().decode("utf-8"))
+        plain, keyed = self._reader_sentence, self._keyed_sentence
 
         text, removed = _record_claims.take_out_unsupported_numbers(
             before, standing, same=_same_statement, holds_number=lambda _sentence: True, plain=plain, keyed=keyed,

@@ -2033,7 +2033,14 @@ _STRAY_FIGURE = re.compile(r"\{\{[\s{]*figure\s*:([^\n]*?)\}\}+", re.I)
 _MARK_TAIL = re.compile(r"(<!-- /fi:fact-figure-[\w-]+ -->)[^\s{}<][^\n{}<]*\}\}+")
 _STRAY_PARTS = re.compile(r"\s*([\w-]+)(?:\.\w+)?\s*:\s*([\w-]+)\s*(?:@(.*))?\Z", re.S)
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
-_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?")
+_TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?|<!-- /?fi:unconfirmed -->")
+#: FI's mark beside a sentence of the writer's that its last claim check found supported by neither the run's results nor
+#: a cited source (Engine._state_unsupported_claims places it from its record, at the last step before delivery): the
+#: sentence stays where it is and a reader is told, where it stands, that it is unconfirmed (the Limitations list it). Its own
+#: marker, not a placeholder: render() keeps it as written, the writer is never given it (:func:`to_placeholders`) and no
+#: check of the writer's text reads it (:func:`without_blocks`).
+UNCONFIRMED_MARK = "<!-- fi:unconfirmed --> (unconfirmed)<!-- /fi:unconfirmed -->"
+_UNCONFIRMED = re.compile(r"<!-- fi:unconfirmed -->.*?<!-- /fi:unconfirmed -->", re.S)
 _ITEM_KEY = "not_done-"
 #: Where no reader sees a placeholder as text: a code block or inline code, math, an HTML comment (not FI's own markers).
 _HIDDEN = re.compile(
@@ -2122,9 +2129,36 @@ def _is_item(name: str) -> bool:
     return name in ("not_done", "notdone", "not_done_item")
 
 
+def without_unconfirmed(markdown: str) -> str:
+    """``markdown`` without FI's marks beside unconfirmed sentences (:data:`UNCONFIRMED_MARK`), exactly as it was before
+    they were placed."""
+    return _UNCONFIRMED.sub("", markdown or "")
+
+
+def mark_unconfirmed(markdown: str, spans: list[tuple[int, int]]) -> str:
+    """``markdown`` (with no mark in it) with :data:`UNCONFIRMED_MARK` placed in each sentence of ``spans`` (``(start, end)``
+    of the sentence in ``markdown``; the same sentence twice is marked once): before the full stop that ends it, or right
+    after its last character when something closes it after the stop (a quote, emphasis) or it has none, so a quotation
+    is never changed."""
+    at: set[int] = set()
+    for start, end in spans:
+        seg = markdown[start:end].rstrip()
+        at.add(start + (len(seg) - 1 if seg[-1:] in (".", "!", "?") else len(seg)))
+    out = markdown
+    for pos in sorted(at, reverse=True):
+        out = out[:pos] + UNCONFIRMED_MARK + out[pos:]
+    return out
+
+
 def to_placeholders(markdown: str) -> str:
     """``markdown`` with every value FI filled in (between its markers) turned back into its placeholder: what the passage
-    editor is given, so its edits are made on the placeholders and FI fills them again."""
+    editor is given, so its edits are made on the placeholders and FI fills them again. FI's marks beside unconfirmed
+    sentences are taken out: the writer never keeps one (FI places them again from its record)."""
+    return _placeholders(without_unconfirmed(markdown))
+
+
+def _placeholders(markdown: str) -> str:
+    """:func:`to_placeholders` with FI's marks beside unconfirmed sentences kept as they are (what :func:`render` reads)."""
     def back(m: re.Match[str]) -> str:
         key = m.group(1)
         if key.startswith(_ITEM_KEY):
@@ -2395,9 +2429,11 @@ def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: 
 
 def without_blocks(markdown: str) -> str:
     """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`) taken out, markers and all: what the checks of the
-    writer's own text read (the block is FI's record, printed, not a claim of the writer's)."""
+    writer's own text read (the block is FI's record, printed, not a claim of the writer's). FI's marks beside unconfirmed
+    sentences are taken out too: they are FI's words, not the writer's."""
     names = "|".join(re.escape(n) for n in BLOCK_NAMES)
-    return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n", markdown or "", flags=re.S)
+    return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n", without_unconfirmed(markdown),
+                  flags=re.S)
 
 
 def mask(markdown: str, token: str = " FI-FACT ") -> str:
@@ -2426,7 +2462,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
     figure_known = _figure_facts(root)
     unfilled: list[str] = []
     # A {{calc:...}} is a key FI fills with the result numbers below, not a fact of the run.
-    text = _values.keyed_calcs(to_placeholders(markdown))
+    text = _values.keyed_calcs(_placeholders(markdown))  # FI's marks beside unconfirmed sentences stay as they are
     hidden = _hidden_spans(text)
 
     def fill(m: re.Match[str]) -> str:
