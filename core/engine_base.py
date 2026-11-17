@@ -1922,6 +1922,16 @@ def _passage_stands(claim: dict[str, Any], *texts: str) -> bool:
     return False
 
 
+_CLAIM_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+
+
+def _claim_numbers_shown(claim: dict[str, Any], sentence: str) -> bool:
+    """Whether every number ``claim`` states is shown in ``sentence`` (as a reader sees it): a claim placed by its passage
+    alone must quote the sentence's own values, so one that misquotes a value never stands for the sentence."""
+    shown = set(_CLAIM_NUMBER_RE.findall(sentence))
+    return set(_CLAIM_NUMBER_RE.findall(str(claim.get("claim") or ""))) <= shown
+
+
 def _passage_names_claim(claim: dict[str, Any], keyed: str) -> bool:
     """Whether a passage the claim check stored for ``claim`` (``where``) stands exactly once in ``keyed`` (the writer's
     text with FI's values as their keys, spaces made single) and says what the claim says: most of the claim's words are

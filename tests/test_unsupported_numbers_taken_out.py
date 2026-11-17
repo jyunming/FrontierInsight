@@ -396,3 +396,11 @@ def test_a_wording_claim_found_by_its_passage_still_stays(tmp_path: Path) -> Non
     eng, path = _split_paper(tmp_path)
     body = _one(eng, path, _claim(HALF, "unsupported", "x", SPLIT_KEYED, "wording"))
     assert "the peak at load 3" in body
+
+
+def test_a_claim_placed_by_its_passage_that_misquotes_the_value_cuts_nothing(tmp_path: Path) -> None:
+    """A claim placed only by its passage must show the sentence's own numbers: one that states another value than the
+    sentence shows (the check misquoted it) cannot take out the sentence that holds the right one."""
+    eng, path = _split_paper(tmp_path)
+    body = _one(eng, path, _claim("The peak at load 3 is 0.0500.", "unsupported", "x", SPLIT_KEYED, "scope"))
+    assert "the peak at load 3" in body
