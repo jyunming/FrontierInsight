@@ -1922,14 +1922,17 @@ def _passage_stands(claim: dict[str, Any], *texts: str) -> bool:
     return False
 
 
-_CLAIM_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+#: A number with its sign: a minus right before the digits (not after a word or a closing bracket, so "loads 1-2" is the
+#: numbers 1 and 2, read the same way in the claim and in the sentence).
+_CLAIM_NUMBER_RE = re.compile(r"(?:(?<![\w)\]])-)?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
 
 def _claim_numbers_shown(claim: dict[str, Any], sentence: str) -> bool:
     """Whether every number ``claim`` states is shown in ``sentence`` (as a reader sees it): a claim placed by its passage
     alone must quote the sentence's own values, so one that misquotes a value never stands for the sentence."""
-    shown = set(_CLAIM_NUMBER_RE.findall(sentence))
-    return set(_CLAIM_NUMBER_RE.findall(str(claim.get("claim") or ""))) <= shown
+    def numbers(text: str) -> set[str]:
+        return set(_CLAIM_NUMBER_RE.findall(text.replace("\u2212", "-")))  # a typeset minus is a minus
+    return numbers(str(claim.get("claim") or "")) <= numbers(sentence)
 
 
 def _passage_names_claim(claim: dict[str, Any], keyed: str) -> bool:
