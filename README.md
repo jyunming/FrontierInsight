@@ -107,7 +107,7 @@ The long descriptions of each are in [docs/features.md](docs/features.md).
 
 - **Python 3.11+**, on Windows, macOS or Linux.
 - **One LLM provider** (see above).
-- Optional: a LaTeX engine (or any Chromium browser) for typeset PDFs, and `pip install axon` for the knowledge layer. `python launch.py --doctor` shows what this machine has; the details are in [docs/INSTALL.md](docs/INSTALL.md).
+- Optional: a LaTeX engine (or any Chromium browser) for typeset PDFs, and `pip install axon-rag` for the knowledge layer. `python launch.py --doctor` shows what this machine has; the details are in [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 

@@ -508,8 +508,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         nargs="+",
         help="Ingest one or more PDF / Markdown / TXT files into Axon "
-             "(kind=fi_local_paper) and exit. Requires `axon` to be "
-             "installed; optionally pass --axon-config to point at a "
+             "(kind=fi_local_paper) and exit. Requires Axon (`pip install axon-rag`) "
+             "to be installed; optionally pass --axon-config to point at a "
              "non-default Axon corpus. PDF support requires `pypdf` installed.",
     )
     mode.add_argument(
@@ -6149,7 +6149,7 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
         return 1
     if not k.enabled:
         print(
-            "[FI ingest] Axon not available (is the `axon` package installed?). "
+            "[FI ingest] Axon not available (install it with `pip install axon-rag`). "
             "Files were parsed but not ingested into a persistent store.",
             file=sys.stderr,
         )

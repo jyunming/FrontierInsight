@@ -1082,7 +1082,7 @@ def make_app(
             return JSONResponse({
                 "available": False,
                 "reason": reason + (
-                    "Install with `pip install axon` (or pull the "
+                    "Install with `pip install axon-rag` (or pull the "
                     "axon repo into PYTHONPATH)."
                 ),
             })
@@ -1141,7 +1141,7 @@ def make_app(
             raise HTTPException(
                 503,
                 "Axon package not installed — can't ingest. "
-                "Run `pip install axon` (or pull the axon repo into "
+                "Run `pip install axon-rag` (or pull the axon repo into "
                 "PYTHONPATH) first.",
             )
         from core.knowledge import Knowledge
