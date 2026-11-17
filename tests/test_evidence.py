@@ -940,9 +940,8 @@ def test_a_receipt_with_times_that_are_not_times_is_not_believed(tmp_path: Path)
     assert any("malformed" in g for g in evidence.assess(root, _state(), settings=ON)["gaps"])
 
 
-def test_a_check_the_code_reader_flags_is_still_independent_evidence(tmp_path: Path) -> None:
-    """A second model's finding about the code that computes the check's measure is its opinion: FI's verdict on the check
-    stands, and the finding is listed in the quality report only."""
+def test_a_check_the_code_reader_flags_is_not_independent_evidence(tmp_path: Path) -> None:
+    """A second model found that the code that computes the check's measure is itself flagged: the check passed, and shows nothing."""
     from core import code_review
 
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
@@ -954,9 +953,13 @@ def test_a_check_the_code_reader_flags_is_still_independent_evidence(tmp_path: P
                                           "without running the simulation", "status": "different", "file": "simulate.py",
                                           "line": 3, "severity": "medium", "fid": "F-1"}]})
     got = evidence.assess(root, _state(), settings=ON)
-    assert got["status"] == "publication_ready"
-    assert not any("not shown: a second model found" in g for g in got["gaps"]), got["gaps"]
+    assert got["status"] == "protocol_runtime_matched"
+    assert any("the check 'closed form' is not shown: a second model found" in g and "line" not in g for g in got["gaps"]), got["gaps"]
     (code / "simulate.py").write_text("def run_trial(seed):\n    return {'x': 1}\n", encoding="utf-8")  # a later version, not read again
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "protocol_runtime_matched", "the flag sticks"
+    rec = code_review.load(root)  # a newer reading of that version no longer flags it
+    rec.update(version=code_review.version(code), read_version=code_review.version(code), problems=[], final=True)
+    code_review.save(root, rec)
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
 
 

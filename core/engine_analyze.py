@@ -713,8 +713,8 @@ class AnalyzeStageMixin:
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
             ruled = self._flat_objective_verdict(state) or self._unreadable_analysis_verdict(state) or (
-                # The code reader's findings are its opinion: listed in QUALITY.md, never a reason to hold a result back.
-                self._no_results_verdict(state)) or (None if gate_off else _evidence_gate_rule(
+                self._no_results_verdict(state)) or (
+                await self._shown_fault_verdict(state)) or (None if gate_off else _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
@@ -737,6 +737,12 @@ class AnalyzeStageMixin:
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
             claim_stop: dict[str, Any] | None = None
+            try:  # what the gate had not decided about a second model's claims is decided now, as if no rerun could be made
+                self._settle_undecided_reader_claims(state)
+            except Exception as settle_exc:  # noqa: BLE001
+                # Failing closed: what cannot be settled is left out, and a leave-out that cannot be recorded stops the quest.
+                self._log.warning("[evidence_gate] the second model's claims could not be settled (%r); they are left out", settle_exc)
+                claim_stop = self._leave_out_undecided_claims(state, f"{type(settle_exc).__name__}: {settle_exc}"[:200])
             if gate_off:
                 # FI's own stop conditions could not be checked: the same route as a failed gate call (recorded as
                 # unknown, a gap in the evidence record), never a silent passthrough to the writer.
@@ -2229,11 +2235,11 @@ class AnalyzeStageMixin:
                 _constant := _code_review.resolve_logic(self.quest_root, self.quest_root / "code", state.get("result_json"))):
             # A second model found, with high severity, that the study's main quantity is a constant in the code, and the
             # run's own results hold it at one value everywhere: the results confirm it (a reader's word alone never stops).
-            # A constant can be the finding itself (a quantity that does not depend on the settings), so this needs the
-            # reader's word to mean a fault: it is listed in QUALITY.md, and the quest goes on.
-            self._log.warning("[evidence_gate] the study's main quantity is a constant in the run's results, as a second "
-                              "model found in the code (%s); QUALITY.md lists it and the quest goes on",
-                              "; ".join(_constant)[:200])
+            why = ("the study's main quantity is a constant in the run's results, as a second model found in the code "
+                   "(" + "; ".join(_constant)[:200] + ")")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "headline_missing"}
         from . import numeric_oracle as _numeric_oracle
 
         result = state.get("result_json")

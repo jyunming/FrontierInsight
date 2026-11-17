@@ -110,10 +110,10 @@ def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_wrong_normalisation_is_sent_to_a_repair_request_without_a_value_and_the_repaired_code_is_not_read_again(tmp_path: Path) -> None:
+async def test_a_wrong_normalisation_is_sent_to_a_repair_request_without_a_value_and_is_fixed(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     (engine.quest_root / "code" / "simulate.py").write_text(WRONG, encoding="utf-8")
-    reader = _Logic(NORMALISATION | {"changes_result": True})
+    reader = _Logic(NORMALISATION)
     reader.repaired = {"simulate.py": RIGHT}
     engine._client = reader
     assert await engine._code_review_gate(WITH_PLAN) is None
@@ -123,11 +123,14 @@ async def test_a_wrong_normalisation_is_sent_to_a_repair_request_without_a_value
     assert "E1 divides by the length" in said and "divide by cell['c']" in said and "### simulate.py" in said
     assert "0.123456789" not in said and pairs.PLACEHOLDER in said, "no value of the plan's reaches the repair"
     assert "has NOT crashed" in said
-    # The repaired code is not read again: the code is read once.
+    # The repaired code is read again and nothing is left.
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RIGHT
     record = cr.load(engine.quest_root)
-    assert record["send_backs"] == 1 and len(reader.prompts) == 1
-    assert [i["outcome"] for i in record["issues"].values()] == ["fixed"]
+    assert record["problems"] == [] and record["final"] is True and record["send_backs"] == 1
+    assert cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
+    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
+    assert len(reader.prompts) == 2 and "Findings still open in the version before this one" in reader.prompts[1]
+    assert "E1 divides by the length" in reader.prompts[1].split("Findings still open", 1)[1]
 
 
 @pytest.mark.asyncio
@@ -163,14 +166,16 @@ async def test_a_false_high_severity_constant_does_not_stop_a_correct_quest(tmp_
 
 
 @pytest.mark.asyncio
-async def test_a_high_severity_constant_the_results_confirm_does_not_stop_the_quest(tmp_path: Path) -> None:
+async def test_a_high_severity_constant_the_results_confirm_is_the_honest_stop(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._client = _Logic(CONSTANT, always=True)
     assert await engine._code_review_gate(STATE, final=True) is None
     flat = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 1.0}, {"c": 0.5, "quality_factor": 1.0}]}}
-    # The reader's word is an opinion: a constant can be the finding itself, so even results that confirm it do not stop the quest.
-    assert engine._no_results_verdict(flat) is None
-    # A result that cannot tell (the quantity appears once) leaves the reviewer's word alone: no stop either.
+    verdict = engine._no_results_verdict(flat)
+    assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
+    stuck = await engine._node_stuck_no_findings({**flat, "evidence_assessment": verdict})
+    assert "is a constant in the run's results" in stuck["stuck"]["problem"]
+    # A result that cannot tell (the quantity appears once) leaves the reviewer's word alone: no stop.
     alone = _engine(tmp_path / "b")
     alone._client = _Logic(CONSTANT, always=True)
     await alone._code_review_gate(STATE, final=True)

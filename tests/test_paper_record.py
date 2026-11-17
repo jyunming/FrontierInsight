@@ -327,7 +327,7 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
                               "plan.")
 
 
-def test_an_open_code_finding_that_changes_a_result_is_not_an_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_open_code_finding_that_changes_a_result_is_an_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import code_review
 
     root, _ = _quest(tmp_path, "kinetics_s1")
@@ -337,7 +337,8 @@ def test_an_open_code_finding_that_changes_a_result_is_not_an_item(tmp_path: Pat
                          {"fid": "low", "text": "a variable name is unclear", "severity": "low", "kind": "logic"}]}
     monkeypatch.setattr(code_review, "open_findings", lambda q, c: found)
     items = [i for i in paper_facts.required_items(root) if i.kind == "code_finding"]
-    assert items == [], "a reader's finding is its opinion: QUALITY.md lists it, the paper's Limitations do not"
+    assert [i.id for i in items] == ["finding-abc"]
+    assert "the variance of k uses n instead of n - 1" in items[0].sentence
 
 
 LIMITS_OK = ("# Kinetics\n\n## Methods\nWe used {{seed}}; the run took {{run_time}}, {{time_limit_met}} the limit.\n\n"

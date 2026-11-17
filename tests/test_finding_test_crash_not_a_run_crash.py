@@ -115,10 +115,13 @@ def _findings(root: Path) -> list[Any]:
     return [i for i in paper_facts.required_items(root) if i.kind == paper_facts.CODE_FINDING]
 
 
-def test_an_unshown_finding_is_no_limitation_of_the_paper_whether_or_not_the_code_changes_after_the_review(tmp_path: Path) -> None:
+def test_an_unshown_finding_stays_in_the_paper_when_the_code_changes_after_the_review(tmp_path: Path) -> None:
     root, issue = _reviewed_then_changed(tmp_path, [FENCED_CALL])
     assert issue["errored_only"] is True
-    assert _findings(root) == [], "a reader's finding is its opinion: it is listed in the quality report, not a Limitations item"
+    [item] = _findings(root)
+    assert "a possible problem with the dose is a typed-in value" in item.sentence
+    assert "every test written for it failed to run" in item.sentence and "not checked again" in item.sentence
+    assert "can change a reported result" not in item.sentence
 
 
 def test_a_later_test_that_ran_and_passed_is_not_said_to_have_failed_to_run(tmp_path: Path) -> None:
@@ -127,6 +130,22 @@ def test_a_later_test_that_ran_and_passed_is_not_said_to_have_failed_to_run(tmp_
         tmp_path, [FENCED_CALL, passing], code=CRASHES + "\n\ndef other():\n    return 60.0\n")
     assert issue["errors"] and issue["errored_only"] is False
     assert _findings(root) == [], "a test that ran and passed is not 'no test could show it'"
+
+
+def test_a_finding_about_a_function_the_run_never_calls_stays_out(tmp_path: Path) -> None:
+    calls_helper = FENCED_CALL.replace("dose()", "helper()")
+    root, issue = _reviewed_then_changed(
+        tmp_path, [calls_helper], problem={"file_rel": "experiment.py", "function": "helper"},
+        code="def helper():\n    return {}['missing']\n\n\ndef dose():\n    return 59.0\n\n\nprint(dose())\n")
+    assert issue["errored_only"] is True
+    # the same finding about a function the run does call is said: the exclusion is the only difference
+    record = code_review.load(root)
+    record["problems"][0]["function"] = "dose"
+    code_review.save(root, record)
+    assert len(_findings(root)) == 1
+    record["problems"][0]["function"] = "helper"
+    code_review.save(root, record)
+    assert _findings(root) == []
 
 
 def test_a_finding_the_runs_results_contradict_stays_out(tmp_path: Path) -> None:
