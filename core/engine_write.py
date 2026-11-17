@@ -3231,9 +3231,11 @@ class WriteStageMixin:
                           if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                           and (" ".join(str(c["claim"]).split()) in flat
                                or any(_same_statement(str(c["claim"]), s) for s in sentences))]
-            # The passage match widens the Limitations listing only; the take-out of sentences with a number below is given
-            # exactly the claims that matched by wording, as before.
-            standing = [c for c in grounding.get("claims") or []
+            # A claim found by its stored passage also goes to the take-out when its fault takes the sentence out: the take-out
+            # cuts only a sentence equal to that passage (FI's own id table), so the claim's wording adds nothing there, and
+            # a check that quotes half of a two-value sentence left its sentence in the paper. An older claim with no fault
+            # keeps the rule FI applied then: its sentence is taken out only when its wording matched.
+            standing =[c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
             # A sentence whose claim's fault takes it out (a number not in the record, a true value under a wrong setting or
@@ -3249,7 +3251,7 @@ class WriteStageMixin:
             removed: list[dict[str, Any]] = []
             try:
                 text, removed = self._plan_take_out_unsupported_numbers(
-                    state, paper_path, [c for c in by_wording if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT],
+                    state, paper_path, [c for c in standing if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT],
                     unnamed=[c for c in by_wording if c.get("fault") is None])
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
