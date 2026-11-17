@@ -57,7 +57,9 @@ are listed under Further reading, and exported as `paper/further_reading.bib` / 
 trace to the experiment, to words quoted from a cited source (the quote must be
 in the source, however that source's PDF rendered its mathematics or spaced its
 words; a quote spanning a formula the stored text lost is not found), or are
-unsupported (unsupported claims force a revise). The
+unsupported (unsupported claims force a revise). A sentence still unconfirmed
+when the paper is delivered stays where it is, listed in the Limitations and marked
+beside it *(unconfirmed; see Limitations)*. The
 check reads every finding the run recorded, whole, with the results branches
 those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each
