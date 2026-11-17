@@ -2036,10 +2036,10 @@ _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?|<!-- /?fi:unconfirmed -->")
 #: FI's mark beside a sentence of the writer's that its last claim check found supported by neither the run's results nor
 #: a cited source (Engine._state_unsupported_claims places it from its record, at the last step before delivery): the
-#: sentence stays where it is and a reader is told, where it stands, that the Limitations list it as unconfirmed. Its own
+#: sentence stays where it is and a reader is told, where it stands, that it is unconfirmed (the Limitations list it). Its own
 #: marker, not a placeholder: render() keeps it as written, the writer is never given it (:func:`to_placeholders`) and no
 #: check of the writer's text reads it (:func:`without_blocks`).
-UNCONFIRMED_MARK = "<!-- fi:unconfirmed --> (unconfirmed; see Limitations)<!-- /fi:unconfirmed -->"
+UNCONFIRMED_MARK = "<!-- fi:unconfirmed --> (unconfirmed)<!-- /fi:unconfirmed -->"
 _UNCONFIRMED = re.compile(r"<!-- fi:unconfirmed -->.*?<!-- /fi:unconfirmed -->", re.S)
 _ITEM_KEY = "not_done-"
 #: Where no reader sees a placeholder as text: a code block or inline code, math, an HTML comment (not FI's own markers).

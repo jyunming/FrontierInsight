@@ -59,7 +59,7 @@ in the source, however that source's PDF rendered its mathematics or spaced its
 words; a quote spanning a formula the stored text lost is not found), or are
 unsupported (unsupported claims force a revise). A sentence still unconfirmed
 when the paper is delivered stays where it is, listed in the Limitations and marked
-beside it *(unconfirmed; see Limitations)*. The
+beside it *(unconfirmed)*. The
 check reads every finding the run recorded, whole, with the results branches
 those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each

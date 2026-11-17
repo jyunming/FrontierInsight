@@ -18,7 +18,7 @@ LISTED = "The sorting order stays stable"
 GOOD = "The board held 12 tiles."
 PAPER = (f"# T\n\n## Abstract\nThe study counts tiles. {CUT} Done.\n\n## Results\n{SOFT}. {GOOD}\n\n- {LISTED}.\n\n"
          "## Limitations\nFew settings were run.\n\n## References\n1. A.\n")
-MARK = " (unconfirmed; see Limitations)"
+MARK = " (unconfirmed)"
 
 
 def _claim(text: str, basis: str, passage: str | None = None, fault: str | None = None) -> dict:
@@ -122,7 +122,7 @@ def test_no_writer_and_no_check_of_the_writers_text_reads_the_mark(tmp_path: Pat
     marked = _run(eng, path)
     assert MARK.strip() not in paper_facts.to_placeholders(marked)  # the passage editor and every rewrite
     assert MARK.strip() not in paper_facts.without_blocks(marked)  # the claim, statistics and record checks
-    assert eng._kept_draft({"paper_md": str(path)}).count("unconfirmed;") == 0  # type: ignore[arg-type]
+    assert MARK not in eng._kept_draft({"paper_md": str(path)})  # type: ignore[arg-type]
 
 
 def test_a_rendered_paper_keeps_its_marks(tmp_path: Path) -> None:
@@ -186,3 +186,12 @@ def test_a_receipt_for_an_earlier_draft_does_not_move(tmp_path: Path) -> None:
     _run(eng, path)
     rec = json.loads(receipts.path(eng.quest_root, "citation_check").read_text(encoding="utf-8"))
     assert rec["input_hashes"]["paper"] == receipts.sha256(b"an earlier draft")
+
+
+def test_a_later_call_takes_the_marks_out_even_when_the_check_gave_no_answer(tmp_path: Path) -> None:
+    """A call that is not the last step before delivery returns early when the claim check has no answer: it still takes
+    the marks out first (they were placed from an earlier record)."""
+    eng, path = _engine(tmp_path)
+    assert MARK in _run(eng, path)
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": {"status": "failed"}})  # type: ignore[arg-type]
+    assert "fi:unconfirmed" not in path.read_text(encoding="utf-8")

@@ -3220,6 +3220,12 @@ class WriteStageMixin:
         last step before delivery), so each sentence of a claim still standing that FI places exactly also gets FI's mark
         where it stands (:meth:`_mark_unconfirmed`); every other call takes the marks out. Returns how many claims are
         stated."""
+        if not mark:
+            # Only the last step before delivery places marks: any other call takes them out first, also when it then
+            # returns early (the claim check off or without an answer).
+            now = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+            if now and Path(now).is_file():
+                self._mark_unconfirmed(now, [])
         if not self.config.engine.claim_grounding:
             return 0
         grounding = state.get("claim_grounding") or {}
