@@ -103,9 +103,7 @@ class ReviewStageMixin:
             ),
             user_feedback_block=_user_feedback_review_block(state),
             # What a second model's reading of the code left open: a claim resting on it is not established.
-            # a second reading's findings are its opinion: QUALITY.md lists them, the review is given FI's own comparison only
-            code_findings_block=(f"\n\n## Open points in the code (FI's own check)\n{own}" if (own := _code_review.second_version_block(
-                self.quest_root)) else ""),
+            code_findings_block=_code_review.review_block(self.quest_root, self.quest_root / "code"),
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.

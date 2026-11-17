@@ -93,17 +93,11 @@ class GateResult:
     #: When FI writes the analysis (core/analysis_frame.py): the function of derive.py FI's record of the run names as the
     #: one that failed, was refused or is still FI's stub (``""``: none, or a statement of derive.py outside its functions).
     body: str = ""
-    #: When FI writes the analysis: for each declared result, the settings of the copy (those with a completed trial) at
-    #: which FI's record of the run holds a value of it, and the figures it drew (``None``: the record could not be read).
-    held: dict[str, list[str]] | None = None
-    drawn: list[str] | None = None
 
     def record(self) -> dict[str, Any]:
         return {"ok": self.ok, "stage": self.stage, "kind": self.kind, "where": self.where, "detail": self.detail,
                 "exception": self.exception, "unfilled": self.unfilled, "late": self.late, "seconds": self.seconds,
-                "left_out": self.left_out, **({"body": self.body} if self.body else {}),
-                **({"held": self.held} if self.held is not None else {}),
-                **({"drawn": self.drawn} if self.drawn is not None else {})}
+                "left_out": self.left_out, **({"body": self.body} if self.body else {})}
 
     def says(self) -> str:
         if self.ok:
@@ -504,9 +498,7 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
 
         if _analysis.is_fis_file(scratch / "code" / _analysis.EXPERIMENT_FILE):
             # The analysis is FI's: its own record of the run says which function of the study's failed (FI's lines never do).
-            got = await asyncio.to_thread(_fis_analysis_result, scratch, run, protocol, seconds, left_out)
-            got.held, got.drawn = await asyncio.to_thread(results_held, scratch)
-            return got
+            return await asyncio.to_thread(_fis_analysis_result, scratch, run, protocol, seconds, left_out)
         where = _trials.last_frame(err, scratch)
         exc = last_exception(err)
         if run.returncode != 0:
@@ -622,75 +614,6 @@ def _unfilled_headlines(scratch: Path, protocol: dict[str, Any] | None) -> list[
     carried = set(records.metrics())
     filled = records.fillable()
     return [m for m, role in _contract.raw_roles(protocol).items() if role == "result" and m in carried and m not in filled]
-
-
-def _has_value(v: Any) -> bool:
-    return v is not None and not (isinstance(v, float) and not math.isfinite(v))
-
-
-def results_held(scratch: Path) -> tuple[dict[str, list[str]] | None, list[str] | None]:
-    """What FI's analysis gave in a run on ``scratch``, from FI's own record of that run (core/analysis_frame.py): for each
-    declared result the settings with a completed trial at which it holds a value (one value for the whole study, or a
-    value for some level compared inside the runs, counts for every such setting), and the ids of the figures it drew.
-    ``(None, None)`` when the record or the copy's trials cannot be read."""
-    from . import analysis_frame as _analysis
-
-    try:
-        record = _analysis.read_record(scratch)
-        cells = json.loads((scratch / "raw" / "trials.json").read_text(encoding="utf-8")).get("cells") or []
-    except (OSError, ValueError, AttributeError):
-        return None, None
-    if not isinstance(record, dict) or not isinstance(record.get("derived"), dict) or record.get("from_earlier_run"):
-        return None, None
-    settings: set[str] = set()
-    for c in cells if isinstance(cells, list) else []:
-        try:
-            if isinstance(c, dict) and int(c.get("ok") or 0) > 0:
-                settings.add(str(c.get("key")))
-        except (TypeError, ValueError):
-            continue
-    held: dict[str, list[str]] = {}
-    for name, rec in record["derived"].items():
-        if not isinstance(rec, dict):
-            continue
-        at: set[str] = set()
-        levels = rec.get("by_level")
-        level_values = levels.get("values") if isinstance(levels, dict) else None
-        if _has_value(rec.get("value")) or (isinstance(level_values, dict)
-                                            and any(_has_value(v) for v in level_values.values())):
-            at = set(settings)
-        per = rec.get("by_setting")
-        if isinstance(per, dict):
-            at |= {str(k) for k, v in per.items() if _has_value(v) and str(k) in settings}
-        held[str(name)] = sorted(at)
-    drawn = sorted(str(f.get("id")) for f in record.get("figures") or []
-                   if isinstance(f, dict) and f.get("status") == "ok")
-    return held, drawn
-
-
-def results_lost(before: GateResult | None, after: GateResult | None) -> str:
-    """Why a change of the code cannot stay because FI's analysis, run on the same trials, gives less than it gave on the
-    code before the change: a declared result with no value at a setting where it had one (a change from one value to one
-    for each setting that keeps every value is not a loss), or a figure that was drawn and is not. ``""`` when nothing is
-    lost, or either run left no record to compare (``held`` is ``None``)."""
-    if before is None or after is None or before.held is None or after.held is None:
-        return ""
-    lost = []
-    for name, at in sorted(before.held.items()):
-        gone = sorted(set(at) - set(after.held.get(name) or []))
-        if gone:
-            lost.append(f"`{name}` had a value at {len(at)} setting(s) and has none at {len(gone)} of them now "
-                        f"(for example {gone[0]})")
-    figures = sorted(set(before.drawn or []) - set(after.drawn or [])) if before.drawn is not None else []
-    parts = lost[:4]
-    if figures:
-        why = after.detail if after.stage == "derive" and after.body.startswith("figure_") else ""
-        parts.append(", ".join(f"figure `{f}`" for f in figures) + " was drawn and is not drawn now"
-                     + (f" ({why[:240]})" if why else ""))
-    if not parts:
-        return ""
-    return ("FI's analysis on the same trials gives less than it gave before this change: " + "; ".join(parts)
-            + ". A repair keeps every result and figure the analysis gave before.")
 
 
 def gate_verdict(before: GateResult | None, after: GateResult) -> Verdict:

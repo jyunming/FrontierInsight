@@ -33,18 +33,73 @@ async def _first_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, exp
 
 
 @pytest.mark.asyncio
-async def test_a_version_changed_after_the_one_reading_is_not_read_again(tmp_path: Path,
-                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_part_nobody_changed_is_not_read_again_and_a_changed_one_is(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     engine, reader = await _first_reading(tmp_path, monkeypatch)
     code = engine.quest_root / "code"
     before = cr.load(engine.quest_root)["reader_calls"]
-    # a part changes after the reading (a new line at the end of experiment.py): the code is read once, so nothing is asked
+    # only experiment.py changes (a new line at its end, so no line of simulate.py moves)
     (code / "experiment.py").write_text(CALLER + "other = 3\n", encoding="utf-8")
     reader.prompts.clear()
     await engine._code_review_gate(WITH_PLAN)
-    assert reader.prompts == [], "the one reading is spent: the changed part is not asked"
+    assert len(reader.prompts) == 1, "only the part that changed is asked"
+    assert "### experiment.py" in reader.prompts[0]
     record = cr.load(engine.quest_root)
-    assert record["reader_calls"] == before and record["read_version"] != cr.version(code)
+    assert record["reader_calls"] == before + 1
+    assert record["parts_reused"] == 1 and [r.get("reused") for r in record["requests"]] == [True, None]
+    # the reused part still counts: every requirement is judged from both parts' answers
+    assert record["problems"] == [] and record["verdicts"]
+
+
+@pytest.mark.asyncio
+async def test_a_part_is_reused_when_only_a_function_it_calls_in_another_part_changed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    code = engine.quest_root / "code"
+    # run_cell (in simulate.py) changes; experiment.py, which calls it, is the same text: the reader is shown only its part
+    (code / "simulate.py").write_text(SIM.replace("1.0", "2.0"), encoding="utf-8")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert len(reader.prompts) == 1 and "### simulate.py" in reader.prompts[0]
+    assert cr.load(engine.quest_root)["parts_reused"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_changed_settings_file_is_read_again_only_by_the_request_that_shows_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _write(engine.quest_root / "code", {"simulate.py": SIM, "experiment.py": CALLER, "study.json": '{"a": 1}\n'})
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 600)
+    reader = _PartReader()
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    n = len(reader.prompts)
+    (engine.quest_root / "code" / "study.json").write_text('{"a": 2}\n', encoding="utf-8")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert n >= 2 and len(reader.prompts) == 1, "only the request that shows the settings file is a new question"
+
+
+@pytest.mark.asyncio
+async def test_a_part_is_kept_when_only_something_it_does_not_use_changed(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    code = engine.quest_root / "code"
+    (code / "simulate.py").write_text(SIM + "def unrelated_helper(z):\n    return z\n", encoding="utf-8")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert len(reader.prompts) == 1 and "### simulate.py" in reader.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_changed_plan_is_a_new_question_so_nothing_is_reused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    code = engine.quest_root / "code"
+    (code / "experiment.py").write_text(CALLER + "other = 3\n", encoding="utf-8")
+    plan = {**WITH_PLAN, "design": {**WITH_PLAN["design"], "protocol": {
+        **WITH_PLAN["design"]["protocol"], "grid": {"c": [0.2, 0.5, 1.0, 2.0]}}}}
+    reader.prompts.clear()
+    await engine._code_review_gate(plan)
+    assert len(reader.prompts) == 2
 
 
 @pytest.mark.asyncio
@@ -62,6 +117,19 @@ async def test_a_reply_is_kept_under_the_text_sent_and_the_model_and_the_same_te
     reader.prompts.clear()
     await engine._code_review_gate(WITH_PLAN)
     assert reader.prompts == [], "the same text to the same model is not asked again"
+
+
+@pytest.mark.asyncio
+async def test_the_cap_still_stops_a_reading_it_cannot_cover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    (engine.quest_root / "code" / "experiment.py").write_text(CALLER + "other = 3\n", encoding="utf-8")
+    # 2 requests are used; the one changed part needs 1 more: 2 cannot cover it
+    monkeypatch.setattr(cr, "MAX_READER_CALLS", 2)
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    record = cr.load(engine.quest_root)
+    assert reader.prompts == [] and "not read in full" in record["error"] and "needs 1 more" in record["error"]
+    assert record["parts_not_read"] and "experiment.py" in record["parts_not_read"][0]
 
 
 @pytest.mark.asyncio
@@ -122,3 +190,15 @@ def test_the_quality_report_names_the_parts_of_the_code_that_were_not_read(tmp_p
         "parts_not_read": ["part 2 of 2 (experiment.py lines 1-24)"]}), encoding="utf-8")
     text = qr.render(qr.build(root))
     assert "not read by a second model." in text and "part 2 of 2 (experiment.py lines 1-24)" in text
+
+
+@pytest.mark.asyncio
+async def test_a_part_is_asked_again_when_the_findings_of_the_version_before_it_is_shown_changed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The earlier findings are part of the text the reader is sent, so a new one is a new question (the old key left them out)."""
+    engine, reader = await _first_reading(tmp_path, monkeypatch)
+    (engine.quest_root / "code" / "experiment.py").write_text(CALLER + "other = 3"+chr(92)+"n", encoding="utf-8")
+    monkeypatch.setattr(cr, "earlier_block", lambda previous: "- L1 an earlier finding about simulate.py line 2")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert len(reader.prompts) == 2 and all("an earlier finding" in p for p in reader.prompts)

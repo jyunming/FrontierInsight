@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import code_findings as _code_findings
+from . import code_reach as _code_reach
+from . import code_review as _code_review
 from .contract import figure_file
 from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
@@ -337,9 +340,55 @@ class ResultChecksMixin:
                       _degenerate.gap_note(gaps))]
 
     def _code_reader_findings(self, result_json: Any) -> list[Found]:
-        """Nothing: a reader's finding that the code computes a quantity differently from the plan is its opinion of the
-        code, listed in QUALITY.md; it takes no result out of the analysis or the paper."""
-        return []
+        """The quantities the plan names that the code computes differently (a second model's finding on the version that ran,
+        left standing by the repairs) and that the run's results hold under a name that begins with the plan's. They are left
+        out: the paper may not present a number under a definition the code does not compute. A finding about a quantity the
+        results do not hold has nothing to leave out (the writer's note about requirements not met covers it)."""
+        try:
+            differing = _code_review.differing_quantities(self.quest_root, self.quest_root / "code")  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not read the code reader's findings against the results (%r)", exc)  # type: ignore[attr-defined]
+            return []
+        found: list[Found] = []
+        issues = _code_review.load(self.quest_root).get("issues") or {}  # type: ignore[attr-defined]
+        never_run = _code_reach.never_run_in(self.quest_root)  # type: ignore[attr-defined]
+        twice = _code_review.plan_defined_twice(self.quest_root)  # type: ignore[attr-defined]
+        for q in differing:
+            # Only "computed differently": a quantity called missing that the results hold is one the reader got wrong
+            # (:func:`core.code_review.resolve_headline` says so for the headline; the writer's note covers the rest).
+            if q["status"] != _code_review.DIFFERENT:
+                continue
+            # Not taken out when FI's own record contradicts the reader: a test written to show the fault passed on the code
+            # (it was not shown), or the function it names is never run (core/code_reach.py). A finding no test was written
+            # for still takes the quantity out: a real paper reported standard deviations under the plan's name for mean
+            # absolute errors, and its reader, never tested, was right.
+            issue = issues.get(q.get("fid")) if isinstance(issues, dict) else None
+            if (isinstance(issue, dict) and issue.get("demonstrated") is False) or never_run(q.get("file_rel"), q.get("function")):
+                continue
+            # A name the plan defines two ways, or a finding marked as one about the plan, is not left out by the reader's word
+            # alone but not kept by that mark either (the mark is a model's judgement): the value stays only when FI holds a
+            # check it measured itself, that passed, and that reads this quantity.
+            contested = ("twice" if _code_review.is_defined_twice(q["name"], twice) else
+                         "plan_problem" if isinstance(issue, dict) and (issue.get("plan_conflict")
+                                                                       or issue.get("outcome") == _code_findings.PLAN_PROBLEM) else "")
+            if contested and _code_review.passing_checks(self.quest_root, q["name"]):  # type: ignore[attr-defined]
+                continue
+            keys = sorted(_code_review.named_in_results(q["name"], result_json))
+            if not keys:
+                continue
+            what = "computed differently from the plan"
+            why = q["note"].rstrip(".") or what
+            if contested:
+                why += ("; the plan defines it in two ways" if contested == "twice" else "; the finding is marked as one about the plan")
+                why += ", and FI holds no passing check of its value"
+            note = f"the plan's {q['kind']} `{q['name']}` is {what} in the code ({why})"
+            # A second model's word alone never keeps a result out of the analysis (core/run_checks.py would strip it from the
+            # input of derive.py): the evidence gate decides after a test shows the claim and a rerun moves a number
+            # (engine._measure_reader_findings, _keep_measured). Until then the claim is recorded with its keys, which stay in.
+            say = (f"A second model compared the code with the plan and found that `{q['name']}` is {what} ({why}). No test of "
+                   f"FI's has shown it yet, so {', '.join('`' + k + '`' for k in keys[:6])} stays in the results for now.")
+            found.append(Found("code_reader", ANALYSIS, "", note, say, quantity=q["name"], contested=contested, claimed=keys))
+        return found
 
     def _degenerate_findings(self, state: Any, result_json: Any, cells: list[dict[str, Any]]) -> list[Found]:
         from . import engine as _e

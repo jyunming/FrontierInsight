@@ -11,16 +11,35 @@ from core.engine import Engine
 from tests.test_plan_defines_twice import ONCE, RESULT, _quest
 
 
-def test_a_reader_claim_about_a_quantity_is_not_looked_for_in_the_results_and_leaves_nothing_out(tmp_path: Path) -> None:
+def test_an_untested_reader_claim_is_recorded_but_leaves_nothing_out(tmp_path: Path) -> None:
     quest = _quest(tmp_path, ONCE)
-    assert quest._code_reader_findings(RESULT) == [], "a second model's finding is its opinion: no check is made of it"
+    found = quest._code_reader_findings(RESULT)
+    assert len(found) == 1 and found[0].keys == [] and set(found[0].claimed) == {"quantity_a", "quantity_a_ci"}
     path = quest.quest_root / "needs" / "RESULT_CHECK.json"
-    quest._leave_out_results([], path, RESULT)
-    record = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    assert record.get("removed_quantities", []) == [] and record.get("removed_values", {}) == {}
+    quest._leave_out_results(found, path, RESULT)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["removed_quantities"] == [] and record["removed_values"] == {}
+    assert record["checks"][0]["keys"] == ["quantity_a", "quantity_a_ci"]  # the gate measures it from this record
     assert result_checks.left_out_by_record(quest.quest_root) == {}  # so the analysis input keeps every metric
-    tested = _quest(tmp_path / "b", ONCE, issue={"demonstrated": True})
-    assert tested._code_reader_findings(RESULT) == [], "not even one a test of the reader's showed"
+    assert "stays in the results" in record["say"] and "Do NOT" not in record["say"]
+
+
+def test_a_demonstrated_claim_is_not_left_out_before_the_rerun_either(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, ONCE, issue={"demonstrated": True})
+    found = quest._code_reader_findings(RESULT)
+    assert len(found) == 1 and found[0].keys == []
+
+
+def test_the_gate_keeps_a_claim_no_test_shows_and_removes_one_a_rerun_moved(tmp_path: Path) -> None:
+    quest = _quest(tmp_path, ONCE)
+    path = quest.quest_root / "needs" / "RESULT_CHECK.json"
+    quest._leave_out_results(quest._code_reader_findings(RESULT), path, RESULT)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    for c in record["checks"]:
+        c["measured"] = {"status": "not_shown"}
+    result_checks._keep_measured(record, list(record["checks"]))
+    assert record["removed_quantities"] == [] and record["kept_differences"][0]["measured"]["status"] == "not_shown"
+    assert "FI could not show it" in record["say"]
 
 
 def test_a_bounded_quantity_fi_took_out_is_not_asked_for_again(tmp_path: Path) -> None:

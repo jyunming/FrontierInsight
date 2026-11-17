@@ -118,16 +118,40 @@ def _printed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 PAPER = "# P\n\n## Methods\n{{run_facts}}\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n"
 
 
-def test_a_reader_s_finding_about_a_result_the_paper_prints_is_not_in_the_paper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fi_writes_a_sentence_for_a_touched_result_the_paper_prints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _printed(tmp_path, monkeypatch)
-    for md in (PAPER, None):
-        text = paper_facts.run_facts_text(root, paper_md=md) if md else paper_facts.run_facts_text(root)
-        assert "comes from code" not in text and "cover is scaled twice" not in text, "a reader's opinion is not a fact FI states"
+    text = paper_facts.run_facts_text(root, paper_md=PAPER)
+    assert "comes from code a review flagged" in text and "cover is scaled twice" in text
+    assert "comes from code" not in paper_facts.run_facts_text(root), "without the paper's text nothing is marked"
+    assert "comes from code" not in paper_facts.run_facts_text(root, paper_md="# P\n\n{{v:est_a @ n=all}}\n")
+
+
+def test_the_sentence_is_placed_even_when_it_is_the_only_run_fact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _printed(tmp_path, monkeypatch)
+    draft = "# P\n\n## Methods\nWe did it.\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n"
+    placed = paper_facts.place_blocks(draft, root)
+    assert "{{run_facts}}" in placed
+    assert "scaled twice" in paper_facts.render(placed, root).text
+
+
+def test_the_sentence_is_in_the_rendered_paper_and_the_finding_is_met(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _printed(tmp_path, monkeypatch)
     out = paper_facts.render(PAPER, root).text
-    assert "scaled twice" not in out
     paper_facts.keep_check(root, [], out)
     kept = paper_facts.kept_check(root)
-    assert [u for u in kept.get("unmet_items", []) if u["kind"] == paper_facts.CODE_FINDING] == [], "and the paper owes no sentence for it"
+    assert [u["id"] for u in kept["unmet_items"] if u["kind"] == paper_facts.CODE_FINDING] == ["finding-f2"]
+    md = chr(10).join(quality_report._paper_record_lines({"paper_check": {"unmet_items": kept["unmet_items"]}}))
+    lines = [ln for ln in md.splitlines() if "`finding-f2`" in ln]
+    assert len(lines) == 1 and lines[0].startswith("- FI could not name a printed result this finding changes")
+    assert "Limitations" not in lines[0]
+
+
+def test_the_sentence_counts_only_inside_fi_s_run_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _printed(tmp_path, monkeypatch)
+    sentence = paper_facts.touched_sentences(root, PAPER)["f1"]
+    stray = "# P\n\n## Methods\nWe did it.\n\n> " + sentence + "\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n"
+    paper_facts.keep_check(root, [], stray)
+    assert "finding-f1" in {u["id"] for u in paper_facts.kept_check(root)["unmet_items"]}
 
 
 OLDER = {k: v for k, v in PROTOCOL.items() if k != "form"}
@@ -145,9 +169,8 @@ def test_a_plan_in_the_older_form_still_places_a_finding_in_a_function_the_trial
     root = _older(tmp_path, monkeypatch, [_v("f1", "the helper of the second quantity is off", "model.py", "helper_for_b", changes_result=True)], [])
     assert shown_reach.Reach(root, OLDER, []).ids == [], "the reach alone holds no ids for this form"
     assert paper_facts._reach(root).ids, "the paper's reading passes the plan's own result ids"
-    sentences = paper_facts.touched_sentences(root, OLDER_PAPER)
-    assert "helper of the second quantity is off" in sentences["f1"]
-    assert "helper of the second quantity is off" not in paper_facts.run_facts_text(root, paper_md=OLDER_PAPER), "not in the paper"
+    text = paper_facts.run_facts_text(root, paper_md=OLDER_PAPER)
+    assert "comes from code a review flagged" in text and "helper of the second quantity is off" in text
 
 
 def test_a_finding_with_no_function_on_a_metric_problem_names_that_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,11 +178,32 @@ def test_a_finding_with_no_function_on_a_metric_problem_names_that_result(tmp_pa
     problems = [{"id": "R2", "fid": "m1", "kind": "metric", "name": "est_b", "text": "the result reports est_b"}]
     root = _older(tmp_path, monkeypatch, flagged, problems)
     assert paper_facts.touched_sentences(root, OLDER_PAPER).keys() == {"m1"}
-    assert "reported without its reference" in paper_facts.touched_sentences(root, OLDER_PAPER)["m1"]
-    assert "reported without its reference" not in paper_facts.run_facts_text(root, paper_md=OLDER_PAPER), "not in the paper"
+    assert "reported without its reference" in paper_facts.run_facts_text(root, paper_md=OLDER_PAPER)
     other = [{"id": "R2", "fid": "m1", "kind": "metric", "name": "not_a_result", "text": "x"}]
     root2 = _older(tmp_path / "b", monkeypatch, flagged, other)
     assert paper_facts.touched_sentences(root2, OLDER_PAPER) == {}, "a metric the plan does not declare places nothing"
+
+
+def test_a_finding_on_a_dependent_variable_stays_unplaced_and_quality_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flagged = [_v("d1", "the spread against the reference is missing", changes_result=True)]
+    problems = [{"id": "R1", "fid": "d1", "kind": "dependent variable", "name": "est_b", "text": "the dependent variable est_b"}]
+    root = _older(tmp_path, monkeypatch, flagged, problems)
+    assert paper_facts.touched_sentences(root, OLDER_PAPER) == {}
+    out = paper_facts.render(OLDER_PAPER, root).text
+    paper_facts.keep_check(root, [], out)
+    kept = paper_facts.kept_check(root)
+    md = chr(10).join(quality_report._paper_record_lines({"paper_check": kept}))
+    assert "FI could not name a printed result this finding changes" in md and "Limitations" not in md
+
+
+def test_a_sentence_FI_can_write_but_the_paper_lacks_is_said_plainly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _printed(tmp_path, monkeypatch)
+    paper_facts.keep_check(root, [], "# P\n\n## Methods\nWe did it.\n\n## Results\nThe value is {{v:cover:mean_ci @ n=all}}.\n")
+    kept = paper_facts.kept_check(root)
+    md = chr(10).join(quality_report._paper_record_lines({"paper_check": kept}))
+    line = next(ln for ln in md.splitlines() if "`finding-f1`" in ln)
+    assert line.startswith("- FI's sentence on the results it may change is not in the paper: ")
+    assert "Limitations" not in md.split("Where the paper still disagrees")[1]
 
 
 def test_an_error_while_placing_findings_is_logged_not_swallowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:

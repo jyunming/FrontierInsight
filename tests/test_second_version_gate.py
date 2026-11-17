@@ -464,4 +464,4 @@ async def test_the_summary_does_not_say_no_second_model_read_the_code_when_one_d
     await engine._second_version_gate(STATE, None, None)
     assert code_review.open_findings(engine.quest_root, code)["unread"] == ""
     claim = " ".join(_claim_findings_parts(engine.quest_root))
-    assert "no second model read the code" not in claim and claim.startswith("TWO INDEPENDENTLY WRITTEN VERSIONS")
+    assert "no second model read the code" not in claim and claim.startswith("A SECOND MODEL'S READING")

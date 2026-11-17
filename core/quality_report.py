@@ -626,15 +626,13 @@ def _unit_problems(q: _Quest) -> list[dict[str, str]]:
 
 
 def _flagged_check_problems(q: _Quest) -> list[dict[str, str]]:
-    """The known-answer checks that a second model's reading of the code flags as computed by flagged code
-    (``core/code_review.py:flagged_checks``). Listed here only: the flag is the reader's opinion and does not change FI's
-    verdict on the check."""
+    """The known-answer checks that passed but that a second model's reading of the code flags as computed by flagged code:
+    not shown, so they do not count as evidence (``core/code_review.py:flagged_checks``)."""
     from . import code_review as _cr
     from . import oracle_check as _oc
 
     names = [str(j["name"]) for j in _oc.last_judged(q.oracle_check)]
-    return [_problem("run", f"a second model flagged the code that computes the check {n!r} ({text}); FI's verdict on the "
-                     "check stands", "a second model reading the code", "not fixed",
+    return [_problem("run", f"the check {n!r} is {_oc.not_shown_words(text)}", "a second model reading the code", "not fixed",
                      ".fi/code_review.json")
             for n, text in _cr.flagged_checks(q.root, q.root / "code", names).items()]
 

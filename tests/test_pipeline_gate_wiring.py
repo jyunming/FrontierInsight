@@ -285,8 +285,7 @@ def _before_the_gate(eng: Engine, monkeypatch: pytest.MonkeyPatch) -> None:
     async def reached(*a: Any, **k: Any) -> None:
         raise _Reached
 
-    # the code is read once, before the run (not in the improve path): the next step after the first gate is the equation gate
-    monkeypatch.setattr(eng, "_equation_gate", reached)
+    monkeypatch.setattr(eng, "_code_review_gate", reached)
 
 
 BROKEN_ANALYSIS = EXPERIMENT.replace("simulate.SCALE for", "simulate.SCALING for")

@@ -83,12 +83,20 @@ def test_the_text_comparison_keeps_the_operators_and_reads_the_formula_sentence(
     assert not twice("quantity_a = mean(error)", "the typical size of the error")  # words: nothing to compare
 
 
-def test_a_reader_finding_takes_no_value_out_whether_the_plan_defines_the_name_once_or_twice(tmp_path: Path) -> None:
-    """A reader's finding is its opinion of the code: QUALITY.md lists it, and no value is withheld for it."""
-    assert _quest(tmp_path / "a", TWICE)._code_reader_findings(RESULT) == []
-    assert _quest(tmp_path / "b", TWICE, check="fail")._code_reader_findings(RESULT) == []
-    for n, extra in enumerate(({"plan_conflict": True}, {"outcome": code_findings.PLAN_PROBLEM}, {"demonstrated": True})):
-        assert _quest(tmp_path / f"c{n}", ONCE, issue=extra)._code_reader_findings(RESULT) == [], extra
+def test_a_name_defined_twice_with_no_passing_check_is_withheld_and_said_so(tmp_path: Path) -> None:
+    found = _quest(tmp_path, TWICE)._code_reader_findings(RESULT)
+    assert len(found) == 1 and found[0].contested == "twice" and set(found[0].claimed) == {"quantity_a", "quantity_a_ci"} and found[0].keys == []
+    assert "two ways" in found[0].note and "no passing check" in found[0].note
+
+
+def test_a_failed_check_does_not_keep_a_flagged_value(tmp_path: Path) -> None:
+    assert len(_quest(tmp_path, TWICE, check="fail")._code_reader_findings(RESULT)) == 1
+
+
+def test_a_finding_marked_as_about_the_plan_with_no_passing_check_is_withheld(tmp_path: Path) -> None:
+    for n, extra in enumerate(({"plan_conflict": True}, {"outcome": code_findings.PLAN_PROBLEM})):
+        found = _quest(tmp_path / str(n), ONCE, issue=extra)._code_reader_findings(RESULT)
+        assert len(found) == 1 and found[0].contested == "plan_problem", extra
 
 
 def test_a_flagged_value_with_a_passing_measured_check_is_kept(tmp_path: Path) -> None:
@@ -96,6 +104,12 @@ def test_a_flagged_value_with_a_passing_measured_check_is_kept(tmp_path: Path) -
     assert _quest(tmp_path / "b", ONCE, issue={"plan_conflict": True}, check="pass")._code_reader_findings(RESULT) == []
     quest = _quest(tmp_path / "c", ONCE, check="pass")  # a check that reads another quantity keeps nothing
     assert cr.passing_checks(quest.quest_root, "quantity_b") == [] and cr.passing_checks(quest.quest_root, "quantity_a") == ["check_a"]
+
+
+def test_a_single_definition_with_a_reader_finding_is_still_taken_out(tmp_path: Path) -> None:
+    found = _quest(tmp_path / "a", ONCE, check="pass")._code_reader_findings(RESULT)  # not contested: a passing check does not overrule
+    assert len(found) == 1 and found[0].kind == "code_reader" and found[0].contested == ""
+    assert len(_quest(tmp_path / "d", ONCE, issue={"demonstrated": True})._code_reader_findings(RESULT)) == 1
 
 
 def _items(root: Path) -> dict[str, str]:

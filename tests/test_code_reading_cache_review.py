@@ -27,6 +27,18 @@ class _SaysNothing(_PartReader):
         return json.dumps({"requirements": [], "findings": [], "checked": [], "summary": "s"})
 
 
+class _LeavesOneOut(_PartReader):
+    """Answers every requirement but the first it is given, in every reply."""
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        reply = await super().chat(messages, **kw)
+        if not reply:
+            return reply
+        data = json.loads(reply)
+        data["requirements"] = data["requirements"][1:]
+        return json.dumps(data)
+
+
 @pytest.mark.asyncio
 async def test_a_follow_up_ask_of_a_part_given_no_requirement_does_not_break_the_reading(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -43,3 +55,22 @@ async def test_a_follow_up_ask_of_a_part_given_no_requirement_does_not_break_the
     assert len(reader.prompts) == 2, "the reply that said nothing is asked once more"
     assert "the call failed" not in str(record.get("error") or ""), record.get("error")
     assert cr.load_reading_cache(engine.quest_root) == {}, "a reply that named nothing of its own is not kept"
+
+
+@pytest.mark.asyncio
+async def test_a_part_answered_only_in_part_is_asked_again_at_the_next_reading(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    _write(code, {"simulate.py": SIM, "experiment.py": EXP})
+    monkeypatch.setattr(cr, "_MAX_CODE_CHARS", 600)
+    assert len(cr.source_parts(code)) == 2
+    reader = _LeavesOneOut()
+    engine._client = reader
+    await engine._code_review_gate(WITH_PLAN)
+    assert reader.prompts, "the code was read"
+    # only experiment.py changes; simulate.py is the same text, but its earlier answer left a requirement out
+    (code / "experiment.py").write_text(EXP + "other = 3\n", encoding="utf-8")
+    reader.prompts.clear()
+    await engine._code_review_gate(WITH_PLAN)
+    assert any("### simulate.py" in p for p in reader.prompts), "the part whose answer was not whole is asked again"
