@@ -197,7 +197,7 @@ async def test_a_part_is_asked_again_when_the_findings_of_the_version_before_it_
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The earlier findings are part of the text the reader is sent, so a new one is a new question (the old key left them out)."""
     engine, reader = await _first_reading(tmp_path, monkeypatch)
-    (engine.quest_root / "code" / "experiment.py").write_text(CALLER + "other = 3"+chr(92)+"n", encoding="utf-8")
+    (engine.quest_root / "code" / "experiment.py").write_text(CALLER + "other = 3\n", encoding="utf-8")
     monkeypatch.setattr(cr, "earlier_block", lambda previous: "- L1 an earlier finding about simulate.py line 2")
     reader.prompts.clear()
     await engine._code_review_gate(WITH_PLAN)

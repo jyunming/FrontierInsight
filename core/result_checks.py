@@ -341,8 +341,9 @@ class ResultChecksMixin:
 
     def _code_reader_findings(self, result_json: Any) -> list[Found]:
         """The quantities the plan names that the code computes differently (a second model's finding on the version that ran,
-        left standing by the repairs) and that the run's results hold under a name that begins with the plan's. They are left
-        out: the paper may not present a number under a definition the code does not compute. A finding about a quantity the
+        left standing by the repairs) and that the run's results hold under a name that begins with the plan's. They are kept
+        as a claim (``claimed``): the keys stay in the results until FI's rerun of the finding at the evidence gate
+        (``_measure_reader_findings``) shows a number moves, and are left out then. A finding about a quantity the
         results do not hold has nothing to leave out (the writer's note about requirements not met covers it)."""
         try:
             differing = _code_review.differing_quantities(self.quest_root, self.quest_root / "code")  # type: ignore[attr-defined]
