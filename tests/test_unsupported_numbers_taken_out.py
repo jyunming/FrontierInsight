@@ -343,28 +343,56 @@ def test_an_older_claim_with_no_fault_kept_only_by_its_stored_passage_is_listed_
     assert "A fit quality of at least 0.9991 holds throughout" in text.split("## Limitations")[1]
 
 
+SPLIT = ("The mean spread is <!-- fi:v {{v:spread_mean @ load=all}} -->0.0314<!-- /fi:v -->, and the peak at load 3 is "
+         "<!-- fi:v {{v:spread_max}} -->0.0927<!-- /fi:v -->.")
+SPLIT_KEYED = "The mean spread is {{v:spread_mean @ load=all}}, and the peak at load 3 is {{v:spread_max}}."
+HALF = "The peak at load 3 is 0.0927."  # three content words: no likeness of wording places it
+
+
+def _split_paper(tmp_path: Path, extra: str = ""):
+    eng, path = _paper(tmp_path)
+    path.write_text(PAPER.replace(GOOD, GOOD + " " + SPLIT + extra), encoding="utf-8")
+    return eng, path
+
+
+def _one(eng, path, claim):
+    g = _grounding()
+    g["claims"] = [claim]
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
+    return path.read_text(encoding="utf-8").split("## Limitations")[0]
+
+
 def test_a_claim_whose_fault_takes_it_out_goes_by_its_passage_when_it_quotes_half_the_sentence(tmp_path: Path) -> None:
     """A check that quotes only the second half of a sentence holding two values, gives fault scope and FI's passage of the
     whole sentence: the sentence is taken out. Old code: the claim's wording matched no sentence, so the take-out never
     saw it and the sentence stayed (a value worked out once for the study, given one setting, reached a paper)."""
-    sentence = ("The mean spread is <!-- fi:v {{v:spread_mean @ load=all}} -->0.0314<!-- /fi:v -->, and the spread at load 3 "
-                "is <!-- fi:v {{v:spread_max}} -->0.0927<!-- /fi:v --> units.")
-    eng, path = _paper(tmp_path)
-    path.write_text(PAPER.replace(GOOD, GOOD + " " + sentence), encoding="utf-8")
-    g = _grounding()
-    g["claims"] = [_claim("The spread at load 3 is 0.0927 units.", "unsupported", "spread_max is the largest over every load",
-                          "The mean spread is {{v:spread_mean @ load=all}}, and the spread at load 3 is {{v:spread_max}} units.",
-                          "scope")]
-    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
-    body = path.read_text(encoding="utf-8").split("## Limitations")[0]
-    assert "0.0927" not in body and "the spread at load 3" not in body
+    from core.engine import _same_statement
+
+    assert not _same_statement(HALF, SPLIT) and HALF.rstrip(".") not in SPLIT  # only the passage places it
+    eng, path = _split_paper(tmp_path)
+    body = _one(eng, path, _claim(HALF, "unsupported", "spread_max is the largest over every load", SPLIT_KEYED, "scope"))
+    assert "the peak at load 3" not in body
     assert GOOD in body and SOFT in body  # the rest of the paper is as it was
+    record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
+    assert [r["claim"] for r in record["removed"]] == [HALF]
+
+
+def test_a_passage_that_is_another_sentence_cuts_nothing(tmp_path: Path) -> None:
+    """The check's passage names a sentence its claim is not about: nothing is cut (the claim stays stated)."""
+    eng, path = _split_paper(tmp_path)
+    body = _one(eng, path, _claim("The sample stayed sterile throughout.", "unsupported", "x", SPLIT_KEYED, "scope"))
+    assert "the peak at load 3" in body
+
+
+def test_a_passage_the_paper_holds_twice_cuts_nothing_by_passage_alone(tmp_path: Path) -> None:
+    """A sentence that stands twice cannot be told apart by its passage: a claim placed only by it cuts neither."""
+    eng, path = _split_paper(tmp_path, "\n\n" + SPLIT)
+    body = _one(eng, path, _claim(HALF, "unsupported", "x", SPLIT_KEYED, "scope"))
+    assert body.count("the peak at load 3") == 2
 
 
 def test_a_wording_claim_found_by_its_passage_still_stays(tmp_path: Path) -> None:
-    """Only the fault decides: a claim whose words go beyond the record (wording) found by its passage is stated, not cut."""
-    eng, path = _paper(tmp_path)
-    g = _grounding()
-    g["claims"] = [_claim("Fit quality holds above the line throughout", "unsupported", "x", TYPED, "wording")]
-    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
-    assert TYPED in path.read_text(encoding="utf-8").split("## Limitations")[0]
+    """Only the fault decides: a claim whose words go beyond the record (wording) placed by its passage is stated, not cut."""
+    eng, path = _split_paper(tmp_path)
+    body = _one(eng, path, _claim(HALF, "unsupported", "x", SPLIT_KEYED, "wording"))
+    assert "the peak at load 3" in body

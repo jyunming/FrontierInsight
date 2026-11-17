@@ -22,7 +22,8 @@ from .engine_base import (  # noqa: F401
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
     _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
-    _parse_json_lenient, _passage_stands, _phased, _place_figures, _places_as_placeholders, _plan_settings,
+    _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders,
+    _plan_settings,
     _quote_in_source, _raise_if_required_skills_unusable, _read_json_or_none_path, _receipts, _record_claims, _refine,
     _refine_count, _refine_round, _reorder_literature, _replicate_result_intervals, _rerun_from,
     _resolve_selected_skills, _results_by_setting, _retractions, _review_items, _review_sends_the_experiment_back,
@@ -3231,10 +3232,10 @@ class WriteStageMixin:
                           if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                           and (" ".join(str(c["claim"]).split()) in flat
                                or any(_same_statement(str(c["claim"]), s) for s in sentences))]
-            # A claim found by its stored passage also goes to the take-out when its fault takes the sentence out: the take-out
-            # cuts only a sentence equal to that passage (FI's own id table), so the claim's wording adds nothing there, and
-            # a check that quotes half of a two-value sentence left its sentence in the paper. An older claim with no fault
-            # keeps the rule FI applied then: its sentence is taken out only when its wording matched.
+            # A claim found by its stored passage also goes to the take-out when its fault takes the sentence out and the
+            # passage says what the claim says, once in the paper (_passage_names_claim): a check that quotes half of a
+            # two-value sentence left its sentence in the paper. An older claim with no fault keeps the rule FI applied
+            # then: its sentence is taken out only when its wording matched.
             standing =[c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
@@ -3251,7 +3252,8 @@ class WriteStageMixin:
             removed: list[dict[str, Any]] = []
             try:
                 text, removed = self._plan_take_out_unsupported_numbers(
-                    state, paper_path, [c for c in standing if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT],
+                    state, paper_path, [c for c in standing if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT
+                                        and (any(c is b for b in by_wording) or _passage_names_claim(c, keyed))],
                     unnamed=[c for c in by_wording if c.get("fault") is None])
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)

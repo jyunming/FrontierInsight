@@ -1922,6 +1922,23 @@ def _passage_stands(claim: dict[str, Any], *texts: str) -> bool:
     return False
 
 
+def _passage_names_claim(claim: dict[str, Any], keyed: str) -> bool:
+    """Whether a passage the claim check stored for ``claim`` (``where``) stands exactly once in ``keyed`` (the writer's
+    text with FI's values as their keys, spaces made single) and says what the claim says: most of the claim's words are
+    in it, numbers aside (the passage holds a key where the paper shows a value). A claim the check quoted only part of
+    is found this way; one whose stored passage is another sentence, or a sentence the paper holds twice, is not."""
+    said = _content_stems(_CITATION_BRACKET_RE.sub(" ", str(claim.get("claim") or "")))
+    words = {w for w in said if not any(ch.isdigit() for ch in w)}
+    if not words:
+        return False
+    for w in claim.get("where") or []:
+        passage = " ".join(str(w.get("passage") or "").split()) if isinstance(w, dict) else ""
+        if passage and keyed.count(passage) == 1:
+            if len(words & _content_stems(_CITATION_BRACKET_RE.sub(" ", passage))) / len(words) >= _SAME_STATEMENT_SHARE:
+                return True
+    return False
+
+
 def _same_statement(a: str, b: str) -> bool:
     """Whether two texts state one thing: the shorter one's content words are
     mostly in the other. A claim the check quotes or paraphrases is compared
