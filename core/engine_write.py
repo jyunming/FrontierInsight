@@ -22,7 +22,8 @@ from .engine_base import (  # noqa: F401
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
     _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
-    _parse_json_lenient, _passage_stands, _phased, _place_figures, _places_as_placeholders, _plan_settings,
+    _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders,
+    _plan_settings,
     _quote_in_source, _raise_if_required_skills_unusable, _read_json_or_none_path, _receipts, _record_claims, _refine,
     _refine_count, _refine_round, _reorder_literature, _replicate_result_intervals, _rerun_from,
     _resolve_selected_skills, _results_by_setting, _retractions, _review_items, _review_sends_the_experiment_back,
@@ -3231,9 +3232,11 @@ class WriteStageMixin:
                           if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                           and (" ".join(str(c["claim"]).split()) in flat
                                or any(_same_statement(str(c["claim"]), s) for s in sentences))]
-            # The passage match widens the Limitations listing only; the take-out of sentences with a number below is given
-            # exactly the claims that matched by wording, as before.
-            standing = [c for c in grounding.get("claims") or []
+            # A claim found by its stored passage also goes to the take-out when its fault takes the sentence out and the
+            # passage says what the claim says, once in the paper (_passage_names_claim): a check that quotes half of a
+            # two-value sentence left its sentence in the paper. An older claim with no fault keeps the rule FI applied
+            # then: its sentence is taken out only when its wording matched.
+            standing =[c for c in grounding.get("claims") or []
                         if isinstance(c, dict) and c.get("basis") == "unsupported" and str(c.get("claim") or "").strip()
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
             # A sentence whose claim's fault takes it out (a number not in the record, a true value under a wrong setting or
@@ -3249,8 +3252,12 @@ class WriteStageMixin:
             removed: list[dict[str, Any]] = []
             try:
                 text, removed = self._plan_take_out_unsupported_numbers(
-                    state, paper_path, [c for c in by_wording if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT],
-                    unnamed=[c for c in by_wording if c.get("fault") is None])
+                    state, paper_path, [c for c in standing if c.get("fault") in _CLAIM_FAULTS_TAKEN_OUT
+                                        and (any(c is b for b in by_wording) or _passage_names_claim(c, keyed))],
+                    unnamed=[c for c in by_wording if c.get("fault") is None],
+                    # A claim placed by its passage alone also shows every number it states in that sentence as a reader
+                    # sees it: a check that misquoted a value cannot take out the sentence that holds the right one.
+                    confirm=lambda c, sentence: any(c is b for b in by_wording) or _claim_numbers_shown(c, sentence))
                 if removed:
                     Path(paper_path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
                     _receipts.carry_over(self.quest_root, "claim_check", "paper", snapshot[Path(paper_path)] or b"",
@@ -3307,14 +3314,15 @@ class WriteStageMixin:
 
     def _plan_take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
                                            standing: list[dict[str, Any]], *, unnamed: list[dict[str, Any]] | None = None,
-                                           ) -> tuple[str, list[dict[str, Any]]]:
+                                           confirm: Any = None) -> tuple[str, list[dict[str, Any]]]:
         """``(the paper without them, the entries taken out)``: the writer's sentences of ``standing`` (claims whose fault
         takes the sentence out, chosen by the caller), found exactly (core/record_claims.py::take_out_unsupported_numbers).
         The claim's fault decides, never what the sentence holds, so every exactly placed sentence of these claims goes.
         ``unnamed``: unsupported claims judged before faults were named (a record an older FI wrote); a placed sentence of
         one goes by the rule that FI applied: when it holds a value FI filled in, or a number the writer typed that FI cannot
         trace to the plan or its records. Nothing is written here; :meth:`_state_unsupported_claims` writes the paper, the
-        claim list, the receipt and the record together."""
+        claim list, the receipt and the record together. ``confirm(claim, sentence)``: a further condition on a placed
+        sentence of ``standing`` (:func:`core.record_claims.take_out_unsupported_numbers`)."""
         before = Path(paper_path).read_bytes().decode("utf-8")
 
         def plain(raw: str) -> str:
@@ -3324,7 +3332,8 @@ class WriteStageMixin:
             return " ".join(_paper_facts.to_placeholders(raw).split())
 
         text, removed = _record_claims.take_out_unsupported_numbers(
-            before, standing, same=_same_statement, holds_number=lambda _sentence: True, plain=plain, keyed=keyed)
+            before, standing, same=_same_statement, holds_number=lambda _sentence: True, plain=plain, keyed=keyed,
+            confirm=confirm)
         if not unnamed:
             return text, removed
         plan = _paper_facts.plan_protocol(self.quest_root, self._protocol_block(state))

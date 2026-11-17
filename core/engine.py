@@ -106,7 +106,7 @@ from .engine_base import (  # noqa: F401
     _paper_figure_count, _paper_for_prompt, _paper_gist, _paper_key, _paper_resolve_link, _paper_scope,
     _paper_sections, _paper_values, _papers_dir_has_files, _papers_next_step, _papers_to_ask,
     _parse_implement_response, _parse_json_lenient, _parse_json_lenient_once, _parse_split_deps, _part_in_layouts,
-    _passage_stands, _person_queries, _phased, _phased_isolation, _physical_bound_paths,
+    _claim_numbers_shown, _passage_names_claim, _passage_stands, _person_queries, _phased, _phased_isolation, _physical_bound_paths,
     _pick_up_user_dropped_datasets, _place_figures, _places_as_placeholders, _plan, _plan_checks_note, _plan_scope,
     _plan_search_mark, _plan_settings, _plan_steps, _planned_figure_order, _plot_scope, _pool_evidence,
     _precision_target_on, _preliminary_reminders, _printed_in_figure, _prose_value, _protocol, _protocol_directive,
