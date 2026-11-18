@@ -1883,6 +1883,7 @@ class AnalyzeStageMixin:
             # A fault in a function that makes one declared result, one figure or a helper they use is placed from FI's
             # records (core/shown_reach.py), not from the finding's words.
             rerun_keys: set[str] = set()  # the keys among what is left out whose recorded value the rerun shows changed
+            unmoved: list[str] = []  # declared results the rerun compared and did not show moved
             try:
                 if rerun is not None and rerun.status == "changed" and reach is not None:
                     # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
@@ -1891,6 +1892,10 @@ class AnalyzeStageMixin:
                     # Only these keys were shown to change; what else is left out (results worked out from them, what the
                     # finding's test reaches) is left out without that having been shown.
                     rerun_keys = reach.changed_keys([m for m in (_rerun_check.metric_of(k)[0] for k in rerun.keys) if m])
+                    if not (rerun.unplaced or rerun.unwritten or "failed trials" in rerun.metrics):
+                        # every delivered number was compared: a declared result that did not move is not left out for the
+                        # likeness of its name to one that did
+                        unmoved = reach.unmoved(rerun.metrics, rerun.mode == "analysis only")
                     if rerun.unplaced or "failed trials" in rerun.metrics:
                         # A changed number that belongs to no result FI can name has not been cleared by the rerun: the finding
                         # is also placed as it was before a rerun (what its test reaches), in addition to the results that moved
@@ -1901,7 +1906,7 @@ class AnalyzeStageMixin:
                         # finding is judged as before a rerun (what its own names and the results' keys say)
                         placed = None
                     if placed is None:
-                        rerun_keys = set()
+                        rerun_keys, unmoved = set(), []
                 elif reach is not None and (not _code_review.missing_quantities(record, issue)
                                             or reach.reads_held_key(issue, result)):
                     # No rerun to say (it could not be made): leave out what the records place, and stop only for an empty paper.
@@ -1921,7 +1926,7 @@ class AnalyzeStageMixin:
                     main = {_shown_reach._norm(h) for h in (headline or [])}
                     if any(_shown_reach._norm(n) in main for n in placed.not_done):
                         placed.stop = "the main result is among what the code does not compute (" + ", ".join(placed.not_done)[:120] + ")"
-                placed_keys = (sorted({*reach.printed_keys(placed.left_out, result), *placed.extra_keys})
+                placed_keys = (sorted({*reach.printed_keys(placed.left_out, result, unmoved), *placed.extra_keys})
                                if placed is not None and (placed.left_out or placed.extra_keys) else [])
                 placed_named = (placed.named or (placed.left_out[0] if placed.left_out else "")) if placed is not None else ""
             except Exception as exc:  # noqa: BLE001 - the records are an extra source: without them the finding is judged as before

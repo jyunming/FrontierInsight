@@ -490,6 +490,13 @@ class Reach:
                 out.append(file)
         return sorted(out)
 
+    def unmoved(self, metrics: list[str], analysis_only: bool = False) -> list[str]:
+        """The declared results a rerun that changed ``metrics`` (its own record of the numbers that moved) did not show moved.
+        ``analysis_only``: the rerun ran the analysis on the recorded trials, so a result a trial returns could not move and
+        is not among them."""
+        moved = self.changed_keys(metrics)
+        return [i for i in self.ids if i not in moved and not (analysis_only and _norm(i) in self.returned)]
+
     def changed_keys(self, metrics: list[str]) -> set[str]:
         """The printed keys whose recorded value a rerun showed moved: ``metrics`` are the metric names of the rerun record's own
         changed keys (``rerun_check.metric_of``), each as the declared result's id when it is one. Nothing is added to them (not
@@ -734,13 +741,16 @@ class Reach:
         return None if eff is None or eff.cannot else list(eff.left_out)
 
     # -- the names to leave out of the printed results ----------------------------------------------------------------------
-    def printed_keys(self, ids: list[str], result: Any) -> list[str]:
+    def printed_keys(self, ids: list[str], result: Any, unmoved: Any = ()) -> list[str]:
         """The keys of the printed results that hold the declared results ``ids``: the id itself, the keys that are its
-        intervals (:func:`core.code_review.named_in_results`) and the coverage and bias FI counts for it."""
+        intervals (:func:`core.code_review.named_in_results`) and the coverage and bias FI counts for it. ``unmoved``: declared
+        results a rerun of the study compared and found unchanged (:meth:`unmoved`); one of them is never taken as a key of
+        ``ids`` by the likeness of the names. Without a rerun the names still group them."""
         keys: set[str] = set()
+        apart = [u for u in unmoved or () if u not in ids]
         for i in ids:
             keys.add(i)
-            keys |= _code_review.named_in_results(i, result)
+            keys |= _code_review.named_in_results(i, result, apart)
             if i in self.counted:
                 keys |= {f"{i}_coverage", f"{i}_bias"}
         return sorted(keys)

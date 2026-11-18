@@ -1498,9 +1498,12 @@ def _the_longer_form_of(want_tokens: list[str], keys: list[str]) -> str | None:
     return alone[0] if len(alone) == 1 else None
 
 
-def named_in_results(name: str, result: Any) -> set[str]:
+def named_in_results(name: str, result: Any, others: Any = ()) -> set[str]:
     """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``, and its
-    intervals. Case, punctuation and underscores are ignored.
+    intervals. Case, punctuation and underscores are ignored. ``others``: results FI's own record shows are not ``name``
+    (declared results a rerun of the study compared and found unchanged): a key that is one of them is never taken as
+    ``name`` or its interval by the likeness of the names (``x`` is not the key of ``x_stderr`` when the rerun moved only
+    ``x_stderr``).
 
     * When a key is the quantity itself (the same name, or a shorter key the plan's name is a longer form of, at least six
       characters), those keys are it, and a key that only begins with the name goes with it only when what follows is an
@@ -1512,7 +1515,8 @@ def named_in_results(name: str, result: Any) -> set[str]:
     want = _norm(name)
     if len(want) < 2:
         return set()
-    keys = _keys_with_numbers(result)
+    apart = {_norm(d) for d in others or ()} - {want, ""}
+    keys = [k for k in _keys_with_numbers(result) if _norm(k) not in apart]
     normed = {k: _norm(k) for k in keys}
     own = {k for k, n in normed.items() if n and (n == want or (len(n) >= 6 and want.startswith(n)))}
     stems: list[list[str]] = []
