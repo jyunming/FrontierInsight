@@ -969,11 +969,10 @@ _BODIES = {}  # each function of the study's that ran: its time and the warnings
 _UNHELD = {}  # each function of the study's whose reads asked FI's table for a value its record does not hold: FI's sentences
 
 
-def _record_says(by, key=None):
+def _record_says(by, key):
     """FI's sentence of what its record holds, for a function ``by`` whose reads asked for a value the record does not hold, as
-    the reason of a result it left without a value (the one about setting ``key`` when there is one), else ``""``."""
-    said = _UNHELD.get(by) or {}
-    mine = said.get(key) if key is not None else [x for at in said.values() for x in at]
+    the reason of a result it left without a value at setting ``key``, else ``""``."""
+    mine = (_UNHELD.get(by) or {}).get(key)
     if not mine:
         return ""
     return "`%s` gave no value here; FI's record: %s" % (by, mine[0])
@@ -1096,13 +1095,12 @@ def check_return(by, role, value, keys, compared):
         return {"status": "refused", "why": "`%s` returned table.missing() with no reason; say why it does not exist" % by}
     if value is None:
         return {"status": "refused", "why": ("`%s` returned None without saying why it does not exist; "
-                                              "return table.missing(\\"the reason\\")" % by) + ("; %s" % _record_says(by) if _record_says(by) else "")}
+                                              "return table.missing(\\"the reason\\")" % by)}
     if not isinstance(value, dict):
         status, number, why, note = _scalar(by, role, value)
         out = {"status": status, "why": why if status != "ok" else ""}
         if status == "ok":
             out["value"] = number
-            why = why or (_record_says(by) if number is None else "")
             if number is None and why:
                 out["missing"] = {"": why}
             if note:
