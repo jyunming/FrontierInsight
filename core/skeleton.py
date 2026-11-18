@@ -378,6 +378,8 @@ class Table:
         self._known = dict(known or {})  # id -> {"interval": [low id, high id], "truth": number or "axis": name}: a result with a known true value
         self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
         self.last_error = {}  # id -> "Type: message" of the last exception a read of that id raised, even if the caller caught it
+        self.unheld = []  # FI's sentences of what its record holds where a read asked for a value it does not hold (``_not_held``)
+        self.unheld_at = {}  # the same sentences by the setting each is about
         self._cells = [c for c in cells if isinstance(c, dict) and isinstance(c.get("metrics"), dict)]
         self.declared = list(declared)
         self._references = dict(references or {})
@@ -432,6 +434,8 @@ class Table:
         """Forget what the reads gave and raised so far (FI does this before it calls each figure body)."""
         self.gave_values.clear()
         self.last_error.clear()
+        self.unheld.clear()
+        self.unheld_at.clear()
 
     def _gave(self, name, got):
         if got and name not in self.inputs:  # an input is not a result a figure drew: a figure of inputs alone drew none
@@ -583,8 +587,9 @@ class Table:
         """For a result the plan gives a true value and an interval (``known_value``): one 1.0 or 0.0 for each trial of setting
         ``key`` that ran, 1.0 where the interval the trial reported holds the true value (a trial with no interval counts 0.0).
         FI counts it from its own record; the mean is the coverage. When a run compares a factor inside it, give its value
-        (``table.coverage("id", key, **{name: value})`` with the compared factor's own name, as ``table.compared()`` lists it). When
-        the record holds no trials at that value, or no interval there, FI raises and says what it holds."""
+        (``table.coverage("id", key, **{name: value})`` with the compared factor's own name, as ``table.compared()`` lists it). ``[]``
+        where the record holds no trials at that value, or no interval there; FI then keeps its sentence of what the record holds
+        (``unheld``) and writes it as the reason of a result left without a value."""
         import fi_table
 
         self._check(name)
@@ -606,7 +611,7 @@ class Table:
             held = held or got is not None
             out += got or []
         if level and cells and not held:
-            raise UnknownResult("the trials of setting %s at %s recorded no interval (%s) for `%s`, so FI has no coverage of it there; "
+            self._not_held(key, "the trials of setting %s at %s recorded no interval (%s) for `%s`, so FI has no coverage of it there; "
                                 "they recorded: %s" % (key, ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items()),
                                                        ", ".join(spec["interval"]), name,
                                                        ", ".join(sorted({m for c in cells for m in (c.get("metrics") or {})})) or "nothing"))
@@ -621,7 +626,8 @@ class Table:
         """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
         minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
         inside it, give its value (``table.bias("id", key, **{name: value})``, the factor's own name). A trial with no finite value is left out of the mean
-        (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where the record holds no such trials."""
+        (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where no trial gave a finite value or the record
+        holds no such trials; in the second case FI keeps its sentence of what the record holds (``unheld``, as ``coverage``)."""
         import fi_table
 
         self._check(name)
@@ -640,7 +646,7 @@ class Table:
                 total += v - truth
                 count += 1
         if level and cells and not any(name in (c.get("metrics") or {}) for c in cells):
-            raise UnknownResult("the trials of setting %s at %s recorded no value of `%s`, so FI has no bias of it there; they recorded: %s"
+            self._not_held(key, "the trials of setting %s at %s recorded no value of `%s`, so FI has no bias of it there; they recorded: %s"
                                 % (key, ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items()), name,
                                    ", ".join(sorted({m for c in cells for m in (c.get("metrics") or {})})) or "nothing"))
         self._gave(name, count)
@@ -659,6 +665,10 @@ class Table:
             raw = m.get("values") if isinstance(m, dict) else None
             if isinstance(raw, (list, tuple)):
                 dropped += sum(1 for v in raw if not fi_table.finite(v))
+        if level and cells and not any(name in (c.get("metrics") or {}) for c in cells):
+            self._not_held(key, "the trials of setting %s at %s recorded no value of `%s`, so FI has no bias of it there; they "
+                                "recorded: %s" % (key, ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items()), name,
+                                                  ", ".join(sorted({m for c in cells for m in (c.get("metrics") or {})})) or "nothing"))
         return dropped
 
     def failed(self, key):
@@ -742,8 +752,9 @@ class Table:
 
     def _cells_at(self, name, key, level):
         """The cells of setting ``key`` the runs recorded at the compared value ``level`` (``{factor: value}``). When the record
-        holds none, FI says what it holds instead of an empty answer: a result recorded once for the setting, the factors the
-        runs did compare, or the values of the factor they recorded."""
+        holds none, the answer is no cells, as before, and FI keeps its sentence of what the record holds instead (``unheld``): a
+        result recorded once for the setting, the factors the runs did compare, the values of the factor they recorded. FI writes
+        it as the reason of a result the study's function then gives no value for."""
         import fi_table
 
         cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
@@ -755,29 +766,42 @@ class Table:
         if not factors:
             pooled = (self._settings.get(key) or {}).get("metrics") or {}
             if name in pooled:
-                raise UnknownResult("`%s` is recorded once for setting %s, not for each value of %s: the runs of this setting recorded "
-                                    "no value compared inside them; read it without `%s`" % (name, key, ", ".join(level), asked))
-            raise UnknownResult("the runs of setting %s recorded no value compared inside them, and no `%s`; they recorded: %s"
+                return self._not_held(key, "`%s` is recorded once for setting %s, not for each value of %s: the runs of this setting recorded "
+                                    "no value compared inside them, so FI's record holds no `%s` at %s (a read without `%s` is the "
+                                    "setting's one recorded value, not the one at %s); a result the plan asks for at each value is "
+                                    "missing until the trials return it for each value"
+                                    % (name, key, ", ".join(level), name, asked, asked, asked))
+            return self._not_held(key, "the runs of setting %s recorded no value compared inside them, and no `%s`; they recorded: %s"
                                 % (key, name, ", ".join(sorted(pooled)) or "nothing"))
         missing = [a for a in level if a not in factors]
         if missing:
-            raise UnknownResult("the runs of setting %s did not compare %s inside them; the factors they compared are: %s"
+            return self._not_held(key, "the runs of setting %s did not compare %s inside them; the factors they compared are: %s"
                                 % (key, ", ".join("`%s`" % a for a in missing), ", ".join("`%s`" % a for a in factors)))
         values = sorted({fi_table.cell_key(c.get("level") or {}) for c in held})
         wider = [c.get("level") for c in held if isinstance(c.get("level"), dict) and len(c["level"]) > len(level)
                  and all(a in c["level"] and c["level"][a] == v for a, v in level.items())]
         if wider:
-            raise UnknownResult("the runs of setting %s compare %s together: give a value of each (%s); the values they recorded "
+            return self._not_held(key, "the runs of setting %s compare %s together: give a value of each (%s); the values they recorded "
                                 "are: %s" % (key, ", ".join("`%s`" % a for a in factors), asked, ", ".join(values)))
         if fi_table.cell_key(level) in values:
             def kind(v):
                 return "text" if isinstance(v, str) else "a number"
             given = next(c.get("level") for c in held if fi_table.cell_key(c.get("level") or {}) == fi_table.cell_key(level))
-            raise UnknownResult("the runs of setting %s recorded %s as %s, and it was given as %s: pass it as the record holds it (%s)"
+            return self._not_held(key, "the runs of setting %s recorded %s as %s, and it was given as %s: pass it as the record holds it (%s)"
                                 % (key, asked, ", ".join(kind(v) for v in given.values()), ", ".join(kind(v) for v in level.values()),
                                    ", ".join("%s=%r" % (a, v) for a, v in given.items())))
-        raise UnknownResult("the runs of setting %s recorded no trials at %s; the values they recorded are: %s"
+        return self._not_held(key, "the runs of setting %s recorded no trials at %s; the values they recorded are: %s"
                             % (key, asked, ", ".join(values)))
+
+    def _not_held(self, key, said):
+        """Keep FI's sentence ``said`` of what its record holds at setting ``key`` where a read asked for what it does not
+        (``unheld``, in order, once each; ``unheld_at``, by setting), and give the read's plain answer there: no trials."""
+        if said not in self.unheld:
+            self.unheld.append(said)
+        at = self.unheld_at.setdefault(str(key), [])
+        if said not in at:
+            at.append(said)
+        return []
 
     @_noting
     def level_rows(self, name, key):

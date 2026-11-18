@@ -680,8 +680,8 @@ def test_a_known_result_is_read_by_its_coverage_from_the_record(tmp_path):
     table = ns["Table"](cells, ["est", "other"], known={"est": {"interval": ["lo", "hi"], "truth": 1.2}})
     assert table.coverage("est", "s=1", m="a") == [1.0, 1.0, 1.0, 0.0]  # the truth 1.2 is inside the first three intervals only
     assert table.coverage("est", "s=1", m="b") == [1.0, 0.0]  # trial 2 reported no upper end: a miss, not left out
-    with pytest.raises(ns["UnknownResult"], match=r"no trials at m=c; the values they recorded are: m=a, m=b"):
-        table.coverage("est", "s=1", m="c")  # a value the runs did not record: FI says what they did (was an empty list)
+    assert table.coverage("est", "s=1", m="c") == [] and "est" in table.gave_values
+    assert any("no trials at m=c; the values they recorded are: m=a, m=b" in x for x in table.unheld)  # FI keeps why
     with pytest.raises(ns["UnknownResult"], match="no true value and interval"):
         table.coverage("other", "s=1", m="a")
     with pytest.raises(ns["UnknownResult"], match="`zzz` is not a result the plan declares"):
