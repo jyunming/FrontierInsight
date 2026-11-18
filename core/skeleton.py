@@ -587,7 +587,7 @@ class Table:
         """For a result the plan gives a true value and an interval (``known_value``): one 1.0 or 0.0 for each trial of setting
         ``key`` that ran, 1.0 where the interval the trial reported holds the true value (a trial with no interval counts 0.0).
         FI counts it from its own record; the mean is the coverage. When a run compares a factor inside it, give its value
-        (``table.coverage("id", key, **{name: value})`` with the compared factor's own name, as ``table.compared()`` lists it). ``[]``
+        (``table.coverage("id", key, **{factor: value})`` with the compared factor's own name, as ``table.compared()`` lists it). ``[]``
         where the record holds no trials at that value, or no interval there; FI then keeps its sentence of what the record holds
         (``unheld``) and writes it as the reason of a result left without a value."""
         import fi_table
@@ -625,7 +625,7 @@ class Table:
     def bias(self, name, key, **level):
         """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
         minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
-        inside it, give its value (``table.bias("id", key, **{name: value})``, the factor's own name). A trial with no finite value is left out of the mean
+        inside it, give its value (``table.bias("id", key, **{factor: value})``, the factor's own name). A trial with no finite value is left out of the mean
         (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where no trial gave a finite value or the record
         holds no such trials; in the second case FI keeps its sentence of what the record holds (``unheld``, as ``coverage``)."""
         import fi_table
