@@ -583,7 +583,8 @@ class Table:
         """For a result the plan gives a true value and an interval (``known_value``): one 1.0 or 0.0 for each trial of setting
         ``key`` that ran, 1.0 where the interval the trial reported holds the true value (a trial with no interval counts 0.0).
         FI counts it from its own record; the mean is the coverage. When a run compares a factor inside it, give its value
-        (``table.coverage("id", key, factor="value")``). ``[]`` where the record holds no such trials."""
+        (``table.coverage("id", key, **{name: value})`` with the compared factor's own name, as ``table.compared()`` lists it). When
+        the record holds no trials at that value, or no interval there, FI raises and says what it holds."""
         import fi_table
 
         self._check(name)
@@ -592,18 +593,23 @@ class Table:
             raise UnknownResult("`%s` is declared, but the plan gives it no true value and interval, so it has no coverage; the results "
                                 "with one are: %s" % (name, ", ".join(sorted(self._known)) or "(none)"))
         self._one_key(key)
-        if level:
-            cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
-        else:
-            cells = [self._cell(key)]
+        cells = self._cells_at(name, key, level) if level else [self._cell(key)]
         out = []
+        held = False
         for c in cells:
+            held = held or any(n in (c.get("metrics") or {}) for n in spec["interval"])  # the interval is recorded here
             truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
             if not fi_table.finite(truth):
                 continue
             got = fi_table.hits(c.get("metrics") or {}, spec["interval"], truth,
                                 estimate=(c.get("metrics") or {}).get(spec.get("estimate")))  # None: this record does not hold the interval
+            held = held or got is not None
             out += got or []
+        if level and cells and not held:
+            raise UnknownResult("the trials of setting %s at %s recorded no interval (%s) for `%s`, so FI has no coverage of it there; "
+                                "they recorded: %s" % (key, ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items()),
+                                                       ", ".join(spec["interval"]), name,
+                                                       ", ".join(sorted({m for c in cells for m in (c.get("metrics") or {})})) or "nothing"))
         return self._gave(name, out)
 
     def known(self):
@@ -614,7 +620,7 @@ class Table:
     def bias(self, name, key, **level):
         """For a result the plan gives a true value (``known_value``): the mean of the finite values the trials of setting ``key`` gave,
         minus the true value, counted by FI from its own record (0 when the estimate is centred on it). When a run compares a factor
-        inside it, give its value (``table.bias("id", key, factor="value")``). A trial with no finite value is left out of the mean
+        inside it, give its value (``table.bias("id", key, **{name: value})``, the factor's own name). A trial with no finite value is left out of the mean
         (``coverage`` counts it as a miss); ``bias_dropped`` says how many. ``None`` where the record holds no such trials."""
         import fi_table
 
@@ -624,10 +630,7 @@ class Table:
             raise UnknownResult("`%s` is declared, but the plan gives it no true value, so it has no bias; the results with one are: %s"
                                 % (name, ", ".join(sorted(self._known)) or "(none)"))
         self._one_key(key)
-        if level:
-            cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
-        else:
-            cells = [self._cell(key)]
+        cells = self._cells_at(name, key, level) if level else [self._cell(key)]
         total, count = 0.0, 0
         for c in cells:
             truth = spec.get("truth", (c.get("cell") or {}).get(spec.get("axis")))
@@ -636,6 +639,10 @@ class Table:
             for v in fi_table.values_of((c.get("metrics") or {}).get(name)):
                 total += v - truth
                 count += 1
+        if level and cells and not any(name in (c.get("metrics") or {}) for c in cells):
+            raise UnknownResult("the trials of setting %s at %s recorded no value of `%s`, so FI has no bias of it there; they recorded: %s"
+                                % (key, ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items()), name,
+                                   ", ".join(sorted({m for c in cells for m in (c.get("metrics") or {})})) or "nothing"))
         self._gave(name, count)
         return total / count if count else None
 
@@ -645,7 +652,7 @@ class Table:
 
         self._check(name)
         self._one_key(key)
-        cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level] if level else [self._cell(key)]
+        cells = self._cells_at(name, key, level) if level else [self._cell(key)]
         dropped = 0
         for c in cells:
             m = (c.get("metrics") or {}).get(name)
@@ -732,6 +739,45 @@ class Table:
                 level = c["level"]
                 out.append((fi_table._fmt(next(iter(level.values()))) if len(level) == 1 else fi_table.cell_key(level), c))
         return out
+
+    def _cells_at(self, name, key, level):
+        """The cells of setting ``key`` the runs recorded at the compared value ``level`` (``{factor: value}``). When the record
+        holds none, FI says what it holds instead of an empty answer: a result recorded once for the setting, the factors the
+        runs did compare, or the values of the factor they recorded."""
+        import fi_table
+
+        cells = [c for c in self._by_setting.get(key, []) if c.get("level") == level]
+        if cells:
+            return cells
+        asked = ", ".join("%s=%s" % (a, fi_table._fmt(v)) for a, v in level.items())
+        held = self._by_setting.get(key, [])
+        factors = sorted({a for c in held for a in (c.get("level") or {})})
+        if not factors:
+            pooled = (self._settings.get(key) or {}).get("metrics") or {}
+            if name in pooled:
+                raise UnknownResult("`%s` is recorded once for setting %s, not for each value of %s: the runs of this setting recorded "
+                                    "no value compared inside them; read it without `%s`" % (name, key, ", ".join(level), asked))
+            raise UnknownResult("the runs of setting %s recorded no value compared inside them, and no `%s`; they recorded: %s"
+                                % (key, name, ", ".join(sorted(pooled)) or "nothing"))
+        missing = [a for a in level if a not in factors]
+        if missing:
+            raise UnknownResult("the runs of setting %s did not compare %s inside them; the factors they compared are: %s"
+                                % (key, ", ".join("`%s`" % a for a in missing), ", ".join("`%s`" % a for a in factors)))
+        values = sorted({fi_table.cell_key(c.get("level") or {}) for c in held})
+        wider = [c.get("level") for c in held if isinstance(c.get("level"), dict) and len(c["level"]) > len(level)
+                 and all(a in c["level"] and c["level"][a] == v for a, v in level.items())]
+        if wider:
+            raise UnknownResult("the runs of setting %s compare %s together: give a value of each (%s); the values they recorded "
+                                "are: %s" % (key, ", ".join("`%s`" % a for a in factors), asked, ", ".join(values)))
+        if fi_table.cell_key(level) in values:
+            def kind(v):
+                return "text" if isinstance(v, str) else "a number"
+            given = next(c.get("level") for c in held if fi_table.cell_key(c.get("level") or {}) == fi_table.cell_key(level))
+            raise UnknownResult("the runs of setting %s recorded %s as %s, and it was given as %s: pass it as the record holds it (%s)"
+                                % (key, asked, ", ".join(kind(v) for v in given.values()), ", ".join(kind(v) for v in level.values()),
+                                   ", ".join("%s=%r" % (a, v) for a, v in given.items())))
+        raise UnknownResult("the runs of setting %s recorded no trials at %s; the values they recorded are: %s"
+                            % (key, asked, ", ".join(values)))
 
     @_noting
     def level_rows(self, name, key):

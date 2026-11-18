@@ -502,7 +502,8 @@ runs on the table of FI's record and can change nothing in it:
 - The table gives, for a result `id` at a setting `key`: `table.mean(id, key)`, `table.interval(id, key)`, `table.n(id, key)`,
   `table.values(id, key)` (one number for each trial that ran), `table.failed(key)`, and, for a result the plan gives a true
   value and an interval, `table.coverage(id, key)` (1.0 for each trial whose interval holds the true value, else 0.0; the
-  interval's own ends are not results to read; give a factor compared inside each run as `table.coverage(id, key, factor="value")`)
+  interval's own ends are not results to read; for a factor compared inside each run, pass that factor's own name and value, e.g. `table.coverage(id, key, dose=2)`,
+  only when `table.compared()` lists it; FI raises and says what the record holds when it holds nothing there)
   and `table.bias(id, key)` (the mean of its values minus the true value); `table.known()` lists the ids that have a true value. FI prints
   the coverage and the bias of every such result itself, one for each parameter, as `<id>_coverage` and `<id>_bias`. When a plan
   quantity is the coverage or the bias of ONE named result, work it out from that result: `table.coverage` gives 1.0 and 0.0 values, so
