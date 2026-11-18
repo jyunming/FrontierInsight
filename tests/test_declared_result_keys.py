@@ -122,3 +122,40 @@ def test_an_analysis_only_rerun_never_shows_a_trial_result_unmoved(tmp_path: Pat
     assert "est_a" in reach.unmoved(["corr_ab"]) and "cover" in reach.unmoved(["corr_ab"])
     assert "est_a" not in reach.unmoved(["corr_ab"], analysis_only=True)
     assert "cover" in reach.unmoved(["corr_ab"], analysis_only=True)
+
+
+def test_a_reader_claim_whose_rerun_moves_one_result_leaves_out_that_one_not_the_one_its_name_begins_with(
+        tmp_path: Path, spread_study: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same rule for a second model's claim that a result is computed differently: a test shows it, the rerun with a
+    repair moves only ``corr_ab_spread``, so ``corr_ab`` stays in. Old code: both went out."""
+    import asyncio
+
+    from core import frozen_protocol, shown_reach
+
+    engine = base._engine(tmp_path)
+    root = base._quest(engine)
+    check = {"kind": "code_reader", "note": "x", "quantity": "corr_ab_spread", "keys": ["corr_ab_spread"]}
+    rc = {"removed_quantities": ["corr_ab_spread"], "removed_figures": [], "removed_values": {}, "checks": [check],
+          "note": "x", "say": "x"}
+    (root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(rc), encoding="utf-8")
+    monkeypatch.setattr(cr, "differing_quantities", lambda *a, **k: [
+        {"name": "corr_ab_spread", "fid": "F-9", "kind": "dependent variable", "status": "different", "note": "x"}])
+
+    async def demonstrate(issue: Any, record: Any, state: Any) -> bool:
+        issue.update(demonstrated=True, test=".fi/finding_tests/F-9_1.py")
+        return True
+
+    async def answers(verdicts: Any, record: Any, state: Any, strict: bool = False) -> dict[str, Any]:
+        return {str(i["id"]): Verdict("changed", metrics=["corr_ab_spread"], keys=["derived/derived/corr_ab_spread"],
+                                      mode="analysis only") for i, _h in verdicts}
+
+    engine._demonstrate_reader_finding = demonstrate
+    engine._rerun_shown = answers
+    record = {"issues": {"F-9": {"id": "F-9", "file": "derive.py", "function": "", "quantity": "corr_ab_spread",
+                                 "kind": "quantity", "changes_result": True, "demonstrated": None, "outcome": "open",
+                                 "text": "computed another way", "severity": "high"}}}
+    reach = shown_reach.Reach(root, frozen_protocol.protocol_of(root), ["est_a"], [])
+    state = {"design": None, "result_json": base.RESULT, "exec_result": {"returncode": 0}}
+    assert asyncio.run(engine._measure_reader_findings(record, state, reach, ["est_a"])) is None
+    removed = json.loads((root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))["removed_quantities"]
+    assert "corr_ab_spread" in removed and "corr_ab" not in removed

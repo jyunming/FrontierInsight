@@ -1658,8 +1658,12 @@ class AnalyzeStageMixin:
                         # placed by what it reaches, as the ordinary shown fault is
                         other = reach.effect(record, issues[fid], result)  # type: ignore[union-attr]
                         placed = None if other is None else _shown_reach.union(placed, other)
+                    # every delivered number was compared: a declared result that did not move is not left out for the likeness
+                    # of its name to one that did (as for a shown fault)
+                    unmoved = (reach.unmoved(v.metrics, v.mode == "analysis only")  # type: ignore[union-attr]
+                               if placed is not None and not (v.unplaced or v.unwritten or "failed trials" in v.metrics) else [])
                     if placed is not None:
-                        keys = sorted({*(c.get("keys") or []), *reach.printed_keys(placed.left_out, result), *placed.extra_keys})  # type: ignore[union-attr]
+                        keys = sorted({*(c.get("keys") or []), *reach.printed_keys(placed.left_out, result, unmoved), *placed.extra_keys})  # type: ignore[union-attr]
                         why = placed.stop
                     else:
                         # no records to place it by: every changed number is left out, and the plan's headline names decide the stop
