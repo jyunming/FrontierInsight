@@ -966,6 +966,16 @@ _CALC = []
 _ASIDE = {"files": []}
 _STATE = {"quest": None, "step": None}
 _BODIES = {}  # each function of the study's that ran: its time and the warnings it raised
+_UNHELD = {}  # each function of the study's whose reads asked FI's table for a value its record does not hold: FI's sentences
+
+
+def _record_says(by, key):
+    """FI's sentence of what its record holds, for a function ``by`` whose reads asked for a value the record does not hold, as
+    the reason of a result it left without a value at setting ``key``, else ``""``."""
+    mine = (_UNHELD.get(by) or {}).get(key)
+    if not mine:
+        return ""
+    return "`%s` gave no value here; FI's record: %s" % (by, mine[0])
 
 
 def _progress(step):
@@ -1125,7 +1135,7 @@ def check_return(by, role, value, keys, compared):
             return {"status": status, "why": "%s (under `%s`)" % (why, k)}
         kept[str(k)] = number
         if number is None:
-            missing[str(k)] = why or "`%s` gave None here and no reason" % by
+            missing[str(k)] = why or _record_says(by, str(k)) or "`%s` gave None here and no reason" % by
         if note:
             disclosed.append(note + " under `%s`" % k)
     out = {"status": "ok", "why": "", "missing": missing}
@@ -1151,6 +1161,10 @@ def _call(by, fn, *args):
     _progress(by)
     seen = _BODIES.setdefault(by, {"seconds": 0.0, "warnings": []})
     value, bad = None, None
+    tables = [a for a in args if isinstance(getattr(a, "unheld_at", None), dict)]
+    for t in tables:
+        t.unheld.clear()
+        t.unheld_at.clear()
     began = time.monotonic()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1163,6 +1177,14 @@ def _call(by, fn, *args):
         except (Exception, KeyboardInterrupt) as e:  # noqa: BLE001 -- one body's failure must not stop the others
             bad = ("failed", _where(e, by))
     seen["seconds"] += time.monotonic() - began
+    said = {}
+    for t in tables:
+        for k, at in t.unheld_at.items():
+            said.setdefault(k, []).extend(x for x in at if x not in said.get(k, []))
+    if said:
+        _UNHELD[by] = said
+    else:
+        _UNHELD.pop(by, None)
     for w in caught:
         said = "%s: %s" % (w.category.__name__, w.message)
         if said not in seen["warnings"] and len(seen["warnings"]) < 20:

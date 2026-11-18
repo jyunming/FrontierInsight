@@ -497,7 +497,9 @@ PINS_AT_811719AF = {
     # for a reference "Upper bound of" / "Lower bound of" as the plan says, an intended text change); it was "b2c0fec39e69d961"
     # and again when the table began to serve FI's own value of a declared result no trial returned (a result worked out
     # afterwards: Table.set_derived), so a figure line of exactly that value is named; it was "a9a7c613dbc16eba"
-    "run_framed": "40022073322a5e86",
+    # and again when a coverage or bias read at a value compared inside the runs keeps FI's sentence of what its record holds when it holds
+    # nothing there (Table.unheld, kept beside the plain answer: an intended text change); it was "40022073322a5e86"
+    "run_framed": "fb4aca77ebd9305f",
 }
 
 
