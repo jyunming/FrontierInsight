@@ -256,7 +256,10 @@ same PR that adds, splits or renames one.
   whole-study estimate is at least 10 minutes (`worth_speeding_up`, `WORTH_SPEEDING_UP_S`), and always, before the cut,
   when the study does not fit.
   `sample_cells` (the timed settings plus each known-answer case of the plan), `untimed_cells` (those the study's timing
-  never ran, timed first so `bounded_sample` limits each by its own cost), `run_sample` (fixed-seed trials through the
+  never ran, timed first so `bounded_sample` limits each by its own cost), `own_budget_s` (the step's own time, never only
+  what the timing left), `numerical_settings` / `coarser_copy` / `COARSER` / `real_values` (when no setting of the plan fits a
+  sample, copies made coarser in the plan's numerical settings until one finishes with real numbers; a change kept on them is
+  checked once more on one setting of the plan, `record['full_check']`), `run_sample` (fixed-seed trials through the
   harness in an outside copy, the least time of two repeats; `why_not_run` says why a run gave too few trials),
   `disagreements` (a number not the same to 9 digits, or only in one run), `fast_enough` (at least `MIN_SAVING` and more
   than the two unchanged samples differ: the first look), `confirm` (the second look at a change that passes it: old and new code timed 4 times each, alternating, kept only when `clearly_faster`, every new timing under every old one and medians a tenth apart; skipped when the repeats would cost more than the change saves, `can_afford_repeats`), `profile_text` (the costliest sampled setting run once

@@ -134,6 +134,68 @@ def bounded_sample(cells: list[dict[str, Any]], probes: list[Any] | None, *, run
             {_tr.cell_key(cell): max(60, math.ceil(SAMPLE_ALLOWANCE * c)) for c, cell in kept}, note)
 
 
+#: How much coarser a copy of a sampled setting is made, in turn, when no setting of the sample finishes in the time for
+#: timing: each of the plan's numerical settings (a mesh step, a time step, a number of points) this many times coarser.
+COARSER = (2, 4, 8, 16)
+
+
+def own_budget_s(budget_s: float, padded_s: float, limit_s: float, frac: float) -> float:
+    """The time the step may spend timing and sampling: what the study's timing left it, and never less than the least
+    of the share of the time allowed the timing itself is given (``engine.pilot_timeout_frac``) and the least saving FI
+    keeps on the study (:data:`MIN_SAVING` of its padded estimate). The timing of a slow study spends its whole share,
+    so the step used to get about nothing of its own."""
+    own = min(max(0.0, float(frac)) * max(0.0, float(limit_s)), MIN_SAVING * max(0.0, float(padded_s)))
+    return max(max(0.0, float(budget_s)), own)
+
+
+def numerical_settings(protocol: dict[str, Any] | None) -> dict[str, str]:
+    """The plan's numerical settings and the direction that is finer (``smaller`` or ``larger``): ``protocol``'s
+    ``numerical_settings``, and a search's (``protocol.optimisation.numerical_settings``). Only these may be made coarser
+    for a copy of a setting: they are the plan's own word for how finely the simulation computes, not what it studies."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    search = protocol.get("optimisation")
+    search = search if isinstance(search, dict) else {}
+    out: dict[str, str] = {}
+    for block in (protocol.get("numerical_settings"), search.get("numerical_settings")):
+        if not isinstance(block, dict):
+            continue
+        for name, spec in block.items():
+            finer = str(spec.get("finer") or "").strip().lower() if isinstance(spec, dict) else ""
+            if finer in ("smaller", "larger"):
+                out[str(name)] = finer
+    return out
+
+
+def coarser_copy(cell: dict[str, Any], settings: dict[str, str], factor: int) -> dict[str, Any] | None:
+    """``cell`` with each of the plan's numerical settings it holds made ``factor`` times coarser (a ``smaller``-is-finer
+    step multiplied, a ``larger``-is-finer count divided, a whole number kept whole and at least 1). ``None`` when no
+    setting of the cell changes, so there is no coarser copy."""
+    out = dict(cell)
+    changed = False
+    for name, finer in settings.items():
+        value = cell.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            continue
+        new: float = value * factor if finer == "smaller" else value / factor
+        if isinstance(value, int):
+            new = max(1, int(round(new)))
+        if new != value:
+            out[name] = new
+            changed = True
+    return out if changed else None
+
+
+def real_values(probe: Any) -> bool:
+    """Whether a timed setting finished with real numbers: not cut by its time (``at_least``), and every number its timed
+    trials returned is finite (a copy too coarse for the simulation returns not-a-number, or nothing, with a reason)."""
+    if probe is None or getattr(probe, "at_least", False):
+        return False
+    trials = [t for t in getattr(probe, "trials", None) or [] if isinstance(t, dict)]
+    numbers = [v for t in trials for v in t.values()]
+    return bool(numbers) and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                                 for v in numbers)
+
+
 def untimed_cells(cells: list[dict[str, Any]], probes: list[Any] | None) -> list[dict[str, Any]]:
     """The settings of the sample the study's timing never ran (a known-answer case's setting, a search's design): each is
     timed on its own before the sample is chosen, so its time limit comes from its own cost, not from another setting's."""
