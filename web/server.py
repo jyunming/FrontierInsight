@@ -365,12 +365,9 @@ def _quest_dirs(output_root: Path) -> list[Path]:
     seen = {d.resolve() for d in here}
     elsewhere = []
     for root in _index_roots():
-        try:
-            if root.resolve() not in seen:
-                seen.add(root.resolve())
-                elsewhere.append(root)
-        except OSError:
-            continue
+        if root not in seen:
+            seen.add(root)
+            elsewhere.append(root)
     return here + elsewhere
 
 
@@ -397,7 +394,13 @@ def _index_roots() -> list[Path]:
         hit = _INDEX_ROOTS.get(str(path))
         if hit is not None and now - hit[0] < _INDEX_ROOTS_S and hit[1] == mtime:
             return list(hit[2])
-        roots = sorted((e.quest_root for e in quest_index.entries(drop_gone=False)), key=lambda r: r.name, reverse=True)
+        roots = []
+        for e in quest_index.entries(drop_gone=False):  # only the folders that can be seen now
+            try:
+                roots.append(e.quest_root.resolve())
+            except OSError:
+                continue
+        roots.sort(key=lambda r: r.name, reverse=True)
     except Exception:  # noqa: BLE001 -- an unreadable index lists this folder's quests only
         return []
     _INDEX_ROOTS[str(path)] = (now, mtime, roots)
@@ -1669,6 +1672,9 @@ def make_app(
         running = app.state.launcher.job_state(job_id)
         if running is not None and running["alive"]:
             raise HTTPException(409, "the plan is already being rewritten; wait for it to finish")
+        if _quest_alive(quest_id, quest_root):
+            # The rewrite resumes the quest: a second process of a running quest would share its files.
+            raise HTTPException(409, f"Quest {quest_id} is still running; ask for the change once it has stopped.")
         from web.quest_launcher import QuestLauncherFull
         try:
             launched = app.state.launcher.launch_command(
@@ -1735,6 +1741,9 @@ def make_app(
         if not (quest_root / "paper" / "paper.md").is_file():
             raise HTTPException(
                 400, "this quest has no paper/paper.md to render from.")
+        if _quest_alive(quest_id, quest_root):
+            # A running quest may be writing the paper this output is made from.
+            raise HTTPException(409, f"Quest {quest_id} is still running; make this output once it has finished.")
         from web.quest_launcher import QuestLauncherFull
         try:
             launched = app.state.launcher.launch_command(
@@ -2204,10 +2213,11 @@ def make_app(
         # (the live per-node engine log). Show whichever was written most
         # recently so a running quest always surfaces live progress, no
         # matter how it was started.
+        job_root = _job_quest_root(out_root, job_id)  # a quest resumed in its own folder elsewhere too
         quest_logs = [
             p for p in (
-                out_root / job_id / ".fi" / "launch.log",
-                out_root / job_id / ".fi" / "run.log",
+                job_root / ".fi" / "launch.log",
+                job_root / ".fi" / "run.log",
             ) if p.is_file()
         ]
         if quest_logs:

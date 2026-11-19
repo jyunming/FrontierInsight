@@ -150,6 +150,7 @@ def test_a_quest_running_from_a_terminal_shows_running_and_is_not_resumed_or_ren
     got = client.post(f"/api/quests/{QID}/resume")
     assert got.status_code == 409 and "still running" in got.text and not launched
     assert client.post(f"/api/quests/{QID}/title", json={"title": "New"}).status_code == 409
+    assert client.post(f"/api/quests/{QID}/generate?kind=slides").status_code == 409 and not launched
     # once its process has ended, it resumes
     (root / ".fi" / "process.json").write_text(json.dumps({**me, "ended": "stopped"}), encoding="utf-8")
     assert client.get(f"/api/quests/{QID}").json()["alive"] is False
