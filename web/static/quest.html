@@ -1589,13 +1589,17 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     const logEl = document.getElementById('log');
     logEl.dataset.streamStarted = '1';
     if (logSource) logSource.close();
-    logSource = new EventSource(`/api/quests/${encodeURIComponent(questId)}/log/stream${logFull ? '?full=true' : ''}`);
-    logSource.onmessage = (ev) => {
+    // Each handler acts on its own stream only: after a switch, a late event of the old stream neither closes the new
+    // one nor adds lines of the other log.
+    const source = new EventSource(`/api/quests/${encodeURIComponent(questId)}/log/stream${logFull ? '?full=true' : ''}`);
+    logSource = source;
+    source.onmessage = (ev) => {
+      if (source !== logSource) return;
       const wasNearBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 20;
       logEl.textContent += '\n' + ev.data;
       if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
     };
-    logSource.onerror = () => { logSource?.close(); };
+    source.onerror = () => { source.close(); };
   }
 
   async function loadClarifyPanel() {
