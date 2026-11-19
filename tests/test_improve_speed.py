@@ -676,6 +676,7 @@ async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(
     assert out["kept"] is True, out
     assert out["full_check"]["passed"] is True and out["full_check"]["cell"] == {"dx": 0.1}
     assert MESH_FAST in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert "speed-up 1" in (engine.quest_root / "code" / "CHANGELOG.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -688,6 +689,10 @@ async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolutio
     assert out["kept"] is False and out["full_check"]["passed"] is False
     assert "number(s) changed" in out["full_check"]["why"]
     assert MESH_LOOP in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    # the change log does not say a change was kept that the check at the plan's resolution dropped
+    changelog = engine.quest_root / "code" / "CHANGELOG.md"
+    assert not changelog.exists() or "speed-up 1" not in changelog.read_text(encoding="utf-8")
+    assert out["speedup"] == 1.0
 
 
 @pytest.mark.asyncio
