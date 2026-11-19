@@ -364,6 +364,16 @@ def _noting(method):
     return wrapper
 
 
+def _asking(check):
+    """Keep every name a read asks the table for (``asked``), in order, also a name the read then refuses: FI's record of what
+    one call of a function asked for (the frame clears it before each call)."""
+    def wrapper(self, name):
+        self.asked.append(name)
+        return check(self, name)
+    wrapper.__name__, wrapper.__doc__ = check.__name__, check.__doc__
+    return wrapper
+
+
 class Table:
     """FI's own record of the trials (``raw/trials.json``), read-only, held to the results the plan declares. Reading an id the
     plan does not declare raises ``UnknownResult`` naming the declared ones; ``served`` lists the ids that were read. A setting
@@ -386,6 +396,7 @@ class Table:
         self._parts = dict(parts or {})
         self._derived = {}  # id -> {setting key: value}: the quantities FI derives for each setting (``set_derived``)
         self.served = []
+        self.asked = []  # every name a read asked for since the frame last cleared it, refused or not (``_asking``)
         self._settings = {}
         self._by_setting = {}
         for c in self._cells:
@@ -442,6 +453,7 @@ class Table:
             self.gave_values.add(name)
         return got
 
+    @_asking
     def _check(self, name):
         if name not in self.declared and name not in self.inputs:
             other = (" or a value a trial returned (those are: %s)" % ", ".join(sorted(self.inputs))) if self.inputs else ""
@@ -473,6 +485,7 @@ class Table:
     def per_level(self, name, key):
         """The values (or combinations) the runs of setting ``key`` compared inside them that ``name`` is recorded under, as
         ``level_means`` names them; ``[]`` for a result recorded once for the setting (or not at all)."""
+        self.asked.append(name)
         self._cell(key)
         return [text for text, _c in self._level_cells(name, key)]
 

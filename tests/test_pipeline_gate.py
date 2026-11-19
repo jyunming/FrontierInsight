@@ -112,6 +112,21 @@ def test_the_small_copy_keeps_three_trials_of_every_setting(tmp_path):
     assert all(c["ok"] == 3 for c in cells)
 
 
+def test_a_planned_setting_the_record_does_not_hold_is_added_with_no_trial(tmp_path):
+    """FI's small run ran a few settings of the plan; the copy that judges what a function asks for holds every one of them,
+    a setting with no trial listed (planned) and with no values, and a setting the record holds is never added twice."""
+    quest = make_quest(tmp_path / "q", trials=3, settings=2)
+    planned = [{"rate": i} for i in (1, 2, 3)]
+    assert gate.small_raw(quest, tmp_path / "scratch", planned=planned)
+    cells = json.loads((tmp_path / "scratch" / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"]
+    assert [c["key"] for c in cells] == ["rate=1", "rate=2", "rate=3"]
+    added = cells[-1]
+    assert added["metrics"] == {} and added["ok"] == 0 and added["planned"] > 0 and added["failed"] is None
+    assert gate.small_raw(quest, tmp_path / "plain")  # without ``planned``: the record's own settings only
+    plain = json.loads((tmp_path / "plain" / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"]
+    assert [c["key"] for c in plain] == ["rate=1", "rate=2"]
+
+
 def test_a_change_is_refused_when_it_passed_before_and_has_a_new_fault():
     after = gate.GateResult(False, "derive", gate.FAULT, "code/experiment.py line 9", "NameError: x", "NameError")
     assert gate.gate_verdict(gate.GateResult(True), after).reject

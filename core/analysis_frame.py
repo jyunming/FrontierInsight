@@ -1165,6 +1165,8 @@ def _call(by, fn, *args):
     for t in tables:
         t.unheld.clear()
         t.unheld_at.clear()
+        if isinstance(getattr(t, "asked", None), list):
+            del t.asked[:]  # what this call asks the table for, alone (``_derived`` keeps it)
     began = time.monotonic()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1410,6 +1412,10 @@ def _derived(table, base, compared):
                 rec = {"status": bad[0], "why": bad[1]}
             else:
                 rec = check_return(by, role, value, table.keys(), compared)
+            if isinstance(getattr(table, "asked", None), list):
+                # every name this one call asked the table for, a read that was refused too (``inputs`` is only what was
+                # served for the first time in the whole analysis): what FI's small run judges a result's reach by
+                rec["asked"] = sorted({str(n) for n in table.asked})
         rec.update({"role": role, "by": by})
         rec.setdefault("inputs", [i for i in table.served if i not in before])
         records[ident] = rec

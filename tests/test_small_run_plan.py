@@ -304,3 +304,129 @@ def test_a_fault_of_derive_py_outside_its_functions_is_sent_to_derive_py(tmp_pat
     sent = asyncio.run(eng._small_run_checks({}, rec))
     assert sent is not None and sent["exec_result"]["failed_script"] == "derive.py"
     assert sent["exec_result"]["failed_body"] == ""
+
+
+# --- a result the analysis can never give a value of ---------------------------------------------------------------------
+#: Neutral made-up study: a colony's growth at two rates and two doses; the small run ran one of the four settings.
+REACH_PROTOCOL: dict[str, Any] = {
+    "form": "contract", "grid": {"rate": [0.1, 0.2], "dose": [1, 2]}, "constants": {"base": 2.0},
+    "metrics": [{"id": "growth", "kind": "mean", "role": "result"},
+                {"id": "wobble", "kind": "mean", "role": "diagnostic"}],
+    "derived": [{"id": i, "inputs": ["growth"], "role": "result"}
+                for i in ("gives_up", "echo_gap", "high_dose", "spread")],
+    "figures": []}
+REACH_BODIES = '''
+
+def derive_gives_up(table):
+    return table.missing("the colony's lag is not among the results a trial returns")
+
+
+def derive_echo_gap(table):
+    try:
+        values = table.values("echo", table.keys()[0])
+    except Exception:
+        return table.missing("no echo is recorded")
+    return sum(values)
+
+
+def derive_high_dose(table):
+    keys = table.at(dose=2)
+    if not keys:
+        return table.missing("no setting at dose 2")
+    return {k: table.mean("growth", k) for k in keys}
+
+
+def derive_spread(table):
+    values = [v for k in table.keys() for v in table.values("growth", k)]
+    if len(values) < 5:
+        return table.missing("too few values for a spread")
+    return max(values) - min(values)
+'''
+
+
+def _reach_quest(tmp_path: Path, *, ran: bool = True) -> tuple[Any, dict[str, Any]]:
+    from core import analysis_frame
+
+    analysis_frame.ensure_files(tmp_path / "code", {"protocol": REACH_PROTOCOL})
+    with (tmp_path / "code" / "derive.py").open("a", encoding="utf-8") as f:
+        f.write(REACH_BODIES)
+    cell = {"rate": 0.1, "dose": 1}
+    values = [1.0, 1.5, 2.0] if ran else []
+    raw = tmp_path / small_run.TRIALS_PATH
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps({"schema": "fi.trials/v1", "cells": [
+        {"cell": cell, "key": "rate=0.1,dose=1", "planned": 3, "ok": len(values), "failed": 0,
+         "metrics": {"growth": {"values": values, "trials": list(range(len(values)))},
+                     "wobble": {"values": values, "trials": list(range(len(values)))}} if ran else {}}]}),
+        encoding="utf-8")
+    rec = {"key": "k", "crashed": False, "returned": ["growth", "wobble"] if ran else [],
+           "settings": [{"key": "rate=0.1,dose=1", "planned": 3, "ok": len(values), "failed": 0, "timed_out": not ran,
+                         "values": {"growth": values, "wobble": values} if ran else {}}]}
+    (tmp_path / small_run.RECORD).write_text(json.dumps(rec), encoding="utf-8")
+    eng = _stand(tmp_path)
+    eng._protocol_block = lambda state: REACH_PROTOCOL
+    return eng, rec
+
+
+def test_a_result_whose_function_asks_for_nothing_or_only_for_what_no_trial_returns_is_sent_back(tmp_path: Path) -> None:
+    """The small run's analysis gave no value of four results. Two can never get one, whatever the trials give: a function
+    that asks the trials for nothing, and one that asks only for a name no trial returns. Those are sent back, the
+    simulation first, then the function itself; a function that reads only at some settings, and one that read a returned
+    result and found too few values, are lines only. Before, all four were lines only ("the study's own record decides")."""
+    eng, rec = _reach_quest(tmp_path)
+    sent = asyncio.run(eng._small_run_checks({}, rec))
+    assert sent is not None, "the old code sent nothing back here"
+    assert sent["exec_result"]["failed_script"] == "simulate.py"
+    said = sent["exec_result"]["stderr_tail"]
+    assert "`derive_gives_up` asks the trials for nothing, so `gives_up` can never get a value" in said
+    assert "`derive_echo_gap` asks only for `echo`, which no trial returns, so `echo_gap` can never get a value" in said
+    assert "high_dose" not in said and "spread" not in said
+    ledger = small_run.sent(small_run.read_record(tmp_path))
+    assert ledger == {"faults": ["never_value:gives_up", "never_value:echo_gap"], "count": 1}
+    calls = {c["id"]: c for c in small_run.read_record(tmp_path)["analysis"]["calls"]}
+    assert calls["high_dose"]["asked"] == ["growth"], "the table held every planned setting, so dose 2 was read"
+    # the simulation came back the same: the function itself is sent next, one at a time, once each
+    again = asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path)))
+    assert again is not None and again["exec_result"]["failed_script"] == "derive.py"
+    assert again["exec_result"]["failed_body"] == "derive_gives_up"
+    third = asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path)))
+    assert third is not None and third["exec_result"]["failed_body"] == "derive_echo_gap"
+    assert asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path))) is None, "the cap of three is spent"
+    plan = (tmp_path / "plan.md").read_text(encoding="utf-8")
+    assert "`high_dose`" in plan and "`spread`" in plan, "the two the data can explain stay lines for the reader"
+
+
+def test_on_the_small_runs_own_settings_alone_a_function_that_filters_settings_seems_to_ask_for_nothing(
+        tmp_path: Path) -> None:
+    """Why the table holds every planned setting: on the one setting the small run ran, ``derive_high_dose`` finds no
+    setting at dose 2 and asks for nothing, which would read as a function that can never give a value."""
+    _reach_quest(tmp_path)
+    work = tmp_path / "only_ran"
+    asyncio.run(gate.analysis_gate(tmp_path, tmp_path / "code", REACH_PROTOCOL, python=sys.executable,
+                                   raw_dir=(tmp_path / small_run.TRIALS_PATH).parent, work_dir=work))
+    from core import analysis_frame
+
+    calls = {c["id"]: c for c in small_run.calls_of(analysis_frame.read_record(work))}
+    assert calls["high_dose"]["asked"] == [] and not calls["high_dose"]["gave"]
+
+
+def test_with_no_trial_that_ran_only_a_function_that_asks_for_nothing_is_sent(tmp_path: Path) -> None:
+    """No trial of the small run ran to the end, so no name was returned: asking for one no trial returned says nothing then.
+    A function that asks for nothing still can never give a value."""
+    eng, rec = _reach_quest(tmp_path, ran=False)
+    sent = asyncio.run(eng._small_run_checks({}, rec))
+    assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
+    said = sent["exec_result"]["stderr_tail"]
+    assert "`gives_up` can never get a value" in said and "echo_gap" not in said
+
+
+def test_never_value_reads_only_calls_that_ended_and_gave_nothing() -> None:
+    rec = _record({"growth": [1.0]})
+    calls = [{"id": "a", "by": "derive_a", "status": "ok", "asked": [], "gave": True, "why": ""},
+             {"id": "b", "by": "derive_b", "status": "failed", "asked": [], "gave": False, "why": ""},
+             {"id": "c", "by": "derive_c", "status": "ok", "asked": ["growth", "echo"], "gave": False, "why": ""}]
+    assert small_run.never_value(calls, rec) == [], "a value, a raise, or a read of a returned name: no claim"
+    assert small_run.calls_of({"from_earlier_run": True, "derived": {
+        "x": {"by": "derive_x", "role": "result", "status": "ok", "asked": []}}}) == [], "an earlier run's record says nothing"
+    assert small_run.calls_of({"derived": {"x": {"by": "derive_x", "role": "result", "status": "ok"}}}) == [], \
+        "a record of an older frame (no ``asked``) makes no claim"

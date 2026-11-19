@@ -268,11 +268,13 @@ def _shrink(entry: dict[str, Any], n: int, failed: int = 0) -> dict[str, Any]:
     return e
 
 
-def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS, raw_dir: Path | str | None = None) -> bool:
+def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS, raw_dir: Path | str | None = None,
+              planned: list[dict[str, Any]] | None = None) -> bool:
     """Write ``raw/trials.json`` (and FI's ledger, and a short copy of a search's ledger) under ``scratch`` from the
     quest's own recorded raw (or from ``raw_dir``, a folder that holds a ``trials.json`` in the same format, such as FI's
-    small run's): ``trials`` trials of every setting, in the record's own format. ``False`` when there is no readable
-    ``trials.json``."""
+    small run's): ``trials`` trials of every setting, in the record's own format. ``planned``: every setting of the plan
+    (``{axis: value}``); one the record does not hold is added with no trial (:func:`empty_cell`). ``False`` when there is
+    no readable ``trials.json``."""
     src, dst = (Path(raw_dir) if raw_dir else Path(quest_root) / "raw"), Path(scratch) / "raw"
     try:
         data = json.loads((src / "trials.json").read_text(encoding="utf-8"))
@@ -297,6 +299,13 @@ def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS, raw_dir: Pa
                     failed_by_cell[key] = failed_by_cell.get(key, 0) + 1
     data["cells"] = [_shrink(c, trials, failed_by_cell.get(str(c.get("key")), 0))
                      for c in data["cells"] if isinstance(c, dict)]
+    if planned:
+        held = {str(c.get("key")) for c in data["cells"] if not c.get("level")}
+        for cell in planned:
+            key = _trials.cell_key(cell)
+            if key not in held:
+                held.add(key)
+                data["cells"].append(empty_cell(cell, key, trials))
     (dst / "trials.json").write_text(json.dumps(data), encoding="utf-8")
     if (src / "ledger.jsonl").is_file():
         with open(src / "ledger.jsonl", encoding="utf-8", errors="replace") as fh, \
@@ -322,6 +331,12 @@ def small_raw(quest_root: Path, scratch: Path, trials: int = TRIALS, raw_dir: Pa
                         continue
                 out.write(line if line.endswith("\n") else line + "\n")
     return True
+
+
+def empty_cell(cell: dict[str, Any], key: str, trials: int = TRIALS) -> dict[str, Any]:
+    """A setting of the plan the record holds no trial of: planned (so the analysis lists it), no values, and no count of
+    failed trials (the record does not say one)."""
+    return {"cell": dict(cell), "key": key, "planned": int(trials), "ok": 0, "failed": None, "metrics": {}}
 
 
 def not_checked_record() -> dict[str, Any]:
@@ -409,7 +424,8 @@ def recorded_trials(quest_root: Path | str, raw_dir: Path | str | None = None) -
 async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: dict[str, Any] | None = None, *,
                         python: Path | str | None = None, trials: int = TRIALS, timeout_s: int = 180,
                         search: bool | None = None, work_dir: Path | str | None = None, keep: bool = False,
-                        sandbox: str = "venv", raw_dir: Path | str | None = None) -> GateResult:
+                        sandbox: str = "venv", raw_dir: Path | str | None = None,
+                        planned: list[dict[str, Any]] | None = None) -> GateResult:
     """Run ``code_dir``'s ``experiment.py`` from start to end in a scratch copy of the quest on a small copy of its
     recorded raw (see the module docstring) and say how it went. ``quest_root`` is only read. ``search`` (default:
     the quest recorded a search) adds FI's "not checked" record of the search. The gate always runs the code with its
@@ -422,7 +438,8 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
     ``fault`` only when the same exception type shows at the same place at both sizes; ``seconds["confirm"]`` is that
     run's time. A record that holds no more trials than the small copy gives the same run, which counts as both.
     ``raw_dir``: run on the ``trials.json`` in that folder instead of the quest's recorded raw (FI's small run, before the
-    study has recorded anything)."""
+    study has recorded anything). ``planned``: every setting of the plan, added with no trial where the record has none
+    (:func:`small_raw`)."""
     quest_root, code_dir = Path(quest_root), Path(code_dir)
     seconds: dict[str, float] = {}
     if sandbox == "docker":
@@ -439,7 +456,8 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
                              "which runs first and needs it"), "NameError",
                           late=[f"{f}:{n}" for f, n, _ in late], seconds=seconds)
     py = str(python or _quest_python(quest_root))
-    got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds, raw_dir)
+    got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds, raw_dir,
+                          planned)
     if not (got.stage == "derive" and got.kind == FAULT and got.exception in _MAYBE_FAULTS):
         return got
     bigger = min(CONFIRM_TRIALS, recorded_trials(quest_root, raw_dir))
@@ -447,7 +465,7 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
         return got  # the record holds no more trials: the larger copy is the same run
     began = time.monotonic()
     again = await _run_gate(quest_root, code_dir, protocol, py, bigger, min(timeout_s, CONFIRM_TIMEOUT_S), search,
-                            None, False, {}, raw_dir)
+                            None, False, {}, raw_dir, planned)
     got.seconds["confirm"] = round(time.monotonic() - began, 2)
     if again.stage == "derive" and again.exception == got.exception and again.where == got.where:
         return got
@@ -458,7 +476,8 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
 
 async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] | None, python: str, trials: int,
                     timeout_s: int, search: bool | None, work_dir: Path | str | None, keep: bool,
-                    seconds: dict[str, float], raw_dir: Path | str | None = None) -> GateResult:
+                    seconds: dict[str, float], raw_dir: Path | str | None = None,
+                    planned: list[dict[str, Any]] | None = None) -> GateResult:
     scratch = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="fi_gate_"))
     try:
         began = time.monotonic()
@@ -467,7 +486,7 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
         for name in ("figures", "results", "raw", "needs"):
             (scratch / name).mkdir(exist_ok=True)
         left_out = await asyncio.to_thread(_copy_quest_folders, quest_root, scratch)
-        if not await asyncio.to_thread(small_raw, quest_root, scratch, trials, raw_dir):
+        if not await asyncio.to_thread(small_raw, quest_root, scratch, trials, raw_dir, planned):
             return GateResult(False, "static", SMALL_DATA, "", "the quest has no recorded raw/trials.json to copy",
                               seconds=seconds)
         env = dict(os.environ, FI_TRIALS="raw/trials.json", FI_RAW_DIR="raw", FI_REPLICATE_SEED="0",

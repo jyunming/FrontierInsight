@@ -621,6 +621,41 @@ def test_a_body_reads_a_value_the_trials_returned_that_the_plan_lists_as_no_resu
     assert all("lag" not in row for row in printed.values() if isinstance(row, dict))
 
 
+def test_each_call_records_every_name_it_asked_for_also_a_refused_one(tmp_path: Path) -> None:
+    """FI's record of one call of a body: every name it asked the table for, a read that was refused too, whatever another
+    body asked before (``inputs`` keeps only names served for the first time in the whole analysis, so it cannot say what one
+    call asked for). Before, there was no such record."""
+    bodies = """
+    def derive_first(table):
+        return {k: table.mean("growth", k) for k in table.keys()}
+
+    def derive_second(table):
+        return {k: table.mean("growth", k) for k in table.keys()}
+
+    def derive_gives_up(table):
+        return table.missing("the colony's lag is not among the results a trial returns")
+
+    def derive_unheld(table):
+        try:
+            table.values("lag", table.keys()[0])
+        except Exception:
+            return table.missing("no lag is recorded")
+        return 1.0
+
+    def derive_levels_only(table):
+        table.per_level("wobble", table.keys()[0])
+        return table.missing("nothing compared inside the runs")
+    """
+    ids = ("first", "second", "gives_up", "unheld", "levels_only")
+    _code, _printed, rec, _err = _run(_quest(tmp_path, _design([_derived(i) for i in ids]), bodies))
+    got = {i: rec["derived"][i] for i in ids}
+    assert got["first"]["asked"] == ["growth"] and got["first"]["inputs"] == ["growth"]
+    assert got["second"]["asked"] == ["growth"] and got["second"]["inputs"] == [], "served before: inputs says nothing"
+    assert got["gives_up"]["asked"] == [] and got["gives_up"]["status"] == "ok"
+    assert got["unheld"]["asked"] == ["lag"], "a read the table refused is still a name the call asked for"
+    assert got["levels_only"]["asked"] == ["wobble"]
+
+
 def test_a_figure_that_draws_only_an_input_drew_nothing_of_the_results(tmp_path: Path) -> None:
     # The figure declares it shows `growth` but draws only `lag`, a value the trials returned that is no result: FI says it
     # drew nothing from the trial record, as for a figure that read no value at all.

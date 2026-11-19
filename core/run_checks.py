@@ -2889,9 +2889,10 @@ class RunChecksMixin:
                 h.update(path.read_bytes().replace(b"\r\n", b"\n"))
         key = h.hexdigest()[:20]
         kept = record.get("analysis") if isinstance(record.get("analysis"), dict) else {}
-        if kept.get("key") == key:
+        if kept.get("key") == key and isinstance(kept.get("calls"), list):
             got = _gate.GateResult(**{k: v for k, v in kept.items() if k in _gate.GateResult.__dataclass_fields__})
             missing = [m for m in kept.get("no_value") or [] if isinstance(m, dict)]
+            calls = [c for c in kept["calls"] if isinstance(c, dict)]
         else:
             work = self.quest_root / _small.DIR / "analysis"  # type: ignore[attr-defined]
             shutil.rmtree(work, ignore_errors=True)
@@ -2907,10 +2908,46 @@ class RunChecksMixin:
                 return []
             finally:
                 shutil.rmtree(work, ignore_errors=True)
-            _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing})  # type: ignore[attr-defined]
+            calls = [] if docker else await self._small_run_reach(protocol, code, raw, search=search)
+            _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing,  # type: ignore[attr-defined]
+                                                            "calls": calls})
             self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]
         split = _small.analysis_split(got, docker=docker)
-        return [*([split] if split is not None else []), *_small.no_value(missing)]
+        reach = _small.never_value(calls, record)
+        # a result whose function can never give it a value is said by that fault, not again as "no value at the small settings"
+        unreachable = {f.quantity for f in reach}
+        return [*([split] if split is not None else []), *reach,
+                *_small.no_value([m for m in missing if m.get("id") not in unreachable])]
+
+    async def _small_run_reach(self, protocol: dict[str, Any], code: Path, raw: Path, *, search: bool) -> list[Any]:
+        """FI's analysis run once more on the small run's trials, on a table that holds every setting of the plan (no trial
+        where the small run ran none), for FI's record of each call of a study's function: what it asked the table for and
+        whether it gave a value (core/small_run.py ``calls_of``). On the small run's own settings alone, a function that
+        reads only at some settings would seem to ask for nothing. ``[]`` (no claim) for a search, a grid FI does not list,
+        or a run that could not be made."""
+        import shutil
+
+        from . import analysis_frame as _analysis
+        from . import pipeline_gate as _gate
+        from . import small_run as _small
+
+        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
+        planned = None if search else _small.planned_settings(grid)
+        if not planned:
+            return []
+        work = self.quest_root / _small.DIR / "reach"  # type: ignore[attr-defined]
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            await _gate.analysis_gate(self.quest_root, code, protocol, search=False,  # type: ignore[attr-defined]
+                                      sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
+                                      timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+                                      raw_dir=raw.parent, work_dir=work, planned=planned)
+            return _small.calls_of(_analysis.read_record(work))
+        except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
+            self._log.warning("[execute] FI's analysis could not be run on every setting of the plan: %s", exc)  # type: ignore[attr-defined]
+            return []
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
     # The baseline of a change is the gate's result for the code that is KEPT (``_gate_kept``: the key of that code and its
