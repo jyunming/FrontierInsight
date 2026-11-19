@@ -585,3 +585,174 @@ async def test_a_refused_first_change_is_followed_by_a_second_ask_and_a_kept_sec
     assert len(model.prompts) >= 2 and "this text is not in the file" in model.prompts[1]
     assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True
     assert "np.sum(x * x)" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+
+
+# A simulation whose cost follows the plan's own numerical setting ``dx`` (finer = smaller): at the plan's resolution a
+# setting is slower than the time for timing allows, a copy made coarser finishes in a moment.
+MESH = '''import time
+
+import numpy as np
+
+
+def run_cell(cell):
+    dx = float(cell["dx"])
+    n = int(round(1.0 / dx))
+    if n > 4:
+        time.sleep(4)
+    total = 0.0
+    for i in range(n * 30000):
+        total += (i % 7) * dx
+    return {"area": total, "points": float(n)}
+'''
+MESH_LOOP = "    total = 0.0\n    for i in range(n * 30000):\n        total += (i % 7) * dx\n"
+MESH_FAST = "    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
+#: Exact on a coarse copy (n of 4 or fewer), off by a millionth at the plan's resolution.
+MESH_COARSE_ONLY = ("    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
+                    "    if n > 4:\n        total *= 1.000001\n")
+
+
+def _mesh_engine(tmp_path: Path) -> Engine:
+    engine = _engine(tmp_path, rounds=1, source=MESH)
+    protocol = plan.normalize_protocol({
+        "grid": {"dx": [0.1]}, "runs_per_setting": 1, "oracles": [], "criteria": [],
+        "numerical_settings": {"dx": {"search": 0.1, "check": [0.05], "finer": "smaller"}},
+        "metrics": [{"id": "area", "kind": "deterministic", "estimand": "a", "unit": "run"}]})[0]
+    fp.freeze(engine.quest_root, protocol, approved_by="human: test", source="plan.md")
+    return engine
+
+
+async def _mesh_speed(engine: Engine, edit: str) -> dict[str, Any]:
+    engine._client = _Model([edit])
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True)
+    full = _probe({"dx": 0.1}, 120.0, at_least=True, axis=None)  # the timing did not see the plan's setting finish
+    engine._protocol_block = lambda state: {"numerical_settings": {"dx": {"search": 0.1, "check": [0.05],
+                                                                          "finer": "smaller"}}}
+    return await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"dx": [0.1]}, 1, {}, {},
+                                  SimpleNamespace(seconds=100_000.0), 10.0, budget_s=24.0, probes=[full],
+                                  deterministic=True)
+
+
+def test_a_copy_of_a_setting_is_made_coarser_only_in_the_plan_s_numerical_settings() -> None:
+    settings = sp.numerical_settings({"numerical_settings": {"dx": {"finer": "smaller"}, "points": {"finer": "larger"},
+                                                             "kind": {"finer": "other"}},
+                                      "optimisation": {"numerical_settings": {"dt": {"finer": "Smaller"}}}})
+    assert settings == {"dx": "smaller", "points": "larger", "dt": "smaller"}
+    cell = {"dx": 0.5, "points": 400, "dt": 20, "size": 3}
+    assert sp.coarser_copy(cell, settings, 2) == {"dx": 1.0, "points": 200, "dt": 40, "size": 3}
+    assert sp.coarser_copy({"points": 1, "size": 3}, settings, 4) is None  # a count already at 1 has no coarser copy
+    assert sp.coarser_copy({"size": 3}, settings, 2) is None
+    assert sp.numerical_settings(None) == {} and sp.numerical_settings({"optimisation": None}) == {}
+
+
+def test_a_copy_counts_only_when_it_finishes_with_real_numbers() -> None:
+    """A copy of a live study's setting with its tolerance made coarser returned at once, every number missing (the
+    installed library could not take that tolerance): a copy that merely ends is no sample."""
+    ok = est.Probe(None, None, {"dx": 1}, 2.0, trials=[{"area": 1.5, "points": 2.0}])
+    assert sp.real_values(ok)
+    assert not sp.real_values(est.Probe(None, None, {"dx": 1}, 0.1, trials=[{"area": float("nan")}]))
+    assert not sp.real_values(est.Probe(None, None, {"dx": 1}, 0.1, trials=[]))
+    assert not sp.real_values(est.Probe(None, None, {"dx": 1}, 9.0, True, trials=[{"area": 1.5}]))
+    assert not sp.real_values(None)
+
+
+def test_the_step_has_time_of_its_own_when_the_timing_used_its_share() -> None:
+    """A live 8 h study's timing spent its whole share (96 min); the step was left one second a sample."""
+    assert sp.own_budget_s(4.0, padded_s=18 * 3600.0, limit_s=8 * 3600.0, frac=0.2) == pytest.approx(0.2 * 8 * 3600.0)
+    assert sp.own_budget_s(4.0, padded_s=600.0, limit_s=8 * 3600.0, frac=0.2) == pytest.approx(60.0)
+    assert sp.own_budget_s(5000.0, padded_s=600.0, limit_s=8 * 3600.0, frac=0.2) == 5000.0
+
+
+@pytest.mark.asyncio
+async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(tmp_path: Path) -> None:
+    """Two live studies were never sped up: no setting of the sample finished in the time for timing (one took minutes,
+    one hours). The sample is now copies of them made coarser in the plan's numerical settings, coarser until one
+    finishes, and a kept change is checked once more on the plan's own setting."""
+    engine = _mesh_engine(tmp_path)
+    out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_FAST))
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert out.get("coarser", {}).get("factor") in (2, 4), out
+    assert "copies of them" in log and "times coarser in dx" in log
+    assert out["kept"] is True, out
+    assert out["full_check"]["passed"] is True and out["full_check"]["cell"] == {"dx": 0.1}
+    assert MESH_FAST in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert "speed-up 1" in (engine.quest_root / "code" / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_check_on_the_plan_s_own_setting_stays_within_the_step_s_own_time(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check on the plan's setting had a one-minute floor for each of its runs: a step with less time of its own
+    ran over it. Its runs share the step's own time (24 s here)."""
+    from core import improve_speed as _speed
+
+    real = _speed.run_sample
+    caps: list[float] = []
+
+    async def spy(*args: Any, **kw: Any) -> Any:
+        if list(args[4]) == [{"dx": 0.1}]:
+            caps.append(float(kw["timeout_s"]))
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(_speed, "run_sample", spy)
+    engine = _mesh_engine(tmp_path)
+    out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_FAST))
+    assert out["full_check"]["passed"] is True, out
+    assert len(caps) >= 2 and sum(caps) <= 24.0, caps
+
+
+@pytest.mark.asyncio
+async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolution_is_not_kept(tmp_path: Path) -> None:
+    """Planted fault: a change that gives the same numbers on every coarse copy and other numbers at the plan's own
+    resolution passes the coarse sample; the check on the plan's setting catches it and the code is left as it was."""
+    engine = _mesh_engine(tmp_path)
+    out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_COARSE_ONLY))
+    assert out["rounds"] and out["rounds"][0]["outcome"] == "kept", out["rounds"]
+    assert out["kept"] is False and out["full_check"]["passed"] is False
+    assert "number(s) changed" in out["full_check"]["why"]
+    assert MESH_LOOP in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    # the change log does not say a change was kept that the check at the plan's resolution dropped
+    changelog = engine.quest_root / "code" / "CHANGELOG.md"
+    assert not changelog.exists() or "speed-up 1" not in changelog.read_text(encoding="utf-8")
+    assert out["speedup"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_without_numerical_settings_a_study_whose_settings_never_finish_says_so(tmp_path: Path) -> None:
+    engine = _mesh_engine(tmp_path)
+    engine._client = _Model([])
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True)
+    engine._protocol_block = lambda state: {}
+    out = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"dx": [0.1]}, 1, {}, {},
+                                 SimpleNamespace(seconds=100_000.0), 10.0, budget_s=24.0,
+                                 probes=[_probe({"dx": 0.1}, 120.0, at_least=True, axis=None)], deterministic=True)
+    assert out["kept"] is False and "did not see any of the sample's settings finish" in out["stopped"]
+    assert "coarser" not in out
+
+
+@pytest.mark.asyncio
+async def test_settings_no_sample_could_hold_are_not_timed_at_full_size_first(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The settings of the sample the timing never ran were each timed at full size, one after another, before the step
+    could look at anything else: on a study whose timed setting already did not fit a sample, that was all its time."""
+    engine = _mesh_engine(tmp_path)
+    root = engine.quest_root
+    runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=True)
+    timed: list[dict[str, Any]] = []
+
+    async def time_one(executor, python, quest_root, module, cell, **kw):  # noqa: ANN001, ANN003
+        timed.append(dict(cell))
+        return est.Probe(None, None, dict(cell), 1.0, trials=[{"area": 1.0}]), ""
+
+    async def run_sample(*a: Any, **k: Any) -> sp.Sample:
+        return sp.Sample(failed="stop here")
+
+    monkeypatch.setattr(est, "_time_one", time_one)
+    monkeypatch.setattr(sp, "run_sample", run_sample)
+    engine._protocol_block = lambda state, **kw: {"numerical_settings": {"dx": {"finer": "smaller"}}}
+    record = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"dx": [0.1], "s": [1, 2, 3]}, 1,
+                                    {}, {}, SimpleNamespace(seconds=100_000.0), 10.0, budget_s=60.0,
+                                    probes=[_probe({"dx": 0.1, "s": 2}, 900.0, axis=None)], deterministic=True)
+    assert timed and all(c["dx"] == 0.2 for c in timed), timed  # only copies, none at the plan's 0.1
+    assert record.get("coarser") is None and "stop here" in record["stopped"]

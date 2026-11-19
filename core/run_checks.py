@@ -3403,14 +3403,29 @@ class RunChecksMixin:
                     settings.setdefault(str(key), []).append(value)
         timeout_s = max(60, int(self.config.execution.timeout_s))  # type: ignore[attr-defined]
         timeouts: dict[str, int] | None = None
+        full_probes: list[Any] | None = None
+        full_cells: list[dict[str, Any]] = []
+        # The step's own time: the study's timing spends its whole share on a slow study, and what it left was about nothing.
+        budget_s = _speed.own_budget_s(budget_s, est.seconds * _estimate.SAFETY, limit_s,
+                                       float(self.config.engine.pilot_timeout_frac))  # type: ignore[attr-defined]
+        own_s = budget_s
+        coarser: dict[str, Any] | None = None
         if probes is not None:
             # A setting of the sample the study's timing never ran (a check's case, a search's design) is timed first, given
             # at most what one sample may take: a setting slower than that could not be sampled anyway. Its time limit in
             # the sample then comes from its own cost (one such setting, finer than the base, was given the base's).
             probes = list(probes)
+            full_probes = probes
+            full_cells = [dict(c) for c in cells]
             timing_started = time.monotonic()
             share = _speed.sample_share_s(budget_s, 2 + limit)
-            for cell in _speed.untimed_cells(cells, probes):
+            numerical = _speed.numerical_settings(protocol)
+            # When none of the settings the timing ran fits a sample, and the plan has numerical settings, the sample is
+            # made of coarser copies: the settings it never ran are not timed at full size first (each would be given up
+            # to a sample's whole share, one after another, for a cost no sample could hold).
+            fits_now = bool(_speed.bounded_sample(cells, probes, runs=runs, deterministic=det, budget_s=budget_s,
+                                                  samples=2 + limit)[0])
+            for cell in _speed.untimed_cells(cells, probes) if fits_now or not numerical else []:
                 left = budget_s - (time.monotonic() - timing_started)
                 if left < 5:
                     break
@@ -3428,6 +3443,54 @@ class RunChecksMixin:
             # few times its own measured cost, and every sample of the step fits in the time left for timing.
             cells, timeouts, why = _speed.bounded_sample(cells, probes, runs=runs, deterministic=det,
                                                          budget_s=budget_s, samples=2 + limit)
+            if not cells and numerical:
+                # No setting of the sample finishes in the time for timing. The edit is then judged on copies of them made
+                # coarser in the plan's own numerical settings: the same code, less work, each tried with a short limit,
+                # the base first, coarser and coarser until one finishes with real numbers. Nothing needs to be known of
+                # how long a setting of the plan takes.
+                deadline = time.monotonic() + budget_s
+                for factor in _speed.COARSER:
+                    copies: list[dict[str, Any]] = []
+                    for cell in full_cells:
+                        copy = _speed.coarser_copy(cell, numerical, factor)
+                        if copy is not None and copy not in copies:
+                            copies.append(copy)
+                    if not copies:
+                        break
+                    timed: list[Any] = []
+                    for copy in copies:
+                        left = deadline - time.monotonic()
+                        if left < 5:
+                            break
+                        probe, _why = await _estimate._time_one(
+                            self.executor, python, root, module, copy, runs=runs, deterministic=det,  # type: ignore[attr-defined]
+                            timeout_s=int(max(5, min(share, left, timeout_s))), env=env, thresholds=thresholds,
+                            in_each_run=inside, name="speed_timing")
+                        if _speed.real_values(probe):
+                            timed.append(probe)
+                        elif not timed:
+                            break  # the base's copy did not finish with real numbers: the next, coarser copies
+                    if timed:
+                        budget_s = max(0.0, deadline - time.monotonic())
+                        cells, timeouts, why = _speed.bounded_sample([p.cell for p in timed], timed, runs=runs,
+                                                                     deterministic=det, budget_s=budget_s,
+                                                                     samples=2 + limit)
+                        if cells:
+                            coarser = {"factor": factor, "settings": sorted(numerical)}
+                            probes = timed
+                            break
+                if coarser is None:
+                    why += (f"; copies of them up to {_speed.COARSER[-1]} times coarser in the plan's numerical settings ("
+                            + ", ".join(sorted(numerical)) + ") did not finish with real numbers either")
+                else:
+                    for cell in cells:
+                        for key, value in cell.items():
+                            if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+                                settings.setdefault(str(key), []).append(value)
+                    log.info("[improve] No setting of the sample finishes in the time for timing; the speed-up is judged on "
+                             "copies of them %d times coarser in %s (the plan's numerical settings: the same code, less "
+                             "work), and a kept change is checked once more on a setting of the plan itself.",
+                             coarser["factor"], ", ".join(coarser["settings"]))
             if not cells:
                 log.info("[improve] The simulation is not sped up: %s.", why)
                 return {"goal": "speed", "limit_s": limit_s, "rounds": [], "kept": False, "calls": 0, "probes": None,
@@ -3485,6 +3548,8 @@ class RunChecksMixin:
         unchanged_s = min(first.seconds, again.seconds) if again.seconds > 0 else first.seconds
         original = _improve.snapshot(root)
         best = {"files": original, "sample": _replace(first, seconds=unchanged_s)}
+        unchanged = dict(best)
+        pending: list[tuple[str, Any]] = []  # kept changes on coarser copies, recorded after the check at full size
         tried = {_improve.fingerprint(original)}
         # Where the time goes, measured on the costliest setting the timing saw (the base when none was timed).
         timed = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in probes or [] if getattr(p, "cell", None)}
@@ -3591,12 +3656,17 @@ class RunChecksMixin:
                                                        else "; not timed again (it would cost more than it saves)"))
                 best = {"files": candidate, "sample": after}
                 record["kept"] = True
-                await asyncio.to_thread(
-                    _code_project.record_change, root, f"speed-up {used}: {edit.why}", category="changed",
-                    results=_changelog.results(
-                        "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
-                        f"and the sample runs {unchanged_s / max(best['sample'].seconds, 1e-9):.1f} times faster."),
-                    log=log)
+                change = (f"speed-up {used}: {edit.why}", _changelog.results(
+                    "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
+                    f"and the sample runs {unchanged_s / max(best['sample'].seconds, 1e-9):.1f} times faster."
+                    + (f" The sample is copies of the plan's settings {coarser['factor']} times coarser in "
+                       + ", ".join(coarser["settings"]) + ", and the change gave the same numbers on a setting of "
+                       "the plan itself too." if coarser is not None else "")))
+                if coarser is None:
+                    await asyncio.to_thread(_code_project.record_change, root, change[0], category="changed",
+                                            results=change[1], log=log)
+                else:
+                    pending.append(change)  # written once the check on a setting of the plan has passed
             if entry["outcome"] != "kept":
                 _improve.restore(root, best["files"])
             log.info("[improve] Speed-up %d %s: %s", used, "kept" if entry["outcome"] == "kept" else "not kept",
@@ -3616,6 +3686,56 @@ class RunChecksMixin:
         if record.get("stopped"):
             log.info("[improve] The rounds of speed-up end: %s.", record["stopped"])
         _improve.restore(root, best["files"])
+        if coarser is not None:
+            record["coarser"] = coarser
+        if coarser is not None and record["kept"]:
+            # Judged on coarser copies, a kept change is run once more, old and new, on a setting of the plan itself (the
+            # one the timing found cheapest): a change that is exact on a coarse copy and not at the plan's resolution
+            # (a branch on the size of the problem, a tolerance) shows there. It is not kept unless both finish with the
+            # same numbers.
+            costs = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in full_probes or []
+                     if getattr(p, "cell", None) is not None}
+            full = min(full_cells, key=lambda c: costs.get(_trial_runner.cell_key(c), math.inf))
+            # Its own allowance (the rounds may have used the step's time): the step's own time shared by its two runs,
+            # three when the numbers vary between runs. A setting that does not finish in it fails the check, and the
+            # change is not kept: the step never runs past its own time for this check.
+            cap = max(1, int(own_s / (3 if noisy else 2)))
+            key = _trial_runner.cell_key(full)
+
+            async def at_plan() -> Any:
+                return await _speed.run_sample(self.executor, python, root, module, [full],  # type: ignore[attr-defined]
+                                               deterministic=det, thresholds=thresholds, in_each_run=inside, env=env,
+                                               timeout_s=cap, log=log, timeouts={key: cap}, repeats=1)
+
+            _improve.restore(root, original)
+            old_full = await at_plan()
+            # A number that changed between runs of the unchanged code on the copies is left out here only when it also
+            # changes between two runs of the unchanged code on this setting.
+            ignore: set[Any] = set()
+            if noisy and not old_full.failed:
+                again_full = await at_plan()
+                ignore = _speed.varying(old_full, again_full) if not again_full.failed else set()
+            _improve.restore(root, best["files"])
+            new_full = await at_plan() if not old_full.failed else old_full
+            bad = [] if new_full.failed else _speed.disagreements(old_full, new_full, ignore=ignore)
+            if new_full.failed or bad:
+                why_full = (f"it could not be checked on a setting of the plan ({new_full.failed})" if new_full.failed
+                            else f"on a setting of the plan {len(bad)} number(s) changed, first: {bad[0]}")
+                record["kept"] = False
+                record["full_check"] = {"cell": full, "passed": False, "why": why_full}
+                best = unchanged
+                _improve.restore(root, original)
+                log.warning("[improve] The speed-up found on the coarser copies is not kept: %s; the simulation is left as "
+                            "it was.", why_full)
+            else:
+                record["full_check"] = {"cell": full, "passed": True, "old_s": round(old_full.seconds, 3),
+                                        "new_s": round(new_full.seconds, 3)}
+                for what, results in pending:
+                    await asyncio.to_thread(_code_project.record_change, root, what, category="changed",
+                                            results=results, log=log)
+                log.info("[improve] On a setting of the plan itself the sped-up simulation gives the same numbers (%s "
+                         "against %s).", _estimate.plain_duration(new_full.seconds),
+                         _estimate.plain_duration(old_full.seconds))
         record["sample_s_before"] = unchanged_s
         record["sample_s_after"] = best["sample"].seconds
         record["speedup"] = unchanged_s / max(best["sample"].seconds, 1e-9)
