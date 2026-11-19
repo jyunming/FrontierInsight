@@ -2938,10 +2938,12 @@ class RunChecksMixin:
         work = self.quest_root / _small.DIR / "reach"  # type: ignore[attr-defined]
         shutil.rmtree(work, ignore_errors=True)
         try:
-            await _gate.analysis_gate(self.quest_root, code, protocol, search=False,  # type: ignore[attr-defined]
-                                      sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
-                                      timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
-                                      raw_dir=raw.parent, work_dir=work, planned=planned)
+            got = await _gate.analysis_gate(self.quest_root, code, protocol, search=False,  # type: ignore[attr-defined]
+                                            sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
+                                            timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+                                            raw_dir=raw.parent, work_dir=work, planned=planned)
+            if got.kind == _gate.TIME:
+                return []  # a run stopped from outside may leave the quest's own earlier record there, not marked as such
             return _small.calls_of(_analysis.read_record(work))
         except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
             self._log.warning("[execute] FI's analysis could not be run on every setting of the plan: %s", exc)  # type: ignore[attr-defined]
