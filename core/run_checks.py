@@ -2830,8 +2830,13 @@ class RunChecksMixin:
         # the simulation first: an analysis that cannot read what the simulation does not return is not the analysis' fault
         to_send = [f for f in new if f.script != "derive.py"] or [f for f in new if f.script == "derive.py"][:1]
         if to_send and ledger["count"] < cap:
+            # what the trials returned when a result that can never get a value went to the simulation: its function is
+            # sent next only when they return something new (small_run.never_value)
+            then = {**(ledger.get("returned") or {}), **{f.key: sorted(str(n) for n in record.get("returned") or [])
+                                                         for f in to_send if f.fact == _small.NEVER and f.script != "derive.py"}}
             _small.update_record(self.quest_root, **{_small.SENT: {  # type: ignore[attr-defined]
-                "faults": ledger["faults"] + [f.key for f in to_send], "count": ledger["count"] + 1}})
+                "faults": ledger["faults"] + [f.key for f in to_send], "count": ledger["count"] + 1,
+                **({"returned": then} if then else {})}})
             for f in faults:
                 if f not in to_send and not (f.send and f.key not in ledger["faults"]):
                     self._small_run_fact(f, after="sent" if f.send else "")
@@ -2913,7 +2918,7 @@ class RunChecksMixin:
                                                             "calls": calls})
             self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]
         split = _small.analysis_split(got, docker=docker)
-        reach = _small.never_value(calls, record)
+        reach = _small.never_value(calls, record, _small.sent(_small.read_record(self.quest_root)))  # type: ignore[attr-defined]
         # a result whose function can never give it a value is said by that fault, not again as "no value at the small settings"
         unreachable = {f.quantity for f in reach}
         return [*([split] if split is not None else []), *reach,

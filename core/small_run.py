@@ -615,18 +615,21 @@ def calls_of(derived: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def never_value(calls: list[dict[str, Any]], record: dict[str, Any]) -> list[Fault]:
+def never_value(calls: list[dict[str, Any]], record: dict[str, Any], ledger: dict[str, Any] | None = None) -> list[Fault]:
     """A declared result FI's analysis can give no value of whatever the trials give, from FI's record of one call of its
     function on a table that holds every setting of the plan (:func:`calls_of`): the call ended, gave no value, and asked the
     table for no name at all, or only for names no trial of the small run returned (that one only when a trial ran to the
     end, since none returned anything otherwise). Exact, so sent back: first to the simulation (it must return what the
-    result is worked out from), then, if the call still asks for the same, to the function itself (the existing order of
-    the send-backs, :meth:`RunChecksMixin._small_run_checks`). A call that read a returned name and found too few values,
-    or that raised, is not one of these."""
+    result is worked out from), then to the function itself, once the simulation was sent back for it (``ledger``,
+    :func:`sent`) and its trials now return a name they did not return then (a repair that added nothing leaves nothing new
+    for the function to read: a result the plan's settings cannot give, or one that is two others, costs one send-back,
+    not two). A call that read a returned name and found too few values, or that raised, is not one of these."""
     returned = _returned_forms(record)
     ran = any(int(s.get("ok") or 0) >= 1 for s in _settings_of(record))
     names = sorted(returned)
     have = (", ".join(f"`{n}`" for n in names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "")) or "nothing"
+    led = ledger if isinstance(ledger, dict) else {}
+    then = led.get("returned") if isinstance(led.get("returned"), dict) else {}
     out: list[Fault] = []
     for c in calls:
         if c.get("status") != "ok" or c.get("gave"):
@@ -642,15 +645,22 @@ def never_value(calls: list[dict[str, Any]], record: dict[str, Any]) -> list[Fau
         given = f"the trials return {have}" if ran else "no trial of the small run ran to the end"
         out.append(Fault(NEVER, ident, f"{head}; {given}. Make each trial return what `{ident}` is worked out from.",
                          fact=NEVER))
+        key = f"{NEVER}:{ident}"
+        if key not in (led.get("faults") or []) or not (returned - set(then.get(key) or [])):
+            continue  # the simulation first; then the function only when the trials return something new
         out.append(Fault(ANALYSIS, by, f"{head}; {given}. Work `{ident}` out from what the trials return.",
                          script="derive.py", body=by, fact=NEVER))
     return out
 
 
 def sent(record: dict[str, Any]) -> dict[str, Any]:
-    """The faults sent back so far in this quest: ``{"faults": [key, ...], "count": send-backs made}``."""
+    """The faults sent back so far in this quest: ``{"faults": [key, ...], "count": send-backs made}``, and ``returned``
+    when a :func:`never_value` fault was sent to the simulation: ``{key: the names the trials returned then}``."""
     got = record.get(SENT) if isinstance(record.get(SENT), dict) else {}
-    return {"faults": [str(k) for k in got.get("faults") or []], "count": int(got.get("count") or 0)}
+    out: dict[str, Any] = {"faults": [str(k) for k in got.get("faults") or []], "count": int(got.get("count") or 0)}
+    if isinstance(got.get("returned"), dict):
+        out["returned"] = {str(k): [str(n) for n in v] for k, v in got["returned"].items() if isinstance(v, list)}
+    return out
 
 
 async def baseline_answer(executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any], *,

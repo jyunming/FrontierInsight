@@ -382,18 +382,24 @@ def test_a_result_whose_function_asks_for_nothing_or_only_for_what_no_trial_retu
     assert "`derive_echo_gap` asks only for `echo`, which no trial returns, so `echo_gap` can never get a value" in said
     assert "high_dose" not in said and "spread" not in said
     ledger = small_run.sent(small_run.read_record(tmp_path))
-    assert ledger == {"faults": ["never_value:gives_up", "never_value:echo_gap"], "count": 1}
+    assert ledger["faults"] == ["never_value:gives_up", "never_value:echo_gap"] and ledger["count"] == 1
+    assert ledger["returned"]["never_value:gives_up"] == ["growth", "wobble"], "what the trials returned then"
     calls = {c["id"]: c for c in small_run.read_record(tmp_path)["analysis"]["calls"]}
     assert calls["high_dose"]["asked"] == ["growth"], "the table held every planned setting, so dose 2 was read"
-    # the simulation came back the same: the function itself is sent next, one at a time, once each
+    plan = (tmp_path / "plan.md").read_text(encoding="utf-8")
+    assert "`high_dose`" in plan and "`spread`" in plan, "the two the data can explain stay lines for the reader"
+    # the simulation's repair returned nothing new: nothing new for the functions to read, so nothing more is sent
+    assert asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path))) is None
+    # a repair whose trials now return a new name: each function is sent next, one at a time, once each
+    now = small_run.read_record(tmp_path)
+    now["returned"] = ["growth", "lag", "wobble"]
+    (tmp_path / small_run.RECORD).write_text(json.dumps(now), encoding="utf-8")
     again = asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path)))
     assert again is not None and again["exec_result"]["failed_script"] == "derive.py"
     assert again["exec_result"]["failed_body"] == "derive_gives_up"
     third = asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path)))
     assert third is not None and third["exec_result"]["failed_body"] == "derive_echo_gap"
     assert asyncio.run(eng._small_run_checks({}, small_run.read_record(tmp_path))) is None, "the cap of three is spent"
-    plan = (tmp_path / "plan.md").read_text(encoding="utf-8")
-    assert "`high_dose`" in plan and "`spread`" in plan, "the two the data can explain stay lines for the reader"
 
 
 def test_on_the_small_runs_own_settings_alone_a_function_that_filters_settings_seems_to_ask_for_nothing(
