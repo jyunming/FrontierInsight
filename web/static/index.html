@@ -98,12 +98,6 @@
   <!-- Quest list -->
   <section id="quest-list" class="flex flex-col gap-4 mb-section-gap"></section>
 
-  <!-- Quests FI has run in other folders on this computer (core/quest_index.py) -->
-  <section id="other-folders" class="mb-section-gap" style="display:none">
-    <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Quests in other folders</h2>
-    <p class="font-body-md text-body-md text-on-surface-variant">Every quest FI has run on this computer, wherever it ran. Open one here, or go on with it from any folder: <code>fi --resume &lt;short id&gt;</code>.</p>
-    <div id="other-folders-list" class="flex flex-col gap-2"></div>
-  </section>
 
 </main>
 
@@ -259,30 +253,9 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  async function loadOtherFolders() {
-    // Every quest FI has run on this computer; the ones under this server's outputs folder are already listed above.
-    try {
-      const res = await fetch('/api/quest-index');
-      if (!res.ok) return;
-      const others = ((await res.json()).quests || []).filter(q => !q.here);
-      const box = document.getElementById('other-folders');
-      box.style.display = others.length ? '' : 'none';
-      document.getElementById('other-folders-list').innerHTML = others.map(q => `
-        <a href="/quest/${encodeURIComponent(q.quest_id)}" title="${escapeHtml(q.quest_id)}" class="hairline-border bg-surface-mid px-4 py-3 rounded-lg flex flex-col md:flex-row md:items-center gap-1 md:gap-4 hover:bg-surface-high no-underline">
-          <span class="font-code-md text-code-md text-primary">${escapeHtml(q.short_id)}</span>
-          <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">${escapeHtml(q.status || '')}</span>
-          <span class="font-body-md text-body-md text-on-surface flex-1">${escapeHtml(q.title || '(no title yet)')}</span>
-          <span class="font-code-md text-[11px] text-outline break-all">${escapeHtml(q.quest_root)}</span>
-        </a>`).join('');
-    } catch (e) {
-      console.warn('[fi] /api/quest-index failed:', e);
-    }
-  }
 
   loadQuests();
   setInterval(loadQuests, 5000);
-  loadOtherFolders();
-  setInterval(loadOtherFolders, 30000);
 
 // How many questions the new-quest page asks first, counted from the interview schema (never written into this page:
 // a number here went stale when the interview changed).

@@ -357,16 +357,35 @@ def _short_id(quest_id: str) -> str:
     return short_id(quest_id)
 
 
+def _quest_dirs(output_root: Path) -> list[Path]:
+    """Every quest folder the dashboard lists: the ones under ``output_root`` (any subdirectory holding a ``.fi/``
+    folder), then every other quest FI has run on this computer, wherever it ran (``core/quest_index.py``), newest
+    first. A round that gives each study its own folder is one list, not one page per folder."""
+    here = sorted((d for d in output_root.iterdir() if d.is_dir()), reverse=True) if output_root.exists() else []
+    seen = {d.resolve() for d in here}
+    try:
+        from core import quest_index
+
+        others = [e.quest_root for e in quest_index.entries()]
+    except Exception:  # noqa: BLE001 -- an unreadable index lists this folder's quests only
+        others = []
+    elsewhere = []
+    for root in others:
+        try:
+            if root.is_dir() and root.resolve() not in seen:
+                seen.add(root.resolve())
+                elsewhere.append(root)
+        except OSError:
+            continue
+    return here + sorted(elsewhere, key=lambda r: r.name, reverse=True)
+
+
 def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
-    """Return one record per quest directory under ``output_root``. A
-    quest dir is any subdirectory containing a ``.fi/`` folder."""
-    if not output_root.exists():
-        return []
+    """Return one record per quest folder the dashboard lists (:func:`_quest_dirs`). A quest dir is any directory
+    containing a ``.fi/`` folder."""
     now = time.time()
     out: list[dict[str, Any]] = []
-    for d in sorted(output_root.iterdir(), reverse=True):
-        if not d.is_dir():
-            continue
+    for d in _quest_dirs(output_root):
         fi_dir = d / ".fi"
         if not fi_dir.is_dir():
             continue
@@ -389,13 +408,13 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         pending = _quest_pending(d)
         if pending is not None:
             verdict = "needs_you"
+        elif _quest_looks_running(d, now):
+            # Its process is alive (a resumed quest too, whose summary is from the earlier run).
+            verdict = "(running)"
         elif summary_path.exists():
             # Only "complete" once the summary actually parsed — a present-but-
             # truncated/unreadable summary is a partial write, not a finish.
             verdict = "complete" if summary_ok else "incomplete"
-        elif _quest_looks_running(d, now):
-            # No summary yet, but the engine wrote run.log recently → live.
-            verdict = "(running)"
         else:
             # A quest dir with no summary and no recent activity was
             # interrupted (crashed / killed / cancelled) before finishing —
@@ -417,19 +436,13 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _quest_looks_running(quest_dir: Path, now: float, *, window_s: float = 300.0) -> bool:
-    """Heuristic liveness for a quest the launcher didn't spawn (a direct
-    ``python launch.py`` run, a cron job, …): running if it has NOT yet
-    written a final ``frontier_insight_summary.json`` AND its engine
-    ``run.log`` was updated within ``window_s``. Keyed on run.log (the live,
-    per-node engine log) — NOT the static launch.log breadcrumb a CLI run
-    drops once at start, whose mtime would make a live quest look idle."""
-    if (quest_dir / "frontier_insight_summary.json").exists():
-        return False
-    try:
-        return (now - (quest_dir / ".fi" / "run.log").stat().st_mtime) < window_s
-    except OSError:
-        return False
+def _quest_looks_running(quest_dir: Path, now: float) -> bool:
+    """Whether a quest the launcher didn't spawn (a direct ``python launch.py`` run, a cron job, ...) is running: the
+    same rule as the quest list everywhere (``core.quest_title.looks_running``: FI's own record of the quest's process,
+    and only for a quest from before that record its ``run.log`` time)."""
+    from core import quest_title
+
+    return quest_title.looks_running(quest_dir, now=now)
 
 
 def _read_log_tail(log_path: Path, n: int = 200) -> list[str]:
@@ -613,20 +626,6 @@ def _resolve_quest_root(output_root: Path, quest_id: str) -> Path:
         raise HTTPException(409, str(e)) from None
     except quest_index.QuestNotFound:
         return candidate
-
-
-def _index_listing(output_root: Path) -> list[dict[str, Any]]:
-    """Every quest FI has run on this computer (core/quest_index.py), each with its short id, title, where it is and
-    whether it is under this server's outputs folder (``here``)."""
-    from core import quest_index
-
-    here = output_root.resolve()
-    out: list[dict[str, Any]] = []
-    for e in quest_index.entries():
-        d = e.as_dict(with_status=True)
-        d["here"] = e.quest_root.parent.resolve() == here
-        out.append(d)
-    return out
 
 
 _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
@@ -2020,11 +2019,9 @@ def make_app(
                 continue
             # A quest the launcher spawned is "alive" per its registry. A
             # quest started OUTSIDE the launcher (`python launch.py`, a
-            # cron job, …) is never in that registry, so infer liveness:
-            # it's running if it has written a log very recently AND not
-            # yet produced a final summary. Matches the "(running)" verdict
-            # the Quests list already shows, so the Jobs tab is consistent
-            # regardless of how the quest was started.
+            # cron job, …) is never in that registry: FI's own record of its
+            # process says (_quest_looks_running), the same rule as the
+            # Quests list, so the Jobs tab is consistent however it started.
             alive = jid in live
             if not alive and _classify_job(jid) == "quest":
                 alive = _quest_looks_running(out_root / jid, now)
@@ -2411,13 +2408,8 @@ def make_app(
 
     @app.get("/api/quests")
     async def list_quests() -> JSONResponse:
-        return JSONResponse({"quests": _scan_quests(app.state.output_root)})
-
-    @app.get("/api/quest-index")
-    async def quest_index_listing() -> JSONResponse:
-        """Every quest FI has run on this computer, whichever folder it ran in (core/quest_index.py): the dashboard's
-        "Quests in other folders". Quests whose folder is gone are dropped from the list as it is read."""
-        return JSONResponse({"quests": await asyncio.to_thread(_index_listing, app.state.output_root)})
+        # every quest FI has run on this computer, this folder's first (_quest_dirs)
+        return JSONResponse({"quests": await asyncio.to_thread(_scan_quests, app.state.output_root)})
 
     @app.get("/api/quests/{quest_id}")
     async def get_quest(quest_id: str) -> JSONResponse:

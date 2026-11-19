@@ -589,7 +589,7 @@ same PR that adds, splits or renames one.
 - `core/quest_index.py` — every quest FI has run on this computer, `fi_home()/quests.json` (id → quest_root, config,
   working_folder, title, created_at, last_seen). `register` (from `launch._record_quest`, called by `run_one` at start /
   resume and at the end), `set_title` (from `quest_title.rename`), `prune` / `entries` / `listing` (`fi tools quests
-  [--prune]`, `launch._list_quests`; `web/server.py::_index_listing` for `GET /api/quest-index`). Every write is
+  [--prune]`, `launch._list_quests`; `web/server.py::_quest_dirs` adds them to `GET /api/quests`, the dashboard's one list); `status` reads `quest_title.looks_running` (FI's process record first). Every write is
   read-modify-write under a `filelock.FileLock` with temp file + `os.replace` (retried on Windows sharing violations);
   a file whose content is not a quest list is kept aside as `quests.json.unreadable-<time>`; a read error (`OSError`)
   writes nothing. `find(text, local_dirs, allow_folder=, tidy=)` is the one lookup: folder path → `<local>/<id>` →

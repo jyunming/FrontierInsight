@@ -154,11 +154,22 @@ def current_title(quest_root: Path) -> str | None:
 
 
 def looks_running(quest_root: Path, *, now: float | None = None) -> bool:
-    """Whether the quest seems to be running now: it has not stopped for a person, and its ``run.log`` changed in the
-    last five minutes while it has no final summary (or the log is newer than the summary: it was resumed)."""
+    """Whether the quest is running now: it has not stopped for a person, and FI's own record of its process
+    (``.fi/process.json``, ``core/run_marker.py``) names a process that is still the one running and has not ended.
+    A quest from before that record (none on disk) falls back to its ``run.log``: changed in the last five minutes while
+    it has no final summary (or the log is newer than the summary: it was resumed). The log alone called a long search
+    that writes a line every quarter of an hour "stopped" while its process ran."""
     fi = quest_root / ".fi"
     if (fi / "pause.json").is_file() or (quest_root / "NEXT_STEP.md").is_file():
         return False
+    from core import run_marker
+
+    try:
+        record = json.loads((quest_root / run_marker.RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    if isinstance(record, dict):
+        return record.get("ended") is None and run_marker.is_running(record)
     try:
         log_mtime = (fi / "run.log").stat().st_mtime
     except OSError:
