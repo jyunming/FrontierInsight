@@ -370,10 +370,14 @@ class Table:
     is named by ``keys()`` (FI's names, ``a=1,b=2``). The numbers come from ``fi_table`` (``core/frame_table.py``, carried
     beside this file)."""
 
-    def __init__(self, cells, declared, references=None, parts=None, known=None, kinds=None, inputs=None):
+    def __init__(self, cells, declared, references=None, parts=None, known=None, kinds=None, inputs=None, own=None):
         # ``inputs``: other values the trials returned, which a function may read as an input of what it works out; they are
         # never a result of the study (``declared`` stays the results alone: what a figure draws as a result, what FI serves).
+        # ``own``: quantities the plan works out afterwards that the trials also returned under the same name. A function may
+        # read the trials' values; once FI holds its own value of the quantity (``set_derived``), ``mean`` gives FI's value and
+        # every other read of the trials' values of it is refused, and a figure that draws one draws a result of the study.
         self.inputs = [str(n) for n in (inputs or ()) if n not in set(declared)]
+        self.own = [str(n) for n in (own or ()) if n not in set(declared) and str(n) not in self.inputs]
         self._kinds = dict(kinds or {})  # id -> "proportion" or "mean": a result gets a binomial interval only when the plan says proportion
         self._known = dict(known or {})  # id -> {"interval": [low id, high id], "truth": number or "axis": name}: a result with a known true value
         self.gave_values = set()  # the ids a read returned data for (at least one finite value), since the last ``reset_reads``
@@ -443,10 +447,16 @@ class Table:
         return got
 
     def _check(self, name):
-        if name not in self.declared and name not in self.inputs:
-            other = (" or a value a trial returned (those are: %s)" % ", ".join(sorted(self.inputs))) if self.inputs else ""
+        if name not in self.declared and name not in self.inputs and name not in self.own:
+            returned = sorted(set(self.inputs) | set(self.own))
+            other = (" or a value a trial returned (those are: %s)" % ", ".join(returned)) if returned else ""
             raise UnknownResult("`%s` is not a result the plan declares%s; the declared results are: %s"
                                 % (name, other, ", ".join(sorted(self.declared)) or "(none)"))
+        if name in self.own and name in self._derived:
+            # FI holds its own value of it now: the trials' values under the same name are not read beside FI's (``mean``
+            # serves FI's value without coming here)
+            raise UnknownResult("`%s` is a quantity FI works out once for each setting; read its value with `table.mean(%r, key)`"
+                                % (name, name))
         if name not in self.served:
             self.served.append(name)
 
