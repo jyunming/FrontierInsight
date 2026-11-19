@@ -591,6 +591,15 @@ def planned_settings(grid: dict[str, Any] | None) -> list[dict[str, Any]] | None
         return None
 
 
+def no_trial_values(trials_path: Path | str) -> bool:
+    """Whether the small run's record of its trials (:data:`TRIALS_PATH`) holds no value of any trial: none ran to the end."""
+    try:
+        cells = json.loads(Path(trials_path).read_text(encoding="utf-8")).get("cells") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return not any(isinstance(c, dict) and c.get("metrics") for c in cells)
+
+
 def calls_of(derived: dict[str, Any]) -> list[dict[str, Any]]:
     """What FI's record of an analysis run (``derived.json``) says of each call of a study's function that works out a declared
     quantity of a counting role: ``{"id", "by", "status", "asked", "gave", "why"}``, ``asked`` being every name the call asked
@@ -611,14 +620,16 @@ def calls_of(derived: dict[str, Any]) -> list[dict[str, Any]]:
         gave = any(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
         why = next((str(w) for w in (rec.get("missing") or {}).values() if w), "") if isinstance(rec.get("missing"), dict) else ""
         out.append({"id": str(ident), "by": by, "status": str(rec.get("status") or ""), "asked": [str(n) for n in rec["asked"]],
-                    "gave": gave, "why": why})
+                    # whether the call read the record's shape (its settings, parts, compared factors); unknown counts as read
+                    "looked": rec.get("looked") is not False, "gave": gave, "why": why})
     return out
 
 
 def never_value(calls: list[dict[str, Any]], record: dict[str, Any], ledger: dict[str, Any] | None = None) -> list[Fault]:
     """A declared result FI's analysis can give no value of whatever the trials give, from FI's record of one call of its
-    function on a table that holds every setting of the plan (:func:`calls_of`): the call ended, gave no value, and asked the
-    table for no name at all, or only for names no trial of the small run returned (that one only when a trial ran to the
+    function on a table that holds every setting of the plan (:func:`calls_of`): the call ended, gave no value, and read
+    nothing of the table at all (not a result, not even its settings: a function that looks at the settings and finds too
+    few, or none of the kind it needs, is honest about the plan), or asked only for names no trial of the small run returned (that one only when a trial ran to the
     end, since none returned anything otherwise). Exact, so sent back: first to the simulation (it must return what the
     result is worked out from), then to the function itself, once the simulation was sent back for it (``ledger``,
     :func:`sent`) and its trials now return a name they did not return then (a repair that added nothing leaves nothing new
@@ -635,6 +646,8 @@ def never_value(calls: list[dict[str, Any]], record: dict[str, Any], ledger: dic
         if c.get("status") != "ok" or c.get("gave"):
             continue
         asked = sorted(set(c.get("asked") or []))
+        if not asked and c.get("looked", True):
+            continue  # it read the settings and gave no value from them: the plan's settings may be too few for it
         if asked and not (ran and not any(_is_returned(n, returned) for n in asked)):
             continue
         ident, by = c["id"], c["by"]

@@ -401,6 +401,7 @@ class Table:
         self._derived = {}  # id -> {setting key: value}: the quantities FI derives for each setting (``set_derived``)
         self.served = []
         self.asked = []  # every name a read asked for since the frame last cleared it, refused or not (``_asking``)
+        self.looked = []  # each read of the record's shape (its settings, parts, compared factors) since the frame last cleared it
         self._settings = {}
         self._by_setting = {}
         for c in self._cells:
@@ -479,6 +480,7 @@ class Table:
                             "take one of them (for example `table.at(...)[0]`) or loop over them" % (list(key),))
 
     def _cell(self, key):
+        self.looked.append("setting")
         self._one_key(key)
         if key not in self._settings:
             raise KeyError("`%s` is not a setting of the study; the settings are: %s" % (key, ", ".join(self.keys())))
@@ -486,6 +488,7 @@ class Table:
 
     def keys(self):
         """The settings of the study, FI's names, in the record's order."""
+        self.looked.append("keys")
         return [k for k, c in self._settings.items() if c["metrics"] or c.get("planned")]
 
     def setting(self, key):
@@ -501,6 +504,7 @@ class Table:
 
     def compared(self):
         """The names of the factors FI recorded as compared inside the runs (any setting), sorted; ``[]`` when none."""
+        self.looked.append("compared")
         return sorted({a for cs in self._by_setting.values() for c in cs for a in (c.get("level") or {})})
 
     def _metric(self, name, key):
@@ -642,6 +646,7 @@ class Table:
 
     def known(self):
         """The ids of the results the plan gives a true value and an interval (``known_value``): the ones ``coverage`` and ``bias`` serve."""
+        self.looked.append("known")
         return sorted(n for n, spec in self._known.items() if n in self.declared and isinstance(spec, dict) and len(spec.get("interval") or ()) == 2)
 
     @_noting
@@ -856,6 +861,7 @@ class Table:
 
     def part(self, name):
         """The keys of the settings of the part ``name`` of a study made of parts."""
+        self.looked.append("part")
         if name not in self._parts:
             raise UnknownResult("`%s` is not a part of the study; the parts are: %s" % (name, ", ".join(sorted(self._parts)) or "(none)"))
         return list(self._parts[name])

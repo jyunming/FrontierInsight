@@ -608,6 +608,8 @@ def test_each_call_records_every_name_it_asked_for_also_a_refused_one(tmp_path: 
     assert got["first"]["asked"] == ["growth"] and got["first"]["inputs"] == ["growth"]
     assert got["second"]["asked"] == ["growth"] and got["second"]["inputs"] == [], "served before: inputs says nothing"
     assert got["gives_up"]["asked"] == [] and got["gives_up"]["status"] == "ok"
+    # whether the call read the record's settings, before FI's own reads of them
+    assert got["gives_up"]["looked"] is False and got["first"]["looked"] is True
     assert got["unheld"]["asked"] == ["lag"], "a read the table refused is still a name the call asked for"
     assert got["levels_only"]["asked"] == ["wobble"]
 

@@ -2907,13 +2907,19 @@ class RunChecksMixin:
                                                 timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
                                                 raw_dir=raw.parent, work_dir=work)
                 # the declared results FI's own record of that run holds no value of (core/analysis_frame.py)
-                missing = [m for m in _analysis.not_computed(_analysis.read_record(work)) if m["status"] == "missing"]
+                first = _analysis.read_record(work)
+                missing = [m for m in _analysis.not_computed(first) if m["status"] == "missing"]
             except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
                 self._log.warning("[execute] FI's analysis could not be run on the small run's trials: %s", exc)  # type: ignore[attr-defined]
                 return []
             finally:
                 shutil.rmtree(work, ignore_errors=True)
-            calls = [] if docker else await self._small_run_reach(protocol, code, raw, search=search)
+            # The analysis again on every planned setting only where it can tell something: not after a first run that ran out
+            # of time, was not checked, or left no record of its own, unless the small run returned no trial at all (the first
+            # run then had nothing to analyse, and a function that reads nothing is still told apart on the planned settings).
+            trusted = isinstance(first.get("derived"), dict) and not first.get("from_earlier_run")
+            usable = got.kind != _gate.TIME and (_small.no_trial_values(raw) or (got.kind != _gate.NOT_CHECKED and trusted))
+            calls = await self._small_run_reach(protocol, code, raw, search=search) if usable and not docker else []
             _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing,  # type: ignore[attr-defined]
                                                             "calls": calls})
             self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]

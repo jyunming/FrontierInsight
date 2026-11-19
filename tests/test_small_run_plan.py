@@ -313,7 +313,7 @@ REACH_PROTOCOL: dict[str, Any] = {
     "metrics": [{"id": "growth", "kind": "mean", "role": "result"},
                 {"id": "wobble", "kind": "mean", "role": "diagnostic"}],
     "derived": [{"id": i, "inputs": ["growth"], "role": "result"}
-                for i in ("gives_up", "echo_gap", "high_dose", "spread")],
+                for i in ("gives_up", "echo_gap", "high_dose", "spread", "trend_slope")],
     "figures": []}
 REACH_BODIES = '''
 
@@ -334,6 +334,13 @@ def derive_high_dose(table):
     if not keys:
         return table.missing("no setting at dose 2")
     return {k: table.mean("growth", k) for k in keys}
+
+
+def derive_trend_slope(table):
+    keys = table.keys()
+    if len(keys) < 8:
+        return table.missing("a trend needs at least eight settings")
+    return 0.0
 
 
 def derive_spread(table):
@@ -381,6 +388,7 @@ def test_a_result_whose_function_asks_for_nothing_or_only_for_what_no_trial_retu
     assert "`derive_gives_up` asks the trials for nothing, so `gives_up` can never get a value" in said
     assert "`derive_echo_gap` asks only for `echo`, which no trial returns, so `echo_gap` can never get a value" in said
     assert "high_dose" not in said and "spread" not in said
+    assert "trend_slope" not in said, "it read the settings and found the plan has too few: honest, never sent"
     ledger = small_run.sent(small_run.read_record(tmp_path))
     assert ledger["faults"] == ["never_value:gives_up", "never_value:echo_gap"] and ledger["count"] == 1
     assert ledger["returned"]["never_value:gives_up"] == ["growth", "wobble"], "what the trials returned then"
@@ -423,7 +431,7 @@ def test_with_no_trial_that_ran_only_a_function_that_asks_for_nothing_is_sent(tm
     sent = asyncio.run(eng._small_run_checks({}, rec))
     assert sent is not None and sent["exec_result"]["failed_script"] == "simulate.py"
     said = sent["exec_result"]["stderr_tail"]
-    assert "`gives_up` can never get a value" in said and "echo_gap" not in said
+    assert "`gives_up` can never get a value" in said and "echo_gap" not in said and "trend_slope" not in said
 
 
 def test_never_value_reads_only_calls_that_ended_and_gave_nothing() -> None:
@@ -436,3 +444,42 @@ def test_never_value_reads_only_calls_that_ended_and_gave_nothing() -> None:
         "x": {"by": "derive_x", "role": "result", "status": "ok", "asked": []}}}) == [], "an earlier run's record says nothing"
     assert small_run.calls_of({"derived": {"x": {"by": "derive_x", "role": "result", "status": "ok"}}}) == [], \
         "a record of an older frame (no ``asked``) makes no claim"
+
+
+@pytest.mark.parametrize("kind", [gate.TIME, gate.NOT_CHECKED])
+def test_the_analysis_on_every_planned_setting_is_not_run_after_a_first_run_that_could_not_tell(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    """A first analysis run on the small run's trials that ran out of time or was not checked says nothing a second, larger
+    run could add: the second run is not made (before, it was made whatever the first gave)."""
+    eng, rec = _reach_quest(tmp_path)
+    seen: list[Any] = []
+
+    async def fake_gate(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("planned"))
+        return gate.GateResult(False, "derive", kind, "", "stopped")
+
+    monkeypatch.setattr(gate, "analysis_gate", fake_gate)
+    asyncio.run(eng._small_run_checks({}, rec))
+    assert seen == [None], "only the first run, on the small run's own trials"
+
+
+def test_with_no_trial_value_the_analysis_on_every_planned_setting_is_still_run(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No trial of the small run gave a value, so the first run had nothing to analyse and was not checked; the run on every
+    planned setting still tells a function that reads nothing."""
+    eng, rec = _reach_quest(tmp_path)
+    raw = tmp_path / small_run.TRIALS_PATH
+    raw.write_text(json.dumps({"schema": "fi.trials/v1", "cells": []}), encoding="utf-8")
+    real = gate.analysis_gate
+    seen: list[Any] = []
+
+    async def first_not_checked(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("planned"))
+        if kwargs.get("planned") is None:
+            return gate.GateResult(False, "derive", gate.NOT_CHECKED, "", "nothing to analyse")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(gate, "analysis_gate", first_not_checked)
+    assert small_run.no_trial_values(raw)
+    asyncio.run(eng._small_run_checks({}, rec))
+    assert len(seen) == 2 and seen[1], "the second run holds every planned setting"

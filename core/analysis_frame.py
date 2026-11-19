@@ -1165,8 +1165,9 @@ def _call(by, fn, *args):
     for t in tables:
         t.unheld.clear()
         t.unheld_at.clear()
-        if isinstance(getattr(t, "asked", None), list):
-            del t.asked[:]  # what this call asks the table for, alone (``_derived`` keeps it)
+        for kept in ("asked", "looked"):
+            if isinstance(getattr(t, kept, None), list):
+                del getattr(t, kept)[:]  # what this call reads of the table, alone (``_derived`` keeps it)
     began = time.monotonic()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1408,14 +1409,17 @@ def _derived(table, base, compared):
             rec = _reference_body(by, role, getattr(derive, by), table)
         else:
             value, bad = _call(by, getattr(derive, by), table)
+            # what this one call read, before FI's own reads below: every name it asked the table for, a read that was refused
+            # too (``inputs`` is only what was served for the first time in the whole analysis), and whether it read the
+            # record's shape (its settings, parts, compared factors): what FI's small run judges a result's reach by
+            asked = sorted({str(n) for n in table.asked}) if isinstance(getattr(table, "asked", None), list) else None
+            looked = bool(table.looked) if isinstance(getattr(table, "looked", None), list) else None
             if bad is not None:
                 rec = {"status": bad[0], "why": bad[1]}
             else:
                 rec = check_return(by, role, value, table.keys(), compared)
-            if isinstance(getattr(table, "asked", None), list):
-                # every name this one call asked the table for, a read that was refused too (``inputs`` is only what was
-                # served for the first time in the whole analysis): what FI's small run judges a result's reach by
-                rec["asked"] = sorted({str(n) for n in table.asked})
+            if asked is not None and looked is not None:
+                rec["asked"], rec["looked"] = asked, looked
         rec.update({"role": role, "by": by})
         rec.setdefault("inputs", [i for i in table.served if i not in before])
         records[ident] = rec
