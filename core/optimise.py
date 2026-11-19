@@ -208,7 +208,8 @@ def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _simulation_modules(quest_root: Path, simulate: Path) -> list[Path]:
     """The simulation and the Python files beside it in ``code/`` it may import, in order: not the analysis FI writes
     and runs on the recorded results (the files :func:`core.code_layout.simulation_inputs` leaves out: ``derive.py``
-    with FI's frame, ``fi_table.py``, ``fi_figure_calls.py``), so a repair of the analysis is not another search."""
+    with FI's frame, ``fi_table.py``), so a repair of the analysis is not another search. FI's drawing calls
+    (``fi_figure_calls.py``) are in: FI's frame runtime imports them when a trial loads."""
     from . import code_layout as _code_layout
 
     code = Path(quest_root) / "code"
