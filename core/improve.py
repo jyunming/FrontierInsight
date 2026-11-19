@@ -579,10 +579,22 @@ def _asks_for_a_setting(old: str, new: str, settings: dict[str, list[Any]]) -> l
     return found
 
 
-def edited_path(edit: Edit) -> str:
-    """The file an edit changes, by its path in ``code/`` (``simulate.py``, ``<package>/model.py``)."""
+def edited_path(edit: Edit, allowed: list[str] | None = None) -> str:
+    """The file an edit changes, by its path in ``code/`` (``simulate.py``, ``<package>/model.py``). With ``allowed``, a bare
+    file name (``model.py``) that is the last part of exactly one allowed path is that path; two such paths leave it as
+    it is (:func:`check_edit` then refuses it and names both)."""
     name = str(edit.file).replace("\\", "/").strip("/")
-    return name[len("code/"):] if name.startswith("code/") else name
+    name = name[len("code/"):] if name.startswith("code/") else name
+    if allowed and name not in allowed and "/" not in name:
+        same = [path for path in allowed if path.rsplit("/", 1)[-1] == name]
+        if len(same) == 1:
+            return same[0]
+    return name
+
+
+def editable_line(allowed: list[str]) -> str:
+    """The files the model may change, each by the path it must name in its edit (its path in ``code/``)."""
+    return ", ".join(f"code/{name}" for name in allowed) or "(none)"
 
 
 def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: set[str],
@@ -592,8 +604,12 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     the normalized forms of the versions already run (the first one included). ``expected``: the values the checks
     expect (and the criteria's targets); ``measures``: the names of the numbers the checks read from what the simulation
     returns; ``settings``: the values of each setting the checks run on, by the setting's name."""
-    name = edited_path(edit)
+    name = edited_path(edit, allowed)
     if name not in allowed:
+        same = [path for path in allowed if "/" not in name and path.rsplit("/", 1)[-1] == name]
+        if len(same) > 1:
+            return None, (f"it changes {edit.file!r}, which could be any of {', '.join(f'code/{p}' for p in same)}; "
+                          "name the file by its path in code/")
         return None, (f"it changes {edit.file!r}, which is not part of the simulation (only "
                       f"{', '.join(allowed) or 'none'} may be changed)")
     old = files.get(name)

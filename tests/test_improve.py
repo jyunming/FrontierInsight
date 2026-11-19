@@ -787,3 +787,39 @@ async def test_a_round_that_meets_the_checks_but_leaves_the_study_without_its_re
     assert "first_order" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").lower() \
         or "k4" not in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert "no longer returns the study's results" in _log(engine)
+
+
+# --- the file an edit names ------------------------------------------------------------------------------------------
+
+
+def _named(file: str, allowed: list[str]) -> tuple[str | None, str]:
+    files = {name: "x = 1\n" for name in allowed}
+    edit = improve.Edit(file=file, find="x = 1", replace="x = 2", why="w")
+    return improve.check_edit(files, edit, allowed, tried=set(), expected=[])
+
+
+def test_a_bare_file_name_is_the_one_allowed_path_with_that_name() -> None:
+    allowed = ["simulate.py", "toy_model/__init__.py", "toy_model/model.py"]
+    new, why = _named("model.py", allowed)
+    assert new is not None and why == ""
+    edit = improve.Edit(file="model.py", find="a", replace="b", why="w")
+    assert improve.edited_path(edit, allowed) == "toy_model/model.py"
+    assert improve.edited_path(edit) == "model.py"  # without the allowed list nothing is guessed
+
+
+def test_a_file_outside_the_allowed_list_is_still_refused() -> None:
+    allowed = ["simulate.py", "toy_model/model.py"]
+    for file in ("other.py", "../x.py", "toy_model/other.py", "code/other.py"):
+        new, why = _named(file, allowed)
+        assert new is None and "not part of the simulation" in why
+
+
+def test_an_ambiguous_bare_name_is_refused_and_names_both_paths() -> None:
+    allowed = ["simulate.py", "toy_model/model.py", "toy_other/model.py"]
+    new, why = _named("model.py", allowed)
+    assert new is None and "code/toy_model/model.py" in why and "code/toy_other/model.py" in why
+
+
+def test_the_files_the_prompt_lists_are_paths_in_code() -> None:
+    assert improve.editable_line(["simulate.py", "toy_model/model.py"]) == "code/simulate.py, code/toy_model/model.py"
+    assert improve.editable_line([]) == "(none)"
