@@ -3631,8 +3631,9 @@ class RunChecksMixin:
                 break
             if after.failed:
                 entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
-            elif (bad := _speed.disagreements(first, after, ignore=noisy)):
-                entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
+            elif (same := _speed.compare(first, after, ignore=noisy)).bad:
+                entry.update(outcome="not kept",
+                             reason=f"{len(same.bad)} number(s) of the sample changed, first: {same.bad[0]}")
             elif not _speed.fast_enough(best["sample"].seconds, after.seconds, noise_s):
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                          f"{best['sample'].seconds:.3f} s: not faster by a tenth and by "
@@ -3651,13 +3652,17 @@ class RunChecksMixin:
             else:
                 entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                     f"{best['sample'].seconds:.3f} s, with the same numbers"
+                                                    + (f" ({same.note()})" if same.rounded else "")
                                                     + (f"; timed again, old and new alternating: old {entry['repeats_old']} "
                                                        f"s, new {entry['repeats_new']} s" if entry.get("repeats_old")
                                                        else "; not timed again (it would cost more than it saves)"))
+                if same.rounded:
+                    entry["rounding"] = {"numbers": same.rounded, "largest_share": same.largest}
                 best = {"files": candidate, "sample": after}
                 record["kept"] = True
                 change = (f"speed-up {used}: {edit.why}", _changelog.results(
-                    "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
+                    "no: every number of a fixed sample of trials (the checks' own cases included) is the same"
+                    + (f" ({same.note()})" if same.rounded else "") + ", "
                     f"and the sample runs {unchanged_s / max(best['sample'].seconds, 1e-9):.1f} times faster."
                     + (f" The sample is copies of the plan's settings {coarser['factor']} times coarser in "
                        + ", ".join(coarser["settings"]) + ", and the change gave the same numbers on a setting of "
@@ -3717,7 +3722,9 @@ class RunChecksMixin:
                 ignore = _speed.varying(old_full, again_full) if not again_full.failed else set()
             _improve.restore(root, best["files"])
             new_full = await at_plan() if not old_full.failed else old_full
-            bad = [] if new_full.failed else _speed.disagreements(old_full, new_full, ignore=ignore)
+            # how much a number varies is taken from the sample too: on one setting of a study with no randomness a number
+            # does not vary, and a difference at rounding level would count as a change there
+            bad = [] if new_full.failed else _speed.disagreements(old_full, new_full, ignore=ignore, reference=(first,))
             if new_full.failed or bad:
                 why_full = (f"it could not be checked on a setting of the plan ({new_full.failed})" if new_full.failed
                             else f"on a setting of the plan {len(bad)} number(s) changed, first: {bad[0]}")

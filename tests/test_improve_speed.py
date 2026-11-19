@@ -100,6 +100,46 @@ def test_the_sample_must_return_the_same_numbers_and_take_clearly_less_time() ->
     assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(0.0, 0.0)
 
 
+def test_a_number_that_differs_only_at_rounding_level_is_the_same_number_and_a_larger_change_is_not() -> None:
+    """A speed-up that only adds the same terms in another order (a vectorised sum, a matrix product regrouped) moved
+    stored results by 1e-8 of their value and was rejected by the nine-digit rule, so a real speed-up was lost. A
+    difference within a millionth of how much that number varies over the unchanged code's sample is now the same
+    number; any larger change, a not-a-number or an infinity still is not."""
+    a = sp.Sample(values={"s=1": [{"x": 1.0}], "s=2": [{"x": 5.0}], "s=3": [{"x": 11.0}]})  # x varies by 10
+
+    def moved(**values: float) -> sp.Sample:
+        return sp.Sample(values={key: [{"x": values.get(key.replace("=", ""), row[0]["x"])}]
+                                 for key, row in a.values.items()})
+
+    reordered = sp.Sample(values={k: [{"x": r[0]["x"] * (1 + 1e-8)}] for k, r in a.values.items()})
+    assert sp.disagreements(a, reordered) == []
+    same = sp.compare(a, reordered)
+    assert same.bad == [] and same.rounded == 3 and 1e-8 < same.largest < 1.2e-8
+    assert same.note() == "3 number(s) differ only by rounding, by at most 1e-08 of how much each varies over the sample"
+    assert sp.compare(a, a).note() == ""
+    # a hundred-thousandth of the range is a change, as are a not-a-number, an infinity and a garbage value
+    for wrong in (moved(s2=5.0 + 1e-4), moved(s2=float("nan")), moved(s2=float("inf")), moved(s2=3.6e14)):
+        assert len(sp.disagreements(a, wrong)) == 1, wrong.values
+    # one setting: the number does not vary there, so only nine digits count, unless another sample of the unchanged
+    # code says how much it varies (the check on a setting of the plan, after a sample of coarser copies)
+    one, one_moved = sp.Sample(values={"s=2": [{"x": 5.0}]}), sp.Sample(values={"s=2": [{"x": 5.0 + 5e-8}]})
+    assert sp.disagreements(one, one_moved) and sp.disagreements(one, one_moved, reference=(a,)) == []
+    # a number that moves at all between two runs of the same code is still left out of the comparison, as before
+    assert sp.varying(a, reordered) == {("s=1", 0, "/x"), ("s=2", 0, "/x"), ("s=3", 0, "/x")}
+
+
+@pytest.mark.asyncio
+async def test_a_faster_edit_whose_numbers_differ_only_by_rounding_is_kept_and_says_so(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, rounds=1)
+    rounded = "    total = float(np.sum(x * x)) * (1.0 + 1e-8)\n"  # what a reordered sum does to a result, made certain
+    out = await _speed(engine, _Model([_edit(LOOP, rounded)]), seconds=10_000.0)
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "kept", entry
+    assert "with the same numbers (" in entry["reason"] and "differ only by rounding" in entry["reason"]
+    assert entry["rounding"]["numbers"] > 0 and entry["rounding"]["largest_share"] < sp.ROUNDING
+    assert "differ only by rounding" in (engine.quest_root / "code" / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
 def test_a_change_is_kept_when_it_saves_a_tenth_and_more_than_two_runs_of_the_same_code_differ() -> None:
     """The step kept a change only at a quarter less time, so a study that a change made 15% faster ran at its old speed.
     The rule is now a tenth, and more than the noise FI measured: the two samples of the unchanged code."""
