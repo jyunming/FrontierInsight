@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any
 
 RECORD = ".fi/process.json"
+#: Held (exclusive create) only while a session reads the record, decides and writes its own: two starts at the same
+#: instant cannot both pass the check.
+LOCK = ".fi/process.lock"
+#: Seconds a start waits for the lock, and after how long (or when its owner is gone) a lock left behind is taken over.
+LOCK_WAIT_S = 10.0
+LOCK_STALE_S = 5.0
 HISTORY = ".fi/process_history.jsonl"
 #: Seconds between the signs of life.
 BEAT_S = 30.0
@@ -79,6 +85,57 @@ def alive(record: dict[str, Any], *, now: float | None = None) -> bool:
             return False
         return (time.time() if now is None else now) - seen < STALE_S
     return is_running(record)
+
+
+def _unlink(path: Path) -> None:
+    """Remove ``path``; on Windows a file another process has open for a moment cannot be removed, so try again."""
+    for _ in range(100):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.02)
+
+
+@contextlib.contextmanager
+def _start_lock(quest_root: Path) -> Any:
+    """The exclusive lock around a session's read-record, decide, write-record (``os.O_EXCL``: no dependency, atomic on
+    every file system FI runs on). A lock whose owner is gone, or that is older than :data:`LOCK_STALE_S` seconds (a
+    start takes milliseconds), is taken over. Waits at most :data:`LOCK_WAIT_S`, then goes on without it (a lock that
+    cannot be made, e.g. a read-only folder, must not stop a run that could otherwise be written)."""
+    path = quest_root / LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while fd is None:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, json.dumps({"pid": os.getpid(), "host": _host()}).encode())
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+                owner = json.loads(path.read_text(encoding="utf-8") or "{}")
+            except (OSError, ValueError):
+                age, owner = 0.0, {}
+            gone = (owner.get("host") in (None, "", _host()) and owner.get("pid") not in (None, os.getpid())
+                    and _started_at(int(owner["pid"])) is None) if isinstance(owner, dict) else False
+            if age > LOCK_STALE_S or gone:
+                _unlink(path)
+                continue
+            if time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+        except OSError:
+            break
+    try:
+        yield
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            _unlink(path)
 
 
 class QuestStillRunning(RuntimeError):
@@ -149,29 +206,30 @@ class RunMarker:
         """Begin this session; refused (:class:`QuestStillRunning`) while another process runs the quest. Returns what
         the earlier session's record says when it was stopped from outside (its
         ``pid``, ``started``, ``seen_at``), else ``None``."""
-        try:
-            earlier = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            earlier = None
-        found: dict[str, Any] | None = None
-        if isinstance(earlier, dict) and not earlier.get("ended"):
-            if running_elsewhere(self.quest_root) is not None:
-                refuse_if_running(self.quest_root)  # before this session writes anything
-            else:
-                found = earlier
-                self._log.warning(
-                    "[run] the earlier run of this quest (started %s) ended without recording an end; its last sign of "
-                    "life was at %s. It was stopped from outside (a kill, a restart, or the system running out of "
-                    "memory); this run goes on from the saved state", _clock(earlier.get("started")),
-                    _clock(earlier.get("seen_at")))
-                self._history({"event": "found_stopped", "pid": earlier.get("pid"), "started": earlier.get("started"),
-                               "seen_at": earlier.get("seen_at")})
-                self._clear_leftovers()
-        now = time.time()
-        pid = os.getpid()
-        self._record = {"pid": pid, "host": _host(), "started": _started_at(pid) or now, "seen_at": now, "ended": None}
-        _write(self.path, self._record)
-        self._history({"event": "started", "pid": pid})
+        with _start_lock(self.quest_root):
+            try:
+                earlier = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                earlier = None
+            found: dict[str, Any] | None = None
+            if isinstance(earlier, dict) and not earlier.get("ended"):
+                if running_elsewhere(self.quest_root) is not None:
+                    refuse_if_running(self.quest_root)  # before this session writes anything
+                else:
+                    found = earlier
+                    self._log.warning(
+                        "[run] the earlier run of this quest (started %s) ended without recording an end; its last sign of "
+                        "life was at %s. It was stopped from outside (a kill, a restart, or the system running out of "
+                        "memory); this run goes on from the saved state", _clock(earlier.get("started")),
+                        _clock(earlier.get("seen_at")))
+                    self._history({"event": "found_stopped", "pid": earlier.get("pid"), "started": earlier.get("started"),
+                                   "seen_at": earlier.get("seen_at")})
+                    self._clear_leftovers()
+            now = time.time()
+            pid = os.getpid()
+            self._record = {"pid": pid, "host": _host(), "started": _started_at(pid) or now, "seen_at": now, "ended": None}
+            _write(self.path, self._record)
+            self._history({"event": "started", "pid": pid})
         self._stop.clear()
         self._thread = threading.Thread(target=self._beat, name="fi-run-marker", daemon=True)
         self._thread.start()

@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -421,3 +422,88 @@ def test_a_second_start_of_a_live_quest_is_refused_with_one_line_and_exit_1_befo
     # this same process running the quest again is not "another process"
     _write_record(tmp_path, {"pid": os.getpid(), "started": rm._started_at(os.getpid()), "seen_at": 1.0, "ended": None})
     rm.refuse_if_running(tmp_path)
+
+
+_RACER = """
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from core import run_marker as rm
+root, go = sys.argv[2], sys.argv[3]
+while not os.path.exists(go):
+    time.sleep(0.001)
+try:
+    rm.RunMarker(root, beat_s=30).start()
+    print("started", flush=True)
+except rm.QuestStillRunning:
+    print("refused", flush=True)
+sys.stdin.read()  # stays alive (and so "running") until the test closes its input
+"""
+
+
+def test_two_starts_at_the_same_instant_on_one_quest_let_exactly_one_run(tmp_path: Path) -> None:
+    """The check that no other process runs the quest and the write of this one's record are one step: six processes
+    released together on a quest with no live record, and exactly one starts; the others are refused."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    quest = tmp_path / "quest"
+    (quest / ".fi").mkdir(parents=True)
+    go = tmp_path / "go"
+    script = tmp_path / "racer.py"
+    script.write_text(_RACER, encoding="utf-8")
+    procs = [subprocess.Popen([sys.executable, str(script), repo, str(quest), str(go)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True) for _ in range(6)]
+    try:
+        time.sleep(1.0)  # every racer is waiting at the gate
+        go.write_text("go", encoding="utf-8")
+        said = [p.stdout.readline().strip() for p in procs]
+    finally:
+        for p in procs:
+            p.stdin.close()
+            p.wait(timeout=30)
+    assert sorted(said) == ["refused"] * 5 + ["started"], said
+    assert not (quest / rm.LOCK).exists()  # the lock is not left behind
+
+
+def test_a_lock_left_by_a_dead_start_is_taken_over(tmp_path: Path) -> None:
+    pid, _ = _dead_pid()
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / rm.LOCK).write_text(json.dumps({"pid": pid, "host": rm._host()}), encoding="utf-8")
+    marker = rm.RunMarker(tmp_path, beat_s=0.05)
+    assert marker.start() is None
+    marker.finish()
+    assert not (tmp_path / rm.LOCK).exists()
+
+
+def test_every_command_that_writes_into_a_quest_refuses_a_live_one_and_writes_nothing(tmp_path: Path) -> None:
+    """`--revise-plan`, `--emit`, `--watch`, `--update`, `--critique`, `--approve-amendment` and `--accept-checks`
+    ask the same question as a resume (core/run_marker.py:refuse_if_running): one line, exit 1, nothing written."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import launch
+
+    out = tmp_path / "outputs"
+    quest = out / "1790000001-demo-aaaaaa"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        began = rm._started_at(other.pid)
+        _write_record(quest, {"pid": other.pid, "host": rm._host(), "started": began, "seen_at": began, "ended": None})
+        cfg = MagicMock()
+        cfg.output.output_dir = out
+        qid = quest.name
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._revise_plan_once(cfg, qid, "change it", supervisor=MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._emit_one(cfg, qid, "slides", supervisor=MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._watch_quest(cfg, SimpleNamespace(watch=qid, watch_every=None), MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            launch._approve_amendment(str(quest), "someone", out)
+        with pytest.raises(rm.QuestStillRunning):
+            launch._accept_checks(str(quest), "someone", out)
+        with pytest.raises(rm.QuestStillRunning):
+            launch._refuse_if_quest_runs(quest)
+        assert sorted(p.name for p in quest.rglob("*") if p.is_file()) == ["process.json"]
+    finally:
+        other.kill()
+        other.wait()
