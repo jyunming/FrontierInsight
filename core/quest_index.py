@@ -477,6 +477,38 @@ def _index_entry(qid: str, root: Path) -> Entry | None:
     return entry if same else None
 
 
+def listed(output_root: Path | None = None) -> list[Entry]:
+    """The one list of quests every surface shows (web page, ``fi tools quests``, the VS Code extension): this folder's
+    quests first (every subfolder of ``output_root`` holding a ``.fi/`` folder, newest id first, whether or not the index
+    knows it), then every other quest in the index whose folder can be seen now, most recently seen first."""
+    index = entries()
+    by_root: dict[str, Entry] = {}
+    for e in index:
+        try:
+            by_root[str(e.quest_root.resolve())] = e
+        except OSError:
+            continue
+    here: list[Entry] = []
+    seen: set[str] = set()
+    if output_root is not None and output_root.is_dir():
+        for d in sorted((d for d in output_root.iterdir() if d.is_dir() and (d / ".fi").is_dir()),
+                        key=lambda d: d.name, reverse=True):
+            key = str(d.resolve())
+            seen.add(key)
+            known = by_root.get(key)
+            if known is None:
+                from core import quest_title
+
+                try:
+                    title = quest_title.current_title(d) or ""
+                except Exception:  # noqa: BLE001 -- a title that cannot be read is no title
+                    title = ""
+                known = Entry(quest_id=d.name, quest_root=d, config=d / "config.yaml", working_folder="",
+                              title=title, created_at="", last_seen="")
+            here.append(known)
+    return here + [e for e in index if str(e.quest_root.resolve()) not in seen]
+
+
 def listing(items: list[Entry]) -> str:
     """``fi tools quests``: one line per quest (short id, where it is, its title) and its folder under it."""
     if not items:
@@ -492,5 +524,5 @@ def listing(items: list[Entry]) -> str:
 
 __all__ = [
     "AmbiguousQuest", "Entry", "Found", "INDEX_NAME", "MIN_SHORT", "QuestNotFound", "entries", "find", "index_path",
-    "listing", "load", "matching", "prune", "register", "set_title", "short_id", "status",
+    "listed", "listing", "load", "matching", "prune", "register", "set_title", "short_id", "status",
 ]

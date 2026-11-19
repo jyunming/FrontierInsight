@@ -591,8 +591,8 @@ same PR that adds, splits or renames one.
   (`fiHome`) is the same rule. (Older files — profile, skills, caches, pip lock — still build the path themselves.)
 - `core/quest_index.py` — every quest FI has run on this computer, `fi_home()/quests.json` (id → quest_root, config,
   working_folder, title, created_at, last_seen). `register` (from `launch._record_quest`, called by `run_one` at start /
-  resume and at the end), `set_title` (from `quest_title.rename`), `prune` / `entries` / `listing` (`fi tools quests
-  [--prune]`, `launch._list_quests`; `web/server.py::_quest_dirs` adds them to `GET /api/quests`, the dashboard's one list); `status` reads `quest_title.looks_running` (FI's process record first). Every write is
+  resume and at the end), `set_title` (from `quest_title.rename`), `prune` / `entries` / `listed` (the one list: the folder's quests first, then the index's) / `listing` (`fi tools quests
+  [--prune] [--json]`, which takes `--output-root`, `launch._list_quests`; `web/server.py::_quest_dirs` adds them to `GET /api/quests`, the dashboard's one list); `status` reads `quest_title.looks_running` (FI's process record first). Every write is
   read-modify-write under a `filelock.FileLock` with temp file + `os.replace` (retried on Windows sharing violations);
   a file whose content is not a quest list is kept aside as `quests.json.unreadable-<time>`; a read error (`OSError`)
   writes nothing. `find(text, local_dirs, allow_folder=, tidy=)` is the one lookup: folder path → `<local>/<id>` →
@@ -607,7 +607,7 @@ same PR that adds, splits or renames one.
   `_locate_quest` (`--update`, `--critique`), and `web/server.py::_resolve_quest_root` (`allow_folder=False,
   tidy=False`; every quest API; a 409 lists an ambiguous id; DELETE refuses a quest outside its outputs folder; the
   resume endpoint also passes `--output <its folder>` and `QuestLauncher.launch_command(cwd=)`). `short_id` (6 hex after the last dash) is shown by the
-  start/resume log line, `fi tools quests`, the dashboard and quest page. VS Code reads the file only:
+  start/resume log line, `fi tools quests`, the dashboard and quest page. VS Code gets the list from `fi tools quests --json --output-root` (`src/quest-list.ts`: `loadQuestList`, `isRunning`; the index file is read directly only when Python cannot run, with no status) and reads the file for ids:
   `vscode-frontier-insight/src/quest-index.ts` (`loadIndex`, `matchIds` = `matching`, `findInIndex`, `shortId`), used by
   `extension.ts::runResume` (`/resume`, `/plan`, `/watch`; `RunWhere` runs a quest from another folder with its config,
   `--output` and cwd) and `quest-map.ts` (`pickQuest`, `fullQuestId`); the other `@fi` commands pass the id to `launch.py`.

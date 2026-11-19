@@ -3665,7 +3665,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return _rename_quest(args.rename, args.output_root, title=args.title)
 
         if args.quests:
-            return _list_quests(prune=args.prune, as_json=args.json_out)
+            return _list_quests(prune=args.prune, as_json=args.json_out, output_root=args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -6994,8 +6994,9 @@ def _locate_quest(quest: str, output_root: Path) -> Path | None:
     return _quest_dir(quest, output_root)
 
 
-def _list_quests(*, prune: bool = False, as_json: bool = False) -> int:
-    """``fi tools quests [--prune]``: every quest FI has run on this computer (core/quest_index.py)."""
+def _list_quests(*, prune: bool = False, as_json: bool = False, output_root: Path | None = None) -> int:
+    """``fi tools quests [--prune]``: every quest FI has run on this computer (core/quest_index.py), this folder's
+    (``output_root``) first: the one list the web page and the VS Code extension show too."""
     from core import quest_index
 
     if prune:
@@ -7006,7 +7007,7 @@ def _list_quests(*, prune: bool = False, as_json: bool = False) -> int:
             return 1
         if not as_json:
             print(f"[FI] forgot {len(dropped)} quest(s) whose folder is gone" + (": " + ", ".join(dropped) if dropped else "."))
-    items = quest_index.entries()
+    items = quest_index.listed(output_root)
     if as_json:
         print(json.dumps({"quests": [e.as_dict(with_status=True) for e in items]}, ensure_ascii=False))
     else:
