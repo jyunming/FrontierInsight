@@ -603,12 +603,14 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
 
     Under ``code/`` (or ``code``, when given): every file, whatever its suffix (a helper module beside ``simulate.py``,
     a model package, a parameter table, a pickled lookup, a binary array: the simulation may read any of them), except
-    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`) and its drawing calls (:data:`FIGURE_CALLS_SCRIPT`), the rest of the analysis FI
+    the analysis script (:data:`ANALYSIS_SCRIPT`), FI's reader of the record (:data:`TABLE_SCRIPT`), the rest of the analysis FI
     writes (``derive.py`` with FI's frame and ``fi_figures.py`` with FI's text; FI's calculator ``fi_core/`` by its name), the tests (``tests/``, ``test_*.py``), FI's copies under ``skills/``,
     the three notes FI writes itself (:data:`FI_NOTES`), tool caches by their exact name (:data:`TOOL_CACHES`), and what a run writes (:data:`GENERATED_FOLDERS`) except a
     ``.py`` file, which is code wherever it sits. Every other note (``.md``) and hidden file or folder is listed: a run can read
     them, and a key that left one out would reuse a result its change should have made again; a recompute is the only
-    cost of listing too much.
+    cost of listing too much. FI's drawing calls (:data:`FIGURE_CALLS_SCRIPT`) are listed though only the analysis draws
+    with them: FI's frame runtime imports them when it loads, so every trial reads the file, and a file a trial reads that
+    the key does not compare keeps its record from being reused (:func:`core.reuse_key.left_out`).
     Under ``<quest_root>/inputs/``: every file, since a simulation may read any of the person's files there. A change to
     any listed file is a change to the simulation, so a cached result of the old version must not be reused (:func:`core.outside_run.code_version`,
     :func:`core.trial_runner._run_key`, :func:`core.optimise._run_key` all hash these files)."""
@@ -626,7 +628,7 @@ def simulation_inputs(quest_root: Path | str, code: Path | None = None) -> list[
                 continue
             if parts[0] in (TESTS_DIR, SKILLS_FOLDER, FI_CORE_FOLDER) or (path.name.startswith("test_") and path.suffix == ".py"):
                 continue
-            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,), (FIGURE_CALLS_SCRIPT,)) or (len(parts) == 1 and parts[0] in FI_NOTES):
+            if parts in ((ANALYSIS_SCRIPT,), (TABLE_SCRIPT,)) or (len(parts) == 1 and parts[0] in FI_NOTES):
                 continue
             if path.suffix == ".py" and parts[0] in _ANALYSIS_PARTS and _analysis_part(code_dir, "/".join(parts)):
                 continue  # the analysis FI writes (derive.py, its figure step, its formula calculator): a repair of it runs no trial again

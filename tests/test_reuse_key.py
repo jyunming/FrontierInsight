@@ -440,6 +440,41 @@ def test_a_run_that_read_a_file_the_key_leaves_out_is_not_reused_and_the_file_is
     assert "code/README.md" in trial_runner._why_not_reused(root, inputs)
 
 
+IMPORTS_DRAWING_CALLS = '''
+import fi_figure_calls  # as FI's frame runtime does when it loads
+
+def run_cell(cell):
+    return {"f": float(fi_figure_calls.X)}
+'''
+
+
+def _with_drawing_calls(tmp_path: Path) -> tuple[Path, Any, Any]:
+    root, run = _opened_run(tmp_path, IMPORTS_DRAWING_CALLS, {"code/fi_figure_calls.py": "X = 1\n"})
+    inputs = trial_runner._run_inputs(root / "code" / "simulate.py", {"grid": {"x": [1]}}, 1, 0, True)
+    return root, run, inputs
+
+
+def test_a_run_that_imported_fi_s_drawing_calls_is_reused_after_an_analysis_only_change(tmp_path: Path) -> None:
+    # every trial imports the drawing calls through FI's frame, so a record that read them must still be reusable
+    root, run, inputs = _with_drawing_calls(tmp_path)
+    assert "code/fi_figure_calls.py" in run.opened(), run.opened()
+    assert reuse_key.left_out(run.opened(), inputs.files) == []
+    (root / ".fi" / "trials").mkdir(parents=True, exist_ok=True)
+    (root / "raw").mkdir(exist_ok=True)
+    trial_runner._save_run(root, inputs.key, run, inputs)
+    (root / "code" / "experiment.py").write_text("print('analysis repaired')\n", encoding="utf-8")  # an analysis repair
+    again = trial_runner._run_inputs(root / "code" / "simulate.py", {"grid": {"x": [1]}}, 1, 0, True)
+    assert again.key == inputs.key
+    assert trial_runner._load_run(root, again.key, again) is not None
+
+
+def test_a_change_to_fi_s_drawing_calls_runs_the_trials_again(tmp_path: Path) -> None:
+    root, _run, inputs = _with_drawing_calls(tmp_path)
+    (root / "code" / "fi_figure_calls.py").write_text("X = 2\n", encoding="utf-8")
+    again = trial_runner._run_inputs(root / "code" / "simulate.py", {"grid": {"x": [1]}}, 1, 0, True)
+    assert again.key != inputs.key
+
+
 # ---- slice 4: the checks and the numeric-warnings resume read the same files ------------------------------------------
 
 
