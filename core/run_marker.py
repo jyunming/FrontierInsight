@@ -28,9 +28,12 @@ RECORD = ".fi/process.json"
 #: Held (exclusive create) only while a session reads the record, decides and writes its own: two starts at the same
 #: instant cannot both pass the check.
 LOCK = ".fi/process.lock"
-#: Seconds a start waits for the lock, and after how long (or when its owner is gone) a lock left behind is taken over.
+#: Seconds a start waits for the lock, then refuses; and after how long a lock that names no process is taken over.
 LOCK_WAIT_S = 10.0
 LOCK_STALE_S = 5.0
+#: A start lock made on another computer (a shared folder) is taken over after this many seconds: its process cannot be
+#: asked from here, and a start holds it for milliseconds.
+LOCK_FOREIGN_S = 600.0
 HISTORY = ".fi/process_history.jsonl"
 #: Seconds between the signs of life.
 BEAT_S = 30.0
@@ -102,30 +105,54 @@ def _unlink(path: Path) -> None:
 @contextlib.contextmanager
 def _start_lock(quest_root: Path) -> Any:
     """The exclusive lock around a session's read-record, decide, write-record (``os.O_EXCL``: no dependency, atomic on
-    every file system FI runs on). A lock whose owner is gone, or that is older than :data:`LOCK_STALE_S` seconds (a
-    start takes milliseconds), is taken over. Waits at most :data:`LOCK_WAIT_S`, then goes on without it (a lock that
-    cannot be made, e.g. a read-only folder, must not stop a run that could otherwise be written)."""
+    every file system FI runs on). A lock is taken over only when its owner is known to be gone: on this computer, the
+    process it names (the same id, started at the same time) no longer runs, or it names none and is older than
+    :data:`LOCK_STALE_S` seconds (a start killed between making the lock and writing it); from another computer, older
+    than :data:`LOCK_FOREIGN_S`. A lock still held after :data:`LOCK_WAIT_S` refuses the start
+    (:class:`QuestStillRunning`): going on without it could let two runs write one quest. A lock that cannot be made at
+    all (e.g. a read-only folder) does not stop a run that could otherwise be written."""
     path = quest_root / LOCK
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
     deadline = time.monotonic() + LOCK_WAIT_S
+    owner: Any = {}
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, json.dumps({"pid": os.getpid(), "host": _host()}).encode())
+            os.write(fd, json.dumps({"pid": os.getpid(), "host": _host(),
+                                     "started": _started_at(os.getpid())}).encode())
         except FileExistsError:
             try:
                 age = time.time() - path.stat().st_mtime
+            except FileNotFoundError:
+                continue  # released between the two calls: try again
+            except OSError:
+                age = 0.0
+            try:
                 owner = json.loads(path.read_text(encoding="utf-8") or "{}")
             except (OSError, ValueError):
-                age, owner = 0.0, {}
-            gone = (owner.get("host") in (None, "", _host()) and owner.get("pid") not in (None, os.getpid())
-                    and _started_at(int(owner["pid"])) is None) if isinstance(owner, dict) else False
-            if age > LOCK_STALE_S or gone:
+                owner = {}  # being written, or never written: judged by its age below
+            if not isinstance(owner, dict):
+                owner = {}
+            here = owner.get("host") in (None, "", _host())
+            if owner.get("pid") is None:
+                gone = age > LOCK_STALE_S
+            elif here and owner.get("started") is not None:
+                gone = not is_running(owner)
+            elif here:
+                gone = _started_at(int(owner["pid"])) is None
+            else:
+                gone = age > LOCK_FOREIGN_S
+            if gone:
                 _unlink(path)
                 continue
             if time.monotonic() > deadline:
-                break
+                import sys
+
+                message = (f"Quest {quest_root.name} is being started by another process "
+                           f"({owner.get('pid', 'unknown')}); nothing was started.")
+                print(f"[FI] {message}", file=sys.stderr)
+                raise QuestStillRunning(message)
             time.sleep(0.02)
         except OSError:
             break

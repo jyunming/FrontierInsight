@@ -473,6 +473,43 @@ def test_a_lock_left_by_a_dead_start_is_taken_over(tmp_path: Path) -> None:
     assert not (tmp_path / rm.LOCK).exists()
 
 
+def test_a_lock_whose_owner_still_runs_is_not_taken_over_however_old_and_the_start_is_refused(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A start paused between making the lock and writing its record (a debugger, a busy machine) still owns it: the
+    next start waits, then refuses, rather than taking it over by age or going on without it."""
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        (tmp_path / ".fi").mkdir()
+        lock = tmp_path / rm.LOCK
+        lock.write_text(json.dumps({"pid": owner.pid, "host": rm._host(), "started": rm._started_at(owner.pid)}),
+                        encoding="utf-8")
+        old = time.time() - 10 * rm.LOCK_STALE_S
+        os.utime(lock, (old, old))
+        monkeypatch.setattr(rm, "LOCK_WAIT_S", 0.3)
+        marker = rm.RunMarker(tmp_path, beat_s=0.05)
+        with pytest.raises(rm.QuestStillRunning):
+            marker.start()
+        assert lock.is_file()  # the owner's lock stays
+        assert not (tmp_path / rm.RECORD).exists()  # and nothing of this start was written
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+def test_a_lock_that_names_no_process_is_taken_over_once_it_is_old(tmp_path: Path) -> None:
+    """A start killed between making the lock and writing into it leaves an empty lock: it names no owner to ask, so
+    its age decides."""
+    (tmp_path / ".fi").mkdir()
+    lock = tmp_path / rm.LOCK
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 10 * rm.LOCK_STALE_S
+    os.utime(lock, (old, old))
+    marker = rm.RunMarker(tmp_path, beat_s=0.05)
+    assert marker.start() is None
+    marker.finish()
+    assert not lock.exists()
+
+
 def test_every_command_that_writes_into_a_quest_refuses_a_live_one_and_writes_nothing(tmp_path: Path) -> None:
     """`--revise-plan`, `--emit`, `--watch`, `--update`, `--critique`, `--approve-amendment` and `--accept-checks`
     ask the same question as a resume (core/run_marker.py:refuse_if_running): one line, exit 1, nothing written."""
