@@ -123,6 +123,30 @@ def test_a_record_of_a_process_still_running_is_not_touched(tmp_path: Path, capl
     assert any("already runs in another process" in r.getMessage() for r in caplog.records)
 
 
+def test_a_record_from_another_computer_is_judged_by_its_last_sign_of_life(tmp_path: Path, caplog) -> None:  # noqa: ANN001
+    """A quest folder another computer shares: a process id there means nothing here. Its record runs while its sign
+    of life is recent, and a run started here neither calls it stopped nor removes its locks."""
+    import time
+
+    now = time.time()
+    other = {"pid": 1, "host": "another-computer-" + os.urandom(4).hex(), "started": now - 900, "seen_at": now - 10,
+             "ended": None}
+    assert rm.alive(other)
+    assert not rm.alive({**other, "seen_at": now - 2 * rm.STALE_S})
+    assert not rm.alive({**other, "ended": "finished"})
+    _write_record(tmp_path, other)
+    _cache_with(tmp_path, "theirs.json.lock")
+    marker = rm.RunMarker(tmp_path, beat_s=5)
+    with caplog.at_level(logging.WARNING):
+        found = marker.start()
+    marker.finish()
+    assert found is None and (tmp_path / SHARED_CACHE / "theirs.json.lock").is_file()
+    assert any("already runs in another process" in r.getMessage() for r in caplog.records)
+    # this computer's records carry its name, and are judged by their process
+    mine = json.loads((tmp_path / rm.RECORD).read_text(encoding="utf-8"))
+    assert mine["host"] == rm._host() and not rm.alive(mine)
+
+
 def test_the_beat_moves_the_sign_of_life(tmp_path: Path) -> None:
     import time
 
