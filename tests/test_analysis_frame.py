@@ -656,6 +656,48 @@ def test_a_body_reads_a_value_the_trials_returned_that_the_plan_lists_as_no_resu
     assert all("lag" not in row for row in printed.values() if isinstance(row, dict))
 
 
+def test_a_body_reads_the_trials_value_of_a_quantity_the_plan_works_out_afterwards(tmp_path: Path) -> None:
+    # The trials return `spread` under its own name, and the plan lists `spread` as a quantity worked out afterwards. Before,
+    # the table told the body that no trial returned `spread`, and `spread` went missing at every setting although the
+    # record held it. A name no trial returned is still refused.
+    record = json.loads(json.dumps(RECORD))
+    for c in record["cells"]:
+        trials = c["metrics"]["growth"]["trials"]
+        c["metrics"]["spread"] = {"values": [0.5 for _ in trials], "trials": trials}
+    bodies = """
+    def derive_spread(table):
+        return {k: table.mean("spread", k) for k in table.keys()}
+
+    def derive_ghost(table):
+        return table.mean("never_returned", table.keys()[0])
+    """
+    quest = _quest(tmp_path, _design([_derived("spread", inputs=()), _derived("ghost", inputs=())]), bodies, record)
+    _code, _printed, rec, _err = _run(quest)
+    spread = rec["derived"]["spread"]
+    assert spread["status"] == "ok" and set(spread["by_setting"]) == set(KEYS)
+    assert all(v == pytest.approx(0.5) for v in spread["by_setting"].values())
+    ghost = rec["derived"]["ghost"]
+    assert ghost["status"] == "failed" and "never_returned" in ghost["why"]
+
+
+def test_once_fi_holds_its_own_value_of_such_a_quantity_the_trials_values_are_not_read_beside_it() -> None:
+    from tests.test_fx339_contract import _cell, _table
+
+    cells = [_cell(0.1, [2.0, 2.0], [5.0, 5.0]), _cell(0.2, [3.0, 3.0], [5.0, 5.0])]
+    for c in cells:
+        c["metrics"]["spread"] = {"values": [0.5, 0.5], "trials": [0, 1]}
+    t = _table(cells, own=["spread"])
+    assert t.mean("spread", "noise=0.1") == pytest.approx(0.5) and t.values("spread", "noise=0.1") == [0.5, 0.5]
+    t.set_derived({"spread": {"status": "ok", "by_setting": {"noise=0.1": 2.0, "noise=0.2": 3.0}}})
+    assert t.mean("spread", "noise=0.1") == pytest.approx(2.0)  # FI's own value, not the trials' 0.5
+    for read in (lambda: t.values("spread", "noise=0.1"), lambda: t.sd("spread", "noise=0.1"),
+                 lambda: t.level_means("spread", "noise=0.1")):
+        with pytest.raises(Exception, match="FI works out once for each setting"):
+            read()
+    with pytest.raises(Exception, match="not a result the plan declares"):
+        t.mean("never_returned", "noise=0.1")
+
+
 def test_a_figure_that_draws_only_an_input_drew_nothing_of_the_results(tmp_path: Path) -> None:
     # The figure declares it shows `growth` but draws only `lag`, a value the trials returned that is no result: FI says it
     # drew nothing from the trial record, as for a figure that read no value at all.

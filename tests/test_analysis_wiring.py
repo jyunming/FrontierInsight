@@ -499,9 +499,7 @@ PINS_AT_811719AF = {
     # afterwards: Table.set_derived), so a figure line of exactly that value is named; it was "a9a7c613dbc16eba"
     # and again when a coverage or bias read at a value compared inside the runs keeps FI's sentence of what its record holds when it holds
     # nothing there (Table.unheld, kept beside the plain answer: an intended text change); it was "40022073322a5e86"
-    # and again when the table began to keep every name one call asks it for, a refused read too (Table.asked, read by FI's
-    # small run to tell a function that can never give a value: an intended text change); it was "fb4aca77ebd9305f"
-    "run_framed": "5b352ff217857137",
+    "run_framed": "cbc38ff1512770ae",
 }
 
 

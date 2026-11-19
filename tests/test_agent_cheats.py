@@ -25,6 +25,10 @@ from core import figure_data_check, run_facts, typed_results
 from core.execution import SharedInterpreterExecutor
 from tests.equation_judge_helpers import fi_verdict
 
+# The module fixture `judged` runs the run-time checks on 12 quests, about 640 s on a busy machine: longer than
+# pytest.ini's 600 s default. pytest-timeout wraps the whole test item (fixture setup included), so this marker covers it.
+pytestmark = pytest.mark.timeout(1800)
+
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_cheats"
 CHEATS = sorted(p.name for p in (FIXTURES / "cheats").iterdir() if p.is_dir())
 
