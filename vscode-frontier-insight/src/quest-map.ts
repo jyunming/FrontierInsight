@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { loadIndex, matchIds, shortId } from "./quest-index";
-import { LaunchRunner, loadQuestList, runningMark } from "./quest-list";
+import { LIST_TIMEOUT_MS, LaunchRunner, loadQuestList, runningMark } from "./quest-list";
 import { rootsForCommand } from "./roots-config";
 import { runLaunch } from "./trace";
 
@@ -143,7 +143,7 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
     const python = cfg.get<string>("pythonPath") || "python";
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputRoot = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(roots.workDir, outputDirSetting);
-    const typed = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest((a) => runLaunch(python, roots.repoPath, roots.workDir, a), outputRoot));
+    const typed = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest((a) => runLaunch(python, roots.repoPath, roots.workDir, a, LIST_TIMEOUT_MS), outputRoot));
     if (!typed) return;
     if (!/^[A-Za-z0-9_\-.]+$/.test(typed)) {
         void vscode.window.showErrorMessage(`"${typed}" is not a quest id (letters, digits, - _ . only).`);

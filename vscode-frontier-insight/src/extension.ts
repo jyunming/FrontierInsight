@@ -51,7 +51,7 @@ import { runProbe } from "./probe";
 import { openQuestMap, tabAreaColumn } from "./quest-map";
 import { IndexEntry, describeAmbiguous, findInIndex, loadIndex, matchIds, shortId } from "./quest-index";
 import { runFollow, runLaunch, runQuality, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
-import { ListedQuest, isRunning, loadQuestList, runningMark, stillRunningMessage } from "./quest-list";
+import { LIST_TIMEOUT_MS, ListedQuest, isRunning, loadQuestList, runningMark, stillRunningMessage } from "./quest-list";
 
 
 /**
@@ -586,7 +586,7 @@ async function runResume(
     // now), from FI's own `--quests --json`: the same list and running test as the web page. Those this /watch or /plan
     // cannot act on are left out.
     const pythonForList = cfg.get<string>("pythonPath") || "python";
-    const listed = await loadQuestList((a) => runLaunch(pythonForList, repoPath, workDir, a), outputsDir);
+    const listed = await loadQuestList((a) => runLaunch(pythonForList, repoPath, workDir, a, LIST_TIMEOUT_MS), outputsDir);
     const here = path.resolve(outputsDir).toLowerCase();
     const elsewhere = listed.filter((e) => {
         if (path.resolve(path.dirname(e.questRoot)).toLowerCase() === here) return false;
@@ -724,7 +724,8 @@ async function runResume(
     // The quest's own folder: under this folder's outputs, or where it was run.
     const questDir = foreign ? foreign.questRoot : path.join(outputsDir, chosenId);
     // A running quest is not started a second time (the web page refuses with "still running" too): another run of
-    // it would share its files. Opening its plan and watching it start nothing, so they are not refused; a quest the
+    // it would share its files. This check is a convenience that fails open (no list, a path through a link); the run
+    // itself refuses a quest whose process record says another process runs it (core/run_marker.py). Opening its plan and watching it start nothing, so they are not refused; a quest the
     // list could not give a status for is not refused either.
     if (!watch && !(plan && !planRequest) && isRunning(listed, questDir)) {
         stream.markdown("❌ " + stillRunningMessage(chosenId) + "\n");

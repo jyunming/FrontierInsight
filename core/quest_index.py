@@ -478,22 +478,29 @@ def _index_entry(qid: str, root: Path) -> Entry | None:
 
 
 def listed(output_root: Path | None = None) -> list[Entry]:
-    """The one list of quests every surface shows (web page, ``fi tools quests``, the VS Code extension): this folder's
+    """The one list of quests ``fi tools quests`` and the VS Code extension show, in the order the web page lists them
+    (``web/server.py::_quest_dirs`` builds the same order from the same record): this folder's
     quests first (every subfolder of ``output_root`` holding a ``.fi/`` folder, newest id first, whether or not the index
     knows it), then every other quest in the index whose folder can be seen now, most recently seen first."""
     index = entries()
+
+    def _key(p: Path) -> str:
+        try:
+            return os.path.normcase(str(p.resolve()))
+        except OSError:
+            return os.path.normcase(str(p))
+
     by_root: dict[str, Entry] = {}
     for e in index:
-        try:
-            by_root[str(e.quest_root.resolve())] = e
-        except OSError:
-            continue
+        by_root.setdefault(_key(e.quest_root), e)
     here: list[Entry] = []
     seen: set[str] = set()
     if output_root is not None and output_root.is_dir():
         for d in sorted((d for d in output_root.iterdir() if d.is_dir() and (d / ".fi").is_dir()),
                         key=lambda d: d.name, reverse=True):
-            key = str(d.resolve())
+            key = _key(d)
+            if key in seen:
+                continue
             seen.add(key)
             known = by_root.get(key)
             if known is None:
@@ -506,7 +513,13 @@ def listed(output_root: Path | None = None) -> list[Entry]:
                 known = Entry(quest_id=d.name, quest_root=d, config=d / "config.yaml", working_folder="",
                               title=title, created_at="", last_seen="")
             here.append(known)
-    return here + [e for e in index if str(e.quest_root.resolve()) not in seen]
+    rest: list[Entry] = []
+    for e in index:  # one line per physical folder: two ids on one root, or a link or a letter-case variant, keep the first
+        key = _key(e.quest_root)
+        if key not in seen:
+            seen.add(key)
+            rest.append(e)
+    return here + rest
 
 
 def listing(items: list[Entry]) -> str:

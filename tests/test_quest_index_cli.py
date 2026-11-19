@@ -3,6 +3,7 @@ own. Every test uses a temporary ``FI_HOME`` (tests/conftest.py), never the real
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -273,3 +274,42 @@ def test_the_quest_list_json_carries_each_quests_running_status(tmp_path: Path, 
     rows = json.loads(capsys.readouterr().out)["quests"]
     assert [r["quest_id"] for r in rows] == ["1790000002-second-bbbbbb", "1790000001-first-aaaaaa"]
     assert [r["status"] for r in rows] == ["stopped", "running"]
+
+
+def test_the_quest_list_has_one_line_per_physical_folder(tmp_path: Path) -> None:
+    """Two index ids on one folder, a letter-case variant of it, or this folder's own quest recorded again, are one
+    quest in the list: the first is kept."""
+    a = _own_folder_quest(tmp_path / "study_a", "1790000001-first-aaaaaa")
+    quest_index.register(a, working_folder=tmp_path / "study_a", title="First")
+    other = _own_folder_quest(tmp_path / "study_b", "1790000002-second-bbbbbb")
+    quest_index.register(other, working_folder=tmp_path / "study_b", title="Second")
+    # the same folder under a second id
+    path = quest_index.index_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    twin = dict(data["quests"]["1790000001-first-aaaaaa"])
+    data["quests"]["1790000005-twin-eeeeee"] = twin
+    path.write_text(json.dumps(data), encoding="utf-8")
+    got = [e.quest_id for e in quest_index.listed(other.parent)]
+    assert len(got) == 2 and got[0] == "1790000002-second-bbbbbb"
+    assert sum(g in ("1790000001-first-aaaaaa", "1790000005-twin-eeeeee") for g in got) == 1
+
+
+def test_the_web_page_lists_quests_in_the_same_order_as_the_shared_list(tmp_path: Path) -> None:
+    """Two quests elsewhere whose most recently seen one has the smaller id: the page and `fi tools quests` agree."""
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    mine = _own_folder_quest(tmp_path / "study_a", "1790000003-mine-cccccc")
+    old = _own_folder_quest(tmp_path / "study_b", "1790000009-zz-old-ffffff")
+    new = _own_folder_quest(tmp_path / "study_c", "1790000001-aa-new-111111")
+    for root, folder in ((mine, "study_a"), (old, "study_b"), (new, "study_c")):
+        quest_index.register(root, working_folder=tmp_path / folder, title=root.name)
+    path = quest_index.index_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["quests"]["1790000009-zz-old-ffffff"]["last_seen"] = "2026-01-01T00:00:00"
+    data["quests"]["1790000001-aa-new-111111"]["last_seen"] = "2026-06-01T00:00:00"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    shared = [e.quest_id for e in quest_index.listed(mine.parent)]
+    page = [q["quest_id"] for q in TestClient(make_app(mine.parent)).get("/api/quests").json()["quests"]]
+    assert page == shared and shared[-2:] == ["1790000001-aa-new-111111", "1790000009-zz-old-ffffff"]

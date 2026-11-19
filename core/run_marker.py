@@ -81,6 +81,43 @@ def alive(record: dict[str, Any], *, now: float | None = None) -> bool:
     return is_running(record)
 
 
+class QuestStillRunning(RuntimeError):
+    """A start of a quest whose own record says another process is running it. Said in one plain line already
+    (:func:`refuse_if_running`), so ``launch.py`` exits 1 without a traceback."""
+
+    _fi_failure_shown = True
+
+
+def running_elsewhere(quest_root: Path | str) -> dict[str, Any] | None:
+    """The record of the other process that is running this quest now, or ``None`` (no record, an ended or stopped one,
+    or this same process: a quest run again in the process that ran it goes on as before)."""
+    try:
+        record = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("ended") or not alive(record):
+        return None
+    if record.get("host") in (None, "", _host()) and int(record.get("pid") or 0) == os.getpid():
+        return None
+    return record
+
+
+def refuse_if_running(quest_root: Path | str) -> None:
+    """Stop, before anything of the quest is touched, when another process runs it: a second run would overwrite the
+    first one's files. One plain line on stderr and :class:`QuestStillRunning` (exit 1). The one place this is decided,
+    so every way of starting a quest (``--resume``, ``--from``, the web page, VS Code) is refused alike, whatever path
+    the folder was reached by."""
+    record = running_elsewhere(quest_root)
+    if record is None:
+        return
+    import sys
+
+    message = (f"Quest {Path(quest_root).name} is still running (process {record.get('pid')}, started "
+               f"{_clock(record.get('started'))}); nothing was started.")
+    print(f"[FI] {message}", file=sys.stderr)
+    raise QuestStillRunning(message)
+
+
 def _write(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{uuid.uuid4().hex[:6]}.tmp")
@@ -109,7 +146,8 @@ class RunMarker:
                 fh.write(json.dumps({"at": _clock(time.time()), **line}) + "\n")
 
     def start(self) -> dict[str, Any] | None:
-        """Begin this session. Returns what the earlier session's record says when it was stopped from outside (its
+        """Begin this session; refused (:class:`QuestStillRunning`) while another process runs the quest. Returns what
+        the earlier session's record says when it was stopped from outside (its
         ``pid``, ``started``, ``seen_at``), else ``None``."""
         try:
             earlier = json.loads(self.path.read_text(encoding="utf-8"))
@@ -117,10 +155,8 @@ class RunMarker:
             earlier = None
         found: dict[str, Any] | None = None
         if isinstance(earlier, dict) and not earlier.get("ended"):
-            if alive(earlier) and not (earlier.get("host") in (None, "", _host()) and int(earlier.get("pid") or 0) == os.getpid()):
-                self._log.warning("[run] this quest already runs in another process (id %s, started %s); two runs "
-                                  "of one quest can overwrite each other's files", earlier.get("pid"),
-                                  _clock(earlier.get("started")))
+            if running_elsewhere(self.quest_root) is not None:
+                refuse_if_running(self.quest_root)  # before this session writes anything
             else:
                 found = earlier
                 self._log.warning(

@@ -325,6 +325,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        # A quest another process is running now is not started a second time (core/run_marker.py): refused before
+        # anything of it is touched, and no failure report is written for it.
+        from .run_marker import refuse_if_running as _refuse_if_running
+
+        _refuse_if_running(self.quest_root)
         # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
         # before then is an earlier run's (launch.py prints only this run's).
         self._step_retries: dict[str, tuple[str, int]] = {}

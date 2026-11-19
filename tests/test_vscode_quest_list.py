@@ -77,3 +77,16 @@ def test_a_quest_whose_status_is_unknown_is_never_refused(tmp_path: Path) -> Non
         str(root.parent), str(root.resolve()),
     )
     assert got == {"ids": ["1790000001-first-aaaaaa"], "status": [""], "running": False}
+
+
+def test_a_list_that_does_not_answer_in_time_falls_back_to_the_index_file(tmp_path: Path) -> None:
+    """A list call stuck on a share or a wrapper must not hold the picker: after the timeout the index file is used."""
+    root = _quest(tmp_path / "study_a", "1790000001-first-aaaaaa", "First")
+    got = _node(
+        "const q = require(process.argv[1]); const t0 = Date.now();"
+        "q.loadQuestList(() => new Promise(() => {}), process.argv[2], undefined, 300).then(list =>"
+        " process.stdout.write(JSON.stringify({ids: list.map(x => x.questId), status: list.map(x => x.status),"
+        " fast: Date.now() - t0 < 5000})));",
+        str(root.parent),
+    )
+    assert got == {"ids": ["1790000001-first-aaaaaa"], "status": [""], "fast": True}

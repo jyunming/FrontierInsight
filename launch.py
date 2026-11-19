@@ -2591,13 +2591,22 @@ async def run_one(
     # runs — instead of creating a second Engine here with a fresh
     # quest_id and stranding the status-line one). When omitted, build.
     if engine is None:
+        if resume_quest_id is not None:
+            # Before the engine opens the quest's run.log: a quest another process runs now is refused untouched.
+            from core.run_marker import refuse_if_running as _refuse_early
+
+            _refuse_early((cfg.output.output_dir / resume_quest_id).resolve())
         engine = Engine(
             cfg, supervisor=supervisor,
             resume_quest_id=resume_quest_id,
             auto_accept_on_pass=auto_accept_on_pass,
         )
     from core.quest_index import short_id as _short_id
+    from core.run_marker import refuse_if_running as _refuse_if_running
 
+    # A quest another process runs now is refused here, before the launch record, the config copy or the index are
+    # written (the engine asks again before its first step).
+    _refuse_if_running(engine.quest_root)
     # The short id is what `fi tools quests` lists and what `--resume` takes from any folder.
     if resume_quest_id is not None:
         print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name} short_id={_short_id(engine.quest_id)}")

@@ -400,7 +400,8 @@ def _index_roots() -> list[Path]:
                 roots.append(e.quest_root.resolve())
             except OSError:
                 continue
-        roots.sort(key=lambda r: r.name, reverse=True)
+        # the index's own order (most recently seen first): the same as ``quest_index.listed``, the list ``fi tools
+        # quests`` and VS Code show
     except Exception:  # noqa: BLE001 -- an unreadable index lists this folder's quests only
         return []
     _INDEX_ROOTS[str(path)] = (now, mtime, roots)

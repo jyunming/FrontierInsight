@@ -113,14 +113,17 @@ def test_a_record_of_a_process_still_running_is_not_touched(tmp_path: Path, capl
     try:
         began = rm._started_at(other.pid)
         _write_record(tmp_path, {"pid": other.pid, "started": began, "seen_at": began, "ended": None})
-        with caplog.at_level(logging.WARNING):
-            found = marker.start()
-        marker.finish()
+        before = (tmp_path / rm.RECORD).read_text(encoding="utf-8")
+        with pytest.raises(rm.QuestStillRunning, match="is still running .*nothing was started"):
+            marker.start()
+        # refused before anything was written: the record, the history and the cache are as they were
+        assert (tmp_path / rm.RECORD).read_text(encoding="utf-8") == before
+        assert not (tmp_path / rm.HISTORY).exists()
+        assert rm.running_elsewhere(tmp_path) is not None
     finally:
         other.kill()
         other.wait()
-    assert found is None and (tmp_path / SHARED_CACHE / "busy.json.lock").is_file()
-    assert any("already runs in another process" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / SHARED_CACHE / "busy.json.lock").is_file()
 
 
 def test_a_record_from_another_computer_is_judged_by_its_last_sign_of_life(tmp_path: Path, caplog) -> None:  # noqa: ANN001
@@ -137,12 +140,14 @@ def test_a_record_from_another_computer_is_judged_by_its_last_sign_of_life(tmp_p
     _write_record(tmp_path, other)
     _cache_with(tmp_path, "theirs.json.lock")
     marker = rm.RunMarker(tmp_path, beat_s=5)
-    with caplog.at_level(logging.WARNING):
-        found = marker.start()
+    with pytest.raises(rm.QuestStillRunning):
+        marker.start()
+    assert (tmp_path / SHARED_CACHE / "theirs.json.lock").is_file()
+    # once its sign of life is old, a run started here goes on, and this computer's records carry its name
+    _write_record(tmp_path, {**other, "seen_at": now - 2 * rm.STALE_S})
+    marker = rm.RunMarker(tmp_path, beat_s=5)
+    assert marker.start() is not None
     marker.finish()
-    assert found is None and (tmp_path / SHARED_CACHE / "theirs.json.lock").is_file()
-    assert any("already runs in another process" in r.getMessage() for r in caplog.records)
-    # this computer's records carry its name, and are judged by their process
     mine = json.loads((tmp_path / rm.RECORD).read_text(encoding="utf-8"))
     assert mine["host"] == rm._host() and not rm.alive(mine)
 
@@ -375,3 +380,44 @@ def test_a_quest_run_finds_a_session_stopped_from_outside_and_records_how_it_end
     assert not (eng.quest_root / SHARED_CACHE / "design_ab12.json.lock").exists()
     record = json.loads((eng.quest_root / rm.RECORD).read_text(encoding="utf-8"))
     assert record["pid"] == os.getpid() and record["ended"] == "failed: RuntimeError"
+
+
+def test_a_second_start_of_a_live_quest_is_refused_with_one_line_and_exit_1_before_anything_is_written(
+        tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """Two runs of one quest overwrote each other's files (the guard in VS Code could not see a quest reached through a
+    link, or a failed list). The run itself refuses, whichever way it was started, and the engine asks before its first
+    step: nothing of the quest is created, and a record that ended or names no live process goes on as before."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        began = rm._started_at(other.pid)
+        _write_record(tmp_path, {"pid": other.pid, "started": began, "seen_at": began, "ended": None})
+        with pytest.raises(rm.QuestStillRunning) as err:
+            rm.refuse_if_running(tmp_path)
+        assert getattr(err.value, "_fi_failure_shown", False)  # launch.py exits 1 without a traceback
+        said = capsys.readouterr().err
+        assert f"is still running (process {other.pid}" in said and "nothing was started." in said
+        assert sorted(p.name for p in (tmp_path / ".fi").iterdir()) == ["process.json"]
+        # the run_one path: refused before the launch record, the config copy or the index
+        import launch
+        from unittest.mock import MagicMock
+
+        engine = MagicMock()
+        engine.quest_root = tmp_path
+        engine.quest_id = tmp_path.name
+        import asyncio
+
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch.run_one(MagicMock(), supervisor=MagicMock(), engine=engine, resume_quest_id=tmp_path.name))
+        assert sorted(p.name for p in (tmp_path / ".fi").iterdir()) == ["process.json"]
+        engine.run.assert_not_called()
+    finally:
+        other.kill()
+        other.wait()
+    # a record that ended, or names a process that is gone, is not a run: it goes on as before
+    _write_record(tmp_path, {"pid": other.pid, "started": 1.0, "seen_at": 1.0, "ended": None})
+    rm.refuse_if_running(tmp_path)
+    _write_record(tmp_path, {"pid": os.getpid(), "started": rm._started_at(os.getpid()), "seen_at": 1.0, "ended": "finished"})
+    rm.refuse_if_running(tmp_path)
+    # this same process running the quest again is not "another process"
+    _write_record(tmp_path, {"pid": os.getpid(), "started": rm._started_at(os.getpid()), "seen_at": 1.0, "ended": None})
+    rm.refuse_if_running(tmp_path)

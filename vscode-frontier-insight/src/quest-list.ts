@@ -4,8 +4,8 @@
  * (`core/quest_index.py:listed` and `status`), the list and the running test the web page and `fi tools quests` use, so
  * the record and the process test are not written a second time here.
  *
- * Only when Python cannot be run is the index file read directly (`loadIndex`), with no status: a quest of unknown status
- * is never refused, so a broken Python never blocks a resume that the person asked for.
+ * Only when Python cannot be run is the index file read directly (`loadIndex`), with no status, so a broken Python never
+ * blocks a resume the person asked for. The refusal of a quest that is running is made by `launch.py` itself.
  *
  * Pure logic with no `vscode` import so plain Node can test it.
  */
@@ -57,16 +57,30 @@ export function parseQuestList(stdout: string): ListedQuest[] | undefined {
     return out;
 }
 
-/** The list for `outputsDir`: from Python, else (Python could not run) the index file with no status. */
+/** Seconds the list may take (about 8 s for 400 quests, most of it Python starting) before the index file is used. */
+export const LIST_TIMEOUT_MS = 30000;
+
+/**
+ * The list for `outputsDir`: from Python, else (Python failed, or did not answer within `timeoutMs`) the index file with
+ * no status. A quest of unknown status is offered like any other: this check is only a convenience, so it fails open.
+ * The safety is in the run itself: `launch.py` refuses to start a quest whose own process record says another process
+ * runs it (`core/run_marker.py:refuse_if_running`), by whatever path the folder was reached.
+ */
 export async function loadQuestList(
-    run: LaunchRunner, outputsDir: string, fallback: () => IndexEntry[] = loadIndex,
+    run: LaunchRunner, outputsDir: string, fallback: () => IndexEntry[] = loadIndex, timeoutMs: number = LIST_TIMEOUT_MS,
 ): Promise<ListedQuest[]> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        const res = await run(["--quests", "--json", "--output-root", outputsDir]);
-        const parsed = res.code === 0 ? parseQuestList(res.stdout) : undefined;
+        const res = await Promise.race([
+            run(["--quests", "--json", "--output-root", outputsDir]),
+            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs); }),
+        ]);
+        const parsed = res && res.code === 0 ? parseQuestList(res.stdout) : undefined;
         if (parsed) return parsed;
     } catch {
         // fall through to the index file
+    } finally {
+        if (timer) clearTimeout(timer);
     }
     return fallback().map((e) => ({ ...e, status: "" as QuestStatus }));
 }
@@ -76,7 +90,8 @@ export function runningMark(q: { status: string }): string {
     return q.status === "running" ? "running now" : "";
 }
 
-/** Whether `questRoot` is running now by FI's own test; false when the list does not hold it or could not say. */
+/** Whether `questRoot` is running now by FI's own test; false when the list does not hold it or could not say (a
+ *  convenience only: the run refuses a running quest itself, so a path that differs here, e.g. through a link, is safe). */
 export function isRunning(list: ListedQuest[], questRoot: string): boolean {
     const norm = (p: string): string => p.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
     const want = norm(questRoot);
