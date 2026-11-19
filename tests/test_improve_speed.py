@@ -680,6 +680,28 @@ async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(
 
 
 @pytest.mark.asyncio
+async def test_the_check_on_the_plan_s_own_setting_stays_within_the_step_s_own_time(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check on the plan's setting had a one-minute floor for each of its runs: a step with less time of its own
+    ran over it. Its runs share the step's own time (24 s here)."""
+    from core import improve_speed as _speed
+
+    real = _speed.run_sample
+    caps: list[float] = []
+
+    async def spy(*args: Any, **kw: Any) -> Any:
+        if list(args[4]) == [{"dx": 0.1}]:
+            caps.append(float(kw["timeout_s"]))
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(_speed, "run_sample", spy)
+    engine = _mesh_engine(tmp_path)
+    out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_FAST))
+    assert out["full_check"]["passed"] is True, out
+    assert len(caps) >= 2 and sum(caps) <= 24.0, caps
+
+
+@pytest.mark.asyncio
 async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolution_is_not_kept(tmp_path: Path) -> None:
     """Planted fault: a change that gives the same numbers on every coarse copy and other numbers at the plan's own
     resolution passes the coarse sample; the check on the plan's setting catches it and the code is left as it was."""

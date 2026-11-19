@@ -3696,8 +3696,10 @@ class RunChecksMixin:
             costs = {_trial_runner.cell_key(p.cell): float(p.seconds) for p in full_probes or []
                      if getattr(p, "cell", None) is not None}
             full = min(full_cells, key=lambda c: costs.get(_trial_runner.cell_key(c), math.inf))
-            # Its own allowance (the rounds may have used the step's time): half of the step's own time for each run.
-            cap = int(max(60, own_s / 2))
+            # Its own allowance (the rounds may have used the step's time): the step's own time shared by its two runs,
+            # three when the numbers vary between runs. A setting that does not finish in it fails the check, and the
+            # change is not kept: the step never runs past its own time for this check.
+            cap = max(1, int(own_s / (3 if noisy else 2)))
             key = _trial_runner.cell_key(full)
 
             async def at_plan() -> Any:
