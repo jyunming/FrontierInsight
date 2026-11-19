@@ -2653,20 +2653,22 @@ def make_app(
             "launcher_started_at": launcher_status.get("started_at"),
         })
 
-    def _progress_or_run_log(quest_id: str) -> Path:
+    def _progress_or_run_log(quest_id: str, full: bool = False) -> Path:
         """The curated view of the quest — a fixed set of one-line stage updates (`core/engine.py:STAGE_PROGRESS`) — or
         the full internal `run.log` for a quest run before that file existed (or one that never wrote a single line
-        to it, e.g. it failed before its first node started)."""
+        to it, e.g. it failed before its first node started). ``full`` is the page's "Full log" switch: always
+        `run.log`, which a person on another device cannot open on disk, and which keeps moving through a long step
+        whose progress line was written hours ago."""
         fi_dir = _resolve_quest_root(app.state.output_root, quest_id) / ".fi"
         progress_path = fi_dir / PROGRESS_LOG_NAME
-        return progress_path if progress_path.is_file() else fi_dir / "run.log"
+        return progress_path if progress_path.is_file() and not full else fi_dir / "run.log"
 
     @app.get("/api/quests/{quest_id}/log")
-    async def get_log(quest_id: str, n: int = 200) -> JSONResponse:
-        return JSONResponse({"lines": _read_log_tail(_progress_or_run_log(quest_id), n=n)})
+    async def get_log(quest_id: str, n: int = 200, full: bool = False) -> JSONResponse:
+        return JSONResponse({"lines": _read_log_tail(_progress_or_run_log(quest_id, full), n=n)})
 
     @app.get("/api/quests/{quest_id}/log/stream")
-    async def stream_log(quest_id: str) -> StreamingResponse:
+    async def stream_log(quest_id: str, full: bool = False) -> StreamingResponse:
         # The full id: whether the quest is still running is asked of the launcher and the registry by it.
         stream_root = _resolve_quest_root(app.state.output_root, quest_id)
         quest_id = stream_root.name
@@ -2676,16 +2678,16 @@ def make_app(
             # Wait briefly for the file to exist on cold start; re-resolved on every attempt, since `progress.log` and
             # `run.log` are created together (`core/engine.py:_quest_logger`, right when the Engine is constructed) —
             # deciding once, before either exists, would otherwise lock this connection onto `run.log` for good.
-            log_path = _progress_or_run_log(quest_id)
+            log_path = _progress_or_run_log(quest_id, full)
             for _ in range(30):
                 if log_path.exists():
                     break
                 await asyncio.sleep(0.2)
-                log_path = _progress_or_run_log(quest_id)
+                log_path = _progress_or_run_log(quest_id, full)
             if log_path.exists():
                 offset = log_path.stat().st_size
-                # Send the existing tail first.
-                for line in _read_log_tail(log_path, n=50):
+                # Send the existing tail first (more of it for the full log, whose lines come faster).
+                for line in _read_log_tail(log_path, n=300 if full else 50):
                     yield f"data: {line}\n\n"
             while True:
                 await asyncio.sleep(0.5)

@@ -273,6 +273,18 @@ def test_app_log_endpoint_returns_tail(tmp_path: Path) -> None:
     assert r.json() == {"lines": ["beta", "gamma"]}
 
 
+def test_the_full_log_switch_shows_run_log_where_the_page_shows_the_short_progress(tmp_path: Path) -> None:
+    """The page shows the short progress lines; a long step left them hours old while run.log moved, and on another
+    device the run.log on disk cannot be opened. ``full`` reads run.log (the stream takes the same switch)."""
+    _mk_quest_dir(tmp_path, "qf", log_body="detail one\ndetail two\n")
+    (tmp_path / "qf" / ".fi" / "progress.log").write_text("Running the experiment.\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/quests/qf/log").json() == {"lines": ["Running the experiment."]}
+    assert client.get("/api/quests/qf/log?full=true").json() == {"lines": ["detail one", "detail two"]}
+    page = client.get("/quest/qf").text
+    assert 'id="log-full-btn"' in page and "toggleFullLog" in page
+
+
 def test_app_figure_endpoint_serves_png_and_rejects_path_traversal(tmp_path: Path) -> None:
     _mk_quest_dir(tmp_path, "qfig", figure_names=["plot.png"])
     app = make_app(tmp_path)
