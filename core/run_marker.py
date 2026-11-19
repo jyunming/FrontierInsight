@@ -17,6 +17,7 @@ import contextlib
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import uuid
@@ -27,6 +28,8 @@ RECORD = ".fi/process.json"
 HISTORY = ".fi/process_history.jsonl"
 #: Seconds between the signs of life.
 BEAT_S = 30.0
+#: A record from another computer whose last sign of life is older than this is taken to have stopped.
+STALE_S = 4 * BEAT_S
 
 
 def _clock(t: float | None) -> str:
@@ -52,6 +55,30 @@ def is_running(record: dict[str, Any]) -> bool:
         return False
     now = _started_at(pid)
     return now is not None and abs(now - began) < 5.0
+
+
+def _host() -> str:
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
+def alive(record: dict[str, Any], *, now: float | None = None) -> bool:
+    """Whether the session a record names is running now: it has not recorded an end, and either it runs on this
+    computer as the same process (:func:`is_running`), or, for a quest folder another computer shares (its ``host``
+    differs), its last sign of life is under :data:`STALE_S` seconds old: a process id means nothing on another
+    computer. A record from before ``host`` was written is taken to be from this computer."""
+    if record.get("ended") is not None:
+        return False
+    host = record.get("host")
+    if host and host != _host():
+        try:
+            seen = float(record.get("seen_at"))
+        except (TypeError, ValueError):
+            return False
+        return (time.time() if now is None else now) - seen < STALE_S
+    return is_running(record)
 
 
 def _write(path: Path, data: dict[str, Any]) -> None:
@@ -90,7 +117,7 @@ class RunMarker:
             earlier = None
         found: dict[str, Any] | None = None
         if isinstance(earlier, dict) and not earlier.get("ended"):
-            if is_running(earlier) and int(earlier.get("pid") or 0) != os.getpid():
+            if alive(earlier) and not (earlier.get("host") in (None, "", _host()) and int(earlier.get("pid") or 0) == os.getpid()):
                 self._log.warning("[run] this quest already runs in another process (id %s, started %s); two runs "
                                   "of one quest can overwrite each other's files", earlier.get("pid"),
                                   _clock(earlier.get("started")))
@@ -106,7 +133,7 @@ class RunMarker:
                 self._clear_leftovers()
         now = time.time()
         pid = os.getpid()
-        self._record = {"pid": pid, "started": _started_at(pid) or now, "seen_at": now, "ended": None}
+        self._record = {"pid": pid, "host": _host(), "started": _started_at(pid) or now, "seen_at": now, "ended": None}
         _write(self.path, self._record)
         self._history({"event": "started", "pid": pid})
         self._stop.clear()

@@ -71,7 +71,7 @@ def test_resume_requires_checkpoint(tmp_path: Path) -> None:
 
 
 def test_resume_happy_path_spawns_subprocess(
-    tmp_path: Path, mock_subprocess: list[list[str]],
+    tmp_path: Path, mock_subprocess: list[list[str]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _client(tmp_path)
     output_root = client.app.state.output_root  # type: ignore[attr-defined]
@@ -89,6 +89,12 @@ def test_resume_happy_path_spawns_subprocess(
     assert "--resume" in argv
     assert "q3" in argv
     assert "--config" in argv
+
+    # a second run of the quest while the first one runs is refused: the two would share its files
+    again = client.post("/api/quests/q3/resume")
+    assert again.status_code == 409 and len(mock_subprocess) == 1
+    monkeypatch.setattr(_FakeProc, "poll", lambda self: 0)  # the first run has ended
+    monkeypatch.setattr(_FakeProc, "returncode", 0, raising=False)
 
     # rerun=true uses --rerun (re-open a finished quest) instead of --resume.
     res2 = client.post("/api/quests/q3/resume?rerun=true")

@@ -363,21 +363,45 @@ def _quest_dirs(output_root: Path) -> list[Path]:
     first. A round that gives each study its own folder is one list, not one page per folder."""
     here = sorted((d for d in output_root.iterdir() if d.is_dir()), reverse=True) if output_root.exists() else []
     seen = {d.resolve() for d in here}
-    try:
-        from core import quest_index
-
-        others = [e.quest_root for e in quest_index.entries()]
-    except Exception:  # noqa: BLE001 -- an unreadable index lists this folder's quests only
-        others = []
     elsewhere = []
-    for root in others:
+    for root in _index_roots():
         try:
-            if root.is_dir() and root.resolve() not in seen:
+            if root.resolve() not in seen:
                 seen.add(root.resolve())
                 elsewhere.append(root)
         except OSError:
             continue
-    return here + sorted(elsewhere, key=lambda r: r.name, reverse=True)
+    return here + elsewhere
+
+
+#: The index's quest folders that can be seen, by index file: (when looked, the file's time, the folders).
+_INDEX_ROOTS: dict[str, tuple[float, float, list[Path]]] = {}
+#: Seconds a look at the index's folders is reused while the index file is unchanged: the page asks every few seconds,
+#: and a folder on a share that is not there can take seconds to answer.
+_INDEX_ROOTS_S = 30.0
+
+
+def _index_roots() -> list[Path]:
+    """The folders of every quest in the index that can be seen now, newest id first (``core/quest_index.py``). The
+    look is reused for :data:`_INDEX_ROOTS_S` seconds while the index file is unchanged; the list is only read, never
+    tidied, here."""
+    try:
+        from core import quest_index
+
+        path = quest_index.index_path()
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return []
+        now = time.monotonic()
+        hit = _INDEX_ROOTS.get(str(path))
+        if hit is not None and now - hit[0] < _INDEX_ROOTS_S and hit[1] == mtime:
+            return list(hit[2])
+        roots = sorted((e.quest_root for e in quest_index.entries(drop_gone=False)), key=lambda r: r.name, reverse=True)
+    except Exception:  # noqa: BLE001 -- an unreadable index lists this folder's quests only
+        return []
+    _INDEX_ROOTS[str(path)] = (now, mtime, roots)
+    return list(roots)
 
 
 def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
@@ -434,6 +458,15 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
             "age_s": int(time.time() - fi_dir.stat().st_mtime),
         })
     return out
+
+
+def _job_quest_root(out_root: Path, job_id: str) -> Path:
+    """The folder of the quest a job runs: under ``out_root``, or its own folder elsewhere (core/quest_index.py), for a
+    quest resumed from this page in the folder it was started in. An id no quest matches gives the local path."""
+    try:
+        return _resolve_quest_root(out_root, job_id)
+    except HTTPException:
+        return out_root / job_id
 
 
 def _quest_looks_running(quest_dir: Path, now: float) -> bool:
@@ -907,6 +940,12 @@ def make_app(
     app.state.registry = registry
     app.state.output_root = output_root
     app.state.supervisor = ProxySupervisor()
+
+    def _quest_alive(quest_id: str, quest_root: Path) -> bool:
+        """Whether the quest runs now, however it was started: this server's own record (the in-process registry or
+        the launcher), or FI's record of the quest's process (a ``python launch.py`` run, another page's launch)."""
+        return (registry.alive(quest_id) or bool((app.state.launcher.status_for(quest_id) or {}).get("alive"))
+                or _quest_looks_running(quest_root, time.time()))
     # Stash both bridge transports on app.state so request handlers
     # can guard against a user picking ``vscode_extension`` when
     # neither is available, and so /api/*/schema endpoints can probe
@@ -1290,6 +1329,9 @@ def make_app(
         if _clarify_run_waiting(quest_root):
             # It is running, waiting for its setup answers on the quest page: a second run would share its files.
             raise HTTPException(409, "this quest is still running and waiting for your answers on its page")
+        if _quest_alive(quest_id, quest_root):
+            # A second run of one quest overwrites the first one's files (a quest started from a terminal included).
+            raise HTTPException(409, f"Quest {quest_id} is still running; resume it once it has stopped or finished.")
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file():
             raise HTTPException(
@@ -1552,7 +1594,7 @@ def make_app(
         except ValueError:
             body = None
         title = body.get("title") if isinstance(body, dict) else None
-        if registry.alive(quest_id) or bool((app.state.launcher.status_for(quest_id) or {}).get("alive")):
+        if _quest_alive(quest_id, quest_root):
             raise HTTPException(409, f"Quest {quest_id} is still running; rename it once it has stopped or finished.")
         # An output being made again reads the paper as it goes: a rename now would leave it half old, half new.
         if any((app.state.launcher.status_for(f"{quest_id}-emit-{kind}") or {}).get("alive")
@@ -2024,7 +2066,7 @@ def make_app(
             # Quests list, so the Jobs tab is consistent however it started.
             alive = jid in live
             if not alive and _classify_job(jid) == "quest":
-                alive = _quest_looks_running(out_root / jid, now)
+                alive = _quest_looks_running(_job_quest_root(out_root, jid), now)
             seen[jid] = {
                 "job_id": jid,
                 "kind": _classify_job(jid),
@@ -2223,7 +2265,7 @@ def make_app(
             # looking already-finished.
             running = (
                 _classify_job(job_id) == "quest"
-                and _quest_looks_running(out_root / job_id, time.time())
+                and _quest_looks_running(_job_quest_root(out_root, job_id), time.time())
             )
             out["alive"] = running
         return JSONResponse(out)
@@ -2301,11 +2343,8 @@ def make_app(
                                      "delete it from there.")
         if not quest_root.is_dir():
             raise HTTPException(404, f"quest {quest_id} not found")
-        # Alive in either tracker = refuse.
-        launcher_alive = bool(
-            (app.state.launcher.status_for(quest_id) or {}).get("alive")
-        )
-        if registry.alive(quest_id) or launcher_alive:
+        # Running by any record (this server's, or the quest's own process record) = refuse.
+        if _quest_alive(quest_id, quest_root):
             raise HTTPException(
                 409,
                 f"quest {quest_id} is still running. Cancel it "
@@ -2559,6 +2598,8 @@ def make_app(
             "alive": (
                 registry.alive(quest_id)
                 or bool(launcher_status.get("alive"))
+                # a quest started outside this server (a terminal, another folder's page) runs too
+                or _quest_looks_running(quest_root, time.time())
             ),
             "pending_clarify": (
                 registry.pending_clarify(quest_id) is not None
@@ -2617,7 +2658,8 @@ def make_app(
     @app.get("/api/quests/{quest_id}/log/stream")
     async def stream_log(quest_id: str) -> StreamingResponse:
         # The full id: whether the quest is still running is asked of the launcher and the registry by it.
-        quest_id = _resolve_quest_root(app.state.output_root, quest_id).name
+        stream_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = stream_root.name
 
         async def gen():
             offset = 0
@@ -2652,16 +2694,11 @@ def make_app(
                 for line in chunk.splitlines():
                     if line.strip():
                         yield f"data: {line}\n\n"
-                # Stop tailing once the quest is done. The in-process
-                # `registry.alive(quest_id)` is False for any
-                # subprocess-launched quest (those are tracked by
-                # `app.state.launcher`, not the registry). Without the
-                # OR-merge below, the stream would close on the FIRST
-                # appended chunk for every web-launched quest.
-                launcher_alive = bool(
-                    (app.state.launcher.status_for(quest_id) or {}).get("alive")
-                )
-                if not registry.alive(quest_id) and not launcher_alive:
+                # Stop tailing once the quest is done, by any record of it: the in-process registry (CLI/VS Code
+                # runs in this process), the launcher (a web-launched run), or the quest's own process record (a run
+                # started from a terminal). With the registry alone the stream closed on the first appended chunk of
+                # every web-launched quest.
+                if not await asyncio.to_thread(_quest_alive, quest_id, stream_root):
                     yield "data: [stream closed: quest task ended]\n\n"
                     return
 

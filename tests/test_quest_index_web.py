@@ -129,3 +129,28 @@ def test_a_quest_whose_process_runs_is_listed_running_however_long_since_its_las
     assert quest_index.status(root) != "running"
     (root / ".fi" / "process.json").write_text(json.dumps({**me, "started": 1.0}), encoding="utf-8")
     assert quest_index.status(root) != "running"
+
+
+def test_a_quest_running_from_a_terminal_shows_running_and_is_not_resumed_or_renamed_again(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The list said running while the quest's own page offered Resume: a second run of the same quest would have
+    shared its files. Every route asks the same question."""
+    import json
+    import os
+    import time
+
+    psutil = pytest.importorskip("psutil")
+    root = _study(tmp_path)
+    me = {"pid": os.getpid(), "started": psutil.Process(os.getpid()).create_time(), "seen_at": time.time(), "ended": None}
+    (root / ".fi" / "process.json").write_text(json.dumps(me), encoding="utf-8")
+    launched: list[list[str]] = []
+    monkeypatch.setattr("web.quest_launcher.subprocess.Popen", lambda argv, **kw: launched.append(argv) or _FakeProc())
+    client = _client(tmp_path)
+    assert client.get(f"/api/quests/{QID}").json()["alive"] is True
+    got = client.post(f"/api/quests/{QID}/resume")
+    assert got.status_code == 409 and "still running" in got.text and not launched
+    assert client.post(f"/api/quests/{QID}/title", json={"title": "New"}).status_code == 409
+    # once its process has ended, it resumes
+    (root / ".fi" / "process.json").write_text(json.dumps({**me, "ended": "stopped"}), encoding="utf-8")
+    assert client.get(f"/api/quests/{QID}").json()["alive"] is False
+    assert client.post(f"/api/quests/{QID}/resume").status_code == 200 and launched
