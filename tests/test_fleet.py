@@ -250,3 +250,102 @@ def test_auto_settings_at_once_is_the_quests_share_of_the_cores(
     assert ("[fleet] 3 quests run at the same time: this one runs up to 5 settings of its study at the same time, its "
             "share of the computer's 16 cores") in run_log(shared)
     assert "up to 4 settings of its study at the same time, as execution.settings_at_once says" in run_log(written)
+
+
+# --- every place that runs the study's settings uses the quest's share ---
+
+
+class _Handed(Exception):
+    """Raised by a stand-in runner once it has been handed its number, so the step stops there."""
+
+
+def _split_engine(tmp_path: Path, simulate: str) -> Engine:
+    """A quest of a fleet of 3 on a 12-core computer with two scripts written and nothing to install."""
+    from unittest.mock import AsyncMock
+
+    cfg = Config(topic="toy study", title="toy", provider=ProviderConfig(name="openai"),
+                 engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", pilot_run=False),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
+                 knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"))
+    assert cfg.execution.settings_at_once == "auto"
+    engine = Engine(cfg, fleet=3)
+    (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    engine.executor.install = AsyncMock(return_value=type("IR", (), {"returncode": 0, "stderr": ""})())  # type: ignore
+    (engine.quest_root / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    (engine.quest_root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    return engine
+
+
+async def _handed_at_once(engine: Engine, protocol: dict[str, object]) -> list[int]:
+    engine._protocol_block = lambda state: protocol  # type: ignore[method-assign]
+    state: dict[str, object] = {"deps": [], "design": {"protocol": protocol}, "iteration": 0, "exec_reflect_iter": 0}
+    with pytest.raises(_Handed):
+        await engine._node_execute_steps(state)  # type: ignore[arg-type]
+    return handed
+
+
+handed: list[int] = []
+
+
+@pytest.mark.asyncio
+async def test_the_run_step_hands_the_trials_runner_the_quests_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run step of a study FI runs trial by trial (core/engine_run.py, TrialsRunner): a quest of a fleet of 3 on 12
+    cores runs 4 settings at once, not 12."""
+    from core import trial_runner
+
+    class _Runner:
+        def __init__(self, *a, at_once: int = 1, **kw):  # noqa: ANN001, ANN002, ANN003
+            handed.append(at_once)
+            raise _Handed
+
+    handed.clear()
+    monkeypatch.setattr(trial_runner, "TrialsRunner", _Runner)
+    monkeypatch.setattr("os.cpu_count", lambda: 12)
+    engine = _split_engine(tmp_path, "def run_trial(cell, seed):\n    return {'y': 1.0}\n")
+    assert await _handed_at_once(engine, {"grid": {"x": [1.0, 2.0]}}) == [4]
+
+
+@pytest.mark.asyncio
+async def test_the_run_step_hands_the_search_the_quests_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run step of a search for the best design (core/engine_run.py, OptimisationRunner): 4 at once on 12 cores
+    for a quest of a fleet of 3."""
+    from core import optimise
+    from tests.test_optimise_runner import SIMULATE, _protocol
+
+    class _Runner:
+        def __init__(self, *a, at_once: int = 1, **kw):  # noqa: ANN001, ANN002, ANN003
+            handed.append(at_once)
+            raise _Handed
+
+    handed.clear()
+    monkeypatch.setattr(optimise, "OptimisationRunner", _Runner)
+    monkeypatch.setattr("os.cpu_count", lambda: 12)
+    engine = _split_engine(tmp_path, SIMULATE.replace("__COUNT__", str(tmp_path / "count.txt"))
+                           .replace("__CWD__", str(tmp_path / "cwd.txt")))
+    protocol = _protocol(evaluation_budget={"starts": 1, "per_start": 6}, grid={"x": [-1.0, 1.0]})
+    assert await _handed_at_once(engine, protocol) == [4]
+
+
+@pytest.mark.asyncio
+async def test_a_round_of_improvement_runs_the_trials_at_the_quests_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A round of improvement measuring the trials (core/engine_improve.py::_improve_measure): 4 at once on 12 cores for
+    a quest of a fleet of 3."""
+    from core import trial_runner
+
+    async def fake_run_trials(*a, at_once: int = 1, **kw):  # noqa: ANN001, ANN002, ANN003
+        handed.append(at_once)
+        raise _Handed
+
+    handed.clear()
+    monkeypatch.setattr(trial_runner, "run_trials", fake_run_trials)
+    monkeypatch.setattr("os.cpu_count", lambda: 12)
+    engine = _split_engine(tmp_path, "def run_trial(cell, seed):\n    return {'y': 1.0}\n")
+    _rows, problems = await engine._improve_measure({"grid": {"x": [1.0, 2.0]}}, [], {"y"})
+    assert handed == [4]
+    assert any("the trials could not be run" in p for p in problems)
