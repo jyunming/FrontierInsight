@@ -1304,8 +1304,9 @@ class ExecutionConfig(BaseModel):
     # isolation (nothing visible but what that quest explicitly installs).
     system_site_packages: bool = True
     # How many settings of the study run at the same time, each in a process of its own (core/trial_runner.py): a number,
-    # or ``auto`` for half the machine's cores, at most 8. FI's estimate of the run time and its decision whether the study
-    # fits use the same number (core/run_estimate.py); the results are the same whatever it is. ``1`` runs them one by one.
+    # or ``auto`` for every core of the machine, shared among the quests of a ``--fleet`` that run at the same time. FI's
+    # estimate of the run time and its decision whether the study fits use the same number (core/run_estimate.py); the
+    # results are the same whatever it is. ``1`` runs them one by one.
     settings_at_once: int | Literal["auto"] = "auto"
 
     @field_validator("settings_at_once", mode="before")

@@ -205,7 +205,7 @@ class RunStageMixin:
                 repairs_left=lambda: (int(state.get("exec_reflect_iter", 0) or 0)
                                       < self.config.engine.exec_reflect_max_iterations
                                       and not state.get("exec_give_up_reason")),
-                at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
+                at_once=self._settings_at_once(),
                 # A search whose objective does not move stops early and its fact goes back to the plan, once per quest.
                 stop_flat=lambda: self._flat_redesign_allowed(state),
                 design=state.get("design"),
@@ -221,7 +221,7 @@ class RunStageMixin:
                                       and not state.get("exec_give_up_reason")),
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
-                at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
+                at_once=self._settings_at_once(),
             )
         elif split:
             runner = _split_run.SplitRunner(

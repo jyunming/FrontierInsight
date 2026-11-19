@@ -237,7 +237,7 @@ def test_disclose_writes_the_record_the_plan_line_and_the_reader_fact_once(tmp_p
     async def fake_run(executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any],
                        **kwargs: Any) -> dm.Moves:
         runs.append(1)
-        assert kwargs["at_once"] >= 1
+        assert kwargs["at_once"] == 2  # the engine's own number (Engine._settings_at_once)
         return await dm.measure(block, _Calls(), budget_s=kwargs["timeout_s"])
 
     monkeypatch.setattr(dm, "run", fake_run)
@@ -249,7 +249,7 @@ def test_disclose_writes_the_record_the_plan_line_and_the_reader_fact_once(tmp_p
 
     class _Exec:
         timeout_s = 600
-        settings_at_once = 2
+        settings_at_once = "auto"  # resolved by the engine (its share of the cores in a fleet), not here
 
     class _Cfg:
         execution = _Exec()
@@ -260,6 +260,9 @@ def test_disclose_writes_the_record_the_plan_line_and_the_reader_fact_once(tmp_p
         config = _Cfg()
         _log = _Log()
         _small_run_note = "FI ran the simulation with its own harness before this reading."
+
+        def _settings_at_once(self) -> int:
+            return 2
 
         def _protocol_block(self, state: Any) -> dict[str, Any]:
             return {"optimisation": _block()}
@@ -396,6 +399,9 @@ def test_a_plan_line_of_an_earlier_pass_is_taken_out_when_the_code_changed(tmp_p
         _log = _Log()
         _small_run_note = ""
 
+        def _settings_at_once(self) -> int:
+            return 2
+
         def _protocol_block(self, state: Any) -> dict[str, Any]:
             return {"optimisation": _block()}
 
@@ -434,6 +440,9 @@ def _engine_for(root: Path, logged: list[str]) -> Any:
         config = _Cfg()
         _log = _Log()
         _small_run_note = ""
+
+        def _settings_at_once(self) -> int:
+            return 2
 
         def _protocol_block(self, state: Any) -> dict[str, Any]:
             return {"optimisation": _block()}

@@ -189,3 +189,64 @@ async def test_run_fleet_disables_unsatisfiable_memory_cap(
     )
     assert rc == 0  # completed (did not deadlock)
     assert "disabling the cap" in capsys.readouterr().err
+
+
+# --- the quests of a fleet share the cores (execution.settings_at_once: auto) ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("quests", "max_concurrent", "together"), [(3, 4, 3), (3, 2, 2), (1, 4, 1)])
+async def test_run_fleet_tells_every_engine_how_many_quests_run_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quests: int, max_concurrent: int, together: int,
+) -> None:
+    """Every Engine of a fleet is told how many quests run at the same time: the fleet's size, at most
+    --max-concurrent (the quests that wait for a slot do not compute meanwhile)."""
+    import launch as fi_launch
+
+    told: list[object] = []
+
+    class _RecordingEngine:
+        def __init__(self, cfg, **kw):  # noqa: ANN001
+            told.append(kw.get("fleet"))
+            self.quest_id = cfg.title
+
+    async def fake_run_one(cfg, **kw):  # noqa: ANN001
+        return {"quest_id": cfg.title}
+
+    monkeypatch.setattr(fi_launch, "Engine", _RecordingEngine)
+    monkeypatch.setattr(fi_launch, "run_one", fake_run_one)
+
+    rc = await fi_launch.run_fleet(
+        [_make_cfg(tmp_path, f"q{i}") for i in range(quests)], supervisor=fi_launch.ProxySupervisor(),
+        max_concurrent=max_concurrent, memory_cap_mb=None, profile=False,
+    )
+    assert rc == 0
+    assert told == [together] * quests
+
+
+def test_auto_settings_at_once_is_the_quests_share_of_the_cores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``auto`` gives a quest of a fleet of 3 on 16 cores 5 settings at once (a quest alone keeps all 16), a number
+    written in the config is kept as written, and the run log says the share in one line only in a fleet."""
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    alone = Engine(_make_cfg(tmp_path, "alone"))
+    shared = Engine(_make_cfg(tmp_path, "shared"), fleet=3)
+    written_cfg = _make_cfg(tmp_path, "written")
+    written_cfg.execution.settings_at_once = 4
+    written = Engine(written_cfg, fleet=3)
+    assert alone._settings_at_once() == 16
+    assert shared._settings_at_once() == 5
+    assert written._settings_at_once() == 4
+    assert Engine(_make_cfg(tmp_path, "many"), fleet=40)._settings_at_once() == 1
+
+    def run_log(engine: Engine) -> str:
+        for h in engine._log.handlers:
+            h.flush()
+        p = engine.fi_dir / "run.log"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    assert "[fleet]" not in run_log(alone)
+    assert ("[fleet] 3 quests run at the same time: this one runs up to 5 settings of its study at the same time, its "
+            "share of the computer's 16 cores") in run_log(shared)
+    assert "up to 4 settings of its study at the same time, as execution.settings_at_once says" in run_log(written)
