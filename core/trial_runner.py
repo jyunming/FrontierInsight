@@ -2296,7 +2296,18 @@ class TrialsRunner:
                            "keep its record of which settings it is (.fi/trial_checks.json could not be written or read back), "
                            "so it could not keep that error and interval from the analysis")
             verdict.tried = [*verdict.tried, "tried to write and read back the record of the disclosure; it failed"]
-        stated = [f for f in verdict.fails if f.stated and not f.fault]
+        if (verdict.calibration.counted_as_misses and verdict.action in (_checks.OK, _checks.DISCLOSE, _checks.LEAVE_OUT)
+                and not (kept and ((_checks.read_record(self.quest_root).get("calibration") or {}).get("counted_as_misses")))):
+            # The paper and QUALITY.md state the coverage counted with each trial that gave no interval as a miss from this
+            # record only: without it the study would go on and the statement would be gone, so it is a stop.
+            verdict.action = _checks.STOP
+            verdict.say = ("FI counted the coverage of a reported interval with each trial that gave no interval as a miss and "
+                           "found it grossly low, which the paper must state, and could not keep its record of it "
+                           "(.fi/trial_checks.json could not be written or read back), so the paper could not state it")
+            verdict.tried = [*verdict.tried, *[q.says() for q in verdict.calibration.counted_as_misses[:2]],
+                             "tried to write and read back the record of the trial checks; it failed"]
+            verdict.directive = "\n\n".join(x for x in (verdict.directive, verdict.say) if x)
+        stated =[f for f in verdict.fails if f.stated and not f.fault]
         if self.log is not None:
             for f in stated:
                 self.log.info("[execute] %s (recorded; the paper states it)", f.says())
@@ -2306,6 +2317,8 @@ class TrialsRunner:
                                   q.label)
                 if not q.fault and q.below:
                     self.log.info("[execute] %s; below the level in %d setting(s): reported, not a fault", q.says(), q.below)
+            for q in verdict.calibration.counted_as_misses:
+                self.log.info("[execute] %s", q.says())
             if not verdict.calibration.checked:
                 self.log.info("[execute] calibration not checked: %s", "; ".join(verdict.calibration.not_checked)[:400])
             for u in verdict.undefined[:8]:

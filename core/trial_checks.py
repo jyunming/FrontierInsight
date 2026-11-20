@@ -23,8 +23,15 @@ itself from the trials: how far the mean estimate lies from the true value in un
 root of the mean squared one), and, only when the trial reports its interval's two ends, whether each trial's interval
 covers the true value. FI never builds a z interval of its own from a standard error: a fit with few degrees of freedom
 reports a wider interval, and a z interval would under-cover by design (more visibly the more trials). A trial that ran
-but gave no number for the estimate is a miss (``no_estimate``). It never reads a coverage flag the code computed. A metric whose declared names the trials do not return is a fault (the code does not keep the plan's
-contract). Without any declaration the calibration is "not checked", and the paper and ``QUALITY.md`` say so.
+but gave no number for the estimate is judged by its own count (``no_estimate``: more than :data:`FAULT_FRACTION` of a
+setting's trials is a fault) and leaves the count of the coverage; a trial that gave an estimate and no interval stays in that
+count as a miss. The coverage counting every trial without an interval as a miss is still measured: where it is grossly low
+and the coverage the verdict reads is not, it is a fact FI states in the paper and ``QUALITY.md`` (``counted_as_misses``),
+never a fault, a repair or a stop (an honest fit that fails on its hardest data gives no estimate there, and no repair of the
+code can give one; a code that hides the trials whose interval would miss is then reported with that count). It never
+reads a coverage flag the code computed. A metric whose declared names the trials do not return is a fault (the code does
+not keep the plan's contract). Without any declaration the calibration is "not checked", and the paper and ``QUALITY.md``
+say so.
 
 For each setting with at least :data:`MIN_TRIALS` trials: the coverage with its Wilson interval, and the ratio with its
 sampling interval, both at the family level 1 - :data:`FAMILY_ALPHA` / k over the k settings judged (Bonferroni: with 25
@@ -110,6 +117,8 @@ _OUT_OF_TIME = "the study's time (execution.timeout_s) ran out"
 RECORD = Path(".fi") / "trial_checks.json"
 
 _Z95 = 1.959963984540054
+#: The kind of the coverage counted over every trial that ran, a trial with no interval as a miss (``Calibration.counted_as_misses``).
+ALL_TRIALS = "coverage_all_trials"
 
 def _number(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -405,6 +414,9 @@ class Quantity:
     #: The columns of the trials a disclosure keeps from what FI hands on, at the settings it marks (:func:`withheld_values`):
     #: the reported standard error (or variance) and the declared interval's two ends, or for a coverage the two ends.
     withheld: list[str] = field(default_factory=list)
+    #: :data:`ALL_TRIALS` only: the verdict's coverage of the same interval at each setting it judged (over the trials that
+    #: gave an estimate), by key, to state beside the count over every trial.
+    given: dict[str, float] = field(default_factory=dict)
 
     @property
     def judged(self) -> int:
@@ -474,6 +486,15 @@ class Quantity:
             return (f"the trials do not return {', '.join(f'`{n}`' for n in self.names)}, which the plan declares for "
                     f"`{self.label}` (its estimate and its uncertainty), so FI could not measure them against the true "
                     "value")
+        if self.kind == ALL_TRIALS:
+            vals = [s.value for s in self.settings]
+            rng = f"{min(vals):.3f} to {max(vals):.3f}" if vals else "no value"
+            level = f" at the {self.level:.0%} level" if self.level is not None else ""
+            return (f"coverage of the true value by `{self.label}`{level}, counting each trial that gave no interval as a "
+                    f"miss: {rng} over {self.judged} setting(s)" + self._pool(".3f")
+                    + f"; grossly low where the trials that gave an estimate are not in {self.gross}"
+                    + (" and over all of them together" if self.pooled is not None and self.pooled.gross else "")
+                    + " (stated in the paper, not a fault)")
         if self.kind == "coverage":
             vals = [s.value for s in self.settings]
             what = (f"coverage of the true value by `{self.label}` at the {self.level:.0%} level" if self.level is not None
@@ -497,7 +518,7 @@ class Quantity:
                 + (" (grossly off beyond sampling error)" if p.gross else ""))
 
     def worst(self, n: int = 4) -> list[SettingCheck]:
-        if self.kind in ("coverage", "inside"):
+        if self.kind in ("coverage", "inside", ALL_TRIALS):
             return sorted(self.settings, key=lambda s: s.value)[:n]
         if self.kind in ("bias", "no_estimate"):
             return sorted(self.settings, key=lambda s: -abs(s.value))[:n]
@@ -514,6 +535,10 @@ class Calibration:
     #: The ``inside`` consistency findings (:func:`_judge_inside`): said in the paper and the quality report only. Kept apart from
     #: ``quantities`` so no rule that reads which settings were judged, or whether anything was checked, counts them.
     inside: list[Quantity] = field(default_factory=list)
+    #: The coverage counting each trial that gave no interval as a miss (kind :data:`ALL_TRIALS`, :func:`_counted_as_misses`),
+    #: where it is grossly low and the coverage the verdict reads is not: said in the paper and the quality report only, kept
+    #: apart from ``quantities`` like ``inside``, so it never repairs or stops.
+    counted_as_misses: list[Quantity] = field(default_factory=list)
 
     @property
     def faults(self) -> list[Quantity]:
@@ -792,7 +817,9 @@ def _judge_inside(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
 
 def _judge_no_estimate(q: "Quantity", per: list[tuple[str, int, int]]) -> None:
     """Each setting's share of the trials that ran to the end and gave no number for the estimate of a declared truth: more
-    than :data:`FAULT_FRACTION` is a gross miss (they are misses of the truth, not values that have no meaning there)."""
+    than :data:`FAULT_FRACTION` is a gross miss (they are misses of the truth, not values that have no meaning there). These
+    trials are judged here, not in the coverage: the coverage the verdict reads is counted over the trials that gave an
+    estimate (:func:`_with_estimate`)."""
     for key, ran, none in per:
         if ran and none:
             share = none / ran
@@ -903,20 +930,62 @@ def _cell_hits(cell: dict[str, Any], kv: dict[str, Any], truth: float) -> tuple[
     """``(estimates, standard errors, hits)`` of one setting for a declared known value: each trial's estimate and standard
     error by trial, and 1/0 per trial for whether the interval the trial reports (the declared two ends) covers ``truth``.
     A trial that reports only a standard error makes no coverage claim FI could judge: FI does not build a z interval of
-    its own (a fit with few degrees of freedom would under-cover it by design), so ``hits`` is empty."""
+    its own (a fit with few degrees of freedom would under-cover it by design), so ``hits`` is empty.
+
+    ``hits`` has one entry for every trial that ran to the end, in trial order (:func:`core.frame_table.hits`, the count the
+    analysis's ``<id>_coverage`` and :func:`reported_coverage_mismatches` use): one with no number for the estimate or its
+    interval misses the truth. The verdict's coverage reads only the trials that gave an estimate (:func:`_with_estimate`)."""
     spread = kv.get("standard_error") or kv.get("variance")
     e = _series(cell, kv["estimate"])
     s = _series(cell, spread) if spread else {}
     if spread and "standard_error" not in kv:
         s = {i: math.sqrt(v) for i, v in s.items() if v >= 0}
     ends = kv.get("interval")
-    # Every trial that ran to the end is judged: one with no number for the estimate or its interval misses the truth (a
-    # repair that returns NaN in place of a failing fit must not drop those trials from the count).
-    # ... in a record that returns these values at all (a value compared inside a run may be kept in its own records only).
+    # Every trial that ran to the end has an entry, in a record that returns these values at all (a value compared inside a
+    # run may be kept in its own records only).
     held = cell.get("metrics") or {}
     if not ends or not all(n in held for n in [kv["estimate"], *ends]):
         return e, s, []
     return e, s, _table_hits(held, ends, truth, estimate=held.get(kv["estimate"])) or []
+
+
+def _with_estimate(hits: list[float], ran: set[int], estimates: dict[int, float],
+                   weights: dict[int, float] | None) -> tuple[list[float], list[float] | None]:
+    """``(hits, weights)`` of the coverage the verdict reads: :func:`_cell_hits`'s ``hits`` (one per trial of ``ran``, in
+    trial order) kept for the trials that gave a number for the estimate. A trial with no estimate at all is judged by the
+    count of trials with no estimate (:func:`_judge_no_estimate`, a fault above :data:`FAULT_FRACTION`), not as a miss of the
+    interval as well; a trial that gave an estimate and no interval stays a miss (a code that drops the interval where it
+    would miss must not lift the coverage). ``weights``: each trial's weight by trial (:func:`_draw_weights`), kept for
+    the same trials."""
+    order = sorted(ran)
+    if len(hits) != len(order):  # no trial numbers to pair them with: every entry is kept, each counting 1
+        return hits, None
+    keep = [i for i, t in enumerate(order) if t in estimates]
+    return [hits[i] for i in keep], ([weights.get(order[i], 1.0) for i in keep] if weights and keep else None)
+
+
+def _counted_as_misses(cover: Quantity, every: Quantity) -> Quantity | None:
+    """The coverage counted over every trial that ran (``every``: a trial with no interval or no estimate is a miss), where
+    it is grossly low and the verdict's coverage (``cover``, over the trials that gave an estimate) is not: at a setting
+    (also one ``cover`` could not judge, with fewer than :data:`MIN_TRIALS` trials that gave an estimate), or over all the
+    settings together. The thresholds are the coverage's own (:data:`COVERAGE_GAP` below the level, beyond sampling error at
+    the family level). ``None`` where there is none. Kind :data:`ALL_TRIALS`: kept apart from the faults, it is stated,
+    never repaired or stopped on."""
+    gross_in_cover = {s.key for s in cover.settings if s.gross}
+    settings = [SettingCheck(s.key, s.n, s.value, s.low, s.high, gross=s.gross and s.key not in gross_in_cover,
+                             below=s.below, above=s.above) for s in every.settings]
+    pooled = every.pooled
+    if pooled is not None:
+        pooled = SettingCheck(pooled.key, pooled.n, pooled.value, pooled.low, pooled.high,
+                              gross=pooled.gross and not (cover.pooled is not None and cover.pooled.gross),
+                              below=pooled.below, above=pooled.above)
+    if not any(s.gross for s in settings) and not (pooled is not None and pooled.gross):
+        return None
+    given = {s.key: s.value for s in cover.settings}
+    if cover.pooled is not None:
+        given[POOLED] = cover.pooled.value
+    return Quantity(ALL_TRIALS, every.label, list(every.names), level=every.level, truth=every.truth, settings=settings,
+                    pooled=pooled, given=given)
 
 
 def _draw_weights(cells: list[dict[str, Any]], protocol: dict[str, Any] | None, quest_root: Path | str | None,
@@ -1023,6 +1092,8 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
                 out.inside.append(inside)
         cover = (Quantity("coverage", " .. ".join(ends), list(ends), level=level, truth=truth_label,
                           withheld=list(ends)) if ends else None)
+        every = Quantity(ALL_TRIALS, " .. ".join(ends), list(ends), level=level, truth=truth_label) if ends else None
+        every_per: list[tuple[Any, ...]] = []
         ratio = (Quantity("se_ratio", est, [est, spread], truth=truth_label, withheld=[spread, *(ends or [])])
                  if spread else None)
         bias = Quantity("bias", est, [est], truth=truth_label)
@@ -1043,15 +1114,19 @@ def calibration(cells: list[dict[str, Any]], protocol: dict[str, Any] | None = N
             e, s, hits = _cell_hits(c, kv, t)
             w = (draw_weights or {}).get(key)
             ran = _ran(c)
-            cover_per.append((key, hits, [w.get(i, 1.0) for i in sorted(ran)] if w and hits else None))
+            cover_per.append((key, *_with_estimate(hits, ran, e, w)))
+            every_per.append((key, hits, [w.get(i, 1.0) for i in sorted(ran)] if w and hits else None))
             if _own_here(c, [est]):  # the estimate is judged where the record keeps it, not again with each value compared
                 bias_per.append((key, list(e.values()), t, _share(w, e)))
                 empty_per.append((key, len(ran), len(ran - set(e))))
             if ratio is not None:
                 used = [i for i in e if i in s and s[i] >= 0]
                 ratio_per.append((key, [e[i] for i in used], [s[i] for i in used], _share(w, used)))
-        if cover is not None:
+        if cover is not None and every is not None:
             _judge_coverage(cover, cover_per)
+            _judge_coverage(every, every_per)
+            if (apart := _counted_as_misses(cover, every)) is not None:
+                out.counted_as_misses.append(apart)
         if ratio is not None:
             _judge_ratio(ratio, ratio_per)
         _judge_bias(bias, bias_per)
@@ -1339,6 +1414,19 @@ def summary(fails: list[SettingFailures], cal: Calibration | None) -> dict[str, 
                         "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
                                       "high": round(s.high, 6), "gross": False, "below": s.below} for s in q.settings]}
                        for q in cal.inside],
+            # Stated, never a fault (``fault`` is False; ``gross`` marks the settings where the count over every trial is
+            # grossly low and the verdict's is not; ``given`` is the verdict's coverage there).
+            "counted_as_misses": [
+                {"kind": q.kind, "label": q.label, "names": q.names, "level": q.level, "truth": q.truth, "judged": q.judged,
+                 "gross": q.gross, "below": q.below, "above": q.above, "fault": False, "says": q.says(), "withheld": [],
+                 "settings": [{"key": s.key, "n": s.n, "value": round(s.value, 6), "low": round(s.low, 6),
+                               "high": round(s.high, 6), "gross": s.gross, "below": s.below,
+                               **({"given": round(q.given[s.key], 6)} if s.key in q.given else {})} for s in q.settings],
+                 "pooled": None if q.pooled is None else {
+                     "n": q.pooled.n, "value": round(q.pooled.value, 6), "low": round(q.pooled.low, 6),
+                     "high": round(q.pooled.high, 6), "gross": q.pooled.gross,
+                     **({"given": round(q.given[POOLED], 6)} if POOLED in q.given else {})}}
+                for q in cal.counted_as_misses],
         },
     }
 

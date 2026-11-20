@@ -13,7 +13,7 @@ import copy
 import math
 import random
 
-from core import frame_table, in_run, trial_checks, trial_runner
+from core import frame_table, frozen_protocol, in_run, paper_facts, trial_checks, trial_runner
 
 NAN = float("nan")
 RULES = ["plain", "robust"]
@@ -174,13 +174,34 @@ def _with_est_missing_in(trials: set[int], keep_interval: bool = True) -> list[d
     return out
 
 
-def test_finite_intervals_around_missing_estimates_are_not_coverage_hits() -> None:
+def test_intervals_around_missing_estimates_are_misses_only_in_the_count_over_every_trial_which_is_stated(
+        tmp_path) -> None:
     cells = _with_est_missing_in(set(range(80)))   # 40% with no estimate, below the no-estimate line; every interval holds the truth
     verdict = _judge(cells)
     empty = next(q for q in verdict.calibration.quantities if q.kind == "no_estimate")
-    assert not empty.gross
+    assert not empty.gross and not empty.fault
+    # The verdict's coverage reads the trials that gave an estimate: neither a stop nor a repair.
     cover = next(q for q in verdict.calibration.quantities if q.kind == "coverage")
-    assert cover.gross and verdict.action == trial_checks.STOP, verdict.say
+    assert not cover.gross and not verdict.calibration.faults
+    assert verdict.action == trial_checks.OK, verdict.say
+    assert trial_checks.judge(cells, PROTOCOL, THRESHOLDS, {}, repairs_left=True).action == trial_checks.OK
+    # The count over every trial (an interval around no estimate is a miss) is kept apart and stated.
+    [apart] = verdict.calibration.counted_as_misses
+    assert apart.kind == trial_checks.ALL_TRIALS and apart.label == "lo .. hi"
+    assert apart.gross == apart.judged == 16 and {s.n for s in apart.settings} == {200}
+    assert sorted({round(s.value, 4) for s in apart.settings}) == [0.545, 0.56, 0.58, 0.6]
+    assert apart.pooled is not None and apart.pooled.gross and round(apart.pooled.value, 6) == 0.580625
+    assert min(apart.given[s.key] for s in apart.settings) > 0.9   # over the trials that gave an estimate
+    root = tmp_path / "q"
+    (root / ".fi").mkdir(parents=True)
+    frozen_protocol.freeze(root, PROTOCOL, approved_by="test", source="test")
+    trial_checks.write_record(root, verdict.record())
+    [said] = [i.sentence for i in paper_facts.required_items(root) if i.id.startswith("calibration-counted-misses")]
+    assert said.startswith("Counting each trial that gave no interval as a miss, the 95% intervals reported for `lo .. hi` "
+                           "contain the true value in far fewer trials than 95% in every setting (")
+    first = apart.settings[0]   # the settings are named in the record's order, six of them
+    assert (f"{first.key}: {first.value:.2f}, {round(first.value * 200):,} of 200 trials, {apart.given[first.key]:.2f} of "
+            "those that gave an estimate" in said) and "; and 10 more" in said
     one = next(c for c in trial_checks._with_main(cells) if c.get("level") == {"rule": "plain", "width": 1.96})
     kv = PROTOCOL["metrics"][0]["known_value"]
     assert sum(trial_checks._cell_hits(one, kv, TRUE)[2][:80]) == 0.0

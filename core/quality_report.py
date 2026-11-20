@@ -723,6 +723,11 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
             "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
 
 
+def _share3(v: Any) -> str:
+    """A share of trials as three decimals (``"?"`` when it is not a number)."""
+    return f"{float(v):.3f}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "?"
+
+
 def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
     """FI's own checks of what the trials gave (core/trial_checks.py): the settings with failed trials, those left out, each
     reported interval or standard error judged against the true values, and what could not be checked. ``None`` when the
@@ -779,6 +784,20 @@ def _trial_checks_summary(q: _Quest) -> dict[str, Any] | None:
                                     if any(isinstance(t, dict) and not t.get("gross") and t.get("below")
                                            for t in _list(x.get("settings"))) else "") + ")")
                    if marked and len(marked) < _int(x.get("judged")) else ""))
+    # The coverage counting each trial that gave no interval as a miss, where it is grossly low and the coverage the verdict
+    # reads (the trials that gave an estimate) is not: stated, never a fault.
+    for x in [x for x in _list(cal.get("counted_as_misses")) if isinstance(x, dict)]:
+        lines.append(f"{_one(x.get('says'), 300)} - FI judged the intervals on the trials that gave an estimate; the paper "
+                     "states this count too")
+        marked = [t for t in _list(x.get("settings")) if isinstance(t, dict) and t.get("gross")]
+        pooled = _dict(x.get("pooled"))
+        shown = marked[:8] if marked else ([{**pooled, "key": "all settings together"}] if pooled.get("gross") else [])
+        if shown:
+            lines.append("counting each trial with no interval as a miss, grossly low at: " + "; ".join(
+                f"{t.get('key') or 'the one setting'}: {_share3(t.get('value'))} from {_int(t.get('n')):,} trials"
+                + (f" ({_share3(t.get('given'))} over the trials that gave an estimate)"
+                   if isinstance(t.get("given"), (int, float)) else "")
+                for t in shown) + (f"; and {len(marked) - 8} more" if len(marked) > 8 else ""))
     from . import trial_checks as _tc
 
     for u in [u for u in _list(rec.get("undefined")) if isinstance(u, dict)][:8]:
