@@ -173,9 +173,10 @@ class _Costs:
     killed process). It records the time each process was given, the order they started in, how many ran at the same time,
     which were cancelled and, for each, whether the shared ``meter`` was still set then."""
 
-    def __init__(self, costs: list[Any], *, ignore_timeout: bool = False) -> None:
+    def __init__(self, costs: list[Any], *, ignore_timeout: bool = False, slow_stop: float = 0.0) -> None:
         self.costs = costs
         self.ignore_timeout = ignore_timeout
+        self.slow_stop = slow_stop  # seconds a cancelled process takes to stop (a process tree's own wait)
         self.given: dict[int, int] = {}
         self.started: list[int] = []
         self.running = 0
@@ -214,6 +215,8 @@ class _Costs:
         except asyncio.CancelledError:
             self.cancelled.append(index)
             self.meter_at_cancel[index] = self.meter
+            if self.slow_stop:
+                await asyncio.sleep(self.slow_stop)
             raise
         finally:
             self.running -= 1
@@ -302,6 +305,17 @@ def test_the_whole_time_is_a_hard_limit_even_when_a_process_does_not_stop(tmp_pa
     got = _go(monkeypatch, ex, root, grid, 6, 3)
     assert sorted(ex.cancelled) == [1, 2], "the settings still running are cancelled, which stops their process trees"
     assert got.seconds == 6 + small_run.CLEANUP_S, got.seconds
+    assert [s.timed_out for s in got.settings] == [False, True, True] and [s.ok for s in got.settings] == [1, 0, 0]
+
+
+def test_a_stop_that_takes_longer_than_allowed_does_not_hold_the_small_run(tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    # The executor stops a cancelled process's tree and may wait for it; the small run waits for that only so long.
+    root, grid = _parts_quest(tmp_path)
+    ex = _Costs([0.1, None, None], ignore_timeout=True, slow_stop=60.0)
+    got = _go(monkeypatch, ex, root, grid, 6, 3)
+    assert sorted(ex.cancelled) == [1, 2]
+    assert got.seconds == 6 + small_run.CLEANUP_S + small_run.STOP_WAIT_S, got.seconds
     assert [s.timed_out for s in got.settings] == [False, True, True] and [s.ok for s in got.settings] == [1, 0, 0]
 
 

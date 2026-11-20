@@ -48,8 +48,12 @@ BUDGET_FRAC = 0.1
 BUDGET_MIN_S = 30
 BUDGET_MAX_S = 180
 #: Seconds past the budget that the settings run together are given to stop (their process trees killed) before they are
-#: cancelled: the small run returns within the budget plus this, whatever a stuck process does after it is told to stop.
+#: cancelled.
 CLEANUP_S = 5.0
+#: Seconds the cancelled settings are then waited for while their executors stop their process trees (the tree's own
+#: wait for a killed process, plus one). The small run returns within the budget plus ``CLEANUP_S`` plus this, even when
+#: a stop takes longer; a stop still unfinished then goes on by itself and its setting is recorded as timed out.
+STOP_WAIT_S = 11.0
 #: The clock of the time budget (a seam for tests: they give it a clock they advance themselves).
 _clock = time.monotonic
 DIR = Path(".fi") / "small_run"
@@ -402,17 +406,17 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
                     job.cancel()
         finally:
             # Whatever is not finished (the time is out, one raised) is cancelled and awaited: the executor then stops its
-            # process tree, and nothing runs on after this returns.
+            # process tree. The wait is bounded (STOP_WAIT_S), so a stop that takes longer does not hold the small run.
             for job in pending:
                 job.cancel()
             if pending | stopping:
-                await asyncio.gather(*(pending | stopping), return_exceptions=True)
+                await asyncio.wait(pending | stopping, timeout=STOP_WAIT_S)
             if metered:
                 executor.meter = meter_before
         stopped = SimpleNamespace(timed_out=True)
         for (task, setting), job in zip(tasks, jobs):
             out.append(setting)
-            if job.cancelled():
+            if job.cancelled() or not job.done():
                 _read_setting(quest_root, task, setting, stopped)  # what it wrote; the trials it did not finish: timed out
                 continue
             error = job.result()
