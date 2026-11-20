@@ -394,7 +394,9 @@ def test_comparison_words(kind: str, ref: Any, mean: float, lower: float, upper:
 
 def test_the_trial_table_is_unchanged_by_reading_it_through_summaries(tmp_path: Path) -> None:
     values = {"a": [0.1, 0.4, 0.35, 0.9], "b": [1.0, 0.0, 1.0, 1.0], "i": [0.0, 1.0, 2.0, 3.0]}
-    cells = [{"cell": {"m": m}, "key": f"m={m}", "metrics": {k: {"values": [v * m if k == "a" else v for v in vs]}
+    # FI's record says which trial each value came from: `i` is the trial number itself, so it is left out
+    cells = [{"cell": {"m": m}, "key": f"m={m}", "metrics": {k: {"values": [v * m if k == "a" else v for v in vs],
+                                                                 "trials": [0, 1, 2, 3]}
                                                               for k, vs in values.items()}} for m in (1, 2)]
     (tmp_path / "raw").mkdir()
     (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
