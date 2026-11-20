@@ -22,6 +22,7 @@ touched. Nothing here knows a field of science.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -30,8 +31,10 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+from . import execution as _execution
 from . import in_run as _in_run
 from . import metric_spec as _metric_spec
 from . import optimise_search as _search
@@ -44,6 +47,15 @@ TRIALS = 3
 BUDGET_FRAC = 0.1
 BUDGET_MIN_S = 30
 BUDGET_MAX_S = 180
+#: Seconds past the budget that the settings run together are given to stop (their process trees killed) before they are
+#: cancelled.
+CLEANUP_S = 5.0
+#: Seconds the cancelled settings are then waited for while their executors stop their process trees (the tree's own
+#: wait for a killed process, plus one). The small run returns within the budget plus ``CLEANUP_S`` plus this, even when
+#: a stop takes longer; a stop still unfinished then goes on by itself and its setting is recorded as timed out.
+STOP_WAIT_S = 11.0
+#: The clock of the time budget (a seam for tests: they give it a clock they advance themselves).
+_clock = time.monotonic
 DIR = Path(".fi") / "small_run"
 RECORD = Path(".fi") / "small_run.json"
 #: The small run's trials in the record format of a study, which FI's analysis is run on before the long run.
@@ -242,26 +254,80 @@ def key_of(simulate: Path, grid: dict[str, Any], deterministic: bool, thresholds
     return hashlib.sha256(f"{base}|{json.dumps(settings(grid), sort_keys=True, default=str)}{inside}".encode()).hexdigest()[:20]
 
 
+def _read_setting(quest_root: Path, task: dict[str, Any], setting: Setting, result: Any) -> str:
+    """Fill ``setting`` from what its process wrote (FI's harness, one line per trial); the simulation's load error when
+    one was reported, else ``""``."""
+    load_error = ""
+    reasons: Counter = Counter()
+    seen: set[int] = set()
+    try:
+        lines = (quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("nonce") != task["nonce"]:
+            continue
+        if row.get("load_error"):
+            load_error = load_error or str(row["load_error"])
+            continue
+        trial = row.get("trial")
+        if not isinstance(trial, int) or trial in seen:
+            continue
+        seen.add(trial)
+        setting.rows.append(row)
+        if row.get("status") == "ok":
+            setting.ok += 1
+            for name, value in (row.get("values") or {}).items():
+                setting.values.setdefault(str(name), []).append(value)
+        else:
+            setting.failed += 1
+            where = _trials.last_frame(str(row.get("traceback") or ""), quest_root)
+            reasons[str(row.get("reason") or "no reason given") + (f" (at {where})" if where else "")] += 1
+            setting.traceback = setting.traceback or str(row.get("traceback") or "")
+    missing = setting.planned - setting.ok - setting.failed
+    if missing > 0:
+        if getattr(result, "timed_out", False):
+            setting.timed_out = True
+        else:
+            setting.failed += missing
+            reasons[f"the process stopped (exit code {getattr(result, 'returncode', '?')}) before reporting"
+                    + (f": {(getattr(result, 'stderr', '') or '').strip().splitlines()[-1][:200]}"
+                       if (getattr(result, "stderr", "") or "").strip() else "")] += missing
+    setting.reasons = reasons.most_common()
+    return load_error
+
+
 async def run(executor: Any, python: Path | str, quest_root: Path, module: str, grid: dict[str, Any], *, deterministic: bool,
               timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-              paired: bool = False, in_each_run: dict[str, list[Any]] | None = None, base_seed: int = 0) -> SmallRun:
+              paired: bool = False, in_each_run: dict[str, list[Any]] | None = None, base_seed: int = 0,
+              at_once: int = 1, log: Any = None) -> SmallRun:
     """Run the small case: each setting of :func:`settings` in its own process, :data:`TRIALS` trials each, within
-    ``timeout_s`` in all, through FI's own harness. Writes only under :data:`DIR`."""
+    ``timeout_s`` in all, through FI's own harness. Writes only under :data:`DIR`.
+
+    ``at_once``: how many settings run at the same time (the study's ``execution.settings_at_once``), each process with its
+    share of the cores and fewer at once when the memory would not hold them, as the study's own run starts its settings
+    (:class:`core.execution.SettingsGate`). One after another, a study of separate parts gave each part's setting an equal
+    share of the time, so a setting that cost more than its share never finished even when the whole time would have held
+    it; run together, every setting that has a place may use what is left of the whole time. A part's setting that waits
+    for a place gets an equal share of what is left with the others still waiting, so one slow part cannot take the time of
+    the rest. A setting that does not finish in its time is timed out, as before; ``timeout_s`` bounds the whole small run."""
     quest_root = Path(quest_root)
     folder = quest_root / DIR
     shutil.rmtree(folder, ignore_errors=True)
     folder.mkdir(parents=True, exist_ok=True)
     (quest_root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
-    started = time.monotonic()
-    out: list[Setting] = []
-    load_error = ""
+    started = _clock()
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
     executor = _trials._outside_executor(executor, quest_root)
     chosen = settings(grid)
     axes = [str(k) for k, v in (grid or {}).items() if isinstance(v, (list, tuple)) and len(v) >= 2]
     parts_run = bool(getattr(grid, "sub_studies", None)) and len(chosen) > 1
-    total = len(chosen)
+    tasks: list[tuple[dict[str, Any], Setting]] = []
     for i, cell in enumerate(chosen):
         sub = folder / f"s{i}"
         sub.mkdir(parents=True, exist_ok=True)
@@ -269,60 +335,95 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
                              base_seed=base_seed, deterministic=deterministic, folder=sub, out_name="cell{index}.out.jsonl",
                              paired=paired, thresholds=thresholds, in_each_run=in_each_run)
         for task in plan:
-            setting = Setting(task["key"], len(task["trials"]), cell=dict(task["cell"]), levels=list(task.get("levels") or []))
+            tasks.append((task, Setting(task["key"], len(task["trials"]), cell=dict(task["cell"]),
+                                        levels=list(task.get("levels") or []))))
+    slots = max(1, min(int(at_once or 1), len(tasks)))
+    waiting = [len(tasks)]  # the settings not started yet
+
+    async def start(task: dict[str, Any], setting: Setting, run_env: dict[str, str] | None) -> Any:
+        """The process of one setting, given what is left of the time (for a study of parts, its share of it); ``None``
+        when no time is left (the setting is timed out without starting)."""
+        left = int(timeout_s - (_clock() - started))
+        if parts_run:
+            # an equal share of what is left with those still waiting for a place
+            left = left // max(1, math.ceil(waiting[0] / slots))
+        waiting[0] -= 1
+        if left <= 0:
+            setting.timed_out = True
+            return None
+        return await executor.execute([str(python), _trials.HARNESS_PATH.as_posix(), task["spec"], task["out"]],
+                                      cwd=quest_root, timeout_s=max(1, left), env=run_env)
+
+    out: list[Setting] = []
+    load_error = ""
+    if slots == 1:
+        for task, setting in tasks:
             out.append(setting)
-            left = int(timeout_s - (time.monotonic() - started))
-            if parts_run:
-                # every part is run: each setting gets an equal share of what is left, so one slow part cannot take the time of the rest
-                left = left // max(1, total - len(out) + 1)
-            if left <= 0:
-                setting.timed_out = True
+            result = await start(task, setting, env)
+            if result is not None:
+                load_error = _read_setting(quest_root, task, setting, result) or load_error
+            if load_error:
+                break  # the simulation cannot be loaded: no other setting is started
+    else:
+        gate = _execution.SettingsGate(slots, log=log)  # fewer at once when the memory would not hold them
+        run_env = _execution.threads_beside(env, slots, _execution.quest_cores(executor))  # each its share of the cores
+        metered = hasattr(executor, "meter")
+        meter_before = getattr(executor, "meter", None)
+        if metered:
+            executor.meter = gate.note
+
+        first_bad = [len(tasks)]  # the first setting, in the plan's order, that could not load the simulation
+
+        async def one(index: int, task: dict[str, Any], setting: Setting) -> str:
+            async with gate.slot():
+                if index > first_bad[0]:
+                    return ""  # one before it could not load the simulation: as one after another, this is never started
+                result = await start(task, setting, run_env)
+                error = "" if result is None else _read_setting(quest_root, task, setting, result)
+                if error:
+                    first_bad[0] = min(first_bad[0], index)  # said before the place is given up: no waiting setting starts
+            return error
+
+        jobs = [asyncio.ensure_future(one(i, task, setting)) for i, (task, setting) in enumerate(tasks)]
+        position = {job: i for i, job in enumerate(jobs)}
+        pending = set(jobs)
+        stopping: set[asyncio.Future] = set()  # cancelled because an earlier setting could not load the simulation
+        hard_stop = started + timeout_s + CLEANUP_S  # the whole small run, cleanup included, ends by then
+        try:
+            while pending:
+                left = hard_stop - _clock()
+                if left <= 0:
+                    break
+                done, pending = await asyncio.wait(pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+                for job in done:
+                    if job.exception() is not None:
+                        raise job.exception()  # type: ignore[misc]  # an executor that raised: the finally stops the rest
+                # No setting after the first that could not load the simulation is started or waited for (the one-at-a-time
+                # run stopped there); those before it are still run, as they were before it.
+                stopping |= {job for job in pending if position[job] > first_bad[0]}
+                pending -= stopping
+                for job in stopping:
+                    job.cancel()
+        finally:
+            # Whatever is not finished (the time is out, one raised) is cancelled and awaited: the executor then stops its
+            # process tree. The wait is bounded (STOP_WAIT_S), so a stop that takes longer does not hold the small run.
+            for job in pending:
+                job.cancel()
+            if pending | stopping:
+                await asyncio.wait(pending | stopping, timeout=STOP_WAIT_S)
+            if metered:
+                executor.meter = meter_before
+        stopped = SimpleNamespace(timed_out=True)
+        for (task, setting), job in zip(tasks, jobs):
+            out.append(setting)
+            if job.cancelled() or not job.done():
+                _read_setting(quest_root, task, setting, stopped)  # what it wrote; the trials it did not finish: timed out
                 continue
-            result = await executor.execute([str(python), _trials.HARNESS_PATH.as_posix(), task["spec"], task["out"]],
-                                            cwd=quest_root, timeout_s=max(1, left), env=env)
-            reasons: Counter = Counter()
-            seen: set[int] = set()
-            try:
-                lines = (quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
-            except OSError:
-                lines = []
-            for line in lines:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(row, dict) or row.get("nonce") != task["nonce"]:
-                    continue
-                if row.get("load_error"):
-                    load_error = load_error or str(row["load_error"])
-                    continue
-                trial = row.get("trial")
-                if not isinstance(trial, int) or trial in seen:
-                    continue
-                seen.add(trial)
-                setting.rows.append(row)
-                if row.get("status") == "ok":
-                    setting.ok += 1
-                    for name, value in (row.get("values") or {}).items():
-                        setting.values.setdefault(str(name), []).append(value)
-                else:
-                    setting.failed += 1
-                    where = _trials.last_frame(str(row.get("traceback") or ""), quest_root)
-                    reasons[str(row.get("reason") or "no reason given") + (f" (at {where})" if where else "")] += 1
-                    setting.traceback = setting.traceback or str(row.get("traceback") or "")
-            missing = setting.planned - setting.ok - setting.failed
-            if missing > 0:
-                if getattr(result, "timed_out", False):
-                    setting.timed_out = True
-                else:
-                    setting.failed += missing
-                    reasons[f"the process stopped (exit code {getattr(result, 'returncode', '?')}) before reporting"
-                            + (f": {(getattr(result, 'stderr', '') or '').strip().splitlines()[-1][:200]}"
-                               if (getattr(result, "stderr", "") or "").strip() else "")] += missing
-            setting.reasons = reasons.most_common()
-        if load_error:
-            break
-    got = SmallRun(out, load_error, time.monotonic() - started, axes)
+            error = job.result()
+            if error:
+                load_error = error
+                break  # as one after another: the settings up to the first that could not load the simulation
+    got = SmallRun(out, load_error, _clock() - started, axes)
     try:
         (quest_root / TRIALS_PATH).parent.mkdir(parents=True, exist_ok=True)
         (quest_root / TRIALS_PATH).write_text(json.dumps(got.trials(thresholds), allow_nan=True, default=str),
