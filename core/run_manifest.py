@@ -807,7 +807,11 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
     the setting's key (``by_setting`` / ``m=20,pi1=0.05`` / ``power_gain`` / ``{mean, se}``), a number under that name (its
     mean), or ``<metric>_se`` and the like beside it. The setting is read from the key path as a list's is
     (:func:`_path_cells`); a summary that names no setting, or only a part of the grid (the key may stand for one stratum of it),
-    is not read here."""
+    is not read here. The metric's name must stand in the very mapping whose key completes the setting, as FI's own
+    RESULT_JSON puts it (``<setting>/<metric>``, :func:`core.analysis_frame.result_json`): a mapping under a further key
+    inside the setting (``cells/m=20,pi1=0/reference/<metric>``, the reference value printed beside the setting) holds
+    that key's quantity, not the summary of the setting's trials, so it is neither held to those trials nor taken as
+    them; which key it is does not matter."""
     def number(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -829,6 +833,8 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
         if isinstance(node, dict):
             stats = read(node.get(metric_id), node)
             pairs = _path_cells(path, grid) if stats else None
+            if pairs and _path_cells(path[:-1], grid) == pairs:
+                pairs = None  # the last key adds nothing to the setting: a quantity of its own beside the setting's
             named = frozenset(c for c in _all_cells(grid) if pairs <= c) if stats and pairs else frozenset()
             if len(named) == 1:  # one whole setting: a part of the grid may be a stratum of it the key does not name
                 found.append((named, stats, "/".join(_segment_text(x) for x in path + (metric_id,))))

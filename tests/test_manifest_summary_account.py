@@ -160,3 +160,29 @@ def test_a_summary_of_a_part_of_the_grid_is_not_read_as_the_setting() -> None:
     del rj["by_setting"]["m=20,pi1=0.2"]
     found = _found(rj, per_cell)
     assert found and "m=20,pi1=0.2" in found[0], found
+
+
+def test_a_value_under_a_further_key_inside_the_setting_is_not_the_settings_summary() -> None:
+    # Old code: a reference printed beside the setting (`<setting>/reference/gain`, a nominal 0.05) was read as the
+    # summary of the setting's trials and called a disagreement with them. FI's own layout puts the summary directly in
+    # the setting's mapping; a mapping under a further key holds that key's quantity, whatever the key is called.
+    _, _, per_cell, _ = _study()
+    rj = _printed(per_cell)
+    rj["by_setting"]["m=20,pi1=0.2"]["reference"] = {"gain": 0.05}
+    rj["by_setting"]["m=200,pi1=0.2"]["theory"] = {"gain": {"mean": 0.05}}
+    assert _found(rj, per_cell) == []
+    # Known positive: the setting's own summary is still held to its trials.
+    rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"] = 0.05
+    found = _found(rj, per_cell)
+    assert found and "m=20,pi1=0.2" in found[0] and "not the mean" in found[0], found
+
+
+def test_a_value_under_a_further_key_never_accounts_for_the_setting_even_when_it_equals_the_mean() -> None:
+    # Old code: a reference that happened to equal the mean of the setting's trials was taken as their summary, so the
+    # setting counted as printed although the analysis printed nothing of its trials.
+    _, _, per_cell, _ = _study()
+    per_cell = {k: ({"gain": Counter({0.05: RUNS})} if k == "m=20,pi1=0.2" else v) for k, v in per_cell.items()}
+    rj = _printed(per_cell)
+    rj["by_setting"]["m=20,pi1=0.2"] = {"reference": {"gain": 0.05}}
+    found = _found(rj, per_cell)
+    assert found and "m=20,pi1=0.2" in found[0] and "not the mean" not in found[0], found
