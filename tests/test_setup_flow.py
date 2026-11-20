@@ -405,3 +405,31 @@ def test_the_analysis_draws_it_in_a_worker_thread(tmp_path: Path, monkeypatch: p
     asyncio.run(eng._node_analyze({"result_json": {"yield": 0.4}, "exec_result": {"returncode": 0},  # type: ignore[arg-type]
                                    "design": {}, **STATE}))
     assert where == [False], "the event loop's thread is never the one drawing"
+
+
+def test_parallel_quests_draw_one_at_a_time_and_both_get_their_figure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    roots = [_quest(tmp_path / f"q{i}", GRID_PLAN) for i in range(4)]
+    inside = {"now": 0, "most": 0}
+    guard = threading.Lock()
+    real = setup_flow._render
+
+    def counted(*a, **k):  # noqa: ANN002, ANN003
+        with guard:
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+        try:
+            return real(*a, **k)
+        finally:
+            with guard:
+                inside["now"] -= 1
+
+    monkeypatch.setattr(setup_flow, "_render", counted)
+    threads = [threading.Thread(target=setup_flow.draw_quietly, args=(r, [RESULT])) for r in roots]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert inside["most"] == 1, "two drawings ran at the same time"
+    assert all(setup_flow.shown(r) for r in roots), "every quest has its set-up figure"

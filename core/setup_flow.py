@@ -35,6 +35,7 @@ import hashlib
 import json
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -591,7 +592,18 @@ def _inside(extent: Any, x: float, y: float, w: float, h: float) -> bool:
             and extent.y0 / DPI >= y - tol and extent.y1 / DPI <= y + h + tol)
 
 
+# One drawing at a time in the process: parallel quests (``--fleet``) draw from worker threads, and matplotlib's shared font
+# and text caches are not documented as safe across threads. Holding it costs a fraction of a second per study.
+_RENDER_LOCK = threading.Lock()
+
+
 def render(flow: Flow, png: Path) -> list[dict[str, Any]]:
+    """Draw ``flow`` to ``png`` (one drawing at a time in the process; see ``_RENDER_LOCK``)."""
+    with _RENDER_LOCK:
+        return _render(flow, png)
+
+
+def _render(flow: Flow, png: Path) -> list[dict[str, Any]]:
     """Draw ``flow`` into ``png``; returns each box as drawn (its column, title and lines after wrapping, dashed)."""
     from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
