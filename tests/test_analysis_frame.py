@@ -148,7 +148,11 @@ def test_what_a_repair_may_and_may_not_change_in_derive() -> None:
     assert "parameters" in af.analysis_problem(old, body.replace("def derive_peak(table):", "def derive_peak(table, extra):"), "derive.py")
     assert "missing" in af.analysis_problem(old, body.replace("def derive_peak(table):", "def derive_other(table):"), "derive.py")
     assert "RESULTS" in af.analysis_problem(old, body + "\nRESULTS = ()\n", "derive.py")
-    assert "imported" in af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    print(1)\n', "derive.py")
+    # FI imports derive.py and never runs it as a script, so the study's own main block never runs under FI: not refused
+    assert af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    print(1)\n', "derive.py") == ""
+    assert af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    pass\n', "derive.py") == ""
+    # a main block that rebinds a name of the frame is still refused for that
+    assert "RESULTS" in af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    RESULTS = ()\n', "derive.py")
     assert af.analysis_problem(old, "def (", "derive.py") != ""  # not Python
 
 
@@ -1190,6 +1194,17 @@ def test_a_study_that_changes_the_frames_dicts_does_not_change_what_fis_analysis
         assert any("the references" in n and "FI used the plan's values" in n for n in said)
         assert sum("the references" in n for n in record["notes"]) == 1  # said once, in plain words
         assert not any("REFERENCES" in n for n in record["notes"])
+
+
+def test_a_main_block_in_derive_never_runs_when_fis_analysis_runs(tmp_path: Path) -> None:
+    """derive.py is imported by FI's experiment.py, never run as a script, so a study's ``if __name__ == "__main__":`` block
+    (which a repair may now keep) does not run: the analysis gives what it gives without the block."""
+    design = _design([_derived("peak")])
+    honest = _run(_quest(tmp_path / "honest", design, _PEAK.format(mutate="pass")))
+    blocked = _PEAK.format(mutate="pass") + '\nif __name__ == "__main__":\n    raise SystemExit("the main block ran")\n'
+    code, printed, record, err = _run(_quest(tmp_path / "main", design, blocked))
+    assert code == honest[0] == 0 and "the main block ran" not in err, err
+    assert printed == honest[1] and record["derived"] == honest[2]["derived"]
 
 
 def test_a_study_that_leaves_the_frame_alone_says_nothing_about_it(tmp_path: Path) -> None:
