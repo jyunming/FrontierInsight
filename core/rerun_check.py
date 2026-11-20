@@ -121,6 +121,18 @@ def expected_seconds(quest_root: Path | str, at_once: int | None = None) -> floa
     return wall * max(1.0, had / max(1, int(at_once)))
 
 
+def too_long(quest_root: Path | str, at_once: int | None, left_s: float) -> str:
+    """Why a rerun of the whole study is not started, in one plain sentence: FI's record of the delivered run says it would
+    take longer than the ``left_s`` seconds left for it (:func:`expected_seconds`); ``""`` when it may start."""
+    need = expected_seconds(quest_root, at_once)
+    if need is None or need <= left_s:
+        return ""
+    from .run_estimate import plain_duration
+
+    return (f"FI expects running the study again to take about {plain_duration(need)}, as long as its own run took, which is "
+            f"more than the {plain_duration(max(0.0, left_s))} left for it, so it was not started")
+
+
 def _seconds_of(v: Any) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else None
 
@@ -230,7 +242,14 @@ def _of_settings(setting: str | None, settings: set[str]) -> bool:
     run of one (``"<setting>,<value>"``, :func:`core.in_run.record_key`)."""
     if setting is None or not settings:
         return False
-    return setting in settings or any(setting.startswith(s + ",") for s in settings if s)
+    if setting in settings:
+        return True
+    at = setting.find(",")
+    while at != -1:  # a value's record is "<setting>,<value>": each shorter key it starts with
+        if setting[:at] in settings:
+            return True
+        at = setting.find(",", at + 1)
+    return False
 
 
 def without_settings(numbers: dict[str, float], settings: set[str]) -> dict[str, float]:
@@ -775,7 +794,7 @@ async def _analysis(executor: Any, python: Path | str, code: Path, trials: Path,
 
 def _ended(ran: Any, out: Path, names: list[str], timeout_s: float, mode: str, secs: float,
            info: dict[str, Any]) -> tuple[str, Path | None, str, float, bool]:
-    wrote = wrote_results(out, names) and (out / "raw" / "trials.json").is_file()
+    wrote = (not names or wrote_results(out, names)) and (out / "raw" / "trials.json").is_file()
     if getattr(ran, "timed_out", False):
         info["timed_out"] = True
         return mode, None, f"the repaired study did not finish within {int(timeout_s)} s", secs, False
@@ -798,13 +817,16 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
     says it would take longer than ``timeout_s`` (:func:`expected_seconds`): the answer is then "could not rerun" at 0 s. A
     run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends some studies that
     way). The run wrote results when it wrote what the delivered run's numbers are read from (:func:`result_names`), not a
-    file name this module fixes: an older study writes ``result.json``. ``info`` gets ``timed_out`` when the run ran out of
+    file name this module fixes: an older study writes ``result.json``, and a study whose delivered run left no result file
+    is read from FI's record of its trials alone. ``info`` gets ``timed_out`` when the run ran out of
     its time."""
     began = time.monotonic()
     quest_root = Path(quest_root)
     base_root = Path(results_root or quest_root)
     raw_trials = base_root / "raw" / "trials.json"
     names = result_names(base_root, derived)
+    if raw_trials.is_file() and not wrote_results(base_root, names):
+        names = []  # the delivered numbers are read from FI's record of the trials alone: that record is what a rerun writes
     info = info if info is not None else {}
     if analysis_only(files) and raw_trials.is_file():
         mode = "analysis only"
@@ -812,12 +834,9 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         ran = await _analysis(executor, python, copy, raw_trials, out, timeout_s, env)
         return _ended(ran, out, names, timeout_s, mode, time.monotonic() - began, info)
     mode = "whole study"
-    need = expected_seconds(quest_root, at_once)
-    if need is not None and need > timeout_s:
-        from .run_estimate import plain_duration
-
-        return mode, None, (f"FI expects running the study again to take about {plain_duration(need)}, as long as its own run "
-                            f"took, which is more than the {plain_duration(timeout_s)} left for it, so it was not started"), 0.0, False
+    why = too_long(quest_root, at_once, timeout_s)
+    if why:
+        return mode, None, why, 0.0, False
     if at_once is not None and isinstance(protocol, dict):
         return await _run_like_main(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work, int(at_once),
                                     names, say=say, finding=finding, info=info, began=began)

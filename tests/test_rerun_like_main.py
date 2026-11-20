@@ -236,6 +236,21 @@ def test_the_whole_study_is_run_again_through_fis_trial_runner_as_the_delivered_
     assert v.status == "changed" and v.metrics == ["y"] and all("a=3" not in k for k in v.keys), v
 
 
+def test_a_study_whose_numbers_are_only_in_fis_record_of_its_trials_is_run_again(tmp_path: Path) -> None:
+    """A delivered run that left no result file of its own: its numbers are read from FI's record of the trials, so that
+    record is what the rerun must write (old code asked for the analysis record's name and answered "wrote no results")."""
+    root = _delivered_by_fi(tmp_path, cut_last=False)
+    (root / "data" / "results" / "derived.json").unlink()
+    (root / "code" / "experiment.py").write_text("print('the analysis writes no result file')\n", encoding="utf-8")
+    assert rerun_check.results_of(root) and not rerun_check.result_files(root, "data/results/derived.json")
+    same = _repaired(root, tmp_path, "c0", SIM + "# repaired, numbers unchanged\n")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, PROTOCOL, 120, None, at_once=2))
+    assert (v.status, v.mode) == ("unchanged", "whole study"), v
+    moved = _repaired(root, tmp_path, "c1", SIM.replace("* 1.0", "* 1.5"))  # known positive
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, PROTOCOL, 120, None, at_once=2))
+    assert v.status == "changed", v
+
+
 def test_settings_that_shared_a_process_in_the_delivered_run_share_one_in_the_rerun(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The delivered run put several settings in one process (after FI's check that this gives the same numbers): the rerun
@@ -375,3 +390,49 @@ def test_only_a_lasting_could_not_is_kept(tmp_path: Path, monkeypatch: pytest.Mo
     record["rerun_calls"] = 0
     asyncio.run(engine._rerun_one(issue, record, {}, {}))
     assert len(judged) == 3
+
+
+def test_a_rerun_that_will_not_fit_is_not_started_by_the_gate_nor_its_small_run(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """The gate's own path: the delivered run took longer than a rerun may take, so neither FI's small run of the repair
+    nor the study is run, and run.log says why (old code ran the small run, then the study for its whole limit)."""
+    import logging
+
+    from core import code_checks
+    from core.engine import Engine
+    from tests.test_rerun_check import SIM_KEEPS_CONTRACT, _engine_with_code
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    engine.config.execution.timeout_s = 28_800
+    _record(root, wall_s=29_073.0, at_once=16, settings_s=30.0)
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text(SIM_KEEPS_CONTRACT, encoding="utf-8")
+    ran: list[str] = []
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        ran.append("study")
+        return Verdict("unchanged")
+
+    async def refusal(*a: Any, **k: Any) -> str:
+        ran.append("small run")
+        return ""
+
+    async def ask(*a: Any, **k: Any) -> dict[str, str]:
+        return {"simulate.py": SIM_KEEPS_CONTRACT + "# repaired" + chr(10)}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    monkeypatch.setattr(code_checks, "small_run_refusal", refusal)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    engine._log = logging.getLogger("test_rerun_like_main.gate")  # type: ignore[assignment]
+    caplog.set_level(logging.INFO)
+    record["rerun_calls"] = 0
+    got = asyncio.run(Engine._rerun_shown(engine, [(issue, "its test fails")], record, {}))["F-1"]
+    assert got.status == "could_not" and "not started" in got.why and got.seconds == 0.0 and ran == [], (got, ran)
+    said = [r.getMessage() for r in caplog.records if "[evidence_gate] F-1" in r.getMessage()]
+    assert any("could not be run again" in m and "8 h 5 min" in m for m in said), said
+    assert not record.get("rerun_could_not")  # an estimate is no lasting answer: a later check with more time may run it
+

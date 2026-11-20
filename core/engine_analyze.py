@@ -1492,6 +1492,13 @@ class AnalyzeStageMixin:
                 counts = budget is not None and not only_analysis
                 if counts and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
                     return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
+                # FI's record of the delivered run says the rerun would not fit in the time left: not started (nor its small
+                # run), "could not rerun" at once
+                late = "" if only_analysis else _rerun_check.too_long(
+                    self.quest_root, at_once, min(allowed, budget[0]) if counts else allowed)
+                if late:
+                    return _rerun_check.Verdict("could_not", late, mode="whole study", source=source, files=sorted(
+                        await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
