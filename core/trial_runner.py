@@ -885,7 +885,8 @@ async def run_trials(
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     gate = _execution.SettingsGate(int(at_once or 1), log=log)  # fewer at once when the memory would not hold them
     executor.meter = gate.note
-    env = _execution.threads_beside(env, int(at_once or 1))  # each process its share of the cores
+    # Each process its share of the cores: of the quest's share in a fleet.
+    env = _execution.threads_beside(env, int(at_once or 1), _execution.quest_cores(executor))
 
     async def start(task: dict[str, Any], fresh: bool = False) -> tuple[Any, float]:
         """One process for ``task`` (a setting, or a group of settings): its result and its time. A group may take the sum of
@@ -1316,7 +1317,7 @@ async def measure_grouping(
         (quest_root / path).write_text(source, encoding="utf-8")
     box = _outside.OutsideExecutor(executor, quest_root, log=log)
     env_given = dict(env or {})
-    env = _execution.threads_beside(env, int(at_once or 1))
+    env = _execution.threads_beside(env, int(at_once or 1), _execution.quest_cores(executor))
     kw: dict[str, Any] = dict(runs_per_setting=runs, base_seed=base_seed, deterministic=deterministic, paired=paired,
                               thresholds=thresholds, in_each_run=in_each_run)
     count = max(2, min(int(sample), total))

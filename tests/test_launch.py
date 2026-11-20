@@ -42,6 +42,15 @@ def test_parse_args_no_mode_raises_systemexit() -> None:
         launch.parse_args([])
 
 
+@pytest.mark.parametrize("bad", ["0", "-2", "two"])
+def test_max_concurrent_below_one_is_refused_in_one_line(bad: str, capsys: pytest.CaptureFixture) -> None:
+    """With --max-concurrent 0 no quest of a fleet would ever start (the fleet waited forever): it is refused at once."""
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--fleet", "a.yaml", "b.yaml", "--max-concurrent", bad])
+    assert f"--max-concurrent: must be a whole number of at least 1, not '{bad}'" in capsys.readouterr().err
+    assert launch.parse_args(["--fleet", "a.yaml", "--max-concurrent", "1"]).max_concurrent == 1
+
+
 def test_parse_args_config_and_fleet_mutually_exclusive() -> None:
     """Both --config and --fleet at once must be rejected."""
     with pytest.raises(SystemExit):

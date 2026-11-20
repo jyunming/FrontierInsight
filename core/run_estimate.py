@@ -738,7 +738,7 @@ async def slowdown_at_once(
         return None, why or "the setting did not finish alone in the time for timing"
     allowance = int(max(10, math.ceil(2 * took * max(1, int(at_once))) + 10))  # twice as slow as one after another
     # Beside the others each process gets its share of the cores, as the study's settings do when they run at once.
-    kw["env"] = _execution.threads_beside(env, int(at_once))
+    kw["env"] = _execution.threads_beside(env, int(at_once), _execution.quest_cores(executor))
     together = await asyncio.gather(*(
         _time_one(executor, python, quest_root, module, cell, timeout_s=allowance, name=f"at_once{i}", **kw)
         for i in range(max(1, int(at_once)))))

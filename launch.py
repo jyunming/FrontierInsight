@@ -467,6 +467,17 @@ def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> 
     args.resume = root.name
 
 
+def _at_least_one(value: str) -> int:
+    """A whole number of at least 1 (``--max-concurrent``: with 0 no quest of a fleet would ever start)."""
+    try:
+        n = int(value)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be a whole number of at least 1, not {value!r}")
+    return n
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     argv = sys.argv[1:] if argv is None else list(argv)
     argv = _expand_tools_argv(argv)   # `tools <name> ...` -> the flag it stands for; everything else is unchanged
@@ -1315,7 +1326,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--max-concurrent",
-        type=int,
+        type=_at_least_one,
         default=min(4, (os.cpu_count() or 4)),
         help="Cap on concurrent quests in --fleet mode.",
     )
@@ -3445,6 +3456,10 @@ async def run_fleet(
     ]
     sem = asyncio.Semaphore(max_concurrent)
     total = len(norm)
+    # The quests that run at the same time share the computer's cores (execution.settings_at_once: auto): as many as the
+    # fleet has, at most --max-concurrent. The same number for every quest and the whole run, so a quest's time estimate
+    # and its run count the same share.
+    together = max(1, min(total, int(max_concurrent or 1)))
     state = {"done": 0, "failed": 0, "running": 0}
     started_at = time.monotonic()
 
@@ -3492,7 +3507,7 @@ async def run_fleet(
                 # status-line quest_id matches the quest that actually runs.
                 engine = Engine(
                     cfg, supervisor=supervisor,
-                    auto_accept_on_pass=auto_accept_on_pass,
+                    auto_accept_on_pass=auto_accept_on_pass, fleet=together,
                 )
                 _status_line(engine.quest_id, "start")
                 summary = await run_one(

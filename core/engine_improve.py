@@ -245,7 +245,7 @@ class ImproveStageMixin:
                     timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
                     paired=_mc_error.paired(protocol, self.quest_root),
                     in_each_run=_in_run.of_study(protocol), log=self._log,
-                    at_once=_trial_runner.settings_at_once(self.config.execution.settings_at_once),
+                    at_once=self._settings_at_once(),
                 )
                 series = _improve.series_of(run, trial_names)
                 if run.ok_trials == 0:

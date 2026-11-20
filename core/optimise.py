@@ -712,7 +712,8 @@ class EvaluationPool:
         # the size measured by the batches before is kept; a gate made here starts again from nothing.
         self.gate = gate if gate is not None else _execution.SettingsGate(max(1, at_once), log=log)
         self.outside.meter = self.gate.note
-        self.env = _execution.threads_beside(env, max(1, at_once))  # each process its share of the cores
+        # Each process its share of the cores: of the quest's share in a fleet.
+        self.env = _execution.threads_beside(env, max(1, at_once), _execution.quest_cores(executor))
         self.work = quest_root / WORK_DIR
         self.tasks: dict[asyncio.Task, Any] = {}
         self.serial = 0
