@@ -103,12 +103,8 @@ def check_answers(root: Path, task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _paper_text(root: Path) -> str:
-    parts = []
-    for rel in ("paper/paper.md", "paper.md"):
-        path = root / rel
-        if path.is_file():
-            parts.append(path.read_text(encoding="utf-8", errors="replace"))
-            break
+    """The delivered paper: its Markdown, the supplement that ships with it (core/supplement.py) and its exports."""
+    parts = [_plant.delivered_text(root)]
     for path in sorted((root / "paper").glob("*.bib")) + sorted((root / "paper").glob("*.ris")):
         parts.append(path.read_text(encoding="utf-8", errors="replace"))
     return "\n".join(parts)
