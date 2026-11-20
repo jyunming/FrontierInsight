@@ -129,6 +129,140 @@ def test_a_study_of_parts_runs_a_setting_of_every_part_each_with_its_share_of_th
     assert ex2.given[0] >= 55, ex2.given
 
 
+class _Costs:
+    """An executor that plays a known cost per small-run setting (``costs[i]`` seconds for the setting in ``s<i>``, ``None``
+    for one that never ends): a setting that fits its time writes an ``ok`` row per trial, one that does not is timed out.
+    It records the time each process was given and how many ran at the same time."""
+
+    def __init__(self, costs: list[float | None]) -> None:
+        self.costs = costs
+        self.given: dict[int, int] = {}
+        self.running = 0
+        self.most = 0
+
+    async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+        import json
+
+        from core.execution import ExecutionResult
+
+        spec_path, out_path = Path(cwd) / cmd[2], Path(cwd) / cmd[3]
+        index = int(next(p for p in Path(cmd[2]).parts if p.startswith("s") and p[1:].isdigit())[1:])
+        self.given[index] = int(timeout_s)
+        cost = self.costs[index]
+        self.running += 1
+        self.most = max(self.most, self.running)
+        try:
+            if cost is None or cost > timeout_s:
+                await asyncio.sleep(float(timeout_s))
+                return ExecutionResult(returncode=-1, stdout="", stderr="", duration_s=float(timeout_s), timed_out=True)
+            await asyncio.sleep(cost)
+        finally:
+            self.running -= 1
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        rows = [json.dumps({"nonce": spec["nonce"], "trial": t["trial"], "seed": t.get("seed"), "status": "ok",
+                            "values": {"y": 1.0}}) for t in spec["trials"]]
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=float(cost))
+
+
+def _parts_quest(tmp_path: Path) -> tuple[Path, Any]:
+    grid = search.study_grid({"grid": {"kind": ["a", "b", "c"], "n": [1, 2, 3]},
+                              "sub_studies": [{"name": "as", "vary": ["n"], "hold": {"kind": "a"}},
+                                              {"name": "bs", "vary": ["n"], "hold": {"kind": "b"}},
+                                              {"name": "cs", "vary": ["n"], "hold": {"kind": "c"}}]})
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {'y': 1.0}\n", encoding="utf-8")
+    return root, grid
+
+
+def test_settings_run_at_once_and_a_costly_part_may_use_the_whole_time(tmp_path: Path) -> None:
+    # One after another, each part's setting had a third of the time: the second part, costing half of the whole time,
+    # never finished. Run together, each may use the whole time, and the small run still ends within it.
+    root, grid = _parts_quest(tmp_path)
+    one_by_one = _Costs([0.1, 3.0, 0.1])
+    got = asyncio.run(small_run.run(one_by_one, sys.executable, root, "code/simulate.py", grid, deterministic=True,
+                                    timeout_s=6))
+    assert [s.timed_out for s in got.settings] == [False, True, False], "one at a time: each part keeps its share"
+    together = _Costs([1.0, 3.0, 1.0])
+    got = asyncio.run(small_run.run(together, sys.executable, root, "code/simulate.py", grid, deterministic=True,
+                                    timeout_s=6, at_once=3))
+    assert [s.ok for s in got.settings] == [1, 1, 1] and not got.timed_out, got.says()
+    # the costly part had 2 s one after another; together it has nearly the whole time (less the start of the others)
+    assert together.most >= 2 and together.given[1] >= 4, together.given
+    assert got.seconds < 6 + 1 and "ran out" not in got.says()
+
+
+def test_a_setting_that_never_ends_still_times_out_when_settings_run_at_once(tmp_path: Path) -> None:
+    root, grid = _parts_quest(tmp_path)
+    ex = _Costs([0.1, None, 0.1])
+    got = asyncio.run(small_run.run(ex, sys.executable, root, "code/simulate.py", grid, deterministic=True, timeout_s=3,
+                                    at_once=3))
+    assert [s.timed_out for s in got.settings] == [False, True, False]
+    assert [s.ok for s in got.settings] == [1, 0, 1]
+    assert got.seconds < 3 + 2, "the small run's whole time still bounds it"
+    assert "ran out in 1 of them" in got.says()
+
+
+def test_with_fewer_places_than_settings_a_waiting_part_gets_its_share_of_what_is_left(tmp_path: Path) -> None:
+    # Two places for three parts that never end: the first to start gets half of the time (two rounds are left), and
+    # the third starts when it ends, with what is left; every part starts and the whole small run ends within its time.
+    root, grid = _parts_quest(tmp_path)
+    ex = _Costs([None, None, None])
+    got = asyncio.run(small_run.run(ex, sys.executable, root, "code/simulate.py", grid, deterministic=True, timeout_s=8,
+                                    at_once=2))
+    assert ex.most == 2 and len(ex.given) == 3 and min(ex.given.values()) >= 3 and min(ex.given.values()) <= 4, ex.given
+    assert all(s.timed_out for s in got.settings) and got.seconds < 8 + 2
+
+
+_CHEAP = "def run_cell(cell):\n    return {'y': 2.0 * float(cell['n']), 'z': float(cell['m'])}\n"
+
+
+@pytest.mark.parametrize("code", [_CHEAP, "raise ImportError('no such module: helper')\n"])
+def test_a_cheap_study_and_one_that_cannot_load_give_the_same_record_at_once(tmp_path: Path, code: str) -> None:
+    records = []
+    for at_once in (1, 3):
+        root = tmp_path / f"quest{at_once}"
+        (root / "code").mkdir(parents=True)
+        (root / "code" / "simulate.py").write_text(code, encoding="utf-8")
+        got = asyncio.run(small_run.run(SharedInterpreterExecutor(python_version="3.11"), sys.executable, root,
+                                        "code/simulate.py", {"n": [1, 2, 3], "m": [5, 6]}, deterministic=True,
+                                        timeout_s=60, at_once=at_once))
+        record = got.record()
+        record.pop("seconds")
+        records.append(record)
+    assert records[0] == records[1]
+    if code == _CHEAP:
+        assert len(records[0]["settings"]) == 3 and all(s["ok"] == 1 for s in records[0]["settings"])
+    else:
+        assert records[0]["load_error"] and len(records[0]["settings"]) == 1, "no setting after the first is kept"
+
+
+@pytest.mark.usefixtures("this_python")
+def test_the_engine_runs_the_small_run_with_its_settings_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_disclosure import _engine
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(_CHEAP, encoding="utf-8")
+    eng = _engine(root)
+    eng._trial_mode, eng._trial_entries = True, {"run_cell"}  # type: ignore[attr-defined]
+    eng._protocol_block = lambda state: {"grid": {"n": [1, 2, 3], "m": [5, 6]}}  # type: ignore[assignment]
+    monkeypatch.setattr(eng, "_settings_at_once", lambda: 5)
+    seen: dict[str, Any] = {}
+    real = small_run.run
+
+    async def spy(*args: Any, **kw: Any) -> Any:
+        seen.update(kw)
+        return await real(*args, **kw)
+
+    monkeypatch.setattr(small_run, "run", spy)
+    record = asyncio.run(eng._small_run({}, sys.executable, {}))
+    assert seen.get("at_once") == 5 and record and not record.get("crashed")
+    assert [s["ok"] for s in record["settings"]] == [1, 1, 1]
+
+
 #: A search whose simulation reads a value it compares inside each run as one number: every evaluation fails.
 _SEARCH_BLOCK: dict[str, Any] = {
     "objective": {"quantity": "f", "direction": "minimise", "unit": "J"},

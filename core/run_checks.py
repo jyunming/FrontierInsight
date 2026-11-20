@@ -2744,7 +2744,9 @@ class RunChecksMixin:
         got = await _small.run(
             self.executor, py, self.quest_root, module, grid,  # type: ignore[attr-defined]
             deterministic=deterministic, timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
-            env=dict(exec_env or {}), thresholds=thresholds, paired=paired, in_each_run=inside)
+            env=dict(exec_env or {}), thresholds=thresholds, paired=paired, in_each_run=inside,
+            # its settings at the same time, as the study's run starts them: each may use the whole time
+            at_once=self._settings_at_once(), log=self._log)  # type: ignore[attr-defined]
         if search and baseline and not got.crashed:
             # the search's own evaluation of its baseline design, judged as the search judges it (_small_run_checks)
             got.baseline = await _small.baseline_answer(
