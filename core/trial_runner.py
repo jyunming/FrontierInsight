@@ -2305,6 +2305,7 @@ class TrialsRunner:
                            "(.fi/trial_checks.json could not be written or read back), so the paper could not state it")
             verdict.tried = [*verdict.tried, *[q.says() for q in verdict.calibration.counted_as_misses[:2]],
                              "tried to write and read back the record of the trial checks; it failed"]
+            verdict.directive = "\n\n".join(x for x in (verdict.directive, verdict.say) if x)
         stated =[f for f in verdict.fails if f.stated and not f.fault]
         if self.log is not None:
             for f in stated:

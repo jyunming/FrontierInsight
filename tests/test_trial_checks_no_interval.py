@@ -131,6 +131,7 @@ def test_a_count_over_every_trial_that_cannot_be_recorded_is_a_stop(tmp_path: Pa
     sent = runner._check_trials(run, plan, 0.0)
     assert sent is not None and sent.returncode == 1 and runner.trial_fault["action"] == tc.STOP
     assert "could not keep its record" in runner.trial_fault["say"]
+    assert "could not keep its record" in sent.stderr  # the person sees why it stopped
 
 
 def test_a_trial_that_kept_its_estimate_and_lost_its_interval_is_still_a_miss() -> None:
