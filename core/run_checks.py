@@ -3533,11 +3533,11 @@ class RunChecksMixin:
             shown = [f"{k or 'its only setting'} trial {t} {n}" for k, t, n in names[:3]]
             record["varying"] = shown
             which = sorted({n.strip("/") for _k, _t, n in noisy})
-            log.info("[improve] %d number(s) of the sample change from one run of the unchanged code to the next (%s); a "
-                     "speed-up is judged on the other numbers.", len(noisy),
+            log.info("[improve] %d value(s) of the sample change from one run of the unchanged code to the next (%s); a "
+                     "speed-up is judged on the other values.", len(noisy),
                      ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
             if len(noisy) >= _speed.count_numbers(first):
-                return stop("every number of the sample differs from one run of the unchanged code to the next, so an "
+                return stop("every value of the sample differs from one run of the unchanged code to the next, so an "
                             "edit cannot be judged")
         needed = padded / max(limit_s, 1e-9)
         # What two samples of the same, unchanged code differ by: an edit must save more than this to count as faster.
@@ -3633,7 +3633,7 @@ class RunChecksMixin:
                 entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
             elif (same := _speed.compare(first, after, ignore=noisy)).bad:
                 entry.update(outcome="not kept",
-                             reason=f"{len(same.bad)} number(s) of the sample changed, first: {same.bad[0]}")
+                             reason=f"{len(same.bad)} value(s) of the sample changed, first: {same.bad[0]}")
             elif not _speed.fast_enough(best["sample"].seconds, after.seconds, noise_s):
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                          f"{best['sample'].seconds:.3f} s: not faster by a tenth and by "
@@ -3728,7 +3728,7 @@ class RunChecksMixin:
             bad = [] if new_full.failed else found.bad
             if new_full.failed or bad:
                 why_full = (f"it could not be checked on a setting of the plan ({new_full.failed})" if new_full.failed
-                            else f"on a setting of the plan {len(bad)} number(s) changed, first: {bad[0]}")
+                            else f"on a setting of the plan {len(bad)} value(s) changed, first: {bad[0]}")
                 record["kept"] = False
                 record["full_check"] = {"cell": full, "passed": False, "why": why_full}
                 best = unchanged

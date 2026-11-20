@@ -171,10 +171,10 @@ async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them
     model = _Model([_edit(LOOP, CHEAT), _edit(LOOP, FAST)])
     out = await _speed(engine, model, seconds=10_000.0)
     text = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert out["rounds"][0]["outcome"] == "not kept" and "number(s) of the sample changed" in out["rounds"][0]["reason"]
+    assert out["rounds"][0]["outcome"] == "not kept" and "value(s) of the sample changed" in out["rounds"][0]["reason"]
     # a change not kept does not end the step: the model is asked again, with the reason
     assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] >= 2
-    assert "number(s) of the sample changed" in model.prompts[1]
+    assert "value(s) of the sample changed" in model.prompts[1]
     assert "np.sum(x * x)" in text and "x[:200]" not in text
     assert out["speedup"] > 1.5
 
@@ -403,6 +403,18 @@ def test_whole_numbers_yes_no_values_texts_and_infinities_are_compared_exactly()
         assert not judged([before, 1.0, 9.0], after), (before, after)
     # a text in a row counts as one of the sample's values
     assert sp.count_numbers(sp.Sample(values={"k": [{"v": 1.0, "label": "a", "ok": True}]})) == 3
+
+
+def test_a_sample_of_only_texts_and_yes_no_values_is_counted_and_compared_value_by_value() -> None:
+    """A simulation whose outputs are all texts or yes/no values: every one is a value of the sample (counted, and left
+    out only when it changes between two runs of the unchanged code), and a change to any of them is a changed value."""
+    a = sp.Sample(values={"s=1": [{"label": "control", "ok": True}], "s=2": [{"label": "treated", "ok": False}]})
+    again = sp.Sample(values={"s=1": [{"label": "control", "ok": True}], "s=2": [{"label": "other", "ok": False}]})
+    flipped = sp.Sample(values={"s=1": [{"label": "control", "ok": False}], "s=2": [{"label": "treated", "ok": False}]})
+    assert sp.count_numbers(a) == 4
+    assert sp.varying(a, again) == {("s=2", 0, "/label")} and sp.varying(a, a) == set()
+    assert sp.disagreements(a, flipped) == ["s=1 trial 0 /ok: True -> False"]
+    assert sp.disagreements(a, flipped, ignore=sp.varying(a, again)) == ["s=1 trial 0 /ok: True -> False"]
 
 
 def test_the_repeats_are_skipped_when_they_would_cost_more_than_the_change_saves() -> None:

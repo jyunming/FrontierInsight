@@ -524,7 +524,7 @@ async def confirm(root: Path, old_files: Any, new_files: Any, sample: Any, entry
         if not out.failed:
             found = compare(unchanged if unchanged is not None else after, out, ignore=ignore)
             if found.bad:
-                out.failed = f"{len(found.bad)} number(s) of the sample changed, first: {found.bad[0]}"
+                out.failed = f"{len(found.bad)} value(s) of the sample changed, first: {found.bad[0]}"
             elif seen is not None:
                 seen.rounded, seen.largest = max(seen.rounded, found.rounded), max(seen.largest, found.largest)
         return out
