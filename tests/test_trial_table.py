@@ -69,6 +69,21 @@ def test_a_value_equal_to_its_own_trial_number_in_every_trial_is_the_trial_index
     assert "trial_id" in {r["metric"] for r in trial_table.rows(_write_cells(tmp_path, cells))}
 
 
+def test_a_result_the_plan_declares_is_never_taken_for_the_trial_index(tmp_path: Path) -> None:
+    # A 0/1 flag with two trials that gave 0 in trial 0 and 1 in trial 1 of every setting equals its trial numbers; the
+    # plan declares it a result, so it stays in the table.
+    cells = [{"cell": {"load": load}, "key": f"load={load}",
+              "metrics": {"flag": {"values": [0.0, 1.0], "trials": [0, 1]},
+                          "width": {"values": [1.5, 1.7], "trials": [0, 1]}}}
+             for load in (1, 2)]
+    root = _write_cells(tmp_path, cells)
+    plan = {"metrics": [{"id": "flag", "kind": "proportion", "estimand": "chance a part is flagged", "unit": "one part"}]}
+    results = trial_table.declared_results(plan)
+    assert {r["metric"] for r in trial_table.rows(root, (), (), results)} == {"flag", "width"}
+    # what the plan does not declare and equals the trial numbers is the index (the limit of the record's own fact)
+    assert {r["metric"] for r in trial_table.rows(root)} == {"width"}
+
+
 def test_without_trial_numbers_in_the_record_nothing_is_taken_for_a_trial_index(tmp_path: Path) -> None:
     # an older record: no value says which trial it came from, so the values' pattern decides nothing
     cells = [{"cell": {"load": 1}, "key": "load=1", "metrics": {"trial_id": {"values": [0.0, 1.0, 2.0]},

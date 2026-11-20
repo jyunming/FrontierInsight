@@ -161,7 +161,8 @@ class WriteStageMixin:
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         try:
             trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)),
-                                            _metric_spec.proportion_ids(self._protocol_block(state)))
+                                            _metric_spec.proportion_ids(self._protocol_block(state)),
+                                            _trial_table.declared_results(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
                 by_setting = _results_by_setting.write(
                     self.quest_root, self._protocol_block(state), self._judged_checks(),

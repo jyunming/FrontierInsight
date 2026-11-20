@@ -135,13 +135,26 @@ def not_run_summary() -> dict[str, Any]:
     return {**summary([]), "status": NOT_RUN}
 
 
-def summaries(cells: list[dict[str, Any]], proportions: Any = ()) -> list[dict[str, Any]]:
+def declared_results(protocol: dict[str, Any] | None) -> frozenset[str]:
+    """The names the plan declares as its results, under every form a trial may return them (``protocol.metrics`` ids and
+    :func:`core.skeleton.declared_names`): a declared result is never taken for the trial index, whatever it gave."""
+    from . import metric_spec as _metric_spec
+    from . import skeleton as _skeleton
+
+    ids = {str(s["id"]) for s in _metric_spec.declared(protocol)}
+    forms = {form for ident in ids for form in _metric_spec.result_forms(ident)}
+    return frozenset(forms | set(_skeleton.declared_names(protocol)))
+
+
+def summaries(cells: list[dict[str, Any]], proportions: Any = (), results: Any = ()) -> list[dict[str, Any]]:
     """Each record of ``raw/trials.json`` as ``{"cell", "key", "level", "metrics": {name: summary}}`` (see
-    :func:`summary`; ``proportions``: the ids the plan declares proportions, :func:`core.metric_spec.proportion_ids`), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
+    :func:`summary`; ``proportions``: the ids the plan declares proportions, :func:`core.metric_spec.proportion_ids`;
+    ``results``: the names the plan declares results, :func:`declared_results`, never a trial index), in the record's order, with the record's counts of runs (``planned``, ``ok``, ``failed``) when it
     has them. A record with no metrics (the per-value records a study that compares values inside each run writes with
     nothing in them) is kept, with an empty ``metrics``."""
     out: list[dict[str, Any]] = []
     declared = {str(p) for p in proportions or ()}
+    named = {str(r) for r in results or ()}
     for c in cells:
         cell, level = c.get("cell"), c.get("level")
         setting: dict[str, Any] = dict(cell) if isinstance(cell, dict) else {}
@@ -152,7 +165,8 @@ def summaries(cells: list[dict[str, Any]], proportions: Any = ()) -> list[dict[s
         entry.update({k: c[k] for k in ("planned", "ok", "failed")
                       if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
         for name, metric in c["metrics"].items():
-            one = {**summary(_values(metric), str(name) in declared, _is_index(metric)), **missing(metric)}
+            one = {**summary(_values(metric), str(name) in declared, str(name) not in named and _is_index(metric)),
+                   **missing(metric)}
             one["status"] = status_of(one, entry)
             entry["metrics"][str(name)] = one
         # The record says in numbers that no trial of this setting succeeded or failed: it never ran, whatever values
@@ -230,7 +244,8 @@ def _constant_everywhere(shown: list[dict[str, Any]]) -> bool:
 
 def kept_values(summarised: list[dict[str, Any]], hide: Any = ()) -> list[str]:
     """The value names the table reports, in the order they first appear: not a trial index (the trial number of FI's
-    record in every trial of every setting that gave values, :func:`_is_index`), not one number in every
+    record in every trial of every setting that gave values, :func:`_is_index`, and never a result the plan declares),
+    not one number in every
     trial of every setting (a constant; see :func:`_constant_everywhere`), and not a name in ``hide`` (the names a plan in
     the contract form lets a trial return that are not its results: :func:`core.skeleton.diagnostic_names`)."""
     hidden = set(hide)
@@ -271,10 +286,11 @@ def rows_of(summarised: list[dict[str, Any]], hide: Any = ()) -> list[dict[str, 
     return out
 
 
-def rows(quest_root: Path, hide: Any = (), proportions: Any = ()) -> list[dict[str, Any]]:
+def rows(quest_root: Path, hide: Any = (), proportions: Any = (), results: Any = ()) -> list[dict[str, Any]]:
     """One row per setting and per value the trials returned: ``{"setting", "metric", "n", "mean", "sd",
-    "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record (``proportions``: see :func:`summaries`)."""
-    return rows_of(summaries(_record(quest_root), proportions), hide)
+    "ci_lower", "ci_upper", "method", "cell"}``; ``[]`` without a trial record (``proportions``, ``results``: see
+    :func:`summaries`)."""
+    return rows_of(summaries(_record(quest_root), proportions, results), hide)
 
 
 def _num(x: Any) -> str:
@@ -313,10 +329,10 @@ def markdown(table: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(quest_root: Path, hide: Any = (), proportions: Any = ()) -> list[dict[str, Any]]:
+def write(quest_root: Path, hide: Any = (), proportions: Any = (), results: Any = ()) -> list[dict[str, Any]]:
     """Write ``paper/results_table.md`` from the trial record and return its rows; nothing is written without one (``hide``:
-    see :func:`kept_values`; ``proportions``: see :func:`summaries`)."""
-    table = rows(quest_root, hide, proportions)
+    see :func:`kept_values`; ``proportions``, ``results``: see :func:`summaries`)."""
+    table = rows(quest_root, hide, proportions, results)
     if table:
         paper = Path(quest_root) / "paper"
         paper.mkdir(parents=True, exist_ok=True)
