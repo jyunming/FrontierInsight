@@ -302,6 +302,21 @@ def _numbers(x: Any, path: str = "") -> dict[str, float]:
     return out
 
 
+def _leaves(x: Any, path: str = "") -> dict[str, Any]:
+    """Every value a row holds, by its path (``/a/b``, ``/a[2]``), with its own type: a float, a whole number, a yes/no,
+    a text or anything else the row returns."""
+    out: dict[str, Any] = {}
+    if isinstance(x, dict):
+        for k, v in x.items():
+            out.update(_leaves(v, f"{path}/{k}"))
+    elif isinstance(x, (list, tuple)):
+        for i, v in enumerate(x):
+            out.update(_leaves(v, f"{path}[{i}]"))
+    else:
+        out[path] = x
+    return out
+
+
 def spreads(*samples: Sample) -> dict[str, float]:
     """How much each number varies over ``samples``: its largest value less its smallest, by name, over every setting and
     trial (finite values only, so a not-a-number or an infinity cannot widen it)."""
@@ -317,11 +332,51 @@ def spreads(*samples: Sample) -> dict[str, float]:
     return {name: high[name] - low[name] for name in low}
 
 
+def _kind(v: Any) -> str:
+    if isinstance(v, bool):
+        return "yes/no"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, int):
+        return "whole"
+    return type(v).__name__
+
+
+def _same(x: Any, y: Any, spread: float | None) -> tuple[bool, float | None]:
+    """Whether ``x`` (the unchanged code's) and ``y`` are the same value, and, when they are only at rounding level, the
+    difference as a share of ``spread``. Only two floats may differ at all: by nine digits, or, with ``spread``, by no
+    more than :data:`ROUNDING` of both ``spread`` and the number itself. Two not-a-numbers are the same, and so is an
+    infinity that stays the same infinity; a finite number that becomes infinite or not-a-number (or back), or an
+    infinity that changes sign, is not. Whole numbers, yes/no values and texts are the same only when equal (a whole
+    number and a float that is equal to it are the same)."""
+    if _kind(x) == "float" and _kind(y) == "float":
+        if (math.isnan(x) and math.isnan(y)) or x == y:
+            return True, None
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return False, None
+        gap = abs(x - y)
+        if gap <= ATOL + RTOL * abs(y):
+            return True, None
+        # and of the number itself: one huge value of it in the sample (a stand-in for "no answer", say) widens its
+        # range so far that any change would fit in a millionth of it
+        if spread and spread > 0 and gap <= ROUNDING * min(spread, max(abs(x), abs(y))):
+            return True, gap / spread
+        return False, None
+    numeric = {"float", "whole"}
+    if _kind(x) in numeric and _kind(y) in numeric:
+        return x == y, None  # a whole number is never "the same" at rounding level: equal or changed
+    return _kind(x) == _kind(y) and x == y, None
+
+
+def _shown(v: Any) -> str:
+    return f"{v:.12g}" if _kind(v) in ("float", "whole") else repr(v)
+
+
 def _differences(before: Sample, after: Sample, scale: dict[str, float] | None = None
                  ) -> tuple[list[tuple[str, int | None, str, str]], list[tuple[str, int, str, float]]]:
-    """Every place the numbers of two samples are not the same, as ``(setting, trial, name, text)``; a setting not run in
-    both has ``trial`` and ``name`` empty. With ``scale`` (how much each number varies, :func:`spreads`), a number that
-    differs by no more than :data:`ROUNDING` of its own, and of itself, is the same, at rounding level: those are returned apart, as
+    """Every place the values of two samples are not the same (:func:`_same`), as ``(setting, trial, name, text)``; a
+    setting not run in both has ``trial`` and ``name`` empty. With ``scale`` (how much each number varies,
+    :func:`spreads`), a float that differs only at rounding level is the same: those are returned apart, as
     ``(setting, trial, name, difference as a share of how much it varies)``. Without it, only nine digits count."""
     bad: list[tuple[str, int | None, str, str]] = []
     rounded: list[tuple[str, int, str, float]] = []
@@ -331,24 +386,17 @@ def _differences(before: Sample, after: Sample, scale: dict[str, float] | None =
             bad.append((key, None, "", f"{key}: not run in both"))
             continue
         for t, (ra, rb) in enumerate(zip(a, b)):
-            na, nb = _numbers(ra), _numbers(rb)
+            na, nb = _leaves(ra), _leaves(rb)
             for name in sorted(na.keys() | nb.keys()):
                 if name not in na or name not in nb:
                     bad.append((key, t, name, f"{key} trial {t} {name}: only in one"))
                     continue
                 x, y = na[name], nb[name]
-                if (math.isnan(x) and math.isnan(y)) or x == y:
-                    continue
-                gap = abs(x - y)  # not finite when either is not: a number that became infinite is never the same
-                if math.isfinite(gap) and gap <= ATOL + RTOL * abs(y):
-                    continue
-                spread = (scale or {}).get(name, 0.0)
-                # and of the number itself: one huge value of it in the sample (a stand-in for "no answer", say) widens
-                # its range so far that any change would fit in a millionth of it
-                if math.isfinite(gap) and spread > 0 and gap <= ROUNDING * min(spread, max(abs(x), abs(y))):
-                    rounded.append((key, t, name, gap / spread))
-                    continue
-                bad.append((key, t, name, f"{key} trial {t} {name}: {x:.12g} -> {y:.12g}"))
+                same, share = _same(x, y, (scale or {}).get(name) if scale is not None else None)
+                if same and share is not None:
+                    rounded.append((key, t, name, share))
+                elif not same:
+                    bad.append((key, t, name, f"{key} trial {t} {name}: {_shown(x)} -> {_shown(y)}"))
     return bad, rounded
 
 
@@ -398,8 +446,8 @@ def varying(first: Sample, again: Sample) -> set[tuple[str, int, str]]:
 
 
 def count_numbers(sample: Sample) -> int:
-    """How many numbers the sample holds (by setting, trial and name)."""
-    return sum(len(_numbers(r)) for rows in sample.values.values() for r in rows)
+    """How many values the sample holds (by setting, trial and name), every value compared (:func:`_differences`)."""
+    return sum(len(_leaves(r)) for rows in sample.values.values() for r in rows)
 
 
 def fast_enough(before_s: float, after_s: float, noise_s: float = 0.0) -> bool:
@@ -446,12 +494,15 @@ def can_afford_repeats(new_run_s: float, old_run_s: float, saves_on_study_s: flo
 
 async def confirm(root: Path, old_files: Any, new_files: Any, sample: Any, entry: dict[str, Any], after: Sample,
                   saves_on_study_s: float, *, before_s: float = 0.0, ignore: Any = frozenset(),
-                  guards_touched: Any = None) -> bool:
+                  guards_touched: Any = None, unchanged: Sample | None = None,
+                  seen: Comparison | None = None) -> bool:
     """The second look at a change that looked faster at first (one timing of each version is not a measurement of speed):
     the old and the new code are timed alternately (:func:`alternate`; ``sample(1)`` runs the sample once) and the change
     stays only when the timings do not overlap (:func:`clearly_faster`) and every run of the new code returns the same
-    numbers as its first run, ``after`` (``ignore``: the numbers that differ between runs of the same code, see
-    :func:`varying`). Skipped (returns True) when the repeats would cost more than the change saves
+    numbers (:func:`compare`) as ``unchanged``, the unchanged code's sample, how much each number varies taken from it
+    (its first run, ``after``, when none is given; ``ignore``: the numbers that differ between runs of the same code, see
+    :func:`varying`). ``seen`` (the first comparison's :class:`Comparison`) takes the most numbers and the largest share at
+    rounding level any repeat showed, so the record covers every comparison. Skipped (returns True) when the repeats would cost more than the change saves
     (:func:`can_afford_repeats`, on the wall time of a run of each version). ``guards_touched()`` lists the files FI judges the code by that
     the runs changed (``outcome`` is then ``aborted``). Sets ``outcome`` and ``reason`` of ``entry`` when the change is not
     kept, and ``repeats_old`` / ``repeats_new`` when it was timed again. Leaves the new code in place."""
@@ -470,8 +521,12 @@ async def confirm(root: Path, old_files: Any, new_files: Any, sample: Any, entry
     async def run_new() -> Any:
         _improve.restore(root, new_files)
         out = await sample(1)
-        if not out.failed and (bad := disagreements(after, out, ignore=ignore)):
-            out.failed = f"{len(bad)} number(s) of the sample changed, first: {bad[0]}"
+        if not out.failed:
+            found = compare(unchanged if unchanged is not None else after, out, ignore=ignore)
+            if found.bad:
+                out.failed = f"{len(found.bad)} number(s) of the sample changed, first: {found.bad[0]}"
+            elif seen is not None:
+                seen.rounded, seen.largest = max(seen.rounded, found.rounded), max(seen.largest, found.largest)
         return out
 
     try:

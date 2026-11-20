@@ -3640,7 +3640,7 @@ class RunChecksMixin:
                                                          f"more than the {noise_s:.3f} s two runs of the same code differ")
             elif not await _speed.confirm(root, best["files"], candidate, sample, entry, after,
                                           (before_s - after.seconds) / max(before_s, 1e-9) * study_now, before_s=before_s,
-                                          ignore=noisy,
+                                          ignore=noisy, unchanged=first, seen=same,
                                           guards_touched=lambda: _improve.changed(before_guard, _improve.guard_hashes(root))):
                 if entry.get("outcome") == "aborted":
                     _improve.put_back(root, saved)
@@ -3724,7 +3724,8 @@ class RunChecksMixin:
             new_full = await at_plan() if not old_full.failed else old_full
             # how much a number varies is taken from the sample too: on one setting of a study with no randomness a number
             # does not vary, and a difference at rounding level would count as a change there
-            bad = [] if new_full.failed else _speed.disagreements(old_full, new_full, ignore=ignore, reference=(first,))
+            found = _speed.compare(old_full, new_full, ignore=ignore, reference=(first,))
+            bad = [] if new_full.failed else found.bad
             if new_full.failed or bad:
                 why_full = (f"it could not be checked on a setting of the plan ({new_full.failed})" if new_full.failed
                             else f"on a setting of the plan {len(bad)} number(s) changed, first: {bad[0]}")
@@ -3737,12 +3738,14 @@ class RunChecksMixin:
             else:
                 record["full_check"] = {"cell": full, "passed": True, "old_s": round(old_full.seconds, 3),
                                         "new_s": round(new_full.seconds, 3)}
+                if found.rounded:
+                    record["full_check"]["rounding"] = {"numbers": found.rounded, "largest_share": found.largest}
                 for what, results in pending:
                     await asyncio.to_thread(_code_project.record_change, root, what, category="changed",
                                             results=results, log=log)
                 log.info("[improve] On a setting of the plan itself the sped-up simulation gives the same numbers (%s "
-                         "against %s).", _estimate.plain_duration(new_full.seconds),
-                         _estimate.plain_duration(old_full.seconds))
+                         "against %s)%s.", _estimate.plain_duration(new_full.seconds),
+                         _estimate.plain_duration(old_full.seconds), f"; {found.note()}" if found.rounded else "")
         record["sample_s_before"] = unchanged_s
         record["sample_s_after"] = best["sample"].seconds
         record["speedup"] = unchanged_s / max(best["sample"].seconds, 1e-9)

@@ -352,6 +352,59 @@ async def test_a_repeat_that_returns_other_numbers_or_touches_a_guarded_file_or_
     assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == old["simulate.py"]
 
 
+@pytest.mark.asyncio
+async def test_the_repeats_are_held_to_the_unchanged_code_and_their_rounding_is_recorded(tmp_path: Path) -> None:
+    """The repeats of the new code were compared with its own first run, and how much a number varies was taken from it;
+    what they differed by at rounding level was never recorded. They are now held to the unchanged code's sample, and the
+    first comparison's record takes the most numbers and the largest share any repeat showed."""
+    unchanged = sp.Sample(values={"s=1": [{"x": 1.0}], "s=2": [{"x": 5.0}], "s=3": [{"x": 11.0}]})
+
+    def runner(factor: float):
+        calls: list[int] = []
+
+        async def sample(repeats: int = 1) -> sp.Sample:
+            calls.append(1)
+            new = "A = 2" in (root / "code" / "simulate.py").read_text(encoding="utf-8")
+            t = REAL_GAIN[(len(calls) - 1) // 2] if new else BUSY_OLD[(len(calls) - 1) // 2]
+            values = {k: [{"x": r[0]["x"] * (factor if new else 1.0)}] for k, r in unchanged.values.items()}
+            return sp.Sample(seconds=t, times=[t], wall_s=0.1, values=values)
+        return sample
+
+    root, old, new, _after = _confirm_setup(tmp_path, None)
+    after = sp.Sample(seconds=0.7, times=[0.7, 0.75], wall_s=1.0, values=unchanged.values)
+    seen = sp.compare(unchanged, after)
+    assert seen.rounded == 0
+    assert await sp.confirm(root, old, new, runner(1 + 1e-8), {}, after, 1e6, unchanged=unchanged, seen=seen)
+    assert seen.rounded == 3 and 1e-8 < seen.largest < 1.2e-8
+    # repeats that drift past rounding level from the unchanged code are a changed number
+    entry: dict[str, Any] = {}
+    assert not await sp.confirm(root, old, new, runner(1 + 1e-5), entry, after, 1e6, unchanged=unchanged)
+    assert entry["outcome"] == "not kept" and "changed" in entry["reason"]
+
+
+def test_whole_numbers_yes_no_values_texts_and_infinities_are_compared_exactly() -> None:
+    """A whole number was turned into a float and allowed nine digits (1000000000 -> 1000000001 passed), and a yes/no
+    value or a text was never compared at all (False -> True passed). A number that became infinite, or an infinity that
+    changed sign, passed too, while an unchanged infinity was flagged. Only two floats may now differ, at rounding level;
+    every other value is the same only when it is equal."""
+    inf, nan = float("inf"), float("nan")
+
+    def judged(values: list[Any], first: Any) -> bool:
+        rows = {f"s={i}": [{"v": v}] for i, v in enumerate(values)}
+        moved = {**rows, "s=0": [{"v": first}]}
+        return not sp.disagreements(sp.Sample(values=rows), sp.Sample(values=moved))
+
+    assert not judged([1_000_000_000, 999_000_000, 1_001_000_000], 1_000_000_001)
+    assert not judged([False, True, False], True) and not judged(["control", "control"], "treated")
+    assert not judged([1, 2], True) and not judged(["1", 2], 1)  # a yes/no is not a 1, a text is not a number
+    assert judged([3, 2], 3.0) and judged([True, False], True) and judged(["a", "b"], "a")
+    assert judged([inf, 1.0, 2.0], inf) and judged([nan, 1.0, 2.0], nan)
+    for before, after in ((5.0, inf), (inf, 5.0), (-inf, inf), (5.0, nan), (nan, 5.0)):
+        assert not judged([before, 1.0, 9.0], after), (before, after)
+    # a text in a row counts as one of the sample's values
+    assert sp.count_numbers(sp.Sample(values={"k": [{"v": 1.0, "label": "a", "ok": True}]})) == 3
+
+
 def test_the_repeats_are_skipped_when_they_would_cost_more_than_the_change_saves() -> None:
     # four runs of each version, 300 s each, against a saving of 1000 s on the study: judged on the first look, as before
     assert not sp.can_afford_repeats(300.0, 300.0, 1000.0) and sp.can_afford_repeats(300.0, 300.0, 2400.0)
