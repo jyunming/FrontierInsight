@@ -98,7 +98,9 @@ fi tools bench score C:/fi_runs/bench                        # writes dev/evalua
 ```
 
 A code plant names its own `--find`/`--replace`: the code is the model's, different in every recording. R1 without
-`--find` multiplies the paper's first number with two or more decimals by 1.37. L1 is a fresh run of the task
+`--find` multiplies the paper's first number with two or more decimals by 1.37 (in its text, else in
+`paper/supplement.md`, where FI's tables of every setting are; the scorer reads the paper with its supplement). L1 is a
+fresh run of the task
 (`plant L1 --task Q11`, and `--control` for its control with a paper that was never retracted): forking from the
 literature step replaces the frozen protocol, which FI records as an amendment made after the results were seen. The
 default L1 source is about MMR and autism; for another task (Q4) give a retracted paper on its own topic with

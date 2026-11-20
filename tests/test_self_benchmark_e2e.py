@@ -290,10 +290,12 @@ def test_fi_catches_each_planted_error(bench: dict[str, Any], error: str, gate: 
     assert o["role"] == "planted" and o["valid"] is True, o
     assert o["let_through"] is False, (error, o["evidence_level"], o["flag_reasons"])
     if error == "R1":
-        # The planted number sits in FI's table of every setting, which FI fills from its records again before delivery:
-        # the paper delivered no longer states it, which is the error put right, not flagged.
+        # The planted number sits in FI's table of every setting (in the supplement that ships with the paper), which FI
+        # fills from its records again before delivery: the paper delivered no longer states it, which is the error put
+        # right, not flagged.
         planted = json.loads((runner.paths(bench["root"] / "R1")[1] / "plant.json").read_text(encoding="utf-8"))
-        paper = (runner.quest_root(bench["root"] / "R1") / "paper" / "paper.md").read_text(encoding="utf-8")
+        assert [e["file"] for e in planted["edits"]] == [plant.SUPPLEMENT], planted
+        paper = plant.delivered_text(runner.quest_root(bench["root"] / "R1"))
         assert planted["planted_value"] not in paper and planted["original_value"] in paper, planted
         return
     assert not o["would_publish"], (error, o["evidence_level"], o["flag_reasons"])
