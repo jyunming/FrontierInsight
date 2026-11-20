@@ -19,7 +19,7 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig,
     ProviderConfig,
 )
-from core.engine import Engine, _assertion_violations
+from core.engine import Engine, _assertion_violations, _assertion_warnings
 
 RMSE_MAX = {"result_assertions": [
     {"path": "rmse", "min": 0.0, "max": 10.0, "unit": "unitless"},
@@ -217,7 +217,9 @@ def _capped_state() -> dict:
 
 
 def test_engine_gate_reads_the_script_off_the_state() -> None:
-    assert [v.kind for v in _assertion_violations(_capped_state())] == ["clamped"]
+    # the cap is read off the state's script and said; it is not a violation (a cap is never a reason to send a run back)
+    assert _assertion_violations(_capped_state()) == []
+    assert [v.kind for v in _assertion_warnings(_capped_state())] == ["clamped"]
 
 
 def test_engine_gate_leaves_a_real_zero_alone() -> None:
@@ -226,8 +228,13 @@ def test_engine_gate_leaves_a_real_zero_alone() -> None:
     assert _assertion_violations(state) == []
 
 
-def test_a_capped_result_routes_back_to_repair(tmp_path: Path) -> None:
-    assert _engine(tmp_path)._route_after_execute_reflect(_capped_state()) == "retry"
+def test_a_capped_result_is_said_and_does_not_route_back_to_repair(tmp_path: Path) -> None:
+    """Which call is a cap is read from call names and literals, without the flow of the code (a study's own `minimum`
+    reads as one, a cap written another way is not seen), so it no longer sends the run back; a value outside its range
+    still does."""
+    eng = _engine(tmp_path)
+    assert eng._route_after_execute_reflect(_capped_state()) == "proceed"
+    assert eng._route_after_execute_reflect({**_capped_state(), "result_json": {"rmse": 1e6}}) == "retry"
 
 
 async def _reflect_prompt(eng: Engine, state: dict) -> tuple[str, dict]:
@@ -248,10 +255,11 @@ async def _reflect_prompt(eng: Engine, state: dict) -> tuple[str, dict]:
 @pytest.mark.asyncio
 async def test_repair_prompt_names_the_bound_and_forbids_the_cap(tmp_path: Path) -> None:
     """The model used to see rc=0 and nothing else, so it invented a bug."""
-    prompt, patch = await _reflect_prompt(_engine(tmp_path), _capped_state())
+    state = {**_capped_state(), "result_json": {"rmse": 1e6}}
+    prompt, patch = await _reflect_prompt(_engine(tmp_path), state)
     assert "IMPLAUSIBLE RESULT" in prompt
-    assert "rmse = 10 sits exactly on a bound" in prompt
-    assert "NEVER clamp" in prompt and "remove that cap" in prompt
+    assert "rmse = 1e+06 violates rmse must be [0, 10]" in prompt
+    assert "NEVER clamp" in prompt and "remove that cap" not in prompt
     assert patch["exec_reflect_iter"] == 1
 
 

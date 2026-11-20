@@ -1071,16 +1071,19 @@ def test_plan_of_gives_every_figure_the_settings_a_panel_may_hold_and_their_labe
 
 
 def _clamp_check(tmp_path: Path, body: str) -> list[Any]:
-    """The violations the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py."""
+    """The cap warnings the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py
+    (never a violation: a cap is said, not a reason to send the run back)."""
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     quest = _quest(tmp_path, _design(), body)
     state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
              "design": {"result_assertions": [{"path": "growth", "min": 0.4, "max": 1.0, "unit": "x"}]}}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
-    return _assertion_violations(Engine._in_force(stub, state))
+    checked = Engine._in_force(stub, state)
+    assert not [v for v in _assertion_violations(checked) if v.kind.startswith("clamped")]  # a cap never sends a run back
+    return _assertion_warnings(checked)
 
 
 def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_is_not_fis(tmp_path: Path) -> None:
@@ -1105,7 +1108,7 @@ def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> 
     derive.py and ``simulate`` as the trial code. ``growth`` is a trial result, ``gain`` a quantity derived from it."""
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     design = _design([_derived("gain")])
     design["result_assertions"] = [{"path": path, "min": 0.0, "max": 1.0, "unit": "x"}]
@@ -1113,7 +1116,9 @@ def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> 
     (quest / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
     state = {"result_json": {"s": {path: 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"), "design": design}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
-    return _assertion_violations(Engine._in_force(stub, state))
+    checked = Engine._in_force(stub, state)
+    assert not [v for v in _assertion_violations(checked) if v.kind.startswith("clamped")]  # a cap never sends a run back
+    return _assertion_warnings(checked)
 
 
 _CAP = "def derive_gain(table):\n    return min(table.mean('growth'), 1.0)\n"
@@ -1125,7 +1130,7 @@ def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path:
     # The state's design carries no protocol; the one in force (the frozen one) is merged in, and the split reads that.
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     full = _design([_derived("gain")])
     quest = _quest(tmp_path, full)
@@ -1133,7 +1138,8 @@ def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path:
     state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
              "design": {"result_assertions": [{"path": "growth", "min": 0.0, "max": 1.0, "unit": "x"}]}}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: full["protocol"])
-    assert [v.kind for v in _assertion_violations(Engine._in_force(stub, state))] == ["clamped"]
+    checked = Engine._in_force(stub, state)
+    assert _assertion_violations(checked) == [] and [v.kind for v in _assertion_warnings(checked)] == ["clamped"]
 
 
 def test_a_cap_in_derive_py_does_not_pin_a_result_the_trials_return(tmp_path: Path) -> None:

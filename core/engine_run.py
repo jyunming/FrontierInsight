@@ -1970,19 +1970,17 @@ class RunStageMixin:
             # value at the bound on the next pass so the gate would take it.
             # The repair has to be told that an honest null beats a plausible
             # number.
-            clamped = any(getattr(v, "kind", "") == "clamped" for v in implausible)
+            # A value on a constant the script caps at is a warning (engine_base._WARNING_KINDS), never sent here.
             self._log.warning(
                 "[execute_reflect] rc=0 but %d value(s) break the design's "
-                "declared bounds or are capped by the script%s — attempting repair (iter %d)",
+                "declared bounds — attempting repair (iter %d)",
                 len(implausible),
-                " (at least one is a capped number)" if clamped else "",
                 iters + 1,
             )
             rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
             stdout_for_prompt = (
                 "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
-                "but these values break the bounds the DESIGN declared for them, or are a number the script "
-                "capped rather than computed:\n"
+                "but these values break the bounds the DESIGN declared for them:\n"
                 + "\n".join(f"- {v.describe()}" for v in implausible[:10])
                 + "\n\nFind the cause before changing anything. If it is a bug "
                 "(wrong units, a factor of two, a sign error, a mis-set "
@@ -1991,10 +1989,8 @@ class RunStageMixin:
                 "unstable fit), that is a finding, not a bug: emit null for that "
                 "value and say why under \"why_missing\" (for example \"why_missing\": {\"<name>\": \"diverged\"}). "
                 "NEVER clamp, cap or clip a result to the bound or replace it "
-                "with any constant: a capped value is detected and rejected, and "
+                "with any constant: a capped value is reported as a capped number, and "
                 "it would state something false."
-                + ("\n\nA value above is capped by the script itself (at its bound, or at a constant the "
-                   "script caps that very quantity at, inside the range); remove that cap." if clamped else "")
                 + "\n\nRESULT_JSON was:\n"
                 f"{rj_preview}\n\nOriginal stdout tail:\n"
                 + exec_result.get("stdout_tail", "")[:1000]

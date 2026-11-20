@@ -63,15 +63,24 @@ def test_the_path_can_be_given_as_tokens_or_a_string() -> None:
     assert direct_caps('out = {"rmse": r}\n', "rmse") == set(), "no cap at all"
 
 
-def test_the_engine_sends_back_only_a_proven_cap() -> None:
+def test_a_cap_is_said_and_never_sends_the_engine_back() -> None:
+    """Which call is a cap is read from call names and literals, without the flow of the code: a finding of it, proven or
+    not, is a warning (run.log and the trace), never a reason to send the run back. A value outside its range still is."""
     from core.engine import _assertion_violations, _assertion_warnings
 
     design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 100}]}
     unproven = {"result_json": {"test": {"rmse": 10.0}}, "design": design,
                 "code": 'out = to_native({"test": {"rmse": min(r, 10.0)}})\nprint(json.dumps(out))\n'}
-    assert _assertion_violations(unproven) == [] and len(_assertion_warnings(unproven)) == 1
+    assert _assertion_violations(unproven) == [] and [w.kind for w in _assertion_warnings(unproven)] == ["clamped_unproven"]
     proven = {**unproven, "code": 'out = {"test": {"rmse": min(r, 10.0)}}\nprint(json.dumps(out))\n'}
-    assert len(_assertion_violations(proven)) == 1 and _assertion_warnings(proven) == []
+    assert _assertion_violations(proven) == [] and [w.kind for w in _assertion_warnings(proven)] == ["clamped"]
+    # a study's own function named `minimum`, unrelated to the result, reads as a cap: said, not a stop
+    own = {"result_json": {"rmse": 1.0}, "design": {"result_assertions": [{"path": "rmse", "min": 0, "max": 1}]},
+           "code": 'def minimum(a, b):\n    return a\nw = minimum(q, 1)\nout = {"rmse": r}\n'}
+    assert _assertion_violations(own) == [] and [w.kind for w in _assertion_warnings(own)] == ["clamped"]
+    # known positive: a value outside its declared range still sends the run back
+    outside = {**proven, "result_json": {"test": {"rmse": 150.0}}}
+    assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
 
 
 def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -> None:
