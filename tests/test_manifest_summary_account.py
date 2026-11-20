@@ -2,8 +2,10 @@
 
 Replayed on the s7 false-discovery quest: the analysis printed ``power_gain_values`` for one setting (m=2000, pi1=0.2) and,
 for the six other settings that have values, only ``by_setting/<setting>/power_gain/{mean, ci95, se}``. FI's record of those
-trials holds all the values, so the printed mean (and standard error) can be computed from it: equal within the rounding
-the printed digits carry, the analysis used the same trials and the setting is accounted for; different, it did not. A
+trials holds all the values, so the printed mean (and standard error) can be computed from it: equal to the precision of
+FI's record, the analysis used the same trials and the setting is accounted for; different, it did not, and a mean
+rounded to fewer digits is not FI's number either (a nominal level printed beside a setting fell within the rounding of
+its trials' mean). A
 setting with neither a list nor a summary stays short, and the three pi1 = 0 settings (power is undefined there by
 definition) owed nothing before and still owe nothing.
 
@@ -48,14 +50,14 @@ def _values(per_cell: dict[str, Any], key: str) -> list[float]:
 
 
 def _printed(per_cell: dict[str, Any]) -> dict[str, Any]:
-    """The analysis as s7's wrote it: one setting's values listed, the rest as mean / se per setting, rounded."""
+    """The analysis as s7's wrote it: one setting's values listed, the rest as mean / se per setting."""
     by_setting: dict[str, Any] = {}
     for m, pi1 in WITH_VALUES:
         key = f"m={m},pi1={pi1}"
         v = _values(per_cell, key)
         mean = sum(v) / len(v)
         sd = math.sqrt(sum((x - mean) ** 2 for x in v) / (len(v) - 1))
-        by_setting[key] = {"gain": {"mean": round(mean, 4), "se": sd / math.sqrt(len(v))}}
+        by_setting[key] = {"gain": {"mean": mean, "se": sd / math.sqrt(len(v))}}
     for m in GRID["m"]:
         by_setting[f"m={m},pi1=0.0"] = {"gain": None}
     return {"gain_values": _values(per_cell, "m=200,pi1=0.2"), "by_setting": by_setting}
@@ -88,7 +90,7 @@ def test_a_mean_computed_from_fewer_trials_is_a_disagreement() -> None:
     _, _, per_cell, _ = _study()
     rj = _printed(per_cell)
     v = sorted(_values(per_cell, "m=20,pi1=0.2"))[6:]  # the lowest tenth never reached the summary
-    rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"] = round(sum(v) / len(v), 4)
+    rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"] = sum(v) / len(v)
     found = _found(rj, per_cell)
     assert found and "m=20,pi1=0.2" in found[0] and "not the mean" in found[0], found
 
@@ -112,10 +114,41 @@ def test_a_trial_count_below_the_records_is_a_disagreement_and_the_true_count_is
     assert found and "number of trials" in found[0], found
 
 
-def test_the_rounding_allowance_comes_from_the_printed_digits() -> None:
-    assert math.isclose(rm._printed_digits_allowance(0.0088), 5e-5, rel_tol=1e-3)
-    assert rm._printed_digits_allowance(25) == 0.0
-    assert rm._printed_digits_allowance(0.40572700000000006) < 1e-10
+def test_the_allowance_is_the_records_precision_never_the_printed_digits() -> None:
+    assert rm._record_allowance(0.0088) < 1e-12  # 0.0088 stands for 0.0088, not for 0.00875 to 0.00885
+    assert rm._record_allowance(25) == 0.0
+    assert rm._record_allowance(0.40572700000000006) < 1e-10
+
+
+def test_a_mean_printed_with_fewer_digits_is_not_fis_number() -> None:
+    _, _, per_cell, _ = _study()
+    rj = _printed(per_cell)
+    rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"] = round(rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"], 4)
+    found = _found(rj, per_cell)
+    assert found and "m=20,pi1=0.2" in found[0] and "not the mean" in found[0], found
+
+
+def test_a_coarse_number_within_the_rounding_of_the_mean_is_not_the_mean() -> None:
+    # A one-digit number printed under the setting (a nominal level, another set's rounded mean) lay within half a unit
+    # of its last digit of the setting's mean, and was taken as the summary of its trials.
+    _, _, per_cell, _ = _study()
+    rj = _printed(per_cell)
+    mean = rj["by_setting"]["m=20,pi1=0.2"]["gain"]["mean"]
+    coarse = round(mean, 1)
+    assert coarse != mean and abs(coarse - mean) <= 0.05
+    rj["by_setting"]["m=20,pi1=0.2"]["gain"] = {"mean": coarse}
+    found = _found(rj, per_cell)
+    assert found and "m=20,pi1=0.2" in found[0] and "not the mean" in found[0], found
+
+
+def test_an_exact_mean_with_few_digits_is_still_the_mean() -> None:
+    # s7's means of 0/1 values over 5000 trials have few digits (0.0088) and are exactly the mean: still FI's number.
+    _, _, per_cell, _ = _study()
+    per_cell = {k: ({"gain": Counter({1.0: 44, 0.0: 5000 - 44})} if k == "m=20,pi1=0.2" else v)
+                for k, v in per_cell.items()}
+    rj = _printed(per_cell)
+    rj["by_setting"]["m=20,pi1=0.2"]["gain"] = {"mean": 0.0088}
+    assert _found(rj, per_cell) == []
 
 
 def test_a_summary_of_a_part_of_the_grid_is_not_read_as_the_setting() -> None:

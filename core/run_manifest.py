@@ -786,19 +786,18 @@ def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, li
 _SUMMARY_NAMES = {"mean": ("mean",), "se": ("se", "sem", "stderr"), "sd": ("sd", "std"), "n": ("n",)}
 
 
-def _printed_digits_allowance(printed: float) -> float:
-    """Half a unit of the last digit the analysis printed: the rounding the number carries. ``0.0088`` was printed to four
-    places, so it stands for anything within 0.00005; a whole number (a count) is exact. FI's own record keys a value to 12
-    significant digits (:func:`_tr_value_key`), so a mean computed from it carries that much too."""
-    from decimal import Decimal, InvalidOperation
+#: How far a printed summary may differ from the one FI computes from its record and still be that number: FI's record
+#: keeps each value to 12 significant digits (:func:`_tr_value_key`), so a mean computed from it carries that much.
+RECORD_PRECISION = 1e-11
 
+
+def _record_allowance(printed: float) -> float:
+    """How far a printed statistic may lie from FI's own and still be FI's number: the precision of FI's record, never
+    the digits the analysis chose to print. A mean printed as ``0.05`` stands for 0.05, not for anything from 0.045 to
+    0.055 (a nominal level printed beside a setting is not the mean of its trials); a whole number (a count) is exact."""
     if isinstance(printed, int):
         return 0.0
-    try:
-        exponent = Decimal(repr(float(printed))).as_tuple().exponent
-    except (InvalidOperation, ValueError):
-        return 0.0
-    return (0.5 * 10.0 ** int(exponent) if isinstance(exponent, int) else 0.0) + 1e-11 * abs(float(printed))
+    return RECORD_PRECISION * abs(float(printed))
 
 
 def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]]
@@ -846,8 +845,8 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
 def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
     """Whether a printed summary of a setting is that setting's own trials: ``None`` when it prints nothing FI can compute
     from its record (no mean), ``""`` when every statistic it prints equals the one FI computes from the record of those
-    trials within the rounding its digits carry, else the plain sentence of the first that does not. ``counts``: value ->
-    how many trials returned it (FI's record of the setting)."""
+    trials, to the record's own precision (:func:`_record_allowance`; a rounded print is not FI's number), else the plain
+    sentence of the first that does not. ``counts``: value -> how many trials returned it (FI's record of the setting)."""
     values: list[tuple[float, int]] = []
     for key, n in (counts or {}).items():
         try:
@@ -870,7 +869,7 @@ def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
     for stat in ("mean", "n", "sd", "se"):
         if stat not in printed or stat not in mine:
             continue
-        if not any(abs(float(printed[stat]) - c) <= _printed_digits_allowance(printed[stat]) for c in mine[stat]):
+        if not any(abs(float(printed[stat]) - c) <= _record_allowance(printed[stat]) for c in mine[stat]):
             return (f"its printed {words[stat]} is {printed[stat]:g}, which is not the {words[stat]} of FI's "
                     f"{n_trials} trial(s) there ({mine[stat][0]:g})")
     return ""
@@ -879,8 +878,8 @@ def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
 def _summaries_match_record(result_json: Any, metric_id: str, grid: dict[str, list[Any]],
                             recorded_by_cell: dict[str, Any] | None) -> bool:
     """Whether the analysis, which prints no per-trial list of ``metric_id``, prints at EVERY setting where FI's record holds
-    trials of it a mean that equals the mean of those trials (:func:`_summary_verdict`, within the rounding its digits
-    carry), and no setting owes undefined trials the summary cannot show. Such a mean is FI's own number (a summary the frame
+    trials of it a mean that equals the mean of those trials (:func:`_summary_verdict`, to the precision
+    of FI's record), and no setting owes undefined trials the summary cannot show. Such a mean is FI's own number (a summary the frame
     computes from the record, or one the analysis derives from it), checked against the trials themselves: the claim is
     backed without a list to count. A setting with no printed mean, a different one, or undefined trials owed, is not."""
     record = _record_by_setting(recorded_by_cell, metric_id, grid) if recorded_by_cell and grid else {}
@@ -982,7 +981,7 @@ def _account(result_json: Any, metric_id: str, grid: dict[str, list[Any]], recor
             short.append({"setting": label(("cells", cell)), "listed": (0, 0), "recorded": of_cell(cell), "owed": want,
                           "cells": frozenset({cell})})
     # A setting whose per-trial list the analysis did not print but whose summary it did: that summary is held to the same
-    # statistics computed from FI's own record of the setting's trials. Equal (within the rounding its digits carry) and no
+    # statistics computed from FI's own record of the setting's trials. Equal (to the record's own precision) and no
     # undefined trial owed: the analysis used these trials, so the setting is accounted for. Different: a real disagreement,
     # kept, and said. No summary: the setting stays short as before.
     summarised = 0
