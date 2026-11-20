@@ -5,10 +5,10 @@ SIR quest (limit 4 pages) the paper ended on 5 pages, page 5 holding two entries
 of that list. ``over_page_limit`` fired twice, the writer was sent into whole-
 paper rewrites, and they changed a correct citation and added unsupported ones.
 
-The review, having counted the draft's pages, moves FI's own parts to
-``paper/supplement.md`` (core/supplement.py, tests/test_page_supplement.py); the
-Further reading is the last of them and moves whole: no model is called, the body
-is not rewritten, and no page is lost (the supplement and the exports list it).
+Every paper now keeps its Further reading in ``paper/supplement.md`` (core/supplement.py,
+tests/test_page_supplement.py), with or without a page limit, before its pages are counted: it moves whole, the
+References keep one line saying how many pages it lists and where, no model is called, the body is not rewritten, and
+no page is lost (the supplement and the exports list it).
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from core.engine import (
     _web_labels_cited,
     further_reading_listed,
 )
+from core import supplement as sup
 from generation.paper import PaperGenerator
 from tests.test_page_limit import _engine, _quiet_log, _review
 
@@ -145,23 +146,23 @@ def test_a_list_that_alone_overflows_moves_whole_and_nothing_is_sent_back(
     # No finding, no rewrite counted, no iteration used.
     assert patch["review"]["must_flag_hits"] == []
     assert "page_limit_rewrites" not in patch and "iteration" not in patch
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4, "supplement": ["further_reading"]}
+    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}, "the list was out before the pages were counted"
+    assert sup.moved(tmp_path) == ["further_reading"]
     assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
-    # The paper on disk lost the list and nothing else; the supplement lists every entry.
+    # The paper on disk lost the list and nothing else but one line under the References; the supplement lists every
+    # entry.
     now = paper.read_text(encoding="utf-8")
     assert _labels(now) == []
-    assert now == written[:written.index("## Further reading")].rstrip() + "\n"
+    assert now == written[:written.index("## Further reading")].rstrip() + "\n\n" + sup.further_pointer(3) + "\n"
     supplement = (tmp_path / "paper" / "supplement.md").read_text(encoding="utf-8")
     assert _labels(supplement) == ["W1", "W2", "W3"]
-    # One line says what moved.
-    moved = [w for w in warnings if "supplement" in w]
-    assert len(moved) == 1, warnings
-    assert "Further reading" in moved[0] and "5 pages" in moved[0] and "renders to 4 pages" in moved[0]
+    # Nothing was over the limit, so no page-limit warning.
+    assert not [w for w in warnings if "over the limit" in w], warnings
     # The reviewer reads the paper as it now is, with the supplement after it.
     reviewed = [p for p in prompts if "Text [1]." in p]
     assert reviewed and all("The supplement that ships with this paper" in p for p in reviewed)
-    # The paper itself is rendered again; no trial file is left behind.
-    assert [p.name for p, _ in seen] == ["paper.md", "paper.md"]
+    # The paper itself is rendered once, without the list; no trial file is left behind.
+    assert [len(_labels(t)) for _, t in seen] == [0] and [p.name for p, _ in seen] == ["paper.md"]
     assert not (tmp_path / ".fi" / "page_check_trial.md").exists()
 
 
@@ -175,22 +176,25 @@ def test_a_body_that_alone_is_over_the_limit_is_recorded_and_not_sent_back(
     seen = _by_entries(monkeypatch, spills_at=None)  # 5 pages however few entries it lists
     eng._trim_body_to_fit = lambda *a, **k: asyncio.sleep(0, None)  # type: ignore[method-assign]
     patch = _review(eng, tmp_path)
-    # The list still moves (the paper is shorter); the rest is over and on record, never sent back.
-    assert _labels(paper.read_text(encoding="utf-8")) == []
+    # The list moves (every paper keeps it in the supplement); the rest is over and on record, never sent back.
+    assert _labels(paper.read_text(encoding="utf-8")) == [] and sup.moved(tmp_path) == ["further_reading"]
     assert patch["review"]["must_flag_hits"] == []
     assert "page_limit_rewrites" not in patch and "iteration" not in patch
-    assert patch["review"]["page_limit"]["supplement"] == ["further_reading"]
-    assert [len(_labels(t)) for _, t in seen] == [3, 0], "one render after the move, and no more"
+    assert "supplement" not in patch["review"]["page_limit"], "the page check itself had nothing more to move"
+    assert [len(_labels(t)) for _, t in seen] == [0], "one render, after the move, and no more"
 
 
 @pytest.mark.parametrize("panel", [False, True])
-def test_a_draft_within_the_limit_is_not_touched_and_rendered_once(tmp_path: Path, monkeypatch, panel: bool) -> None:
+def test_a_draft_within_the_limit_is_rendered_once_and_loses_only_its_list(
+    tmp_path: Path, monkeypatch, panel: bool,
+) -> None:
     eng = _engine(tmp_path, panel=panel)
     written = _paper(3)
     paper = _put(tmp_path, written)
     seen = _by_entries(monkeypatch, spills_at=None, over=4)  # 4 pages whatever it lists
     patch = _review(eng, tmp_path)
-    assert paper.read_text(encoding="utf-8") == written
+    assert paper.read_text(encoding="utf-8") == (
+        written[:written.index("## Further reading")].rstrip() + "\n\n" + sup.further_pointer(3) + "\n")
     assert len(seen) == 1
     assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}
     assert patch["review"]["must_flag_hits"] == []
@@ -217,24 +221,21 @@ def test_a_list_the_engine_did_not_write_is_not_touched(tmp_path: Path, monkeypa
     assert paper.read_text(encoding="utf-8") == written and len(seen) == 1
 
 
-def test_a_render_that_fails_after_the_move_leaves_the_paper_as_written(tmp_path: Path, monkeypatch) -> None:
+def test_a_render_that_cannot_be_counted_keeps_the_list_in_the_supplement(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     written = _paper(4)
     paper = _put(tmp_path, written)
-    renders: list[int] = []
 
-    async def flaky(self, paper_path, state):  # noqa: ANN001, ARG001
-        n = len(_labels(Path(paper_path).read_text(encoding="utf-8")))
-        renders.append(n)
-        if len(renders) == 2:
-            return None  # the render could not be counted
-        return {"pages": 5 if n >= 3 else 4, "words": 1, "last_page_lines": 3, "last_page_empty": 0.9}
+    async def failing(self, paper_path, state):  # noqa: ANN001, ARG001
+        return None  # the render could not be counted
 
-    monkeypatch.setattr(Engine, "_measure_draft_pages", flaky)
+    monkeypatch.setattr(Engine, "_measure_draft_pages", failing)
     _quiet_log(eng)
     patch = _review(eng, tmp_path)
-    assert paper.read_text(encoding="utf-8") == written
-    assert not (tmp_path / "paper" / "supplement.md").exists()
+    # the list moved before the render and needs none: it stays in the supplement, the line under References points there
+    now = paper.read_text(encoding="utf-8")
+    assert _labels(now) == [] and sup.further_pointer(4) in now
+    assert _labels((tmp_path / "paper" / "supplement.md").read_text(encoding="utf-8")) == ["W1", "W2", "W3", "W4"]
     assert patch["review"]["must_flag_hits"] == []
 
 
@@ -301,7 +302,7 @@ def test_a_real_render_moves_the_list_and_the_pdf_lists_what_paper_md_does(tmp_p
     written = f"# A Draft\n\n## Abstract\n\nShort.\n\n## Results\n\n{body}\n\n## Further reading\n\n{entries}\n"
     paper = _put(tmp_path, written)
     record = asyncio.run(eng._page_limit_review({}, paper))  # type: ignore[arg-type]
-    assert record is not None and record.get("supplement") == ["further_reading"], record
+    assert record is not None and sup.moved(tmp_path) == ["further_reading"], record
     assert record["pages"] <= 2 and resolve_page_limit(eng.config) == 2
     now = paper.read_text(encoding="utf-8")
     assert _labels(now) == []

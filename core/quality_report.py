@@ -1666,7 +1666,7 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
               ("code_findings", "Open points in the code that produced the results"),
-              ("page_limit", "Page limit"))
+              ("page_limit", "Page limit and supplement"))
     parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
     check = records.get("paper_check") or {}
     unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
