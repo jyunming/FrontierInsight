@@ -83,6 +83,29 @@ def test_a_cap_is_said_and_never_sends_the_engine_back() -> None:
     assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
 
 
+def test_a_capped_value_on_its_bound_in_every_setting_is_said_and_never_sends_the_run_back() -> None:
+    """The same capped value on the declared bound in two settings: FI's record says it sits on a constant the script caps
+    at, whatever else the bound finds. The cap is a warning, the value on its bound in many settings a warning too, and
+    nothing sends the run back; a value past the bound still does."""
+    from core.engine import _assertion_violations, _assertion_warnings
+
+    design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 10}]}
+    both = {"by_setting": {"n=10": {"rmse": 10.0}, "n=20": {"rmse": 10.0}}}
+    for code in ('out = {"by_setting": {}}\nfor s in S:\n    out["by_setting"][s] = {"rmse": min(raw, 10)}\n'
+                 'print(json.dumps(out))\n',
+                 'x = min(raw, 10)\nprint(json.dumps({"by_setting": {"n=10": {"rmse": x}, "n=20": {"rmse": x}}}))\n'):
+        state = {"result_json": both, "design": design, "code": code}
+        assert _assertion_violations(state) == []
+        assert [w.kind for w in _assertion_warnings(state)] == ["clamped", "clamped"]
+    # no cap in the code: on the bound in both settings is said, not a stop
+    plain = {"result_json": both, "design": design, "code": "print(json.dumps(out))\n"}
+    assert _assertion_violations(plain) == [] and [w.kind for w in _assertion_warnings(plain)] == ["at_bound"]
+    # known positive: past the bound still sends the run back
+    past = {"result_json": {"by_setting": {"n=10": {"rmse": 12.0}, "n=20": {"rmse": 10.0}}}, "design": design,
+            "code": 'x = min(raw, 10)\nprint(json.dumps(out))\n'}
+    assert [v.kind for v in _assertion_violations(past)] == ["out_of_range"]
+
+
 def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -> None:
     # The inline alias: test_metrics is placed under "test" by the printed literal, so its cap is proven there.
     code = 'test_metrics = {"rmse": min(e, 10.0)}\nprint("RESULT_JSON:", json.dumps({"test": test_metrics}))\n'
