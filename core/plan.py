@@ -1562,7 +1562,8 @@ def _returns_lines(protocol: Any) -> list[str]:
         lines.append(f"- `{m['id']}`: {_RESULT_ROLE_WORDS.get(str(m['role']), str(m['role']))}"
                      + ("; may change with " + ", ".join(f"`{s}`" for s in dep) if isinstance(dep, list) and dep else
                         "; changes with none of the settings" if isinstance(dep, list) else "")
-                     + ("; computed afterwards from the runs" if m.get("returned") == "afterwards" else ""))
+                     + ("; computed afterwards from the runs" if m.get("returned") == "afterwards" else "")
+                     + _shape_words(m) + _bound_words(m.get("range")))
     for d in protocol.get("derived") or []:
         if isinstance(d, dict) and d.get("id"):
             lines.append(f"- `{d['id']}`: " + ("a theory or reference value FI computes from `" + str(d["formula"]) + "`"
@@ -1578,6 +1579,47 @@ def _returns_lines(protocol: Any) -> list[str]:
     for c in protocol.get("comparisons") or []:
         if isinstance(c, dict) and c.get("result"):
             lines.append(f"- compared: `{c['result']}` between values of `{c.get('across')}` ({c.get('how', 'difference')})")
+    return lines + [""] + _system_lines(protocol.get("system"))
+
+
+def _shape_words(metric: dict[str, Any]) -> str:
+    """``; a curve along `time` in each run`` for a result the plan states is a curve or a map; nothing for a number."""
+    along = [str(a) for a in metric.get("along") or []] if isinstance(metric.get("along"), list) else []
+    if metric.get("shape") == "curve" and along:
+        return f"; a curve along `{along[0]}` in each run"
+    if metric.get("shape") == "map" and len(along) == 2:
+        return f"; a map over `{along[0]}` and `{along[1]}` in each run"
+    return ""
+
+
+def _bound_words(rng: Any) -> str:
+    """``; by its physics never below 0 (why)`` for a physical bound FI asked after the plan; nothing otherwise."""
+    if not isinstance(rng, dict) or rng.get("physical") is not True:
+        return ""
+    unit = f" {rng['unit']}" if str(rng.get("unit") or "").strip() else ""
+    lo, hi = rng.get("min"), rng.get("max")
+    said = (f"between {lo:g} and {hi:g}{unit}" if lo is not None and hi is not None else
+            f"never below {lo:g}{unit}" if lo is not None else f"never above {hi:g}{unit}" if hi is not None else "")
+    why = str(rng.get("reason") or "").strip()
+    return f"; by its physics {said}" + (f" ({why.rstrip('.')})" if why else "") if said else ""
+
+
+def _system_lines(system: Any) -> list[str]:
+    """The studied system the plan states (``protocol.system``), one line per entry and one per link, in plain words."""
+    if not isinstance(system, dict) or not isinstance(system.get("parts"), list) or not system["parts"]:
+        return []
+    kinds = {"part": "a part", "boundary": "a boundary", "source": "a source"}
+    names = {str(x.get("id")): str(x.get("name") or x.get("id")) for x in system["parts"] if isinstance(x, dict)}
+    lines = ["The studied system:"]
+    for x in system["parts"]:
+        if isinstance(x, dict):
+            carries = [str(c) for c in x.get("carries") or []]
+            lines.append(f"- {x.get('name')} (`{x.get('id')}`, {kinds.get(str(x.get('kind') or 'part'), 'a part')})"
+                         + (": " + ", ".join(f"`{c}`" for c in carries) if carries else ""))
+    for link in system.get("links") or []:
+        if isinstance(link, dict):
+            lines.append(f"- {names.get(str(link.get('from')), link.get('from'))} to {names.get(str(link.get('to')), link.get('to'))}"
+                         + (f": {link['what']}" if str(link.get("what") or "").strip() else ""))
     return lines + [""]
 
 

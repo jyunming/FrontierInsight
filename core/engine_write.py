@@ -656,6 +656,9 @@ class WriteStageMixin:
             self._log.warning("[code] could not try code/ in a clean environment: %s", exc)
 
     async def _node_write(self, state: QuestState) -> QuestState:
+        from . import setup_flow as _setup_flow  # FI's set-up figure (drawn at the analysis) into figures/; never raises
+
+        _setup_flow.place_quietly(self.quest_root, self._log)
         await self._check_code_project()
         # A rewrite reads the paper on disk: what the page check moved to the supplement comes back first, so the writer
         # is given its own Limitations paragraphs and FI's parts as they were, and the next review decides again.
@@ -944,7 +947,13 @@ class WriteStageMixin:
     async def _ensure_abstract(self, state: QuestState, markdown: str) -> str:
         """``markdown`` with an ``## Abstract`` (core/paper_sections.py). A draft without one is not sent whole again: the
         Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
-        log says so."""
+        log says so. An ``## Abstract`` heading with no body under it (only a comment, say: the writer's note to itself) is
+        taken out first, so the paper never carries an empty Abstract beside its real one."""
+        emptied = _paper_sections.without_bodiless_abstract(markdown)
+        if emptied != markdown:
+            self._log.info("[write] the draft had an Abstract heading with nothing under it (only a comment); it was "
+                           "taken out")
+            markdown = emptied
         if not _paper_sections.missing_abstract(markdown):
             return markdown
         self._log.warning("[write] the draft has no Abstract; asking for it from the draft")

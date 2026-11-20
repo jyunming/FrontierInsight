@@ -38,6 +38,7 @@ by its file name.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from typing import Any, Literal
 
@@ -66,9 +67,16 @@ class Range(_Strict):
     min: float | None = None
     max: float | None = None
     reason: str = ""
+    #: The bound is one the physics of the quantity fixes (a fraction cannot be above 1), as the plan's model answered FI's
+    #: question after the plan (core/contract_parts.py); a value on it is allowed, a value beyond it is a fault.
+    physical: bool = False
+    unit: str = ""  # the unit the bound is given in, where the answer states one
 
     @model_validator(mode="after")
     def _ordered(self) -> "Range":
+        for end in (self.min, self.max):
+            if end is not None and not math.isfinite(end):
+                raise ValueError(f"the range has an end that is not a finite number ({end})")
         if self.min is not None and self.max is not None and self.min > self.max:
             raise ValueError(f"the range's min {self.min} is above its max {self.max}")
         return self
@@ -101,6 +109,16 @@ class Result(_Strict):
     exact: bool | None = None
     family: str = ""
     undefined_when: dict[str, Any] = Field(default_factory=dict)
+    #: What one run returns for it: one ``number`` (the default), a ``curve`` along one name of :attr:`along`, or a ``map``
+    #: over two. A name is ``time``, a position (``x``, ``y``, ``z``) in the studied system, or another quantity one run steps
+    #: through named in a word or two; never a setting of the plan (FI records a number for each of its values itself).
+    shape: Literal["number", "curve", "map"] = "number"
+    along: tuple[str, ...] = ()
+
+
+#: The names a curve or a map may run along that FI offers by name: time, and a position in the studied system.
+SHAPE_AXES = ("time", "x", "y", "z")
+SHAPES = ("number", "curve", "map")
 
 
 class Comparison(_Strict):
@@ -144,6 +162,43 @@ class Figure(_Strict):
     x_scale: Literal["linear", "log"] | None = None
     y_scale: Literal["linear", "log"] | None = None
     declared: bool = True
+    #: The reference lines the figure draws beside what it shows: each the id of a reference quantity of the plan, or of a
+    #: result it shows whose plan gives a reference or a known value (:func:`reference_ids`).
+    references: tuple[str, ...] = ()
+
+
+#: The kinds of entry of the studied system: a ``part`` (a body, a region, a component), a ``boundary`` (a wall, an edge,
+#: an interface where a condition is set) and a ``source`` (what drives the system).
+SYSTEM_KINDS = ("part", "boundary", "source")
+#: The most entries a description of the studied system may have (a set-up drawing with more is not readable).
+MAX_SYSTEM_PARTS = 16
+
+
+class SystemPart(_Strict):
+    """One entry of the studied system. ``carries``: the ids of the plan's settings, constants and results that belong to it;
+    every number shown for it is read from the plan by those ids, never typed beside its name."""
+
+    id: str
+    name: str
+    kind: Literal["part", "boundary", "source"] = "part"
+    carries: tuple[str, ...] = ()
+
+
+class SystemLink(_Strict):
+    """Two entries of the studied system that touch or feed each other, with what passes between them in plain words."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    source: str = Field(alias="from")
+    to: str
+    what: str = ""
+
+
+class System(_Strict):
+    """The studied system as the plan states it (``protocol.system``), the structure a set-up drawing is made from."""
+
+    parts: tuple[SystemPart, ...] = ()
+    links: tuple[SystemLink, ...] = ()
 
 
 def figure_file(planned: Any) -> str:
@@ -210,6 +265,7 @@ class StudyContract(_Strict):
     search: dict[str, Any] | None = None  # a find-the-best-design study's search block, as the plan gives it
     shared_draws: bool = False  # trial t uses the same seed at every setting, so comparisons are paired
     labels: dict[str, str] = Field(default_factory=dict)
+    system: System | None = None  # the studied system (protocol.system); None: the plan does not state one
     notes: dict[str, Any] = Field(default_factory=dict)  # free text: shown to the models, read by no check
     gaps: tuple[str, ...] = ()  # what the plan gave that could not be placed, for the paper to say
 
@@ -271,7 +327,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", "dependent_map", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", "dependent_map", "system", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
@@ -477,7 +533,9 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "returned": m.get("returned") if m.get("returned") in ("each_run", "afterwards") else None,
-                "range": ranges.get(rid) or m.get("range"),
+                "range": _joined_range(_finite_range(ranges.get(rid), rid, "the plan's bound on", gaps),
+                                       _finite_range(m.get("range"), rid, "the range on", gaps)),
+                **_shape_of(m, p, gaps),
                 "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
                 "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "exact": m.get("exact") if isinstance(m.get("exact"), bool) else None,
                 "family": str(m.get("family") or ""),
@@ -526,14 +584,14 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         if own is not None:
             fig = own
         elif isinstance(decl, dict):
-            fig = _first_valid(Figure, {"id": f"fig{i}", **{k: v for k, v in decl.items() if k in ("shows", "x", "series", "panels", "x_scale", "y_scale")},
+            fig = _first_valid(Figure, {"id": f"fig{i}", **{k: v for k, v in decl.items() if k in ("shows", "x", "series", "panels", "x_scale", "y_scale", "references")},
                                        "file": name}, gaps, f"figure {i}")
         elif isinstance(f, dict):
             fig = _first_valid(Figure, {"id": f"fig{i}", **f}, gaps, f"figure {i}")
         else:
             fig = Figure(id=f"fig{i}", file=str(f), declared=False)
         if fig is not None:
-            figures.append(fig)
+            figures.append(_with_known_references(fig, results, derived, gaps))
     if any(not f.declared for f in figures):
         gaps.append("the plan names " + str(sum(not f.declared for f in figures))
                     + " figure(s) only by file name, so what they show is not declared")
@@ -576,7 +634,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                              assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"), gaps, "the topic map")),
             "model": _mapping(p.get("model")) if isinstance(p.get("model"), dict) else
             ({"summary": p["model"]} if isinstance(p.get("model"), str) else {}),
-            "search": _mapping(p.get("optimisation")) or None, "shared_draws": p.get("shared_draws") is True}
+            "search": _mapping(p.get("optimisation")) or None, "shared_draws": p.get("shared_draws") is True,
+            "system": _system_of(p, gaps)}
     if isinstance(p.get("steps"), list) and "steps" not in base["model"]:
         base["model"] = {**base["model"], "steps": p["steps"]}  # steps written beside the model belong to it
     parts = {"results": tuple(results), "comparisons": tuple(comparisons), "derived": tuple(derived),
@@ -587,6 +646,417 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         # A reference between parts that does not hold (a comparison of an undeclared result, a figure along a name
         # that is not a setting): drop the part that holds it, say so, and keep the rest.
         return _without_broken_links(base, parts, gaps, e)
+
+
+def _not_finite(r: Any) -> bool:
+    """Whether the range ``r`` has an end given as a number that is not a finite one (NaN, infinity)."""
+    return isinstance(r, dict) and any(isinstance(v, (int, float)) and not isinstance(v, bool) and not math.isfinite(v)
+                                       for v in (r.get("min"), r.get("max")))
+
+
+def _finite_range(r: Any, rid: str, what: str, gaps: list[str]) -> Any:
+    """``r``, or ``None`` with a gap when an end of it is not a finite number: the range check cannot hold a value to such
+    an end (core/plausibility.py drops it), so the contract does not hold the range either."""
+    if not _not_finite(r):
+        return r
+    gaps.append(f"{what} result `{rid}` has an end that is not a finite number; the result is held to no such bound")
+    return None
+
+
+def _joined_range(asserted: Any, own: Any) -> Any:
+    """The range of a result: the plan's bound on it (``result_assertions``) and the range on its own entry (a physical bound
+    FI asked after the plan, or one the plan wrote there), both held: the values inside both. Either alone is as given."""
+    if not isinstance(asserted, dict) or not isinstance(own, dict):
+        return asserted or own
+    lows = [v for v in (asserted.get("min"), own.get("min")) if _is_number(v)]
+    highs = [v for v in (asserted.get("max"), own.get("max")) if _is_number(v)]
+    reason = "; ".join(str(r).strip() for r in (asserted.get("reason"), own.get("reason")) if str(r or "").strip())
+    if lows and highs and max(lows) > min(highs):
+        return asserted  # the two do not overlap: the plan's own bound is the one read (FI's check refuses such an answer)
+    return {"min": max(lows) if lows else None, "max": min(highs) if highs else None, "reason": reason,
+            "physical": own.get("physical") is True, "unit": str(own.get("unit") or asserted.get("unit") or "")}
+
+
+def _is_number(v: Any) -> bool:
+    """A finite number (the range check reads no other: core/plausibility.py drops a NaN or an infinite end)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _shape_of(m: dict[str, Any], protocol: dict[str, Any], gaps: list[str]) -> dict[str, Any]:
+    """``{"shape", "along"}`` of a declared result as its entry states it (a number when it states none). A shape that does not
+    hold to the plan (:func:`check_shape`) is read as a number, said in ``gaps``; the result itself is kept."""
+    if m.get("shape") in (None, "", "number") and not m.get("along"):
+        return {}
+    problems = check_shape(str(m.get("id")), {"shape": m.get("shape"), "along": m.get("along")}, protocol)
+    if problems:
+        gaps.append(f"the shape of result `{m.get('id')}` could not be used ({problems[0]}); it is read as one number")
+        return {}
+    return {"shape": m["shape"], "along": tuple(m.get("along") or ())}
+
+
+def reference_ids(results: Any, derived: Any, shows: Any = None) -> list[str]:
+    """What a figure may draw as a reference line: a reference quantity of the plan (a result or derived quantity of role
+    ``reference``), and, among the results it ``shows`` (all of them when ``None``), each whose plan gives a reference or a
+    known value."""
+    shown = None if shows is None else set(shows)
+    out = [r.id for r in results if r.role == "reference"] + [d.id for d in derived if d.role == "reference"]
+    out += [r.id for r in results if (shown is None or r.id in shown) and r.role != "reference"
+            and (isinstance(r.reference, dict) and r.reference or isinstance(r.known_value, dict) and r.known_value)]
+    return list(dict.fromkeys(out))
+
+
+def _with_known_references(fig: Figure, results: list[Result], derived: list[Derived], gaps: list[str]) -> Figure:
+    """``fig`` with only the reference lines FI holds for it (:func:`reference_ids`); one it does not is left out, said in
+    ``gaps``, and the figure is kept."""
+    if not fig.references:
+        return fig
+    known = reference_ids(results, derived, fig.shows)
+    lost = [r for r in fig.references if r not in known]
+    if not lost:
+        return fig
+    gaps.append(f"figure `{fig.file}` names {', '.join('`' + r + '`' for r in lost)} as a reference line, which the plan "
+                "declares as no reference of what it shows; that line is left out")
+    return fig.model_copy(update={"references": tuple(r for r in fig.references if r in known)})
+
+
+def _system_of(protocol: dict[str, Any], gaps: list[str]) -> System | None:
+    """The studied system the plan states (``protocol.system``), held to the plan's ids (:func:`check_system`); one that does
+    not hold is left out, said in ``gaps``. ``None`` when the plan states none, or states that there is no set-up to draw."""
+    value = protocol.get("system")
+    if value is None or (isinstance(value, dict) and not value.get("parts")):
+        return None
+    problems = check_system(value, protocol)
+    if problems:
+        gaps.append(f"the studied system the plan states could not be used ({problems[0]}); it is left out")
+        return None
+    return _first_valid(System, value, gaps, "the studied system")
+
+
+# --- what a plan states about a result's shape, its physical bound and the studied system -------------------------------
+
+_CODE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: A number written as its own word in a name ("layer 2", "0.5 mm gap"); a digit inside a word ("H2O") is not one.
+_NUMBER_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_.])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![A-Za-z0-9_])")
+
+
+def _grid_and_inside(protocol: dict[str, Any]) -> tuple[list[str], list[str]]:
+    grid = settings_between_runs(protocol)[0]
+    inside = search_in_each_run(protocol) or protocol.get("in_each_run")
+    return ([str(k) for k in grid] if isinstance(grid, dict) else [],
+            [str(k) for k in inside] if isinstance(inside, dict) else [])
+
+
+def check_shape(rid: str, row: Any, protocol: Any) -> list[str]:
+    """Why the shape an answer states for the result ``rid`` (``row``'s ``shape`` and ``along``) cannot be used; empty when it
+    can, or when it states none (a number). Held to the plan's own names: a ``curve`` runs along one thing a single run steps
+    through and a ``map`` over two: ``time``, a position (:data:`SHAPE_AXES`), or another such quantity named in a word or two
+    (a frequency). No setting of the plan is one of them: a setting the runs differ in has one value in a run, and for a value
+    every run goes through together FI already records a number for each value when the result changes with it
+    (``depends_on``); nor is a result or a constant of the plan."""
+    p = protocol if isinstance(protocol, dict) else {}
+    row = row if isinstance(row, dict) else {}
+    shape, along = row.get("shape"), row.get("along")
+    if shape in (None, "", "number"):
+        return [] if along in (None, [], ()) else [f"`{rid}`: a number runs along nothing; give `along` only for a curve or a map"]
+    if shape not in SHAPES:
+        return [f"`{rid}`: `shape` must be one of {', '.join(SHAPES)}"]
+    grid, inside = _grid_and_inside(p)
+    allowed = list(SHAPE_AXES)
+    want = 1 if shape == "curve" else 2
+    if not isinstance(along, list) or len(along) != want or not all(isinstance(a, str) for a in along) or len(set(along)) != want:
+        return [f"`{rid}`: a {shape} needs `along`, a list of {'one name' if want == 1 else 'two different names'} of "
+                f"{', '.join(allowed)}"]
+    out = []
+    fixed = [str(k) for key in ("constants", "thresholds", "numerical_settings") if isinstance(p.get(key), dict) for k in p[key]]
+    results = [str(m["id"]).strip() for key in ("metrics", "derived") for m in p.get(key) or []
+               if isinstance(m, dict) and _ident(m.get("id"))]
+    for a in along:
+        if a in grid:
+            out.append(f"`{rid}`: `{a}` is a setting the runs differ in, so one run has one value of it and returns one number "
+                       f"for `{rid}` there (FI draws such numbers along `{a}` itself): answer `number`, or the thing it runs "
+                       f"along inside one run ({', '.join(allowed)}, or another named in a word or two)")
+        elif a in allowed:
+            continue
+        elif a in inside:
+            out.append(f"`{rid}`: every run goes through the values of `{a}` together, and FI records a number of `{rid}` for "
+                       f"each of them when it changes with `{a}` (list `{a}` in its depends_on): that is a number, not a curve; "
+                       f"a curve runs along what one run steps through ({', '.join(allowed)}, or another named in a word or two)")
+        elif a in results or a in fixed:
+            out.append(f"`{rid}`: `{a}` is a {'number the study reports' if a in results else 'constant of the plan'}, not "
+                       f"something a run steps through; use {', '.join(allowed)}, or another such thing named in a word or two")
+        elif not _plain_word(a):
+            out.append(f"`{rid}`: `along` names what a run steps through in a word or two, with no number (`{a}` is not)")
+    return out
+
+
+def _plain_word(text: str) -> bool:
+    """A name of a quantity a run steps through: one to three words of letters (underscores allowed), no number of its own."""
+    words = text.replace("_", " ").split()
+    return 1 <= len(words) <= 3 and len(text) <= 40 and all(w.isalpha() for w in words)
+
+
+def _plan_bound(design: dict[str, Any], rid: str) -> dict[str, Any] | None:
+    """The plan's own bound on the result ``rid``: its ``result_assertions`` entry by that path, else a range on its entry that
+    FI did not ask for."""
+    for a in design.get("result_assertions") if isinstance(design.get("result_assertions"), list) else []:
+        if isinstance(a, dict) and str(a.get("path") or "").strip() == rid and (_is_number(a.get("min")) or _is_number(a.get("max"))):
+            return a
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    for m in p.get("metrics") or []:
+        if isinstance(m, dict) and m.get("id") == rid and isinstance(m.get("range"), dict) and m["range"].get("physical") is not True:
+            return m["range"]
+    return None
+
+
+def _known_numbers(design: dict[str, Any], rid: str) -> list[tuple[str, float]]:
+    """The values the plan itself says the result ``rid`` takes: its known true value, and the expected value of each check
+    that measures exactly it, each with where it is written."""
+    from . import metric_spec
+
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    fixed = metric_spec.fixed_numbers(p)
+    out: list[tuple[str, float]] = []
+    for m in p.get("metrics") or []:
+        if isinstance(m, dict) and m.get("id") == rid and isinstance(m.get("known_value"), dict):
+            v = metric_spec.fixed_value(m["known_value"].get("true_value"), fixed)
+            if v is not None:
+                out.append(("its known true value", v))
+    for o in p.get("oracles") if isinstance(p.get("oracles"), list) else []:
+        if isinstance(o, dict) and _ident(o.get("measure")) == rid and _is_number(o.get("expected")):
+            out.append((f"the expected value of the check `{o.get('name')}`", float(o["expected"])))
+    return out
+
+
+def check_bound(rid: str, bound: Any, design: Any) -> list[str]:
+    """Why the physical bound an answer states for the result ``rid`` cannot be used; empty when it can, or when it states
+    none (``None``). A bound gives ``min`` and/or ``max`` (numbers, ``min`` not above ``max``) and ``why``. It is held to the
+    plan's own facts about the result: the values the plan says it takes lie inside it, it overlaps the plan's own bound on
+    it, and its ``unit``, where both are given, is the result's declared ``physical_unit``. Nothing is judged by its words."""
+    if bound is None:
+        return []
+    design = design if isinstance(design, dict) else {}
+    if not isinstance(bound, dict):
+        return [f"`{rid}`: `bound` must be a mapping with `min` and/or `max`, or null"]
+    lo, hi = bound.get("min"), bound.get("max")
+    out = []
+    if (lo is not None and not _is_number(lo)) or (hi is not None and not _is_number(hi)):
+        return [f"`{rid}`: the bound's `min` and `max` must be finite numbers (or null for no bound on that side)"]
+    if lo is None and hi is None:
+        return [f"`{rid}`: a bound gives `min`, `max` or both; answer `bound`: null when physics fixes none"]
+    if lo is not None and hi is not None and lo > hi:
+        return [f"`{rid}`: the bound's `min` {lo} is above its `max` {hi}"]
+    if not (isinstance(bound.get("why"), str) and bound["why"].strip()):
+        out.append(f"`{rid}`: say in `why` what in the physics fixes the bound")
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    declared = next((m.get("physical_unit") for m in p.get("metrics") or [] if isinstance(m, dict) and m.get("id") == rid
+                     and str(m.get("physical_unit") or "").strip()), None)
+    unit = bound.get("unit")
+    if declared is not None and isinstance(unit, str) and unit.strip() and "".join(unit.split()) != "".join(str(declared).split()):
+        out.append(f"`{rid}`: the plan gives `{rid}` in `{declared}`, but the bound is in `{unit}`; give the bound in `{declared}`")
+    for where, v in _known_numbers(design, rid):
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            out.append(f"`{rid}`: {where} is {v:g}, outside the bound; a physical bound holds every value the quantity can take, "
+                       "so correct the bound, or answer null if physics fixes none")
+    own = _plan_bound(design, rid)
+    if own is not None:
+        olo, ohi = own.get("min"), own.get("max")
+        if (lo is not None and _is_number(ohi) and ohi < lo) or (hi is not None and _is_number(olo) and olo > hi):
+            out.append(f"`{rid}`: the plan's own bound on it is {olo if _is_number(olo) else '-inf'} to "
+                       f"{ohi if _is_number(ohi) else 'inf'}, which lies outside the physical bound; correct it, or answer null")
+    return out
+
+
+def is_code_name(name: Any) -> bool:
+    """Whether ``name`` is written as a name in code rather than in words: one token of letters, digits and underscores
+    with an underscore or a digit in it (``full_grid``, ``sweep2``)."""
+    return isinstance(name, str) and bool(_CODE_NAME.fullmatch(name)) and ("_" in name or any(c.isdigit() for c in name))
+
+
+def titles_to_ask(protocol: Any) -> dict[str, str]:
+    """The sub-studies and the groups of results (a result's ``family``) whose name is a name in code (:func:`is_code_name`)
+    and that have no reader name in ``protocol.labels`` yet, each with what it is: a figure or a paper would print the code
+    name. In the plan's order."""
+    p = protocol if isinstance(protocol, dict) else {}
+    labels = p.get("labels") if isinstance(p.get("labels"), dict) else {}
+    out: dict[str, str] = {}
+    taken = set(system_names(p))  # a name that is also a setting's, a constant's or a result's id keeps that one's label
+    parts = settings_between_runs(p)[1]
+    for sub in parts if isinstance(parts, list) else []:
+        name = sub.get("name") if isinstance(sub, dict) else None
+        if is_code_name(name) and name not in taken and not str(labels.get(name) or "").strip():
+            out.setdefault(name, "a sub-study")
+    for m in p.get("metrics") or []:
+        name = m.get("family") if isinstance(m, dict) else None
+        if is_code_name(name) and name not in taken and not str(labels.get(name) or "").strip():
+            out.setdefault(name, "a group of results")
+    return out
+
+
+def group_names(protocol: Any) -> set[str]:
+    """The names of the plan's sub-studies and of its groups of results (a result's ``family``) that are no setting's,
+    constant's or result's id: the labels of these are titles."""
+    p = protocol if isinstance(protocol, dict) else {}
+    parts = settings_between_runs(p)[1]
+    out = {str(s["name"]) for s in parts if isinstance(s, dict) and isinstance(s.get("name"), str)} if isinstance(parts, list) else set()
+    out |= {str(m["family"]) for m in p.get("metrics") or [] if isinstance(m, dict) and isinstance(m.get("family"), str)}
+    return out - set(system_names(p))
+
+
+def check_title(name: str, title: Any) -> list[str]:
+    """Why ``title``, the plain title an answer gives the sub-study or group ``name``, cannot be used; empty when it can:
+    words a scientist would write, not a name in code, not the name itself written again, and no number in it (a number a
+    title typed would be one FI does not hold)."""
+    if not isinstance(title, str) or not title.strip():
+        return [f"`{name}` needs a plain title"]
+    text = " ".join(title.split())
+    if len(text) > 80:
+        return [f"`{name}`: the title is longer than 80 characters; shorten it"]
+    if "_" in text or is_code_name(text) or text.lower().replace(" ", "_") == name.lower():
+        return [f"`{name}`: \"{text}\" is the name in code again; give the title a scientist would write in a paper"]
+    if _NUMBER_IN_TEXT.search(text):
+        return [f"`{name}`: the title \"{text}\" has a number in it; FI states every number from the plan by its id, so "
+                "write the title without it (for example \"at a fixed noise\")"]
+    return []
+
+
+def system_names(protocol: Any) -> list[str]:
+    """The ids an entry of the studied system may carry: the plan's settings (those the runs differ in, those every run goes
+    through together, the numerical settings), its constants and thresholds, its declared results and derived quantities."""
+    p = protocol if isinstance(protocol, dict) else {}
+    out: list[str] = []
+    grid, inside = _grid_and_inside(p)
+    out += grid + inside
+    for key in ("numerical_settings", "constants", "thresholds"):
+        if isinstance(p.get(key), dict):
+            out += [str(k) for k in p[key]]
+    for key in ("metrics", "derived"):
+        out += [str(m["id"]).strip() for m in p.get(key) or [] if isinstance(m, dict) and _ident(m.get("id"))]
+    return list(dict.fromkeys(out))
+
+
+def _plain_name(text: Any) -> str | None:
+    """Why ``text`` is not a plain name for an entry or a link (``None`` when it is): text, short, with no number in it."""
+    if not isinstance(text, str) or not text.strip():
+        return "needs a plain `name`"
+    if len(text) > 80:
+        return "has a name longer than 80 characters"
+    if _NUMBER_IN_TEXT.search(text):
+        return (f"has a number in its words (\"{text.strip()}\"); every number comes from the plan by the id in `carries`, so "
+                "write the name without it")
+    return None
+
+
+def check_system(value: Any, protocol: Any) -> list[str]:
+    """Why ``value``, the studied system an answer or the plan states, cannot be used; empty when it can, or when it states
+    there is none (``None``, or no parts). ``parts``: each an ``id`` (a name in code, once), a plain ``name`` with no number
+    in it, a ``kind`` of :data:`SYSTEM_KINDS` and ``carries``, ids of the plan (:func:`system_names`). ``links``: each
+    ``from`` and ``to``, two different entries, and ``what`` passes between them in plain words."""
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        return ["`system` must be a mapping with `parts` and `links`, or null when the study has no set-up to draw"]
+    parts, links = value.get("parts"), value.get("links", [])
+    unknown_keys = [k for k in value if k not in ("parts", "links")]
+    out = [f"`system` has `{k}`, which is not `parts` or `links`" for k in unknown_keys]
+    if parts in (None, []):
+        return out
+    if not isinstance(parts, list) or not all(isinstance(x, dict) for x in parts):
+        return out + ["`system.parts` must be a list of entries, each with `id`, `name`, `kind` and `carries`"]
+    if len(parts) > MAX_SYSTEM_PARTS:
+        out.append(f"`system.parts` has {len(parts)} entries; at most {MAX_SYSTEM_PARTS}, so join the smaller ones")
+    names = system_names(protocol)
+    ids: list[str] = []
+    for i, part in enumerate(parts, 1):
+        pid = part.get("id")
+        if not isinstance(pid, str) or not _CODE_NAME.fullmatch(pid):
+            out.append(f"part {i} needs an `id`, a name in code (letters, digits and underscores)")
+            continue
+        if pid in ids:
+            out.append(f"`{pid}` is given twice; each part has its own id")
+        ids.append(pid)
+        why = _plain_name(part.get("name"))
+        if why:
+            out.append(f"part `{pid}` {why}")
+        if part.get("kind", "part") not in SYSTEM_KINDS:
+            out.append(f"part `{pid}`: `kind` must be one of {', '.join(SYSTEM_KINDS)}")
+        carries = part.get("carries", [])
+        if not isinstance(carries, list) or not all(isinstance(c, str) for c in carries):
+            out.append(f"part `{pid}`: `carries` must be a list of the plan's names")
+        else:
+            bad = [c for c in carries if c not in names]
+            if bad:
+                out.append(f"part `{pid}` carries {', '.join('`' + c + '`' for c in bad)}, which the plan does not declare "
+                           f"(it declares {', '.join(names[:40]) or 'nothing'})")
+        extra = [k for k in part if k not in ("id", "name", "kind", "carries")]
+        if extra:
+            out.append(f"part `{pid}` has {', '.join('`' + k + '`' for k in extra)}; an entry has only `id`, `name`, `kind` and "
+                       "`carries` (a number goes in by its plan id in `carries`)")
+    if not isinstance(links, list) or not all(isinstance(x, dict) for x in links):
+        return out + ["`system.links` must be a list of entries, each with `from`, `to` and `what`"]
+    for i, link in enumerate(links, 1):
+        a, b = link.get("from"), link.get("to")
+        if a not in ids or b not in ids:
+            out.append(f"link {i} must join two part ids ({', '.join(ids)})")
+        elif a == b:
+            out.append(f"link {i} joins `{a}` to itself")
+        what = link.get("what")
+        if what not in (None, "") and _plain_name(what):
+            out.append(f"link {i} {_plain_name(what)}")
+        extra = [k for k in link if k not in ("from", "to", "what")]
+        if extra:
+            out.append(f"link {i} has {', '.join('`' + k + '`' for k in extra)}; a link has only `from`, `to` and `what`")
+    return out
+
+
+def held_assertions(design: Any) -> list[dict[str, Any]]:
+    """The plan's ``result_assertions`` with the range on each declared result held too, for the range check
+    (core/plausibility.py) to hold every run to: a physical bound FI asked after the plan, or a range the plan wrote on the
+    entry. One bound per result: every entry of the plan's own ``result_assertions`` on the same path and the range are
+    joined into one (the tightest limit on each side, every reason), so a value beyond them gives one finding, not one per
+    bound. A value may sit on a side of the joined bound when a bound that sets that side's limit says so (a physical bound,
+    or a plan entry with ``may_equal_bound``): both sides, ``may_equal_bound``; one side only, ``may_equal: ["min"]`` or
+    ``["max"]``. A range that does not overlap the plan's own bounds leaves them as they are, and a range with an end that
+    is not a finite number is held to nothing."""
+    design = design if isinstance(design, dict) else {}
+    p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+    out = [dict(a) if isinstance(a, dict) else a for a in design.get("result_assertions") or []]
+    for m in p.get("metrics") or []:
+        r = m.get("range") if isinstance(m, dict) else None
+        rid = _ident(m.get("id")) if isinstance(m, dict) else None
+        if rid is None or not isinstance(r, dict) or _not_finite(r):
+            continue  # a range with an end that is not a finite number is held to nothing (the contract says so in a gap)
+        lo, hi = (r.get("min") if _is_number(r.get("min")) else None), (r.get("max") if _is_number(r.get("max")) else None)
+        if (lo is None and hi is None) or (lo is not None and hi is not None and lo > hi):
+            continue
+        physical, reason = r.get("physical") is True, str(r.get("reason") or "").strip()
+        unit = str(m.get("physical_unit") or r.get("unit") or "")
+        mine = [i for i, a in enumerate(out) if isinstance(a, dict) and str(a.get("path") or "").strip() == rid
+                and (_is_number(a.get("min")) or _is_number(a.get("max"))) and not _not_finite(a)]
+        # every bound on this result, the plan's own entries and the range, with whether a value may sit on it
+        sources = [(a.get("min") if _is_number(a.get("min")) else None, a.get("max") if _is_number(a.get("max")) else None,
+                    a.get("may_equal_bound") is True, str(a.get("reason") or "").strip()) for a in (out[i] for i in mine)]
+        sources.append((lo, hi, physical, reason))
+        lows, highs = [(s[0], s[2]) for s in sources if s[0] is not None], [(s[1], s[2]) for s in sources if s[1] is not None]
+        jlo, jhi = (max(v for v, _ in lows) if lows else None), (min(v for v, _ in highs) if highs else None)
+        if mine and jlo is not None and jhi is not None and jlo > jhi:
+            continue  # they do not overlap: the plan's own bounds are the ones held (FI's check refuses such an answer)
+        # a side may be reached when a bound that sets its kept limit says so (a physical bound: its physics)
+        sides = [side for side, limit, pairs in (("min", jlo, lows), ("max", jhi, highs))
+                 if limit is not None and any(v == limit and ok for v, ok in pairs)]
+        kept = [side for side, limit in (("min", jlo), ("max", jhi)) if limit is not None]
+        joined = {**(out[mine[0]] if mine else {"path": rid}), "min": jlo, "max": jhi,
+                  "unit": str((out[mine[0]].get("unit") if mine else "") or unit),
+                  "reason": "; ".join(dict.fromkeys(s[3] for s in sources if s[3])),
+                  "may_equal_bound": bool(kept) and sides == kept}
+        joined.pop("may_equal", None)
+        if sides and sides != kept:
+            joined["may_equal"] = sides
+        if mine:
+            out[mine[0]] = joined
+            out = [a for i, a in enumerate(out) if i not in mine[1:]]
+        else:
+            out.append(joined)
+    return out
 
 
 _ONE = {"derived": "derived", "comparisons": "comparison", "figures": "figure"}
@@ -759,7 +1229,8 @@ def undeclared_names(design: Any, not_asked: list[str] | None = None) -> dict[st
     uses them, at most :data:`MAX_NAMES`; the names past that are added to ``not_asked`` when it is given."""
     design = design if isinstance(design, dict) else {}
     p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
-    known = {n.lower() for n in _declared_names(p)} | _KNOWN_WORDS
+    # a sub-study's or a group's reader name in the labels is a title, not a number
+    known = {n.lower() for n in _declared_names(p) | group_names(p)} | _KNOWN_WORDS
     found: dict[str, str] = {}
 
     def take(name: str, where: str) -> None:

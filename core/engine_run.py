@@ -694,10 +694,12 @@ class RunStageMixin:
         result_before_check = result
         result, failed_script = await self._results_match_run(state, result, failed_script, split)
         result_check_sent_back = ran_with_results and result is not result_before_check
-        figures = sorted(
+        from . import setup_flow as _setup_flow
+
+        figures = _setup_flow.without(self.quest_root, sorted(  # the run's own figures: FI's set-up figure is not one
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
-        ) if (self.quest_root / "figures").is_dir() else []
+        ) if (self.quest_root / "figures").is_dir() else [])
         # What the primary run's figures say of themselves; the replicates below write derived.json again.
         primary_record = self._primary_figure_record = _analysis_frame.read_record(self.quest_root)
         raw_result_json = _extract_result_json(result.stdout)
@@ -1246,8 +1248,12 @@ class RunStageMixin:
         figures FI's own notes ask to rename: each must draw the numbers its record held."""
         done: QuestState = {"refine_layout": [], "layout_missed": [], "layout_not_redrawn": []}
         fig_dir = self.quest_root / "figures"
-        figures = sorted(f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES) \
-            if fig_dir.is_dir() else []
+        from . import setup_flow as _setup_flow
+
+        # FI's set-up figure is drawn again by FI at the next write, never by the model's redraw
+        figures = _setup_flow.without(self.quest_root, sorted(
+            f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES)
+            if fig_dir.is_dir() else [])
         data = sorted(
             str(f.relative_to(self.quest_root)).replace("\\", "/")
             for root in (self.quest_root / "data" / "results", self.quest_root / "data")
@@ -2288,13 +2294,15 @@ class RunStageMixin:
         return patch
 
     def _list_figures(self) -> list[str]:
+        from . import setup_flow as _setup_flow
+
         fdir = self.quest_root / "figures"
         if not fdir.is_dir():
             return []
-        return sorted(
+        return _setup_flow.without(self.quest_root, sorted(
             p.name for p in fdir.iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
-        )
+        ))
 
     def _gather_collected_text(self, state: QuestState, *, limit: int = 12) -> str:
         """Concatenate the web/data content the collector gathered (full

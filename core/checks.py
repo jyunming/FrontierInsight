@@ -1328,7 +1328,8 @@ CHECKS: tuple[Check, ...] = (
           'survey quests); others are not embedded'),
     Check('abstract_missing', 'core.paper_sections', 'missing_abstract',
           'write', 'model_text', 'repair',
-          'scientific paper without a bodied ## Abstract; an Abstract is asked for from the draft once'),
+          'scientific paper without a bodied ## Abstract (a comment is not a body; an Abstract heading with none is '
+          'taken out); an Abstract is asked for from the draft once'),
     Check('paper_citation_names_no_source', 'core.engine', '_finalize_paper_sources',
           'write', 'own_record', 'strip',
           'citation numbers that name no source in the prior-work block are removed; engine writes '
