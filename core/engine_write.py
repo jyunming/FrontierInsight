@@ -656,6 +656,9 @@ class WriteStageMixin:
             self._log.warning("[code] could not try code/ in a clean environment: %s", exc)
 
     async def _node_write(self, state: QuestState) -> QuestState:
+        from . import setup_flow as _setup_flow  # FI's set-up figure (drawn at the analysis) into figures/; never raises
+
+        _setup_flow.place_quietly(self.quest_root, self._log)
         await self._check_code_project()
         # A rewrite reads the paper on disk: what the page check moved to the supplement comes back first, so the writer
         # is given its own Limitations paragraphs and FI's parts as they were, and the next review decides again.

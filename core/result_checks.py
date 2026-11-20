@@ -32,6 +32,7 @@ from . import code_review as _code_review
 from .contract import figure_file
 from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
+from . import setup_flow as _setup_flow
 
 #: Why a quantity a failing test is about is left out, as the must-fix hit for a paper that quotes it says it. FI holds no record
 #: that tells a wrong value from a missing one: only the study run again with a repair says more, and only when it changed numbers.
@@ -300,7 +301,8 @@ class ResultChecksMixin:
         from . import engine as _e
 
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
-        return sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+        found = sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+        return _setup_flow.without(self.quest_root, found)  # type: ignore[attr-defined]  # FI's set-up figure is no result
 
     def _no_figures_standing(self, state: Any) -> list[Found]:
         try:
@@ -399,6 +401,7 @@ class ResultChecksMixin:
             reported |= _degenerate.keys_in(value)
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
         figures = sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+        figures = _setup_flow.without(self.quest_root, figures)  # type: ignore[attr-defined]
         drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
         found = _degenerate.quantity_problems(
