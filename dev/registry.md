@@ -235,7 +235,7 @@ same PR that adds, splits or renames one.
   `Engine._hold_code_runs` pauses it around the improve loop, the speed-up and the finding repairs, which commit each
   try with their own words.
 - `core/improve.py` — the improve loop and the ratchet: one edit per round to the simulation against the protocol's
-  criteria. `parse_edit` / `check_edit` (the edit refused before it runs: another file, not found once, does not
+  criteria. `parse_edit` / `check_edit` (the edit refused before it runs: another file (a bare file name is read as the one allowed path with that name, by `edited_path`; the prompts list files as `code/` paths, `editable_line`), not found once, does not
   parse, `normalized` unchanged = print/comment-only, a version already tried by `fingerprint`, a check's expected
   value or a criterion's target `planted`, `_measure_exprs` changed = the checked number worked out differently,
   `_asks_for_a_setting` = a new comparison with a check's setting), `guard_hashes` / `guard_bytes` / `put_back` (the files a round's run must not change),

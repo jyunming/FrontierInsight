@@ -26,7 +26,7 @@ $history_block
 
 ## The simulation's code
 
-The files you may change: $editable. Every other file (the analysis script, FI's own files, the protocol) is out of
+The files you may change, each by the path to give as the edit's "file", exactly as listed: $editable. Every other file (the analysis script, FI's own files, the protocol) is out of
 reach, and a change to one is refused.
 
 $code_block
@@ -51,4 +51,4 @@ Rules:
 
 Reply with JSON only, nothing before or after it:
 
-{"file": "simulate.py", "find": "<the exact text to replace>", "replace": "<the text that replaces it>", "why": "<one sentence: what was wrong and which check this should make better>"}
+{"file": "code/simulate.py", "find": "<the exact text to replace>", "replace": "<the text that replaces it>", "why": "<one sentence: what was wrong and which check this should make better>"}

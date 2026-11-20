@@ -310,7 +310,7 @@ class ImproveStageMixin:
                     criteria_block=_improve.criteria_block(countable, protocol),
                     values_block="\n".join(f"- {part}" for part in _improve.values_line(best["rows"]).split("; ")),
                     history_block=_improve.history_block(record["rounds"]),
-                    editable=", ".join(allowed) or "(none)",
+                    editable=_improve.editable_line(allowed),
                     code_block=_improve.code_block(files, allowed),
                     rounds_left=f"This is round {used} of {limit}.",
                 )
@@ -342,10 +342,10 @@ class ImproveStageMixin:
                         f"improve round {used} refused before it ran ({why}); nothing was changed", log=self._log)
                     self._improve_save(record)
                     continue
-                name = _improve.edited_path(edit)  # `simulate.py`, or `<package>/model.py` for the model's package
+                name = _improve.edited_path(edit, allowed)  # `simulate.py`, or `<package>/model.py` for the model's package
                 candidate = {**files, name: new_text}
                 tried.add(_improve.fingerprint(candidate))
-                entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit), ran=True)
+                entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit, name), ran=True)
                 _improve.restore(root, candidate)
                 saved = _improve.guard_bytes(root)
                 tree = _improve.tree_bytes(root)  # code/ as the round starts, git's settings and hooks included

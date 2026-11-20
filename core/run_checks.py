@@ -3631,7 +3631,7 @@ class RunChecksMixin:
             allowed = _improve.editable(root)
             prompt = self._prompts["improve_speed"].substitute(  # type: ignore[attr-defined]
                 topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
-                history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
+                history_block=_improve.history_block(record["rounds"]), editable=_improve.editable_line(allowed),
                 code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
             from . import skeleton as _skeleton
 
@@ -3662,10 +3662,10 @@ class RunChecksMixin:
                 last_wall_s = time.monotonic() - round_started
                 entry["wall_s"] = round(last_wall_s, 3)
                 continue
-            name = _improve.edited_path(edit)
+            name = _improve.edited_path(edit, allowed)
             candidate = {**files, name: new_text}
             tried.add(_improve.fingerprint(candidate))
-            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit))
+            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit, name))
             _improve.restore(root, candidate)
             saved = _improve.guard_bytes(root)
             before_guard = _improve.guard_hashes(root)
