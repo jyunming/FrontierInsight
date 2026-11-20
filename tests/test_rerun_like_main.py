@@ -292,17 +292,37 @@ def test_a_rerun_through_the_trial_runner_that_crashes_or_runs_out_of_time_is_co
 
     caplog.set_level(logging.INFO)
     root = _delivered_by_fi(tmp_path, cut_last=False)
-    monkeypatch.setattr(rerun_check, "PROGRESS_EVERY_S", 1.0)  # the "still running" line, as the main run says it
     broken = _repaired(root, tmp_path, "c0", "def run_trial(cell, trial_id, seed):\n    raise ValueError('broken')\n")
     v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, broken, PROTOCOL, 120, None, at_once=2))
     assert v.status == "could_not" and v.crashed and "ValueError" in v.why and not v.timed_out
-    slow = _repaired(root, tmp_path, "c1", "import time\n\ndef run_trial(cell, trial_id, seed):\n"
-                                           "    time.sleep(60 if cell['a'] == 3 else 0)\n    return {'y': 1.0}\n")
-    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, slow, PROTOCOL, 8, None, at_once=2))
+    # The study's time runs out before its last setting: the trial runner records that setting's trials as cut off. The
+    # runner's own answer is stood in for (no real wait on a clock): the real run of the repair, with the last setting's
+    # trials then marked as the runner marks the ones its time limit cut off, handed back only once the rerun has said
+    # where it is, as the main run says it.
+    monkeypatch.setattr(rerun_check, "PROGRESS_EVERY_S", 0.01)
+    real = trial_runner.run_trials
+
+    def said() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "still running" in r.getMessage()]
+
+    async def cut_short(*a: Any, **k: Any) -> Any:
+        run = await real(*a, **k)
+        for c in run.cells:
+            if c.key == "a=3":
+                c.rows = [{"trial": r["trial"], "seed": r.get("seed"), "status": "failed", "reason": trial_runner.OUT_OF_TIME}
+                          for r in c.rows]
+        for _ in range(500):  # at most 5 s; the first line comes after 0.01 s
+            if said():
+                break
+            await asyncio.sleep(0.01)
+        return run
+
+    monkeypatch.setattr(trial_runner, "run_trials", cut_short)
+    slow = _repaired(root, tmp_path, "c1", SIM + "# repaired\n")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, slow, PROTOCOL, 120, None, at_once=2))
     # a setting the delivered run ran and the rerun did not reach is neither a change nor "unchanged"
     assert v.status == "could_not" and v.timed_out and not v.crashed and "did not finish" in v.why, v
-    said = [r.getMessage() for r in caplog.records if "still running" in r.getMessage()]
-    assert said and "settings done" in said[-1], said
+    assert said() and "settings done" in said()[-1], said()
 
 
 def test_other_seeds_than_the_delivered_runs_are_refused_before_anything_runs(tmp_path: Path) -> None:
@@ -401,6 +421,59 @@ def test_only_a_lasting_could_not_is_kept(tmp_path: Path, monkeypatch: pytest.Mo
     record["rerun_calls"] = 0
     asyncio.run(engine._rerun_one(issue, record, {}, {}))
     assert len(judged) == 3
+
+
+def test_a_kept_could_not_is_not_reused_once_another_file_the_rerun_reads_changed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same repaired code with another frozen protocol (what each run is given) or other files under ``inputs/`` would
+    run other trials: the answer kept for it is not reused (old key: the code, the delivered results and the time only)."""
+    from core import frozen_protocol
+    from tests.test_rerun_check import _engine_with_code
+
+    engine, root, issue, record = _engine_with_code(tmp_path)
+    engine.config.execution.timeout_s = 900
+    judged: list[int] = []
+
+    async def judge(*a: Any, **k: Any) -> Verdict:
+        judged.append(1)
+        return Verdict("could_not", "the repaired code did not run to the end (KeyError: x)", mode="whole study", crashed=True)
+
+    async def ask(*a: Any, **k: Any) -> dict[str, str]:
+        return {"simulate.py": "def run_cell(cell):\n    return {'q': 1.0}  # repaired\n"}
+
+    async def passes(issue: Any, copy_dir: Path) -> tuple[bool, str]:
+        return True, ""
+
+    async def no_refusal(*a: Any, **k: Any) -> str:
+        return ""
+
+    issue["file"] = record["issues"]["F-1"]["file"] = "simulate.py"
+    (root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {'q': 1.0}\n", encoding="utf-8")
+    monkeypatch.setattr(rerun_check, "judge", judge)
+    engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
+    engine._repair_passes_own_test = passes  # type: ignore[method-assign,assignment]
+    engine._repair_small_run_refusal = no_refusal  # type: ignore[method-assign,assignment]
+
+    def check() -> None:
+        record["rerun_calls"] = 0
+        asyncio.run(engine._rerun_one(issue, record, {}, {}))
+
+    check()
+    assert judged == [1] and len(record["rerun_could_not"]) == 1  # crashed: kept (asked once more, the same code)
+    check()
+    assert judged == [1]  # nothing else changed: the kept answer is used
+    frozen = frozen_protocol.frozen_path(root)
+    data = json.loads(frozen.read_text(encoding="utf-8"))
+    data["protocol"] = {**data["protocol"], "in_each_run": {"steps": 200}}
+    frozen.write_text(json.dumps(data), encoding="utf-8")
+    check()
+    assert len(judged) == 2  # another frozen protocol: run again
+    check()
+    assert len(judged) == 2
+    (root / "inputs").mkdir(exist_ok=True)
+    (root / "inputs" / "table.csv").write_text("x\n1\n", encoding="utf-8")
+    check()
+    assert len(judged) == 3  # another file under inputs/: run again
 
 
 def test_a_rerun_that_will_not_fit_is_not_started_by_the_gate_nor_its_small_run(

@@ -185,6 +185,33 @@ def analysis_only(files: list[str] | set[str] | tuple[str, ...]) -> bool:
     return bool(files) and all(Path(f).name in ANALYSIS_FILES and "/" not in f for f in files)
 
 
+def inputs_of(quest_root: Path | str) -> dict[str, str | None]:
+    """The hash of every file of the quest, other than the repaired code, that a rerun of the whole study reads
+    (:func:`_run_like_main` and the study's own ``run.py``): the frozen protocol (grid, trials per setting, what each run is
+    given, thresholds), FI's record of the two stages (the seed base), FI's ledger of the delivered trials, its run record
+    and sizing (settings at once, shared processes), and the files under ``inputs/`` and ``data/`` but the results. ``None``
+    for a file that is not there. An answer kept for a repair is reused only while these are the same."""
+    from . import frozen_protocol as _frozen
+    from . import phased as _phased
+    from . import reuse_key as _reuse_key
+    from . import run_estimate as _estimate
+    from . import run_facts as _run_facts
+
+    root = Path(quest_root)
+    named = (_frozen.frozen_path(root), _phased.record_path(root), root / "raw" / "ledger.jsonl", root / _run_facts.PATH,
+             root / _estimate.RECORD)
+    out: dict[str, str | None] = {}
+    for path in named:
+        try:
+            out[path.relative_to(root).as_posix()] = _reuse_key.digest(path)
+        except OSError:
+            out[path.relative_to(root).as_posix()] = None
+    found = _reuse_key.files(root, "simulation")
+    out.update({k: v for k, v in found.digests.items() if not k.startswith("code/")})
+    out["complete"] = "yes" if found.complete else "no"
+    return out
+
+
 # ---- FI's ledger of the delivered run ---------------------------------------------------------------------------------
 @dataclass
 class Ledger:

@@ -1357,13 +1357,18 @@ class AnalyzeStageMixin:
     def _rerun_lasting_key(self, code_version: str, allowed: float, at_once: int | None, strict: bool,
                            disputed: list[str]) -> str:
         """The key of an answer "could not rerun" that the same repaired code would get again: the repaired code, what it is
-        compared with, the time a rerun is allowed and how it runs, and FI's own rules for the answer."""
+        compared with, every other file the rerun reads (:func:`core.rerun_check.inputs_of`: the frozen protocol, FI's
+        records of the delivered run, the person's inputs and data), the time a rerun is allowed and how it runs, and FI's
+        own rules for the answer. ``""`` when one of those files could not be read: no answer is kept or reused then."""
         from . import reuse_key as _reuse_key
 
+        inputs = _rerun_check.inputs_of(self.quest_root)
+        if inputs.pop("complete", "no") != "yes":
+            return ""
         return _reuse_key.digest_text(json.dumps({
-            "code": code_version, "delivered": self._rerun_delivered(), "allowed": int(allowed), "at_once": at_once,
-            "strict": bool(strict), "disputed": sorted(disputed), "rules": _reuse_key.digest(Path(_rerun_check.__file__))},
-            sort_keys=True, default=str))
+            "code": code_version, "delivered": self._rerun_delivered(), "inputs": inputs, "allowed": int(allowed),
+            "at_once": at_once, "strict": bool(strict), "disputed": sorted(disputed),
+            "rules": _reuse_key.digest(Path(_rerun_check.__file__))}, sort_keys=True, default=str))
 
     def _log_rerun(self, fid: str, v: Any) -> None:
         if v.status == "could_not":
@@ -1472,8 +1477,8 @@ class AnalyzeStageMixin:
                     return done[key]
                 # The same repaired code already could not be run again in an earlier check (it crashed, or it did not finish in
                 # the whole time a rerun is allowed): that answer stands, and the study is not run again for it.
-                lasting = self._rerun_lasting_key(key, allowed, at_once, strict, disputed)
-                kept = (record.get("rerun_could_not") or {}).get(lasting)
+                lasting = await asyncio.to_thread(self._rerun_lasting_key, key, allowed, at_once, strict, disputed)
+                kept = (record.get("rerun_could_not") or {}).get(lasting) if lasting else None
                 if isinstance(kept, dict):
                     verdict = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
                     self._log.info("[evidence_gate] %s: this repaired code could not be run again in an earlier check (%s); "
@@ -1520,7 +1525,7 @@ class AnalyzeStageMixin:
                                                        finding=str(issue.get("id") or ""), at_once=at_once)
                 if counts:
                     budget[0] -= time.monotonic() - began
-                if verdict.status == "could_not" and (verdict.crashed or (verdict.timed_out and left >= allowed)):
+                if lasting and verdict.status == "could_not" and (verdict.crashed or (verdict.timed_out and left >= allowed)):
                     # what the same repaired code would get again: kept by that code, so a later check does not run it again
                     kept_all = record.get("rerun_could_not") if isinstance(record.get("rerun_could_not"), dict) else {}
                     kept_all.pop(lasting, None)
