@@ -118,7 +118,9 @@ def test_the_venue_templates_print_the_keywords_under_the_abstract_and_in_the_pd
 
 def test_the_writer_is_asked_for_an_abstract_and_keywords() -> None:
     text = (REPO / "agents" / "write.md").read_text(encoding="utf-8")
-    assert "open with `## Abstract`" in text
+    # Under the title, which stays the first line: "open with `## Abstract`" read as "before the title" to a writer.
+    assert "put `## Abstract` right under the title" in text and "open with `## Abstract`" not in text
+    assert "**The first line MUST be a proper Title-Case academic title" in text
     assert "`**Keywords:** <keyword>, <keyword>, <keyword>, <keyword>`" in text
     assert "`<!-- Keywords: <keyword>, <keyword>, <keyword>, <keyword> -->`" in text
 

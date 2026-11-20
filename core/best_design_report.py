@@ -9,7 +9,9 @@ The numbers come from FI's own record, never from the writer's memory: ``results
   best design at every level of the numerical settings with the improvement and its numerical error, how the search
   ran, the check's verdict and each check in plain words, the target a person asked for and whether it was reached,
   and the limits of the result. Whatever the writer put between the markers is taken out first (:func:`without_block`).
-  The writer is told the section is there (:func:`write_note`) and may discuss it, not restate its numbers.
+  The writer is told the section is there (:func:`write_note`) and may discuss it, not restate its numbers or give a
+  section of its own the same heading; when it does, FI's record goes at the end of the writer's section, under its
+  heading, so the paper never has that heading twice.
 * The numbers checks read the section like the rest of the paper: ``core/number_provenance.py`` is given the two
   records (:func:`records`), so every number in it traces to them. The claim check, which asks a model whether a
   sentence is grounded in the literature or the results, leaves the section out only when it is exactly the text FI
@@ -32,6 +34,11 @@ from . import optimum_check as _check
 BEGIN = "<!-- fi:best-design -->"
 END = "<!-- /fi:best-design -->"
 HEADING = "Best design found"
+_OPENING = ("The numbers in this section are FI's own record of the search, every evaluation of it included, and of its "
+            "check at finer numerical settings.")
+# The same, when the section goes under a heading of the writer's own (:func:`mark_paper`): FI's record ends the section.
+_OPENING_UNDER = ("The numbers from here to the end of this section are FI's own record of the search, every evaluation of "
+                  "it included, and of its check at finer numerical settings.")
 READABLE_PATH = Path("results") / "best_design.md"
 PROGRESS_FIGURE = Path("figures") / "optimisation_progress.png"
 
@@ -276,9 +283,7 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     u = f" {unit}" if unit else ""
     sign = _sign(best)
     hashes = "#" * max(1, min(6, heading_level))
-    lines = [f"{hashes} {HEADING}", "",
-             "The numbers in this section are FI's own record of the search, every evaluation of it included, and of "
-             "its check at finer numerical settings.", ""]
+    lines = [f"{hashes} {HEADING}", "", _OPENING, ""]
     what = f"**What was optimised.** {quantity}"
     if objective.get("meaning"):
         what += f" ({objective['meaning']})"
@@ -474,13 +479,55 @@ def heading_level(markdown: str) -> int:
     return 1 if levels.count(1) > 1 else 2
 
 
+_OWN_HEADING = re.compile(_NUMBERED + re.escape(HEADING) + r"[ \t]*[.:]?[ \t]*$", re.I)
+
+
+def _writer_section(lines: list[str]) -> tuple[int, int] | None:
+    """``(heading line, end line)`` of the first section of the paper whose heading is FI's own (:data:`HEADING`, the one
+    the writer is told FI's section has), or ``None``. The section ends at the next heading of its level or above."""
+    headings = _headings(lines)
+    for n, (i, lv, t) in enumerate(headings):
+        if _OWN_HEADING.match(t):
+            end = next((j for j, lv2, _t in headings[n + 1:] if lv2 <= lv), len(lines))
+            return i, end
+    return None
+
+
+def _under_heading(text: str) -> str:
+    """The section ``text`` (:func:`section`) as it goes under a heading of the writer's own: without its heading line,
+    its opening sentence saying where FI's record starts."""
+    lines = text.split("\n")
+    if lines and _HEADING.match(lines[0]):
+        lines = lines[1:]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).replace(_OPENING, _OPENING_UNDER, 1)
+
+
 def mark_paper(markdown: str, text: str) -> str:
     """``markdown`` with the section ``text`` (:func:`section`) once: before the discussion that follows the results
-    (else the conclusions, the limitations, the references), else at the end. An empty ``text`` leaves no section."""
+    (else the conclusions, the limitations, the references), else at the end. An empty ``text`` leaves no section.
+
+    A paper whose writer gave a section of its own FI's heading keeps that one heading: FI's record goes at the end of
+    that section, without its own heading (:func:`for_paper` gives it so), so the paper never has the heading twice. The
+    writer's heading and text are outside the markers, so the next draft keeps them and FI's record goes in again."""
     markdown = without_block(markdown)
     if not text:
         return markdown
+    lines = markdown.split("\n")
+    own = _writer_section(lines)
+    if own is not None:
+        return _insert_at(lines, _before_rule(lines, own[1]), [BEGIN, _under_heading(text).rstrip("\n"), END])
     return insert_before_discussion(markdown, [BEGIN, text.rstrip("\n"), END])
+
+
+def _before_rule(lines: list[str], at: int) -> int:
+    """``at`` moved back over blank lines and the rule line the engine's references follow."""
+    while at > 0 and not lines[at - 1].strip():
+        at -= 1
+    if at > 0 and lines[at - 1].strip() == "---":
+        at -= 1
+    return at
 
 
 def insert_before_discussion(markdown: str, block: list[str]) -> str:
@@ -497,13 +544,14 @@ def insert_before_discussion(markdown: str, block: list[str]) -> str:
     for pattern in _BEFORE:
         hit = next((i for i, t in sections if i > after and pattern.match(t)), None)
         if hit is not None:
-            at = hit
             # The engine's references follow a rule line: the section goes before it.
-            while at > 0 and not lines[at - 1].strip():
-                at -= 1
-            if at > 0 and lines[at - 1].strip() == "---":
-                at -= 1
+            at = _before_rule(lines, hit)
             break
+    return _insert_at(lines, at, block)
+
+
+def _insert_at(lines: list[str], at: int, block: list[str]) -> str:
+    """``lines`` joined with ``block`` as a paragraph of its own before line ``at``."""
     head = lines[:at]
     while head and not head[-1].strip():
         head.pop()
@@ -515,8 +563,11 @@ def insert_before_discussion(markdown: str, block: list[str]) -> str:
 
 
 def for_paper(quest_root: Path, block: dict[str, Any] | None, markdown: str) -> str:
-    """The section as it goes into ``markdown`` (at the level of the paper's own sections)."""
-    return section(quest_root, block, heading_level=heading_level(without_block(markdown)))
+    """The section as it goes into ``markdown`` (at the level of the paper's own sections; without its heading when the
+    writer gave a section of that heading, which it then ends: :func:`mark_paper`)."""
+    paper = without_block(markdown)
+    text = section(quest_root, block, heading_level=heading_level(paper))
+    return _under_heading(text) if text and _writer_section(paper.split("\n")) is not None else text
 
 
 def strip_for_checks(text: str, expected: str) -> str:
@@ -539,8 +590,9 @@ def write_note(quest_root: Path) -> str:
     note = ("This study searched for the best design. FI puts a section titled \"" + HEADING + "\" into the paper "
             "itself after you finish, with the numbers from its own record: the objective, the baseline against the "
             "best design at each numerical setting, the improvement and its numerical error, how the search ran, the "
-            "check at finer settings, any target asked for, and the limits. Do not write that table or restate its "
-            "numbers in a section of your own; refer to the section and discuss what it means. Every number you do "
+            "check at finer settings, any target asked for, and the limits. That heading is FI's: do not give a section "
+            "of your own that heading, write that table or restate its numbers; refer to the section and discuss what it "
+            "means. Every number you do "
             "write about the best design, the baseline or the improvement must be one of FI's (the results' "
             "`fi_search`).")
     if verdict != "verified" or not passed:
