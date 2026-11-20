@@ -259,3 +259,43 @@ def test_a_value_picked_by_its_value_and_asserted_present_keeps_the_stop(tmp_pat
             "    assert got is not None, 'no value of one half'\n")
     out, _record, _engine_ = _gate(tmp_path, test)
     assert _stops(out)
+
+
+# ---- the recording only looks: it never runs the study's own code ----------------------------------------------------------
+def test_a_returned_object_whose_items_changes_a_value_does_not_turn_a_failing_test_into_a_pass(tmp_path: Path) -> None:
+    # an outside review's input: the recording called the returned value's own items(), which set the value the test then
+    # checked, so the second run passed and the gate cleared a wrong value as a flaky test
+    code = {"m.py": ("class Result(dict):\n    def items(self):\n        self['mean'] = 1.0\n        return super().items()\n\n\n"
+                     "def run():\n    return Result(mean=0.0)\n")}
+    test = "import m\n\n\ndef test_mean():\n    assert m.run()['mean'] == 1.0\n"
+    plain = _harness(tmp_path / "a", code, test, capture=False)
+    recorded = _harness(tmp_path / "b", code, test, capture=True)
+    assert plain.status == "fail" and recorded.status == "fail"
+    assert recorded.held["returned"][0]["record"] is False  # an object of the study's own class is not a record of names
+
+
+def test_the_recording_never_calls_a_method_of_a_value_the_code_returned_or_the_test_held(tmp_path: Path) -> None:
+    # every method a recording could reach writes to a file when called; only the test's own lines run them
+    hooks = ("keys", "items", "values", "__getitem__", "__iter__", "__len__", "__getattr__", "__repr__", "__str__",
+             "__eq__", "__hash__", "__bool__", "__contains__")
+    body = "".join(f"    def {h}(self, *a, **k):\n        _called({h!r})\n        return 0\n" for h in hooks)
+    code = {"m.py": ("def _called(name):\n    with open('calls.txt', 'a') as fh:\n        fh.write(name + '\\n')\n\n\n"
+                     "class Loud(dict):\n" + body + "\n\nclass Thing:\n" + body
+                     + "    @property\n    def dtype(self):\n        _called('dtype')\n        return None\n\n\n"
+                     "def run():\n    return Loud(a=1), Thing(), [Thing()], {'k': Thing()}\n")}
+    test = "import m\n\n\ndef test_x():\n    got = m.run()\n    held = m.Thing()\n    assert not got\n"
+    run = _harness(tmp_path, code, test, capture=True)
+    assert run.status == "fail" and run.held is not None
+    assert not (tmp_path / "calls.txt").is_file(), (tmp_path / "calls.txt").read_text()
+    assert [r["record"] for r in run.held["returned"]] == [False] and run.held["complete"] is False
+
+
+def test_a_wrong_value_in_a_record_whose_items_changes_it_still_stops_the_study(tmp_path: Path) -> None:
+    # the outside review's input at the gate: on the old recording the second run passed and the finding was cleared
+    files = {"model.py": FILES["model.py"] + ("\n\nclass Result(dict):\n    def items(self):\n        self['est_a'] = 9.0\n"
+                                              "        return super().items()\n\n\n"
+                                              "def helper_record(x):\n    return Result(est_a=2.0 * x, est_b=5.0)\n")}
+    test = ("from model import helper_record\n\n\ndef test_x():\n    r = helper_record(1)\n"
+            "    assert r['est_a'] == 9.0, 'the estimate is wrong'\n")
+    out, _record, _engine_ = _gate(tmp_path, test, files=files)
+    assert _stops(out)

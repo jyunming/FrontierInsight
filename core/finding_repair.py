@@ -206,81 +206,96 @@ def runs_nothing_on_import(path: Path) -> bool:
 
 #: Added to :data:`HARNESS` when FI also records what a failing test was given (``harness_source(..., capture=True)``): every
 #: value a function of the study's code returned to the test, and the records the test held when its assertion failed, as
-#: the names they hold (keys of a mapping, columns of a table, fields of an object, and those of the records inside them).
-#: ``record`` says whether a returned value is a record of names at all (a bare number or array is not), and ``complete``
-#: whether FI listed everything: a value it cannot list, too many values or names, or nesting too deep make it false.
+#: the names they hold (keys of a mapping, columns of a table, fields of a structured array, and those of the records inside
+#: them). Only built-in containers and NumPy / pandas values of exactly the library's type are read, never by calling a
+#: method of the value: an object of the study's own class is not a record of names. ``record`` says whether a returned
+#: value is a record of names at all (a bare number, a list or a plain array is not), and ``complete`` whether FI listed
+#: everything: a value it cannot list, too many values or names, or nesting too deep make it false.
 #: ``failures``: per failing test function, the line its assertion failed on and the names of that frame that held nothing
 #: (``None`` or an empty container) at that moment.
 CAPTURE = '''
-import collections.abc as _abc, types as _types
+import collections as _coll, types as _types
 
+# Only inert values of known types are read, by their type's own built-in methods (dict.items(value), never value.items()):
+# the recording runs inside the test, so it never calls a method, a property or a hook of the study's (or the test's) own
+# objects, which could change what the test then checks. Anything else is not a record of names.
 _PLAIN = (type(None), bool, int, float, complex, str, bytes)
-_NOT_RECORDS = (_types.FunctionType, _types.BuiltinFunctionType, _types.MethodType, _types.ModuleType, type)
+_KEYS = (str, int, float, bool)
+_MAPS = (dict, _coll.OrderedDict, _coll.defaultdict)
+_SEQS = (list, tuple, set, frozenset)
+_NOT_RECORDS = (_types.FunctionType, _types.BuiltinFunctionType, _types.MethodType, _types.ModuleType)
+
+def _table(value):
+    # a NumPy array or a pandas table of exactly the library's own type (a subclass may be the study's code)
+    t = type(value)
+    if t.__module__ == "numpy" and t.__name__ == "ndarray":
+        return "array"
+    if t.__module__ == "pandas.core.frame" and t.__name__ == "DataFrame":
+        return "frame"
+    return ""
+
+def _skipped(value):
+    t = type(value)
+    return t in _PLAIN or t in _NOT_RECORDS or issubclass(t, type)
+
+def _key(k, out, state):
+    if type(k) in _KEYS:
+        out.add(str(k))
+    else:
+        state["complete"] = False
 
 def _names(value, out, state, depth=0):
     if state["seen"] > 20000 or depth > 5:
         state["complete"] = False
         return
     state["seen"] += 1
-    if isinstance(value, _PLAIN) or isinstance(value, _NOT_RECORDS):
+    t = type(value)
+    if _skipped(value):
         return
-    dtype = getattr(value, "dtype", None)
-    if dtype is not None and getattr(value, "shape", None) is not None:
-        names = getattr(dtype, "names", None)
-        if names:
-            out.update(str(n) for n in names)
-        elif str(getattr(dtype, "kind", "")) == "O":
-            try:
-                flat = list(value.ravel()[:1000])
-            except Exception:
-                state["complete"] = False
-                return
-            for v in flat:
-                _names(v, out, state, depth + 1)
-        return
-    if isinstance(value, _abc.Mapping):
-        for k, v in list(value.items())[:2000]:
-            out.add(str(k))
+    if t in _MAPS:
+        pairs = list(dict.items(value))
+        for k, v in pairs[:2000]:
+            _key(k, out, state)
             _names(v, out, state, depth + 1)
-        if len(value) > 2000:
+        if len(pairs) > 2000:
             state["complete"] = False
         return
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if t is _types.SimpleNamespace:
+        for k, v in list(dict.items(vars(value)))[:2000]:
+            _key(k, out, state)
+            _names(v, out, state, depth + 1)
+        return
+    if t in _SEQS:
         items = list(value)
         for v in items[:1000]:
             _names(v, out, state, depth + 1)
         if len(items) > 1000:
             state["complete"] = False
         return
-    keys = getattr(value, "keys", None)
-    if callable(keys):
-        try:
-            out.update(str(k) for k in list(keys())[:2000])
-            return
-        except Exception:
-            state["complete"] = False
-            return
-    fields = getattr(value, "__dict__", None)
-    slots = getattr(type(value), "__slots__", None)
-    if isinstance(fields, dict) or slots:
-        for k, v in list((fields or {}).items()):
-            out.add(str(k))
-            _names(v, out, state, depth + 1)
-        for k in ([slots] if isinstance(slots, str) else list(slots or [])):
-            out.add(str(k))
-            if hasattr(value, k):
-                _names(getattr(value, k), out, state, depth + 1)
+    kind = _table(value)
+    if kind == "array":
+        names = value.dtype.names
+        if names:
+            out.update(str(n) for n in names)
+        elif value.dtype.kind == "O":
+            for v in list(value.ravel()[:1000]):
+                _names(v, out, state, depth + 1)
+        return
+    if kind == "frame":
+        for k in list(value.columns)[:2000]:
+            _key(k, out, state)
         return
     state["complete"] = False
 
 def _is_record(value):
-    if isinstance(value, _abc.Mapping) or getattr(getattr(value, "dtype", None), "names", None):
+    t = type(value)
+    if t in _MAPS or t is _types.SimpleNamespace or _table(value) == "frame":
         return True
-    if isinstance(value, _PLAIN) or isinstance(value, _NOT_RECORDS) or getattr(value, "shape", None) is not None:
-        return False
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return False
-    return callable(getattr(value, "keys", None)) or isinstance(getattr(value, "__dict__", None), dict)
+    return _table(value) == "array" and bool(value.dtype.names)
+
+def _empty(value):
+    t = type(value)
+    return value is None or (t in _MAPS or t in _SEQS) and len(value) == 0
 
 def RUN(fn, path):
     returned, state = [], {"seen": 0, "complete": True}
@@ -321,8 +336,7 @@ def RUN(fn, path):
                 # the frame the assertion failed in (the innermost of the test file): its line, and its names that hold
                 # nothing (None or an empty container)
                 line = tb.tb_lineno
-                empty = sorted(k for k, v in local.items()
-                               if v is None or isinstance(v, (list, tuple, set, frozenset, dict, _abc.Mapping)) and len(v) == 0)
+                empty = sorted(k for k, v in local.items() if _empty(v))
             tb = tb.tb_next
         if len(held) > 5000:
             state["complete"] = False
