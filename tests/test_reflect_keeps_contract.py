@@ -99,10 +99,66 @@ def test_an_oracle_is_what_the_module_binds_not_a_word_in_its_text() -> None:
     imported = GOOD + "from checks import oracle\n"
     assert f(OLD, imported, "simulate.py", oracles=checks, trial=True) == ""
     assert f(OLD, GOOD + "\n\ndef oracle():\n    return {'drift': 0.0}\n", "simulate.py", oracles=checks, trial=True) == ""
-    refused = "it defines no oracle() and some check has no case FI can run"
+    # not imported: read from the code, and the reason says so
+    refused = "it defines no oracle() and some check has no case FI can run (read from the code: it was not imported)"
     assert f(OLD, GOOD + "# def oracle() is not needed here\n", "simulate.py", oracles=checks, trial=True) == refused
     assert f(OLD, GOOD + "\n\ndef oracle_helper():\n    return {'drift': 0.0}\n", "simulate.py", oracles=checks,
              trial=True) == refused
     nested = GOOD + "\n\ndef outer():\n    def oracle():\n        return {'drift': 0.0}\n    return oracle\n"
     assert f(OLD, nested, "simulate.py", oracles=checks, trial=True) == refused
     assert f(OLD, GOOD, "simulate.py", oracles=[{"name": "drift", "case": {"a": 1}, "measure": "x"}], trial=True) == ""
+
+
+# A module binds oracle() when FI, importing it as it does to call it, finds a callable one: asked of the module, not read.
+_IN_A_BRANCH = GOOD + "\n\nif True:\n    def oracle():\n        return {'drift': 0.0}\n"
+_STAR = GOOD + "\nfrom checks import *\n"
+_CHECKS = "__all__ = ['oracle']\n\n\ndef oracle():\n    return {'drift': 0.0}\n\n\ndef _hidden():\n    return 1\n"
+
+
+def _bound(tmp_path: Path, text: str, helper: str = "") -> tuple:
+    import asyncio
+    import sys
+
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "simulate.py").write_text(text, encoding="utf-8")
+    if helper:
+        (root / "code" / "checks.py").write_text(helper, encoding="utf-8")
+    return asyncio.run(trial_runner.binds_callable(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root,
+        "code/simulate.py", "oracle", timeout_s=60))
+
+
+def test_whether_a_module_binds_oracle_is_asked_of_the_module_and_nothing_is_called(tmp_path: Path) -> None:
+    assert _bound(tmp_path / "a", _IN_A_BRANCH) == (True, "")
+    assert _bound(tmp_path / "b", _STAR, _CHECKS) == (True, "")
+    assert _bound(tmp_path / "c", GOOD + "\n\ndef oracle_helper():\n    return {}\n") == (False, "")
+    assert _bound(tmp_path / "d", GOOD + "\noracle = 3\n") == (False, ""), "a name that is not callable is no oracle()"
+    # nothing of the module is called: an oracle() that would leave a file leaves none
+    marks = GOOD + "\n\ndef oracle():\n    open('called.txt', 'w').write('x')\n    return {}\n"
+    assert _bound(tmp_path / "e", marks) == (True, "")
+    assert not list((tmp_path / "e").rglob("called.txt"))
+    # the import itself failed: not an answer, and why is kept
+    got, why = _bound(tmp_path / "f", GOOD + "\nraise RuntimeError('needs a data file')\n")
+    assert got is None and "needs a data file" in why
+
+
+def test_a_repair_s_oracle_is_what_the_imported_module_binds(tmp_path: Path) -> None:
+    """FI's answer from the import decides; the reading of the code only when the import failed, and then it says so."""
+    f = trial_runner.repair_breaks_contract
+    checks = [{"name": "drift"}]
+    refused = "it defines no oracle() and some check has no case FI can run"
+    # read from the code, both of these bind no top-level oracle; the module itself binds one
+    assert f(OLD, _IN_A_BRANCH, "simulate.py", oracles=checks, trial=True).startswith(refused)
+    assert f(OLD, _STAR, "simulate.py", oracles=checks, trial=True).startswith(refused)
+    for text in (_IN_A_BRANCH, _STAR):
+        assert f(OLD, text, "simulate.py", oracles=checks, trial=True, oracle_bound=True) == ""
+    # a def oracle the module rebinds to something else is no oracle(), whatever the text shows
+    assert f(OLD, GOOD + "\n\ndef oracle():\n    return {}\noracle = None\n", "simulate.py", oracles=checks, trial=True,
+             oracle_bound=False) == refused
+    failed = f(OLD, _STAR, "simulate.py", oracles=checks, trial=True, import_why="ImportError: no module checks")
+    assert failed == refused + " (read from the code: FI's import of it failed, ImportError: no module checks)"
+    assert trial_runner.needs_oracle(checks, True) and not trial_runner.needs_oracle(checks, False)
+    assert not trial_runner.needs_oracle([{"name": "drift", "case": {"a": 1}, "measure": "x"}], True)
