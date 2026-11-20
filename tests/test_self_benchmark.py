@@ -276,6 +276,27 @@ def test_r1_changes_a_number_of_the_paper_and_nothing_else(tmp_path: Path) -> No
         plant.edit_file(tmp_path, "paper/paper.md", "4.567", "1")
 
 
+def test_r1_changes_a_number_of_the_supplement_when_the_text_states_none(tmp_path: Path) -> None:
+    """FI's tables of every setting ship in the supplement, not the paper's body: a paper whose text states no such number
+    has its planted number in the supplement, and the scorer reads the paper with its supplement."""
+    (tmp_path / "paper").mkdir()
+    text = "# T\n\nWe ran 300 runs.\n\n## References\n1. A 12.345 B.\n"
+    (tmp_path / "paper" / "paper.md").write_text(text, encoding="utf-8")
+    table = "# Supplement\n\n## Results for every setting\n\n| 0.9 | 300 | 90.491 ± 0.033 |\n"
+    (tmp_path / "paper" / "supplement.md").write_text(table, encoding="utf-8")
+    rec = plant.plant_r1(tmp_path)
+    assert (rec["original_value"], rec["planted_value"], rec["original_count"]) == ("90.491", "123.973", 1)
+    assert [e["file"] for e in rec["edits"]] == ["paper/supplement.md"]
+    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == text
+    assert "123.973" in (tmp_path / "paper" / "supplement.md").read_text(encoding="utf-8")
+    assert "123.973" in score._paper_text(tmp_path) and not score.r1_put_right(rec, score._paper_text(tmp_path))
+    (tmp_path / "paper" / "supplement.md").write_text(table, encoding="utf-8")  # FI wrote it again from its records
+    assert score.r1_put_right(rec, score._paper_text(tmp_path))
+    (tmp_path / "paper" / "supplement.md").unlink()
+    with pytest.raises(ValueError, match="state no number"):
+        plant.plant_r1(tmp_path)
+
+
 def test_r2_adds_a_number_the_run_never_computed_to_the_writers_answer() -> None:
     rec = Recording([{"node": "write", "index": 1, "response": "# T\n\nIntro.\n\nResults."}])
     record, answers_ = plant.plant_r2(rec)

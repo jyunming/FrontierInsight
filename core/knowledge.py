@@ -5263,7 +5263,7 @@ class Knowledge:
                 if paper_md_path.exists()
                 else ""
             )
-            # The supplement a paper over its page limit sent parts of itself to (core/supplement.py) sits beside it and
+            # The supplement FI sent parts of the paper to (core/supplement.py) sits beside it and
             # is stored with it, so what the paper points to is in the knowledge base too.
             supplement_md = paper_md_path.parent / "supplement.md"
             if paper_md and supplement_md.is_file():

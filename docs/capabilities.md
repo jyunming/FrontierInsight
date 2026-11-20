@@ -33,7 +33,7 @@ Searches arXiv, OpenAlex, Crossref, Semantic Scholar, PubMed and more, plus the 
 
 ## What you get
 
-A paper (Markdown, plus PDF with LaTeX or a fallback), in scientific formats (generic, NeurIPS, ICLR, IEEE Access, Nature MI) or essay, report, policy brief and whitepaper; slides; a poster; a talk script; every figure; BibTeX and CSL-JSON citations; a claims table tying each claim to evidence, a citation, or "unsupported". Rendered PDFs are measured for layout problems (an optional model check looks at them too). [Details](capabilities-reference.md#outputs)
+A paper (Markdown, plus PDF with LaTeX or a fallback), in scientific formats (generic, NeurIPS, ICLR, IEEE Access, Nature MI) or essay, report, policy brief and whitepaper; slides; a poster; a talk script; every figure, and a figure of how the study is set up that FI draws from its plan; BibTeX and CSL-JSON citations; a claims table tying each claim to evidence, a citation, or "unsupported". Rendered PDFs are measured for layout problems (an optional model check looks at them too). [Details](capabilities-reference.md#outputs)
 
 ## Three ways to drive it
 
