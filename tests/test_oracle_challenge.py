@@ -475,3 +475,23 @@ def test_a_working_from_the_plan_s_own_constants_is_a_working_even_when_the_case
         assert refused is None and "stated values" in why, restated
     without, _ = ch.challenge_of(check, {**ask, "expected_formula": "500/1.2"}, 420.0)
     assert without is None, "with no constants given, nothing changed"
+
+
+def test_a_stated_value_is_the_plans_where_the_working_names_it_or_writes_its_very_number() -> None:
+    """Old code: a written number was taken for a stated value when it rounded to it at the digits written (499 for 500,
+    and a one-digit 0.3 for 0.5), so a number restated beside it read as a working; a working that named the plan's
+    value was refused, since only the case's settings were known by name."""
+    check = {"name": "first_ring", "kind": "special_case", "expected": 900.0, "expected_formula": "0.61*500/(0.2*1.2)",
+             "tolerance": 50, "tolerance_mode": "absolute", "case": {"spread": 0.2}, "measure": "ring_nm"}
+    constants = {"length": 500.0, "speed": 1.2, "order": 2.0, "share": 0.5}
+    ask = {"name": "first_ring", "disputed_step": "the first ring is set by the lens", "expected": 416.7}
+    named, why = ch.challenge_of(check, {**ask, "expected_formula": "length / speed"}, 420.0, constants=constants)
+    assert named is not None and abs(named["value"] - 500 / 1.2) < 1e-9, why
+    mixed, why = ch.challenge_of(check, {**ask, "expected_formula": "500 / speed"}, 420.0, constants=constants)
+    assert mixed is not None, why  # a written 500 and a named speed move together: a ratio of the plan's values
+    small, why = ch.challenge_of(check, {**ask, "expected": 3.1416, "expected_formula": "order * pi / 2"}, 3.1,
+                                 constants=constants)
+    assert small is not None, why  # a small whole value is taken where it is named
+    for restated in ("499*0.835", "0.3*1389"):  # numbers that only round to a stated value (500, 0.5)
+        refused, why = ch.challenge_of(check, {**ask, "expected_formula": restated}, 420.0, constants=constants)
+        assert refused is None and "stated values" in why, restated
