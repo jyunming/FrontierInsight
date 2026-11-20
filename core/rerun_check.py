@@ -190,7 +190,8 @@ def inputs_of(quest_root: Path | str) -> dict[str, str | None]:
     (:func:`_run_like_main` and the study's own ``run.py``): the frozen protocol (grid, trials per setting, what each run is
     given, thresholds), FI's record of the two stages (the seed base), FI's ledger of the delivered trials, its run record
     and sizing (settings at once, shared processes), and the files under ``inputs/`` and ``data/`` but the results. ``None``
-    for a file that is not there. An answer kept for a repair is reused only while these are the same."""
+    for a file that is not there; ``complete`` is ``"no"`` when a file is there but cannot be read. An answer kept
+    for a repair is reused only while these are the same."""
     from . import frozen_protocol as _frozen
     from . import phased as _phased
     from . import reuse_key as _reuse_key
@@ -201,14 +202,16 @@ def inputs_of(quest_root: Path | str) -> dict[str, str | None]:
     named = (_frozen.frozen_path(root), _phased.record_path(root), root / "raw" / "ledger.jsonl", root / _run_facts.PATH,
              root / _estimate.RECORD)
     out: dict[str, str | None] = {}
+    unread = False
     for path in named:
         try:
             out[path.relative_to(root).as_posix()] = _reuse_key.digest(path)
         except OSError:
             out[path.relative_to(root).as_posix()] = None
+            unread = unread or path.exists()  # there but not readable: the key would not tell its versions apart
     found = _reuse_key.files(root, "simulation")
     out.update({k: v for k, v in found.digests.items() if not k.startswith("code/")})
-    out["complete"] = "yes" if found.complete else "no"
+    out["complete"] = "yes" if found.complete and not unread else "no"
     return out
 
 

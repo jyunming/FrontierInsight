@@ -520,3 +520,26 @@ def test_a_rerun_that_will_not_fit_is_not_started_by_the_gate_nor_its_small_run(
     assert any("could not be run again" in m and "8 h 5 min" in m for m in said), said
     assert not record.get("rerun_could_not")  # an estimate is no lasting answer: a later check with more time may run it
 
+
+
+def test_a_rerun_input_that_is_there_but_cannot_be_read_keeps_no_answer(tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    # A frozen protocol that cannot be read gives the same key whatever it holds: no kept answer may be reused then.
+    from core import frozen_protocol, reuse_key
+
+    root = tmp_path / "quest"
+    proto = frozen_protocol.frozen_path(root)
+    proto.parent.mkdir(parents=True, exist_ok=True)
+    proto.write_text("{}", encoding="utf-8")
+    assert rerun_check.inputs_of(root)["complete"] == "yes"
+    real = reuse_key.digest
+
+    def unreadable(path: Any) -> str:
+        if Path(path) == proto:
+            raise PermissionError("locked")
+        return real(path)
+
+    monkeypatch.setattr(reuse_key, "digest", unreadable)
+    assert rerun_check.inputs_of(root)["complete"] == "no"
+    proto.unlink()
+    assert rerun_check.inputs_of(root)["complete"] == "yes", "a file that is not there is a fact the key holds"
