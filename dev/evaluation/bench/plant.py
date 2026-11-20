@@ -61,31 +61,49 @@ def _perturbed(token: str) -> str:
     return f"{value:.{decimals}f}"
 
 
+#: The supplement that ships with the paper (core/supplement.py): FI's tables of every setting are there, not in the
+#: paper's body, so a number the delivered paper shows may be in it.
+SUPPLEMENT = "paper/supplement.md"
+
+
 def paper_files(quest_root: Path) -> list[str]:
     """The paper's Markdown (paper/paper.md, and the top-level copy when there is one)."""
     return [rel for rel in ("paper/paper.md", "paper.md") if (Path(quest_root) / rel).is_file()]
 
 
+def delivered_text(quest_root: Path) -> str:
+    """What a reader of the paper is given: its Markdown and the supplement that ships with it."""
+    root = Path(quest_root)
+    return "\n".join(path.read_text(encoding="utf-8", errors="replace")
+                     for rel in (*paper_files(root)[:1], SUPPLEMENT) if (path := root / rel).is_file())
+
+
 def plant_r1(quest_root: Path, *, find: str | None = None, replace: str | None = None) -> dict[str, Any]:
-    """R1: one number of the paper changed. Without ``find``, the first number with two or more decimals in the paper's
-    text before its references is multiplied by 1.37."""
+    """R1: one number the delivered paper shows changed. Without ``find``, the first number with two or more decimals in
+    the paper's text before its references is multiplied by 1.37, or, when that text has none, the first in its
+    supplement (FI's tables of every setting are there)."""
     rels = paper_files(quest_root)
     if not rels:
         raise ValueError("the quest has no paper to plant a number in")
-    text = (Path(quest_root) / rels[0]).read_text(encoding="utf-8")
+    root = Path(quest_root)
+    text = (root / rels[0]).read_text(encoding="utf-8")
+    supplement = (root / SUPPLEMENT).read_text(encoding="utf-8") if (root / SUPPLEMENT).is_file() else ""
     if find is None:
         body = re.split(r"(?im)^#+\s*references\b", text)[0]
-        m = _NUMBER.search(body)
+        m = _NUMBER.search(body) or _NUMBER.search(supplement)
         if not m:
-            raise ValueError("the paper states no number with two or more decimals to change; give --find/--replace")
+            raise ValueError("the paper and its supplement state no number with two or more decimals to change; give "
+                             "--find/--replace")
         find = m.group(1)
         replace = _perturbed(find)
     if replace is None:
         raise ValueError("give the number that replaces it")
-    # How often the paper states the original number before the plant (only the first is changed): the scorer asks for
-    # every one of them back, so a number the paper also states elsewhere does not pass for the planted one put right.
-    original_count = text.count(find)
-    edits = [edit_file(quest_root, rel, find, replace) for rel in rels]
+    # How often the delivered paper states the original number before the plant (only the first is changed): the scorer
+    # asks for every one of them back, so a number the paper also states elsewhere does not pass for the planted one put
+    # right.
+    original_count = delivered_text(root).count(find)
+    targets = rels if find in text else [SUPPLEMENT] if find in supplement else rels
+    edits = [edit_file(quest_root, rel, find, replace) for rel in targets]
     return {"error": "R1", "how": "edit", "from_step": catalogue.get("R1").from_step, "edits": edits,
             "planted_value": replace, "original_value": find, "original_count": original_count}
 
