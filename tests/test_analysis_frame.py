@@ -1207,6 +1207,25 @@ def test_a_main_block_in_derive_never_runs_when_fis_analysis_runs(tmp_path: Path
     assert printed == honest[1] and record["derived"] == honest[2]["derived"]
 
 
+def test_a_frame_change_through_another_name_is_seen_in_fis_record_and_changes_nothing(tmp_path: Path) -> None:
+    """The reading of the code sees only a frame's own names; a change made through another name for the same dict
+    (``plan = REFERENCES; plan[...] = ...``) or a method call on it is not read there. FI's own run reads the frame from the
+    text it wrote, so the change reaches nothing FI computes, and the record says the study's code changed it."""
+    design = _design([_derived("peak")])
+    honest = _run(_quest(tmp_path / "honest", design, _PEAK.format(mutate="pass")))
+    aliased = ("plan = REFERENCES\nplan['extra'] = {'when': \"mode == 'b'\", 'formula': 'base'}\n"
+               "kept = FIXED\nkept.update({'base': 99.0})\n" + _PEAK.format(mutate="pass"))
+    quest = _quest(tmp_path / "alias", design, aliased)
+    text = (quest / "code" / "derive.py").read_text(encoding="utf-8")
+    frame = af.derive_source(design)
+    assert af.derive_intact(frame, text) == ""  # the reading of the code does not see it
+    code, printed, record, err = _run(quest)
+    assert code == honest[0] == 0 and not record["fi_faults"], err
+    assert printed == honest[1] and record["derived"] == honest[2]["derived"]
+    said = [n for n in record["notes"] if "the study's code changed" in n and "FI used the plan's values" in n]
+    assert any("the references" in n for n in said) and any("the fixed numbers" in n for n in said), record["notes"]
+
+
 def test_a_study_that_leaves_the_frame_alone_says_nothing_about_it(tmp_path: Path) -> None:
     code, _printed, record, _err = _frame_study(tmp_path, False, False, "honest")
     assert code == 0 and not [n for n in record["notes"] if "the study's code changed" in n or "could not read" in n]
