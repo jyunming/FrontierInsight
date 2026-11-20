@@ -1307,6 +1307,7 @@ class AnalyzeStageMixin:
                                             at_once=self._rerun_at_once(_frozen.protocol_of(self.quest_root)))
         # all the reruns of the whole study in one check together (a rerun of the analysis alone is not counted)
         budget = [_rerun_check.total_allowed(allowed, self.config.execution.timeout_s)]
+        timed_out: dict[str, Any] = {}  # the first rerun of the whole study in this check that did not finish in all its time
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
         from . import reuse_key as _reuse_key
@@ -1340,7 +1341,7 @@ class AnalyzeStageMixin:
             else:
                 runs += 1
                 try:
-                    out[fid] = await self._rerun_one(issue, record, state, done, budget, strict)
+                    out[fid] = await self._rerun_one(issue, record, state, done, budget, strict, timed_out)
                 except Exception as exc:  # noqa: BLE001 - a rerun that fails is "could not rerun", never a stop by itself
                     self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
                                       type(exc).__name__, exc)
@@ -1414,14 +1415,18 @@ class AnalyzeStageMixin:
             ": " + _one_line(run.detail or "", 160) if run is not None and run.detail else "")
 
     async def _rerun_one(self, issue: dict[str, Any], record: dict[str, Any], state: Any, done: dict[str, Any],
-                         budget: list[float] | None = None, strict: bool = False) -> Any:
+                         budget: list[float] | None = None, strict: bool = False,
+                         timed_out: dict[str, Any] | None = None) -> Any:
         """Run the study on a copy of the code with a repair of one shown fault, as :func:`core.rerun_check.judge`. The repair is
         the last one FI tried for the finding that makes its own test pass, even one its own rules refused (kept in ``code/``'s
         history); a finding with none that fits the code as it is is asked for one repair, with the same prompt as the
         code-review loop (counted in the record as ``rerun_calls``). A repair that does not make the finding's test pass is
         never run: the answer is "could not rerun". ``strict``: the finding is a reader's claim about the quantities in
         ``issue["disputed"]``: the answer is "unchanged" only when those numbers were compared, and a repair that leaves a
-        delivered number unwritten is "could not rerun"."""
+        delivered number unwritten is "could not rerun". ``timed_out`` (shared by the findings of one check): once a rerun of the
+        whole study did not finish in all the time a rerun is allowed, the whole study is not run again for another finding in
+        that check, since a repair of another line would not make it shorter; that finding's answer is "could not rerun", which
+        says so, and it is judged as a finding no rerun answered."""
         code = self.quest_root / "code"
         if str(getattr(self.config.execution, "sandbox", "venv")) == "docker":
             # the copy would run in a container that has none of the quest's data: no rerun, and no request spent on one
@@ -1503,6 +1508,11 @@ class AnalyzeStageMixin:
                                    + ". The repair may use only the results the plan declares.")
                         copy_dir = None
                         continue
+                    if (budget is not None and timed_out is not None and not timed_out and verdict.timed_out
+                            and not verdict.crashed and verdict.mode == "whole study"):
+                        # the kept answer is a whole-study rerun that ran out of all its time (a resumed check reads it here,
+                        # not from a new run): no other finding's whole study is run again in this check either
+                        timed_out.update(finding=fid, seconds=verdict.seconds or allowed)
                     done[key] = verdict
                     return verdict
                 # A repair of the analysis alone is run again on the recorded trials in seconds: it is not counted against the
@@ -1519,6 +1529,12 @@ class AnalyzeStageMixin:
                 if late:
                     return _rerun_check.Verdict("could_not", late, mode="whole study", source=source, files=sorted(
                         await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
+                if counts and timed_out:
+                    return _rerun_check.Verdict(
+                        "could_not", f"the study run again with a repair of {timed_out['finding']} did not finish within "
+                        f"{timed_out['seconds']:.0f} s, so FI does not run it again for another finding in this check",
+                        mode="whole study", source=source,
+                        files=sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
@@ -1540,6 +1556,9 @@ class AnalyzeStageMixin:
                                                        finding=str(issue.get("id") or ""), at_once=at_once)
                 if counts:
                     budget[0] -= time.monotonic() - began
+                if (counts and timed_out is not None and not timed_out and verdict.status == "could_not" and verdict.timed_out
+                        and left >= allowed):
+                    timed_out.update(finding=fid, seconds=left)
                 if lasting and verdict.status == "could_not" and (verdict.crashed or (verdict.timed_out and left >= allowed)):
                     # what the same repaired code would get again: kept by that code, so a later check does not run it again
                     kept_all = record.get("rerun_could_not") if isinstance(record.get("rerun_could_not"), dict) else {}
