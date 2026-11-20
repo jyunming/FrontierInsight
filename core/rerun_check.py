@@ -4,8 +4,12 @@ The evidence gate (``Engine._shown_fault_check``) used to stop the paper, or lea
 failed and the code it reaches feeds the main result. A test can check something the plan does not ask for, a faulty branch
 may never fire in the run, and a fault may sit in text FI wrote; each of those stopped a paper whose numbers were right.
 Here the question is put to the study itself: a repair of the finding is applied to a COPY of the study's code, the study is
-run again with the same seeds (the study's own entry, ``code/run.py``; only the analysis again, on the recorded trials, when
-only the analysis changed), and the numbers it reports are compared with the delivered ones.
+run again with the same seeds, and the numbers it reports are compared with the delivered ones. The study is run again the
+way the delivered run ran it: FI's own trial runner, with as many settings at the same time as the delivered run had, then
+the analysis on the trials it recorded (:func:`run_copy`); only the analysis again, on the recorded trials, when only the
+analysis changed. Only the settings the delivered run ran are run again: a setting the study's time limit cut off has no
+delivered number, is not run and is not compared (it is neither a change nor a failure). A search for the best design, and a
+study FI does not run through its trial runner, run through the study's own entry (``code/run.py``), one setting after another.
 
 * A number counts as changed only when it moves by more than its Monte Carlo uncertainty. The uncertainty is read from FI's
   own record of the trials (``raw/trials.json``): a mean's spread over the trials divided by their square root, a share's
@@ -21,8 +25,9 @@ only the analysis changed), and the numbers it reports are compared with the del
   counts, or an interval whose width moves by more than that, takes the allowance from the whole setting. A result with no
   declared precision keeps the rules above.
 * A change that only reshapes the same value (a number against ``{"value": ..., "lo": ..., "hi": ...}``) is not a change.
-* The rerun is bounded by the quest's own record of how long the study took (:func:`time_allowed`); when it does not fit,
-  when the repaired code does not run, or when no result is written, the answer is "could not rerun".
+* The rerun is bounded by the quest's own record of how long the study took (:func:`time_allowed`). It is not started when
+  that record says it would not fit in the time left (:func:`expected_seconds`); when it does not fit, when the repaired
+  code does not run, or when no result is written, the answer is "could not rerun".
 
 This module only runs and compares; the repair itself is asked for by the engine (``core/finding_repair.py``).
 """
@@ -46,13 +51,15 @@ _LOG = logging.getLogger(__name__)
 
 #: A rerun may take this much of what the study's own record says it needs.
 SLACK = 1.5
-#: The study's own entry (``run.py``) runs the settings one after another, each in a process of its own, where FI's run had
-#: several at once and the settings' own time (``settings_s``, summed) is what a serial run needs before it pays each process's
-#: start. Measured on one study: the serial entry took 1.8 to 2.9 times ``settings_s``; 3 is used. Not measured on other studies.
+#: The study's own entry (``run.py``, used only for a search for the best design and a study FI does not run through its trial
+#: runner) runs the settings one after another, each in a process of its own, where FI's run had several at once and the
+#: settings' own time (``settings_s``, summed) is what a serial run needs before it pays each process's start. Measured on one
+#: study: the serial entry took 1.8 to 2.9 times ``settings_s``; 3 is used for its limit. Not measured on other studies.
 SERIAL_FACTOR = 3.0
 #: Never less than this (starting the interpreter and the packages).
 FLOOR_S = 60
-#: All the reruns of one check together may take this many times what one rerun of the study is allowed.
+#: All the reruns of the whole study in one check together may take this many times what one of them is allowed, or the
+#: quest's own limit for one run when that is longer (:func:`total_allowed`). A rerun of the analysis alone is not counted.
 TOTAL_FACTOR = 2.0
 #: Standard errors a number must move by (the difference of two runs has sqrt(2) times one run's error).
 Z = 3.0
@@ -88,25 +95,75 @@ class Verdict:
     unwritten: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write that the changed code can affect
     carried: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write and no changed code writes: kept as delivered
     redrawn: bool = False  # the repair changes how random numbers are drawn (changes are judged against their uncertainty)
+    timed_out: bool = False  # could_not because the rerun ran out of the time it was given (not the estimate made before it)
 
     def record(self) -> dict[str, Any]:
         return {"status": self.status, "why": self.why, "metrics": self.metrics[:20], "keys": self.keys[:12],
                 "notes": self.notes[:6], "mode": self.mode, "seconds": round(self.seconds, 1), "source": self.source,
                 "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8], "unwritten": self.unwritten[:8], "carried": self.carried[:8],
-                "redrawn": self.redrawn}
+                "redrawn": self.redrawn, "timed_out": self.timed_out}
 
 
 # ---- how long ---------------------------------------------------------------------------------------------------------
-def time_allowed(quest_root: Path | str, limit_s: float | None = None) -> float | None:
-    """The seconds a rerun may take, from the run record, ``None`` when the record says nothing. The study's entry runs the
-    settings one after another, so what it needs is what the run's settings took in all (``settings_s``, times
-    :data:`SERIAL_FACTOR`), or the wall time when that is longer; the answer is :data:`SLACK` times that, and never above ``limit_s`` (the quest's own limit for one run).
+def expected_seconds(quest_root: Path | str, at_once: int | None = None) -> float | None:
+    """How long a rerun of the whole study is expected to take, from FI's record of the delivered run (never from the plan),
+    ``None`` when the record says nothing: the delivered run's own wall time (:func:`core.run_facts.run_seconds`). With
+    ``at_once`` (FI's trial runner, that many settings at the same time) it is longer in proportion when fewer settings run
+    at once than the delivered run had. Without (the study's own ``run.py``, one setting after another) it is a floor: such a
+    rerun took 1.0 to 85 times the delivered run's time on stored studies, and the settings' own times added up said nothing
+    better (a search run again that way took a tenth of them), so only what is certain decides that a rerun is not started."""
+    from . import run_facts as _run_facts
+
+    wall = _run_facts.run_seconds(quest_root)
+    if wall is None or at_once is None:
+        return wall
+    had = _run_facts.settings_at_once(quest_root) or int(at_once)
+    return wall * max(1.0, had / max(1, int(at_once)))
+
+
+def too_long(quest_root: Path | str, at_once: int | None, left_s: float) -> str:
+    """Why a rerun of the whole study is not started, in one plain sentence: FI's record of the delivered run says it would
+    take longer than the ``left_s`` seconds left for it (:func:`expected_seconds`); ``""`` when it may start."""
+    need = expected_seconds(quest_root, at_once)
+    if need is None or need <= left_s:
+        return ""
+    from .run_estimate import plain_duration
+
+    return (f"FI expects running the study again to take about {plain_duration(need)}, as long as its own run took, which is "
+            f"more than the {plain_duration(max(0.0, left_s))} left for it, so it was not started")
+
+
+def _seconds_of(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < float("inf") else None
+
+
+def total_allowed(allowed: float | None, limit_s: float | None) -> float:
+    """The seconds all the reruns of the whole study in one check may take together: :data:`TOTAL_FACTOR` times what one is
+    allowed, or the quest's own limit for one run (``limit_s``) when that is longer."""
+    return max(TOTAL_FACTOR * float(allowed or 0.0), float(limit_s or 0.0))
+
+
+def time_allowed(quest_root: Path | str, limit_s: float | None = None, at_once: int | None = None) -> float | None:
+    """The seconds a rerun may take, from the run record, ``None`` when the record says nothing; never above ``limit_s``
+    (the quest's own limit for one run) and never below :data:`FLOOR_S`.
+
+    With ``at_once`` the rerun runs as the delivered run ran (FI's trial runner, that many settings at the same time): it
+    may take :data:`SLACK` times the delivered run's own time at that many at once (:func:`expected_seconds`).
+
+    Without, the study's entry runs the settings one after another, so what it needs is what the run's settings took in all
+    (``settings_s``, times :data:`SERIAL_FACTOR`), or the wall time when that is longer; the answer is :data:`SLACK` times that.
     For a search for the best design the entry runs the coarse scan and then every evaluation one after another, so the
     evaluations' own times (``evaluations_s``) are settings' times too, and the wall time is the scan's, the search's and
     FI's check of its best design (:func:`core.run_facts.run_seconds`; the entry does not run the check, so it is a
     generous floor)."""
     from . import run_facts as _run_facts
 
+    if at_once is not None:
+        need = expected_seconds(quest_root, at_once)
+        if need is None:
+            return None
+        allowed = max(FLOOR_S, SLACK * need)
+        return min(allowed, float(limit_s)) if limit_s else allowed
     run = _run_facts.read(quest_root).get("trials_run")
 
     def seconds(name: str) -> float | None:
@@ -120,6 +177,117 @@ def time_allowed(quest_root: Path | str, limit_s: float | None = None) -> float 
         return None
     allowed = max(FLOOR_S, SLACK * max(seen))
     return min(allowed, float(limit_s)) if limit_s else allowed
+
+
+def analysis_only(files: list[str] | set[str] | tuple[str, ...]) -> bool:
+    """Whether a repair that changed ``files`` (paths in ``code/``) changed only the analysis: only the analysis is run again,
+    on the recorded trials, and such a rerun is not counted against the time of the check."""
+    return bool(files) and all(Path(f).name in ANALYSIS_FILES and "/" not in f for f in files)
+
+
+def inputs_of(quest_root: Path | str) -> dict[str, str | None]:
+    """The hash of every file of the quest, other than the repaired code, that a rerun of the whole study reads
+    (:func:`_run_like_main` and the study's own ``run.py``): the frozen protocol (grid, trials per setting, what each run is
+    given, thresholds), FI's record of the two stages (the seed base), FI's ledger of the delivered trials, its run record
+    and sizing (settings at once, shared processes), and the files under ``inputs/`` and ``data/`` but the results. ``None``
+    for a file that is not there; ``complete`` is ``"no"`` when a file is there but cannot be read. An answer kept
+    for a repair is reused only while these are the same."""
+    from . import frozen_protocol as _frozen
+    from . import phased as _phased
+    from . import reuse_key as _reuse_key
+    from . import run_estimate as _estimate
+    from . import run_facts as _run_facts
+
+    root = Path(quest_root)
+    named = (_frozen.frozen_path(root), _phased.record_path(root), root / "raw" / "ledger.jsonl", root / _run_facts.PATH,
+             root / _estimate.RECORD)
+    out: dict[str, str | None] = {}
+    unread = False
+    for path in named:
+        try:
+            out[path.relative_to(root).as_posix()] = _reuse_key.digest(path)
+        except OSError:
+            out[path.relative_to(root).as_posix()] = None
+            unread = unread or path.exists()  # there but not readable: the key would not tell its versions apart
+    found = _reuse_key.files(root, "simulation")
+    out.update({k: v for k, v in found.digests.items() if not k.startswith("code/")})
+    out["complete"] = "yes" if found.complete and not unread else "no"
+    return out
+
+
+# ---- FI's ledger of the delivered run ---------------------------------------------------------------------------------
+@dataclass
+class Ledger:
+    """What FI's ledger of a run of the trials (``raw/ledger.jsonl``) says: the settings it planned, in its order, with the
+    trials each was planned with; the seed of each trial; and the trials the study's time limit cut off
+    (:data:`core.trial_runner.OUT_OF_TIME`), by setting."""
+
+    planned: dict[str, int] = field(default_factory=dict)
+    seeds: dict[tuple[str, int], Any] = field(default_factory=dict)
+    cut: dict[str, set[int]] = field(default_factory=dict)
+
+    def cut_settings(self) -> set[str]:
+        """The settings none of whose planned trials ran because the study's time ran out: no number was delivered for them."""
+        return {k for k, n in self.planned.items() if n > 0 and len(self.cut.get(k, ())) >= n}
+
+
+def ledger_of(root: Path | str) -> Ledger | None:
+    """FI's ledger of the run whose trials are stored under ``root`` (:class:`Ledger`), ``None`` when there is none."""
+    from .trial_runner import OUT_OF_TIME
+
+    path = Path(root) / "raw" / "ledger.jsonl"
+    if not path.is_file():
+        return None
+    out = Ledger()
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or not isinstance(row.get("cell"), str):
+                    continue
+                key = row["cell"]
+                if row.get("event") == "planned" and isinstance(row.get("trials"), int):
+                    out.planned[key] = int(row["trials"])
+                elif row.get("event") == "trial" and isinstance(row.get("trial"), int):
+                    out.seeds[(key, int(row["trial"]))] = row.get("seed")
+                    if str(row.get("reason") or "").startswith(OUT_OF_TIME):
+                        out.cut.setdefault(key, set()).add(int(row["trial"]))
+    except OSError:
+        return None
+    return out
+
+
+def cut_settings(root: Path | str) -> set[str]:
+    """The settings of the run stored under ``root`` that its time limit cut off whole (:meth:`Ledger.cut_settings`); empty
+    when FI has no ledger of it."""
+    ledger = ledger_of(root)
+    return ledger.cut_settings() if ledger is not None else set()
+
+
+def _of_settings(setting: str | None, settings: set[str]) -> bool:
+    """Whether ``setting`` (a key :func:`metric_of` gives) is one of ``settings`` or the record of a value compared inside a
+    run of one (``"<setting>,<value>"``, :func:`core.in_run.record_key`)."""
+    if setting is None or not settings:
+        return False
+    if setting in settings:
+        return True
+    at = setting.find(",")
+    while at != -1:  # a value's record is "<setting>,<value>": each shorter key it starts with
+        if setting[:at] in settings:
+            return True
+        at = setting.find(",", at + 1)
+    return False
+
+
+def without_settings(numbers: dict[str, float], settings: set[str]) -> dict[str, float]:
+    """``numbers`` (:func:`results_of`) without the ones of ``settings``: their counts of trials and their means, and the
+    numbers a result gives at them."""
+    if not settings:
+        return numbers
+    return {k: v for k, v in numbers.items() if not _of_settings(metric_of(k)[1], settings)}
 
 
 # ---- reading the results ----------------------------------------------------------------------------------------------
@@ -600,8 +768,9 @@ def progress_of(copy: Path, elapsed_s: float) -> str:
     return ", ".join(bits)
 
 
-async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
-    """Await ``task``; every ``PROGRESS_EVERY_S`` seconds say where the rerun is, as the main run does."""
+async def _say_while(task: Any, where: Any, say: Any, finding: str) -> Any:
+    """Await ``task``; every ``PROGRESS_EVERY_S`` seconds say where the rerun is (``where(elapsed seconds)``), as the main run
+    does."""
     from .run_estimate import plain_duration
 
     began = time.monotonic()
@@ -612,8 +781,8 @@ async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
             if done:
                 return task.result()
             try:
-                where = progress_of(copy, time.monotonic() - began)
-                say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {where}" if where else ""))
+                at = where(time.monotonic() - began)
+                say(f"{who} is still running, {plain_duration(time.monotonic() - began)} elapsed" + (f": {at}" if at else ""))
             except Exception:  # noqa: BLE001 - a line about progress never stops the rerun
                 pass
     finally:
@@ -622,55 +791,245 @@ async def _say_while(task: Any, copy: Path, say: Any, finding: str) -> Any:
             await asyncio.wait({task})  # its clean-up (the process tree) is finished before the cancel goes on
 
 
-async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
-                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None, *, say: Any = None,
-                   finding: str = "", derived: str = "data/results/derived.json") -> tuple[str, Path | None, str, float, bool]:
-    """Run the study of a copy of ``code/``: ``(mode, folder holding data/ and raw/ it wrote or None, why not, seconds, crashed)``.
-    Only the analysis, on the recorded trials, when the changed ``files`` are all analysis files; else the study's own entry
-    (``run.py``). A run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends
-    some studies that way). The run wrote results when it wrote what the delivered run's numbers are read from
-    (:func:`result_names`), not a file name this module fixes: an older study writes ``result.json``."""
-    began = time.monotonic()
-    quest_root = Path(quest_root)
-    raw_trials = Path(results_root or quest_root) / "raw" / "trials.json"
-    names = result_names(results_root or quest_root, derived)
-    analysis_only = bool(files) and all(Path(f).name in ANALYSIS_FILES and "/" not in f for f in files) and raw_trials.is_file()
-    if analysis_only:
-        mode = "analysis only"
-        out = work / "ao"
-        (out / "raw").mkdir(parents=True)
-        shutil.copy2(raw_trials, out / "raw" / "trials.json")
-        shutil.copytree(copy, out / "code", ignore=_COPY_SKIP)
-        env = {**(env or {}), "FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw", "FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}
-        ran = await _run(executor, python, ["code/experiment.py"], out, max(1, int(timeout_s)), env)
-        wrote = wrote_results(out, names)
-    else:
-        mode = "whole study"
-        out = copy / "output"
-        if not (copy / "run.py").is_file():
-            return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
-        wrapped = False
-        if say is not None:
-            try:
-                (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
-                (copy / _MARK).unlink(missing_ok=True)
-                wrapped = True
-            except OSError:  # no note of progress then: the study itself still runs
-                pass
-        if not wrapped:
-            ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
-        else:
-            ran = await _say_while(asyncio.ensure_future(
-                _run(executor, python, ["_fi_rerun_run.py"], copy, max(1, int(timeout_s)), env)), copy, say, finding)
-        wrote = wrote_results(out, names) and (out / "raw/trials.json").is_file()
-    secs = time.monotonic() - began
+def parallel(quest_root: Path | str, protocol: Any, default: int = 1) -> int | None:
+    """How many settings at the same time a rerun of the whole study runs, ``None`` when it runs through the study's own
+    ``run.py`` (one setting after another). A study whose stored trials FI's trial runner ran (FI's ledger of them and its
+    run record are there) and that is no search for the best design is run again the way that run ran: as many settings at
+    once as it had (:func:`core.run_facts.settings_at_once`), or ``default`` when FI did not count them."""
+    from . import run_facts as _run_facts
+    from . import trial_runner as _tr
+    from .split_run import SIMULATE_NAME
+
+    root = Path(quest_root)
+    if not isinstance(protocol, dict) or isinstance(protocol.get("optimisation"), dict):
+        return None
+    if not (_tr.entries(root / "code" / SIMULATE_NAME) & {"run_trial", "run_cell"}):
+        return None
+    if not ((root / "raw" / "trials.json").is_file() and (root / "raw" / "ledger.jsonl").is_file()):
+        return None
+    if not isinstance(_run_facts.read(root).get("trials_run"), dict):
+        return None
+    return _run_facts.settings_at_once(root) or max(1, int(default or 1))
+
+
+async def _analysis(executor: Any, python: Path | str, code: Path, trials: Path, out: Path, timeout_s: float,
+                    env: dict[str, str] | None) -> Any:
+    """The study's analysis (``experiment.py`` of ``code``) on the record of the trials ``trials``, in ``out``."""
+    (out / "raw").mkdir(parents=True)
+    shutil.copy2(trials, out / "raw" / "trials.json")
+    shutil.copytree(code, out / "code", ignore=_COPY_SKIP)
+    env = {**(env or {}), "FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw", "FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}
+    return await _run(executor, python, ["code/experiment.py"], out, max(1, int(timeout_s)), env)
+
+
+def _ended(ran: Any, out: Path, names: list[str], timeout_s: float, mode: str, secs: float,
+           info: dict[str, Any]) -> tuple[str, Path | None, str, float, bool]:
+    # no result file to write (the delivered numbers are FI's record of the trials, rewritten by the trial runner): the
+    # analysis must still end cleanly, so a crash in it is never read as a run
+    wrote = (wrote_results(out, names) if names else ran.returncode == 0) and (out / "raw" / "trials.json").is_file()
     if getattr(ran, "timed_out", False):
+        info["timed_out"] = True
         return mode, None, f"the repaired study did not finish within {int(timeout_s)} s", secs, False
     if ran.returncode != 0 and not wrote:
         return mode, None, f"the repaired code did not run to the end ({_error_of(ran)})", secs, True
     if not wrote:
         return mode, None, "the repaired study wrote no results", secs, True
     return mode, out, "", secs, False
+
+
+async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
+                   env: dict[str, str] | None, work: Path, results_root: Path | str | None = None, *, say: Any = None,
+                   finding: str = "", derived: str = "data/results/derived.json", protocol: Any = None,
+                   at_once: int | None = None, info: dict[str, Any] | None = None) -> tuple[str, Path | None, str, float, bool]:
+    """Run the study of a copy of ``code/``: ``(mode, folder holding data/ and raw/ it wrote or None, why not, seconds, crashed)``.
+    Only the analysis, on the recorded trials, when the changed ``files`` are all analysis files (:func:`analysis_only`). Else
+    the whole study: with ``at_once`` (:func:`parallel`) as the delivered run ran it, through FI's trial runner with that many
+    settings at the same time and only the settings it ran, then the analysis on the trials recorded (:func:`_run_like_main`);
+    without, through the study's own entry (``run.py``). The whole study is not started when FI's record of the delivered run
+    says it would take longer than ``timeout_s`` (:func:`expected_seconds`): the answer is then "could not rerun" at 0 s. A
+    run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends some studies that
+    way). The run wrote results when it wrote what the delivered run's numbers are read from (:func:`result_names`), not a
+    file name this module fixes: an older study writes ``result.json``, and a study whose delivered run left no result file FI
+    reads is read, through FI's trial runner, from FI's record of its trials alone. ``info`` gets ``timed_out`` when the run ran out of
+    its time."""
+    began = time.monotonic()
+    quest_root = Path(quest_root)
+    base_root = Path(results_root or quest_root)
+    raw_trials = base_root / "raw" / "trials.json"
+    names = result_names(base_root, derived)
+    info = info if info is not None else {}
+    if analysis_only(files) and raw_trials.is_file():
+        mode = "analysis only"
+        out = work / "ao"
+        ran = await _analysis(executor, python, copy, raw_trials, out, timeout_s, env)
+        return _ended(ran, out, names, timeout_s, mode, time.monotonic() - began, info)
+    mode = "whole study"
+    why = too_long(quest_root, at_once, timeout_s)
+    if why:
+        return mode, None, why, 0.0, False
+    if at_once is not None and isinstance(protocol, dict):
+        # a delivered run with no result file FI reads has its numbers in FI's record of the trials alone: that record,
+        # which the trial runner writes again, is what the rerun must write (only on this path: an analysis-only rerun
+        # copies the delivered record, so there the analysis's own result file is still required)
+        trials_only = raw_trials.is_file() and not wrote_results(base_root, names)
+        return await _run_like_main(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work, int(at_once),
+                                    [] if trials_only else names, say=say, finding=finding, info=info, began=began)
+    out = copy / "output"
+    if not (copy / "run.py").is_file():
+        return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
+    wrapped = False
+    if say is not None:
+        try:
+            (copy / "_fi_rerun_run.py").write_text(_WRAPPER, encoding="utf-8")
+            (copy / _MARK).unlink(missing_ok=True)
+            wrapped = True
+        except OSError:  # no note of progress then: the study itself still runs
+            pass
+    if not wrapped:
+        ran = await _run(executor, python, ["run.py"], copy, max(1, int(timeout_s)), env)
+    else:
+        ran = await _say_while(asyncio.ensure_future(
+            _run(executor, python, ["_fi_rerun_run.py"], copy, max(1, int(timeout_s)), env)),
+            lambda elapsed: progress_of(copy, elapsed), say, finding)
+    return _ended(ran, out, names, timeout_s, mode, time.monotonic() - began, info)
+
+
+def _plan_progress(root: Path, seen: list[Any], elapsed_s: float) -> str:
+    """Where a rerun through FI's trial runner is (the plan it was told, ``seen``), in the words of the main run's line."""
+    if not seen:
+        return ""
+    from . import run_estimate as _estimate
+
+    plan = seen[-1]
+    done_trials = done_cells = 0
+    for task in plan:
+        try:
+            lines = (root / task["out"]).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        got = sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
+        done_trials += got
+        done_cells += got >= len(task["trials"])
+    return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan), elapsed_s)
+
+
+async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, base_root: Path, copy: Path, protocol: dict[str, Any],
+                         timeout_s: float, env: dict[str, str] | None, work: Path, at_once: int, names: list[str], *,
+                         say: Any, finding: str, info: dict[str, Any], began: float) -> tuple[str, Path | None, str, float, bool]:
+    """The whole study of ``copy`` run as the delivered run ran it (the settings, the seeds and the trial runner of
+    ``core.trial_runner.TrialsRunner``, with as many settings at once and, when it shared processes after FI's check that
+    sharing gives the same numbers, the same groups of settings to a process), in a folder of its own under ``work``: never
+    in the quest, whose record of the trials stays as it is. Only the settings the delivered run planned are run, and of them
+    not the ones its time limit cut off whole; a trial it cut off is recorded the same way in the rerun's record of the
+    trials, so the analysis reads the same settings as the delivered one did. The seeds are checked against FI's ledger
+    before anything runs."""
+    from . import in_run as _in_run
+    from . import mc_error as _mc
+    from . import optimise_search as _search
+    from . import phased as _phased
+    from . import run_estimate as _estimate
+    from . import run_facts as _run_facts
+    from . import trial_runner as _tr
+    from .split_run import SIMULATE_NAME
+
+    mode = "whole study"
+    ledger = ledger_of(base_root)
+    if ledger is None or not ledger.planned:
+        return mode, None, "FI has no ledger of the delivered run's trials to run them again from", 0.0, False
+    grid = _search.study_grid(protocol)
+    runs = int(protocol.get("runs_per_setting") or 1)
+    inside = protocol.get("in_each_run") if isinstance(protocol.get("in_each_run"), dict) else None
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+    paired = _mc.paired(protocol, quest_root)
+    deterministic = "run_trial" not in _tr.entries(copy / SIMULATE_NAME)
+    per = 1 if deterministic else max(1, runs)
+    # The seed base the delivered run was given (moved for the confirm stage of a study run in two stages).
+    base = int(_phased.seed_env(quest_root, {"FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}, record=False)
+               .get("FI_REPLICATE_SEED") or 0)
+    cells: dict[str, dict[str, Any]] = {}
+    for listed, cell in enumerate(_search.iter_grid_cells(grid)):
+        key = _tr.cell_key(cell)
+        if key in ledger.planned:
+            cells.setdefault(key, cell)
+        if len(cells) == len(ledger.planned) or listed >= _search.MAX_LISTED_SETTINGS:
+            break
+    missing = [k for k in ledger.planned if k not in cells]
+    if missing:
+        return mode, None, ("the delivered run's record of the trials holds settings the plan's grid does not list now ("
+                            + (missing[0] or "its one setting") + ")"), 0.0, False
+    for key, planned in ledger.planned.items():
+        if planned != per:
+            return mode, None, (f"the delivered run planned {planned} trial(s) of {key or 'its one setting'} and the rerun "
+                                f"would plan {per}"), 0.0, False
+        for t in range(planned):
+            want = None if deterministic else _tr.trial_seed(base, "" if paired else key, t)
+            if (key, t) in ledger.seeds and ledger.seeds[(key, t)] != want:
+                return mode, None, ("the rerun would give its trials other seeds than the delivered run gave them (trial "
+                                    f"{t} of {key or 'its one setting'})"), 0.0, False
+    cut = ledger.cut_settings()
+    root = work / "trials"
+    root.mkdir(parents=True)
+
+    def copy_inputs() -> None:
+        shutil.copytree(copy, root / "code", ignore=_COPY_SKIP)
+        for name in ("inputs", "data"):
+            src = quest_root / name
+            if src.is_dir():  # what a setting's process is given besides code/ (core/outside_run.py), without data/results/
+                shutil.copytree(src, root / name, ignore=lambda folder, items, src=src: (
+                    {"results"} if Path(folder) == src and name == "data" else set()))
+
+    await asyncio.to_thread(copy_inputs)
+    # Settings that shared a process in the delivered run share one here too, in the groups its sizing kept
+    # (core/run_checks.py records them with the estimate); without the groups, as many to a process as it had.
+    shared = _run_facts.settings_shared(quest_root)
+    sizing = _estimate.read_record(quest_root) if shared else {}
+    groups = [[str(k) for k in g] for g in sizing.get("shared_groups") or [] if isinstance(g, list)] or None
+    allowance = sizing.get("group_allowance_s") if groups and isinstance(sizing.get("group_allowance_s"), (int, float)) else None
+    seen: list[Any] = []
+    task = asyncio.ensure_future(_tr.run_trials(
+        executor, python, root, f"code/{SIMULATE_NAME}", grid, runs_per_setting=runs, base_seed=base,
+        deterministic=deterministic, timeout_s=max(1, int(timeout_s)), env=env, thresholds=thresholds, paired=paired,
+        on_plan=seen.append, in_each_run=inside, at_once=max(1, int(at_once)), per_process=shared or 1, groups=groups,
+        group_allowance_s=allowance, cell_list=[cells[k] for k in ledger.planned if k not in cut]))
+    if say is not None:
+        run = await _say_while(task, lambda elapsed: _plan_progress(root, seen, elapsed), say, finding)
+    else:
+        run = await task
+    secs = time.monotonic() - began
+    loaded = sorted({c.load_error for c in run.cells if c.load_error})
+    if loaded:
+        return mode, None, f"the repaired simulation could not be loaded ({loaded[0][:300]})", secs, True
+    late = [c.key for c in run.cells for r in c.rows if str(r.get("reason") or "").startswith(_tr.OUT_OF_TIME)
+            and r.get("trial") not in ledger.cut.get(c.key, set())]
+    if late:
+        # A setting the delivered run ran and the rerun did not reach is no change and no failure: the rerun did not finish.
+        info["timed_out"] = True
+        return mode, None, (f"the repaired study did not finish within {int(timeout_s)} s ({len(set(late))} setting(s) the "
+                            "delivered run ran were not reached)"), secs, False
+    if run.cells and run.ok_trials == 0:
+        reason = next((str(r.get("reason")) for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
+        return mode, None, f"the repaired code did not run to the end (no trial ran: {reason[:300]})", secs, True
+    # The record of the trials the analysis reads: every setting the delivered run planned, in its order, and every trial its
+    # time limit cut off recorded as it was cut off there.
+    ran = {c.key: c for c in run.cells}
+    levels = _in_run.level_cells(inside or {})
+    every: list[Any] = []
+    for key, planned in ledger.planned.items():
+        lost = ledger.cut.get(key, set())
+        cell_run = ran.get(key) or _tr.CellRun(key=key, cell=dict(cells[key]), planned=planned, levels=levels)
+        rows = {r.get("trial"): r for r in cell_run.rows}
+        cell_run.rows = [{"trial": t, "seed": ledger.seeds.get((key, t)), "status": "failed", "reason": _tr.OUT_OF_TIME}
+                         if t in lost or t not in rows else rows[t] for t in range(planned)]
+        every.append(cell_run)
+    trials = root / "raw" / "trials.json"
+    trials.write_text(json.dumps(_tr.summary_of(every, thresholds), indent=1, allow_nan=True), encoding="utf-8")
+    left = timeout_s - (time.monotonic() - began)
+    if left < 1:
+        info["timed_out"] = True
+        return mode, None, f"the repaired study did not finish within {int(timeout_s)} s", time.monotonic() - began, False
+    out = work / "ao"
+    ran_analysis = await _analysis(executor, python, copy, trials, out, left, env)
+    return _ended(ran_analysis, out, names, timeout_s, mode, time.monotonic() - began, info)
 
 
 def _error_of(ran: Any) -> str:
@@ -702,14 +1061,15 @@ def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
 
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
-                derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "") -> Verdict:
-    """As :func:`_judge`; the repaired files the gate judged (run or not), its verdict and the result record the rerun wrote,
+                derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "",
+                at_once: int | None = None) -> Verdict:
+    """As :func:`_judge` (``at_once``: :func:`parallel`); the repaired files the gate judged (run or not), its verdict and the result record the rerun wrote,
     if any, are then kept in ``code/``'s own git history under ``refs/fi/rerun/<finding>``
     (:func:`core.code_project.keep_rerun`), so a later case can be replayed on the very repair the gate judged. Keeping it
     never changes the verdict."""
     seen: dict[str, Any] = {}
     verdict = await _judge(executor, python, quest_root, copy, protocol, timeout_s, env, source=source, results_root=results_root,
-                           derived=derived, disputed=disputed, finding=finding, seen=seen)
+                           derived=derived, disputed=disputed, finding=finding, seen=seen, at_once=at_once)
     if seen.get("files"):
         from . import code_project as _project
 
@@ -731,7 +1091,7 @@ KEEP_DERIVED_BYTES = 4_000_000
 async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                  env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
                  derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "",
-                 seen: dict[str, Any] | None = None) -> Verdict:
+                 seen: dict[str, Any] | None = None, at_once: int | None = None) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
     delivered (``results_root``, the quest folder by default). ``finding``: the id of the finding the repair is for; while the whole study runs, the quest's run.log says
     every 30 s which finding is being rerun, how many settings are done and about how long is left. ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
@@ -749,15 +1109,20 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
         logger = logging.getLogger(f"frontier_insight.{Path(quest_root).name}")  # the quest's own log, when it has one
         if not logger.handlers:
             logger = _LOG
+        info: dict[str, Any] = {}
         mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root,
                                                        say=lambda line: logger.info("[evidence_gate] %s", line), finding=finding,
-                                                       derived=derived)
+                                                       derived=derived, protocol=protocol, at_once=at_once, info=info)
         if out is None:
-            return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed)
+            return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed,
+                           timed_out=bool(info.get("timed_out")))
         base_root = Path(results_root or quest_root)
-        base = await asyncio.to_thread(results_of, base_root, derived)
+        # A setting the delivered run's time limit cut off has no delivered number: whether the rerun ran it or not is neither a
+        # change nor a failure, so it is not compared (FI's ledger says which; without one every setting is compared).
+        cut = await asyncio.to_thread(cut_settings, base_root)
+        base = without_settings(await asyncio.to_thread(results_of, base_root, derived), cut)
         delivered = dict(base)  # every delivered number, before a file the repaired run did not write leaves the comparison
-        new = await asyncio.to_thread(results_of, out)
+        new = without_settings(await asyncio.to_thread(results_of, out), cut)
         # a result the repair gives at another grain of settings is compared at each delivered setting (FI's own record)
         new_doc = await asyncio.to_thread(_json, out / derived)
         grid = grid_of(await asyncio.to_thread(_json, base_root / "raw" / "trials.json"))
@@ -781,6 +1146,9 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
         redrawn = draws_changed({r: o for r, (o, _n) in changed.items()}, {r: n for r, (_o, n) in changed.items()})
         keep, notes = counted(compare(base, new, REL_TOL if redrawn else EXACT_TOL), protocol,
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
+        if cut:
+            notes = [*notes, f"{len(cut)} setting(s) the delivered run did not run because the study's time ran out are not "
+                             "compared: they have no delivered number"]
         keys = [c["key"] for c in keep]
         dropped = [c["key"] for c in keep if c["new"] is None]
         if disputed is not None and dropped:
