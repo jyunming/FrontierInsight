@@ -50,7 +50,8 @@ import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { openQuestMap, tabAreaColumn } from "./quest-map";
 import { IndexEntry, describeAmbiguous, findInIndex, loadIndex, matchIds, shortId } from "./quest-index";
-import { runFollow, runQuality, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
+import { runFollow, runLaunch, runQuality, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
+import { LIST_TIMEOUT_MS, ListedQuest, isRunning, loadQuestList, runningMark, stillRunningMessage } from "./quest-list";
 
 
 /**
@@ -581,10 +582,13 @@ async function runResume(
             // Missing checkpoint or unreadable file — skip silently.
         }
     }));
-    // Every quest FI has run on this computer, in any folder (core/quest_index.py): offered when this folder has none,
-    // and looked up when an id is not one of this folder's. Those this /watch or /plan cannot act on are left out.
+    // The one list of quests (this folder's, then every other FI has run on this computer, each with whether it runs
+    // now), from FI's own `--quests --json`: the same list and running test as the web page. Those this /watch or /plan
+    // cannot act on are left out.
+    const pythonForList = cfg.get<string>("pythonPath") || "python";
+    const listed = await loadQuestList((a) => runLaunch(pythonForList, repoPath, workDir, a, LIST_TIMEOUT_MS), outputsDir);
     const here = path.resolve(outputsDir).toLowerCase();
-    const elsewhere = loadIndex().filter((e) => {
+    const elsewhere = listed.filter((e) => {
         if (path.resolve(path.dirname(e.questRoot)).toLowerCase() === here) return false;
         if (watch && !fs.existsSync(path.join(e.questRoot, ".fi", "pending.json"))) return false;
         if (plan && !fs.existsSync(path.join(e.questRoot, "plan.md"))) return false;
@@ -666,17 +670,19 @@ async function runResume(
     let foreign: IndexEntry | undefined;
     if (!chosenId) {
         // This folder's quests; when it has none, every quest FI has run on this computer.
-        const picks = candidates.length > 0
-            ? candidates.map((c) => ({
+        const picks = [
+            ...candidates.map((c) => ({
                 label: `$(beaker) ${c.questId}`,
-                description: `${shortId(c.questId)} · ${new Date(c.mtimeMs).toLocaleString()}`,
+                description: [runningMark({ status: listedStatus(listed, c.questDir) }),
+                    `${shortId(c.questId)} · ${new Date(c.mtimeMs).toLocaleString()}`].filter(Boolean).join(" · "),
                 questId: c.questId, entry: undefined as IndexEntry | undefined,
-            }))
-            : elsewhere.map((e) => ({
+            })),
+            ...elsewhere.map((e) => ({
                 label: `$(beaker) ${shortId(e.questId)}  ${e.title || e.questId}`,
-                description: e.questRoot,
+                description: [runningMark(e), e.questRoot].filter(Boolean).join(" · "),
                 questId: e.questId, entry: e as IndexEntry | undefined,
-            }));
+            })),
+        ];
         const picked = await vscode.window.showQuickPick(picks, {
             placeHolder: candidates.length === 0
                 ? "This folder has no quests. Pick one FI has run in another folder (most recent first)"
@@ -717,6 +723,14 @@ async function runResume(
     }
     // The quest's own folder: under this folder's outputs, or where it was run.
     const questDir = foreign ? foreign.questRoot : path.join(outputsDir, chosenId);
+    // A running quest is not started a second time (the web page refuses with "still running" too): another run of
+    // it would share its files. This check is a convenience that fails open (no list, a path through a link); the run
+    // itself refuses a quest whose process record says another process runs it (core/run_marker.py). Opening its plan and watching it start nothing, so they are not refused; a quest the
+    // list could not give a status for is not refused either.
+    if (!watch && !(plan && !planRequest) && isRunning(listed, questDir)) {
+        stream.markdown("❌ " + stillRunningMessage(chosenId) + "\n");
+        return;
+    }
     if (foreign) {
         stream.markdown(`📁 \`${chosenId}\` is in \`${path.dirname(questDir)}\`; it runs there.\n\n`);
     }
@@ -843,6 +857,11 @@ async function runResume(
         roots,
         where,
     );
+}
+
+/** What the list says of the quest in this folder: "running", ... or "" when it is not in the list or has no status. */
+function listedStatus(list: ListedQuest[], questDir: string): string {
+    return isRunning(list, questDir) ? "running" : "";
 }
 
 /** Where a quest from another folder runs (see runResume): its config by full path, its working folder, its outputs. */

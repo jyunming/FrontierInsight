@@ -2457,6 +2457,14 @@ def _is_review_pause_active(pause_path: Path) -> bool:
         return False
 
 
+def _refuse_if_quest_runs(quest_root: Path) -> None:
+    """Every command that writes into a quest's folder asks this first (core/run_marker.py:refuse_if_running): a quest
+    another process runs is refused with one line (exit 1) before anything of it is touched."""
+    from core.run_marker import refuse_if_running
+
+    refuse_if_running(Path(quest_root).resolve())
+
+
 def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
     """For a quest started directly (``python launch.py``), drop a small
     launch record at ``<quest>/.fi/launch.log`` so every quest — however it
@@ -2516,6 +2524,7 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     from core.job_watch import describe, read_pending, watch
 
     quest_id = args.watch
+    _refuse_if_quest_runs(cfg.output.output_dir / quest_id)
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
     pending = read_pending(engine.fi_dir)
     if pending is None:
@@ -2591,13 +2600,22 @@ async def run_one(
     # runs — instead of creating a second Engine here with a fresh
     # quest_id and stranding the status-line one). When omitted, build.
     if engine is None:
+        if resume_quest_id is not None:
+            # Before the engine opens the quest's run.log: a quest another process runs now is refused untouched.
+            from core.run_marker import refuse_if_running as _refuse_early
+
+            _refuse_early((cfg.output.output_dir / resume_quest_id).resolve())
         engine = Engine(
             cfg, supervisor=supervisor,
             resume_quest_id=resume_quest_id,
             auto_accept_on_pass=auto_accept_on_pass,
         )
     from core.quest_index import short_id as _short_id
+    from core.run_marker import refuse_if_running as _refuse_if_running
 
+    # A quest another process runs now is refused here, before the launch record, the config copy or the index are
+    # written (the engine asks again before its first step).
+    _refuse_if_running(engine.quest_root)
     # The short id is what `fi tools quests` lists and what `--resume` takes from any folder.
     if resume_quest_id is not None:
         print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name} short_id={_short_id(engine.quest_id)}")
@@ -2838,6 +2856,7 @@ async def _emit_one(
     """Generate ONE extra output format for a finished quest without
     re-running the research: load the checkpoint read-only, then run only
     the requested generator off the existing paper.md + figures."""
+    _refuse_if_quest_runs(cfg.output.output_dir / quest_id)
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
     try:
         art = await engine.emit_artifacts_only()
@@ -2876,6 +2895,7 @@ async def _revise_plan_once(
     cfg.knowledge = cfg.knowledge.model_copy(update={"enabled": False})
     from core.provider import ProviderUnusable
 
+    _refuse_if_quest_runs(cfg.output.output_dir / quest_id)
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
     try:
         done = await engine.revise_plan(request)
@@ -3665,7 +3685,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return _rename_quest(args.rename, args.output_root, title=args.title)
 
         if args.quests:
-            return _list_quests(prune=args.prune, as_json=args.json_out)
+            return _list_quests(prune=args.prune, as_json=args.json_out, output_root=args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -3750,6 +3770,7 @@ async def main_async(args: argparse.Namespace) -> int:
             located = _locate_quest(args.update, args.output_root)
             if located is None:
                 return 1
+            _refuse_if_quest_runs(located)
             if located.parent.resolve() != Path(args.output_root).resolve():
                 # A quest from another folder: updated and resumed from the folder it was started in, as --resume does.
                 started_in = _started_in(located.resolve())
@@ -3800,6 +3821,7 @@ async def main_async(args: argparse.Namespace) -> int:
             located = _locate_quest(args.critique, args.output_root)
             if located is None:
                 return 1
+            _refuse_if_quest_runs(located)
             return await _run_critique(
                 quest_id=located.name,
                 output_root=located.parent,
@@ -6994,8 +7016,9 @@ def _locate_quest(quest: str, output_root: Path) -> Path | None:
     return _quest_dir(quest, output_root)
 
 
-def _list_quests(*, prune: bool = False, as_json: bool = False) -> int:
-    """``fi tools quests [--prune]``: every quest FI has run on this computer (core/quest_index.py)."""
+def _list_quests(*, prune: bool = False, as_json: bool = False, output_root: Path | None = None) -> int:
+    """``fi tools quests [--prune]``: every quest FI has run on this computer (core/quest_index.py), this folder's
+    (``output_root``) first: the one list the web page and the VS Code extension show too."""
     from core import quest_index
 
     if prune:
@@ -7006,7 +7029,7 @@ def _list_quests(*, prune: bool = False, as_json: bool = False) -> int:
             return 1
         if not as_json:
             print(f"[FI] forgot {len(dropped)} quest(s) whose folder is gone" + (": " + ", ".join(dropped) if dropped else "."))
-    items = quest_index.entries()
+    items = quest_index.listed(output_root)
     if as_json:
         print(json.dumps({"quests": [e.as_dict(with_status=True) for e in items]}, ensure_ascii=False))
     else:
@@ -7153,6 +7176,7 @@ def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:
     if root is None:
         print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
+    _refuse_if_quest_runs(root)
     ok, message = frozen_protocol.approve(root, approved_by, via="cli")
     print(f"[FI] {message}")
     if not ok:
@@ -7174,6 +7198,7 @@ def _accept_checks(quest: str, approved_by: str, output_root: Path) -> int:
     if root is None:
         print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
+    _refuse_if_quest_runs(root)
     ok, message = accepted_checks.accept(root, approved_by, via="cli")
     print(f"[FI] {message}")
     if not ok:

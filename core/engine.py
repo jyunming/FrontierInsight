@@ -325,6 +325,19 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        # This session's marker (core/run_marker.py), taken first and in one step with the check that no other process
+        # runs this quest: a quest another process is running now is not started a second time, nothing of it is touched
+        # and no failure report is written for it. An earlier session that ended without recording an end was stopped
+        # from outside, which is said, and its leftover cache locks are cleared. Ended in the finally below.
+        from .run_marker import QuestStillRunning as _QuestStillRunning, RunMarker as _RunMarker
+
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+        _marker = _RunMarker(self.quest_root, log=self._log)
+        try:
+            _marker.start()
+        except _QuestStillRunning:
+            _close_quest_logger(self.quest_id)
+            raise
         # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
         # before then is an earlier run's (launch.py prints only this run's).
         self._step_retries: dict[str, tuple[str, int]] = {}
@@ -353,16 +366,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         _arxiv_gate.reset_quest(self.quest_id)
         _quest_ctx = _source_failures.current_quest.set(self.quest_id)
         _run_started_at = _time.time()
-        # This session's marker (core/run_marker.py): an earlier session that ended without recording an end was stopped
-        # from outside, which is said, and its leftover cache locks are cleared. Ended in the finally below.
-        _marker = None
         _ended_how = "finished"
         try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            from .run_marker import RunMarker as _RunMarker
-
-            _marker = _RunMarker(self.quest_root, log=self._log)
-            _marker.start()
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)

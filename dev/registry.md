@@ -591,8 +591,8 @@ same PR that adds, splits or renames one.
   (`fiHome`) is the same rule. (Older files — profile, skills, caches, pip lock — still build the path themselves.)
 - `core/quest_index.py` — every quest FI has run on this computer, `fi_home()/quests.json` (id → quest_root, config,
   working_folder, title, created_at, last_seen). `register` (from `launch._record_quest`, called by `run_one` at start /
-  resume and at the end), `set_title` (from `quest_title.rename`), `prune` / `entries` / `listing` (`fi tools quests
-  [--prune]`, `launch._list_quests`; `web/server.py::_quest_dirs` adds them to `GET /api/quests`, the dashboard's one list); `status` reads `quest_title.looks_running` (FI's process record first). Every write is
+  resume and at the end), `set_title` (from `quest_title.rename`), `prune` / `entries` / `listed` (the one list: the folder's quests first, then the index's) / `listing` (`fi tools quests
+  [--prune] [--json]`, which takes `--output-root`, `launch._list_quests`; `web/server.py::_quest_dirs` adds them to `GET /api/quests`, the dashboard's one list); `status` reads `quest_title.looks_running` (FI's process record first). Every write is
   read-modify-write under a `filelock.FileLock` with temp file + `os.replace` (retried on Windows sharing violations);
   a file whose content is not a quest list is kept aside as `quests.json.unreadable-<time>`; a read error (`OSError`)
   writes nothing. `find(text, local_dirs, allow_folder=, tidy=)` is the one lookup: folder path → `<local>/<id>` →
@@ -607,7 +607,7 @@ same PR that adds, splits or renames one.
   `_locate_quest` (`--update`, `--critique`), and `web/server.py::_resolve_quest_root` (`allow_folder=False,
   tidy=False`; every quest API; a 409 lists an ambiguous id; DELETE refuses a quest outside its outputs folder; the
   resume endpoint also passes `--output <its folder>` and `QuestLauncher.launch_command(cwd=)`). `short_id` (6 hex after the last dash) is shown by the
-  start/resume log line, `fi tools quests`, the dashboard and quest page. VS Code reads the file only:
+  start/resume log line, `fi tools quests`, the dashboard and quest page. VS Code gets the list from `fi tools quests --json --output-root` (`src/quest-list.ts`: `loadQuestList`, `isRunning`; the index file is read directly only when Python cannot run, with no status) and reads the file for ids:
   `vscode-frontier-insight/src/quest-index.ts` (`loadIndex`, `matchIds` = `matching`, `findInIndex`, `shortId`), used by
   `extension.ts::runResume` (`/resume`, `/plan`, `/watch`; `RunWhere` runs a quest from another folder with its config,
   `--output` and cwd) and `quest-map.ts` (`pickQuest`, `fullQuestId`); the other `@fi` commands pass the id to `launch.py`.
@@ -765,7 +765,7 @@ same PR that adds, splits or renames one.
   loop or by `Engine._node_execute` (a failed run for the repair step); log lines shown to the agent lose their numbers
   (`without_numbers`). Evidence: `agent_coder.evidence_settings` -> `code_writer` in `needs/EVIDENCE.json`. Tests:
   `tests/test_agent_build.py`.
-- `core/run_marker.py` — `RunMarker(quest_root).start()/finish()`: `.fi/process.json` (pid, host, start, sign of life every 30 s, how it ended); `alive(record)` is the one running test (same process on this computer; a sign of life under `STALE_S` from another computer sharing the folder), used by `quest_title.looks_running` and so by the quest lists and the web routes and `.fi/process_history.jsonl`; `start()` finds an earlier session that ended with no record while no process runs, says so, and clears the locks/temp files it left in the shared cache. NOT yet called by `Engine.run` (engine.py owned elsewhere). `core/execution.py` also holds `SettingsGate` (settings at once sized by measured memory; used by `trial_runner.run_trials` and `optimise.evaluate_many`), `ExecutionResult.peak_mb`, `say_silent_death`. Tests: `tests/test_run_environment.py`.
+- `core/run_marker.py` — `RunMarker(quest_root).start()/finish()` (`start` and `refuse_if_running` / `running_elsewhere` raise `QuestStillRunning`, one plain line and exit 1, when another process runs the quest; asked in `launch.run_one` before the engine opens run.log, by every CLI command that writes into a quest (`launch._refuse_if_quest_runs`: `--revise-plan`, `--emit`, `--watch`, `--update`, `--critique`, `--approve-amendment`, `--accept-checks`), and, as the one atomic check-and-write under an exclusive-create `.fi/process.lock`, by `RunMarker.start()` at the top of `Engine.run`): `.fi/process.json` (pid, host, start, sign of life every 30 s, how it ended); `alive(record)` is the one running test (same process on this computer; a sign of life under `STALE_S` from another computer sharing the folder), used by `quest_title.looks_running` and so by the quest lists and the web routes and `.fi/process_history.jsonl`; `start()` finds an earlier session that ended with no record while no process runs, says so, and clears the locks/temp files it left in the shared cache. NOT yet called by `Engine.run` (engine.py owned elsewhere). `core/execution.py` also holds `SettingsGate` (settings at once sized by measured memory; used by `trial_runner.run_trials` and `optimise.evaluate_many`), `ExecutionResult.peak_mb`, `say_silent_death`. Tests: `tests/test_run_environment.py`.
 - `core/outside_run.py` — FI runs the quest's code from a copy outside the quest folder (what every run wrote, also a file
   written again with the same content, is counted in `note_written` / `write_mark` / `written_since`; `OutsideCopy.rewritten`
   and `.wrote`): `OutsideCopy` (`<temp>/fi_run/

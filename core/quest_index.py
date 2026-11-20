@@ -477,6 +477,51 @@ def _index_entry(qid: str, root: Path) -> Entry | None:
     return entry if same else None
 
 
+def listed(output_root: Path | None = None) -> list[Entry]:
+    """The one list of quests ``fi tools quests`` and the VS Code extension show, in the order the web page lists them
+    (``web/server.py::_quest_dirs`` builds the same order from the same record): this folder's
+    quests first (every subfolder of ``output_root`` holding a ``.fi/`` folder, newest id first, whether or not the index
+    knows it), then every other quest in the index whose folder can be seen now, most recently seen first."""
+    index = entries()
+
+    def _key(p: Path) -> str:
+        try:
+            return os.path.normcase(str(p.resolve()))
+        except OSError:
+            return os.path.normcase(str(p))
+
+    by_root: dict[str, Entry] = {}
+    for e in index:
+        by_root.setdefault(_key(e.quest_root), e)
+    here: list[Entry] = []
+    seen: set[str] = set()
+    if output_root is not None and output_root.is_dir():
+        for d in sorted((d for d in output_root.iterdir() if d.is_dir() and (d / ".fi").is_dir()),
+                        key=lambda d: d.name, reverse=True):
+            key = _key(d)
+            if key in seen:
+                continue
+            seen.add(key)
+            known = by_root.get(key)
+            if known is None:
+                from core import quest_title
+
+                try:
+                    title = quest_title.current_title(d) or ""
+                except Exception:  # noqa: BLE001 -- a title that cannot be read is no title
+                    title = ""
+                known = Entry(quest_id=d.name, quest_root=d, config=d / "config.yaml", working_folder="",
+                              title=title, created_at="", last_seen="")
+            here.append(known)
+    rest: list[Entry] = []
+    for e in index:  # one line per physical folder: two ids on one root, or a link or a letter-case variant, keep the first
+        key = _key(e.quest_root)
+        if key not in seen:
+            seen.add(key)
+            rest.append(e)
+    return here + rest
+
+
 def listing(items: list[Entry]) -> str:
     """``fi tools quests``: one line per quest (short id, where it is, its title) and its folder under it."""
     if not items:
@@ -492,5 +537,5 @@ def listing(items: list[Entry]) -> str:
 
 __all__ = [
     "AmbiguousQuest", "Entry", "Found", "INDEX_NAME", "MIN_SHORT", "QuestNotFound", "entries", "find", "index_path",
-    "listing", "load", "matching", "prune", "register", "set_title", "short_id", "status",
+    "listed", "listing", "load", "matching", "prune", "register", "set_title", "short_id", "status",
 ]

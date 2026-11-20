@@ -12,41 +12,31 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { loadIndex, matchIds, shortId } from "./quest-index";
+import { LIST_TIMEOUT_MS, LaunchRunner, loadQuestList, runningMark } from "./quest-list";
 import { rootsForCommand } from "./roots-config";
 import { runLaunch } from "./trace";
 
-async function pickQuest(outputRoot: string): Promise<string | undefined> {
-    let entries: fs.Dirent[] = [];
-    try {
-        entries = await fs.promises.readdir(outputRoot, { withFileTypes: true });
-    } catch {
-        entries = [];
+async function pickQuest(run: LaunchRunner, outputRoot: string): Promise<string | undefined> {
+    // The one list of quests (this folder's first, then every other FI has run on this computer, each with whether it
+    // runs now), from FI's own `--quests --json`: the same list as the web page. A quest with no checkpoint cannot be
+    // mapped, so one of this folder's without a checkpoint is left out; the others' folders are not looked into here.
+    const here = path.resolve(outputRoot).toLowerCase();
+    const listed = (await loadQuestList(run, outputRoot)).filter((q) =>
+        path.resolve(path.dirname(q.questRoot)).toLowerCase() !== here
+        || fs.existsSync(path.join(q.questRoot, ".fi", "state.sqlite")));
+    if (listed.length === 0) {
+        void vscode.window.showInformationMessage(`No quest with a checkpoint under ${outputRoot}, and none recorded elsewhere on this computer.`);
+        return undefined;
     }
-    const quests: { id: string; mtime: number }[] = [];
-    for (const e of entries) {
-        if (!e.isDirectory()) continue;
-        try {
-            const st = await fs.promises.stat(path.join(outputRoot, e.name, ".fi", "state.sqlite"));
-            quests.push({ id: e.name, mtime: st.mtimeMs });
-        } catch {
-            // No checkpoint: not a quest that can be mapped.
-        }
-    }
-    if (quests.length === 0) {
-        // This folder has none: every quest FI has run on this computer, in any folder (core/quest_index.py).
-        const elsewhere = loadIndex();
-        if (elsewhere.length === 0) {
-            void vscode.window.showInformationMessage(`No quest with a checkpoint under ${outputRoot}.`);
-            return undefined;
-        }
-        const picked = await vscode.window.showQuickPick(
-            elsewhere.map((e) => ({ label: `${shortId(e.questId)}  ${e.title || e.questId}`, description: e.questRoot, id: e.questId })),
-            { placeHolder: "This folder has no quests. Which quest from another folder? (most recent first)", matchOnDescription: true },
-        );
-        return picked?.id;
-    }
-    quests.sort((a, b) => b.mtime - a.mtime);
-    return vscode.window.showQuickPick(quests.map((q) => q.id), { placeHolder: "Which quest? (newest first)" });
+    const picked = await vscode.window.showQuickPick(
+        listed.map((e) => ({
+            label: `${shortId(e.questId)}  ${e.title || e.questId}`,
+            description: [runningMark(e), e.questRoot].filter(Boolean).join(" · "),
+            id: e.questId,
+        })),
+        { placeHolder: "Which quest? (this folder's first, then every quest FI has run on this computer)", matchOnDescription: true },
+    );
+    return picked?.id;
 }
 
 /** The full id `typed` names: this folder's quest, else the one quest FI has run elsewhere; `typed` when not unique. */
@@ -153,7 +143,7 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
     const python = cfg.get<string>("pythonPath") || "python";
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputRoot = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(roots.workDir, outputDirSetting);
-    const typed = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest(outputRoot));
+    const typed = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest((a) => runLaunch(python, roots.repoPath, roots.workDir, a, LIST_TIMEOUT_MS), outputRoot));
     if (!typed) return;
     if (!/^[A-Za-z0-9_\-.]+$/.test(typed)) {
         void vscode.window.showErrorMessage(`"${typed}" is not a quest id (letters, digits, - _ . only).`);
