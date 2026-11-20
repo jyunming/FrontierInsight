@@ -9,8 +9,8 @@ What it holds, and what it does not: for each setting and each value ``run_trial
 (n), their mean and SD, and a 95% interval of the mean -- a Wilson interval when every trial gave 0 or 1 (a
 proportion), otherwise a t interval. A quantity the analysis derives from several values (a coverage from an estimate
 and its truth, a power from two counts) is not here; the table covers what the trials themselves recorded. A value
-that is the same in every trial of every setting (a setting echoed back, a constant) and a trial index are left out:
-they have no spread to report.
+that is the same in every trial of every setting (a setting echoed back, a constant) and a trial index (a value equal,
+in every trial, to the trial number FI's record gives that trial) are left out: they have no spread to report.
 
 Written to ``paper/results_table.md`` beside the paper and given to the writer while it is short enough.
 """
@@ -69,8 +69,18 @@ def _values(metric: Any) -> list[float]:
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))]
 
 
-def _is_index(values: list[float]) -> bool:
-    return len(values) > 1 and sorted(values) == [float(i) for i in range(len(values))]
+def _is_index(metric: Any) -> bool:
+    """Whether a value is the trial number itself: FI's record says which trial each value came from (``trials``, the
+    number FI gave ``run_trial``), and every one of at least two finite values equals the number of its own trial. Read
+    from FI's record, never from the values' pattern: a count that gave 0, 1 and 2 in some order is a result. A record
+    without the trial numbers (an older one) has no index."""
+    raw = metric.get("values") if isinstance(metric, dict) else None
+    trials = metric.get("trials") if isinstance(metric, dict) else None
+    if not isinstance(raw, (list, tuple)) or not isinstance(trials, (list, tuple)) or len(raw) != len(trials):
+        return False
+    pairs = [(float(v), t) for v, t in zip(raw, trials)
+             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))]
+    return len(pairs) > 1 and all(isinstance(t, int) and not isinstance(t, bool) and v == float(t) for v, t in pairs)
 
 
 #: The method a mean gets; a result that gave only 0 and 1 though the plan does not declare it a proportion gets this said too.
@@ -78,17 +88,17 @@ T_INTERVAL = "t interval of the mean"
 UNDECLARED = " (the plan does not declare it a proportion)"
 
 
-def summary(values: list[float], proportion: bool = False) -> dict[str, Any]:
+def summary(values: list[float], proportion: bool = False, index: bool = False) -> dict[str, Any]:
     """What the table needs of one value's trials in one setting, without the trials themselves: ``n``, ``mean``,
     ``sd``, whether the plan declares the value a proportion and every trial gave 0 or 1 (``binary``: the only case with a
-    binomial interval; ``zero_one`` says only that every trial gave 0 or 1, and ``successes`` counts those), whether the values are a trial index
-    (``index``), whether they are all one number (``constant``), and a ``digest`` of the values (two settings with the
+    binomial interval; ``zero_one`` says only that every trial gave 0 or 1, and ``successes`` counts those), whether the
+    values are the trial number FI gave each trial (``index``: :func:`_is_index` on FI's record, given by the caller), whether they are all one number (``constant``), and a ``digest`` of the values (two settings with the
     same digest gave the very same trials: copies, not independent runs)."""
     mean, sd, n = _stats.mean_std(values)
     zero_one = bool(values) and all(v in (0.0, 1.0) for v in values)
     return {"n": n, "mean": mean, "sd": sd, "binary": bool(proportion) and zero_one, "zero_one": zero_one,
             "successes": sum(values) if zero_one else None,
-            "index": _is_index(values), "constant": len(set(values)) <= 1,
+            "index": bool(index), "constant": len(set(values)) <= 1,
             "digest": hashlib.sha256(array("d", values).tobytes()).hexdigest()[:16]}
 
 
@@ -142,7 +152,7 @@ def summaries(cells: list[dict[str, Any]], proportions: Any = ()) -> list[dict[s
         entry.update({k: c[k] for k in ("planned", "ok", "failed")
                       if isinstance(c.get(k), int) and not isinstance(c.get(k), bool)})
         for name, metric in c["metrics"].items():
-            one = {**summary(_values(metric), str(name) in declared), **missing(metric)}
+            one = {**summary(_values(metric), str(name) in declared, _is_index(metric)), **missing(metric)}
             one["status"] = status_of(one, entry)
             entry["metrics"][str(name)] = one
         # The record says in numbers that no trial of this setting succeeded or failed: it never ran, whatever values
@@ -219,7 +229,8 @@ def _constant_everywhere(shown: list[dict[str, Any]]) -> bool:
 
 
 def kept_values(summarised: list[dict[str, Any]], hide: Any = ()) -> list[str]:
-    """The value names the table reports, in the order they first appear: not a trial index, not one number in every
+    """The value names the table reports, in the order they first appear: not a trial index (the trial number of FI's
+    record in every trial of every setting that gave values, :func:`_is_index`), not one number in every
     trial of every setting (a constant; see :func:`_constant_everywhere`), and not a name in ``hide`` (the names a plan in
     the contract form lets a trial return that are not its results: :func:`core.skeleton.diagnostic_names`)."""
     hidden = set(hide)

@@ -77,8 +77,21 @@ def test_after_the_repair_the_fact_is_recorded_and_the_search_runs_on() -> None:
     assert outcome["stopped_because"] != "stepped_objective"
     assert outcome["stepped_objective"]["stopped"] is False
     said = best_design_report.stepped_went_on({"stepped_objective": outcome["stepped_objective"]})
-    assert "whole steps of step (0.25 mm)" in said and "went on to its budget" in said
+    fact = outcome["stepped_objective"]
+    assert (f"{fact['on_step']} of the {fact['nonzero']} values of the objective other than zero" in said
+            and "whole multiples of step (0.25 mm, the step the search ran it at)" in said and "went on to its budget" in said)
     assert best_design_report.stepped_went_on({"stepped_objective": {**outcome["stepped_objective"], "stopped": True}}) == ""
+
+
+def test_the_report_says_only_what_the_record_counted() -> None:
+    # A record where a quarter of the values sat on the step (the watch's share): the clause states the count, never that
+    # the objective moves only in whole steps or that the search could tell designs apart only to that step.
+    fact = {"designs": 50, "setting": "scan_step", "step": 0.5, "unit": "nm", "on_step": 13, "nonzero": 50,
+            "stopped": False}
+    said = best_design_report.stepped_went_on({"stepped_objective": fact})
+    assert said.startswith("13 of the 50 values of the objective other than zero among the first 50 designs")
+    assert "whole multiples of scan_step (0.5 nm, the step the search ran it at)" in said
+    assert "moves in whole steps" not in said and "tell designs apart" not in said
 
 
 COUNTED = '''\

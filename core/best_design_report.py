@@ -81,17 +81,17 @@ def flat_went_on(ev: dict[str, Any]) -> str:
 
 
 def stepped_went_on(ev: dict[str, Any]) -> str:
-    """The search's objective was counted in whole steps of one of its numerical settings and the search went on
-    (``stepped_objective`` recorded, not stopped: the simulation was already sent back for it once): one plain clause, or
-    empty."""
+    """The search recorded that many of its objective's values were whole multiples of the step of one of its numerical
+    settings, and went on (``stepped_objective`` recorded, not stopped: the simulation was already sent back for it once):
+    one plain clause, or empty. The clause says what the record counted and no more: FI's record shows how many values
+    sat on the step, not that the objective moves only in those steps."""
     fact = ev.get("stepped_objective") if isinstance(ev, dict) else None
     if not isinstance(fact, dict) or fact.get("stopped", True):
         return ""
     unit = f" {fact.get('unit')}" if fact.get("unit") else ""
-    return (f"the objective moves in whole steps of {fact.get('setting')} ({_fmt(fact.get('step'))}{unit}): "
-            f"{fact.get('on_step')} of the {fact.get('nonzero')} values other than zero among the first "
-            f"{fact.get('designs')} designs across the whole range are whole multiples of it, so the search could tell "
-            "designs apart only to that step; it went on to its budget")
+    return (f"{fact.get('on_step')} of the {fact.get('nonzero')} values of the objective other than zero among the "
+            f"first {fact.get('designs')} designs across the whole range were whole multiples of {fact.get('setting')} "
+            f"({_fmt(fact.get('step'))}{unit}, the step the search ran it at), and the search went on to its budget")
 
 
 def _num(value: Any) -> bool:
