@@ -820,7 +820,7 @@ async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolutio
     out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_COARSE_ONLY))
     assert out["rounds"] and out["rounds"][0]["outcome"] == "kept", out["rounds"]
     assert out["kept"] is False and out["full_check"]["passed"] is False
-    assert "number(s) changed" in out["full_check"]["why"]
+    assert "value(s) changed" in out["full_check"]["why"]
     assert MESH_LOOP in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     # the change log does not say a change was kept that the check at the plan's resolution dropped
     changelog = engine.quest_root / "code" / "CHANGELOG.md"
