@@ -100,6 +100,39 @@ def test_the_paper_and_quality_report_state_the_count_over_every_trial(tmp_path:
                                "(1.000 over the trials that gave an estimate)") for line in summary["lines"]), summary["lines"]
 
 
+def _runner_on(root: Path):
+    import json
+
+    from core.trial_runner import TrialsRunner
+
+    (root / "raw").mkdir(parents=True, exist_ok=True)
+    (root / "code").mkdir(exist_ok=True)
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / "raw" / "trials.json").write_text(json.dumps({"cells": _honest(), "thresholds": {}}), encoding="utf-8")
+    plan = {"metrics": [_spec()]}
+    runner = TrialsRunner(object(), quest_root=root, protocol=lambda: plan, deterministic=False,
+                          simulate=root / "code" / "simulate.py", analysis=root / "code" / "analysis.py",
+                          repairs_left=lambda: False)
+    run = SimpleNamespace(summary_path=root / "raw" / "trials.json", cells=[], stderr=lambda: "")
+    return runner, run, plan
+
+
+def test_the_runner_goes_on_and_keeps_the_count_over_every_trial_in_its_record(tmp_path: Path) -> None:
+    runner, run, plan = _runner_on(tmp_path / "q")
+    assert runner._check_trials(run, plan, 0.0) is None and not getattr(runner, "trial_fault", None)
+    assert tc.read_record(tmp_path / "q")["calibration"]["counted_as_misses"]
+
+
+def test_a_count_over_every_trial_that_cannot_be_recorded_is_a_stop(tmp_path: Path) -> None:
+    # The paper and QUALITY.md state it from the record only: going on without the record would drop the statement.
+    root = tmp_path / "q"
+    runner, run, plan = _runner_on(root)
+    (root / ".fi" / "trial_checks.json").mkdir()  # the record cannot be written
+    sent = runner._check_trials(run, plan, 0.0)
+    assert sent is not None and sent.returncode == 1 and runner.trial_fault["action"] == tc.STOP
+    assert "could not keep its record" in runner.trial_fault["say"]
+
+
 def test_a_trial_that_kept_its_estimate_and_lost_its_interval_is_still_a_miss() -> None:
     # a code that drops the interval where it would miss must not lift the coverage: still a fault (sent to repair; once
     # the repairs are spent, grossly low at two settings while right over all of them together, the existing disclosure)
