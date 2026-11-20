@@ -188,9 +188,14 @@ def _is_num(value: Any) -> bool:
 
 
 def _words(text: Any) -> str:
-    """A name or a value the plan wrote as text, as a reader reads it: its own words, an underscore read as a space
-    (``stress_free`` is "stress free"); nothing else in it is changed."""
+    """A value the plan wrote as text, as a reader reads it: its own words, an underscore read as a space
+    (``stress_free`` is "stress free"); nothing else in it is changed. Names the plan wrote are shown by ``_text``."""
     return " ".join(str(text).replace("_", " ").split())
+
+
+def _text(text: Any) -> str:
+    """A name the plan wrote (a sub-study's, a result group's, an equation's), exactly in the plan's words."""
+    return " ".join(str(text).split())
 
 
 def _value(value: Any) -> str:
@@ -321,7 +326,7 @@ def _inputs(protocol: dict[str, Any]) -> tuple[list[Box], str, bool]:
                      for k in keys if _label(protocol, k)]
             lines, c = _cut(lines, "settings", hidden=len(keys) - len(lines))
             cut = cut or c
-            boxes.append(Box(_words(sub.get("name") or f"sub-study {i + 1}"), lines, source=f"sub_studies[{i}]"))
+            boxes.append(Box(_text(sub.get("name") or f"sub-study {i + 1}"), lines, source=f"sub_studies[{i}]"))
         boxes, c = _cap_boxes(boxes, "sub-studies", MAX_BOXES - 1)
         cut = cut or c
     else:
@@ -363,7 +368,7 @@ def _computation(protocol: dict[str, Any], steps_record: Any, layout_record: Any
     dashed = cut = False
     # An equation is shown by the name the plan gives it; the plan's ids (E1, E2, ...) say nothing to a reader, so a plan
     # that records only ids and formulas gives no equations box.
-    named = [_words(e.get("name") or e.get("title")) for e in equations
+    named = [_text(e.get("name") or e.get("title")) for e in equations
              if str(e.get("name") or e.get("title") or "").strip()]
     room = MAX_BOXES - (1 if named else 0)
     one_box = len(steps) > room  # too many steps for a box each: one box lists them
@@ -413,7 +418,7 @@ def _results(protocol: dict[str, Any]) -> tuple[list[Box], bool]:
     for m in protocol.get("metrics") or []:
         if not isinstance(m, dict) or not m.get("id") or str(m.get("role") or "result") != "result":
             continue
-        family = _words(m.get("family") or "")
+        family = _text(m.get("family") or "")
         families.setdefault(family, [])
         label = _label(protocol, m["id"])
         if not label:

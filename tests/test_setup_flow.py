@@ -91,6 +91,13 @@ def test_equations_are_shown_by_the_names_the_plan_gives_them(tmp_path: Path) ->
     assert "steps and equations of its computation" in record["caption"]
 
 
+def test_only_a_text_value_has_its_underscores_read_as_spaces_names_are_the_plans_own(tmp_path: Path) -> None:
+    plan = {**GRID_PLAN, "metrics": [{"id": "yield_pct", "role": "result", "family": "yield over batch_size"}]}
+    text = _texts(setup_flow.draw(_quest(tmp_path, plan), []))
+    assert "Yield over batch_size" in text, "a result group is named as the plan wrote it (first letter capitalised)"
+    assert "Mixer: paddle wheel" in text, "a value the plan wrote as text, an underscore read as a space"
+
+
 def test_an_unnamed_setting_is_counted_not_printed(tmp_path: Path) -> None:
     plan = {**GRID_PLAN, "grid": {**GRID_PLAN["grid"], "mesh_n": [16, 32]}}
     text = _texts(setup_flow.draw(_quest(tmp_path, plan), []))
