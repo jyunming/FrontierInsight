@@ -2962,7 +2962,8 @@ class WriteStageMixin:
         tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
         text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
         holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
-        is already its pointer (the supplement would hold nothing more)."""
+        is already its pointer (the supplement would hold nothing more). The answers move only when their full lines
+        say more than the short ones the paper keeps."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
@@ -2970,18 +2971,26 @@ class WriteStageMixin:
             return False
         if part == _supplement.LIMITATIONS:
             return bool(_paper_facts.limitations_text(self.quest_root))
+        if part == _supplement.ANSWERS:
+            full, short = _paper_facts.answers_forms(self.quest_root)
+            return bool(full) and short != full
         block = _paper_facts.block_text(self.quest_root, part, full=True)
         return any(line.lstrip().startswith("|") for line in block.splitlines())
 
     def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
         """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
-        tables and the Limitations as FI would have put them in the paper, the Further reading as it was listed. No model
-        call. Returns ``False`` only when the file could not be written."""
+        tables, the answers in full and the Limitations as FI would have put them in the paper (the answers' result
+        numbers filled from the same records as the paper's, without changing the paper's record of them), the Further
+        reading as it was listed. No model call. Returns ``False`` only when the file could not be written."""
         root = self.quest_root
         moved = _supplement.moved(root)
         parts: dict[str, str] = {}
         if _supplement.TABLES in moved:
             parts[_supplement.TABLES] = _paper_facts.block_text(root, _supplement.TABLES, full=True)
+        if _supplement.ANSWERS in moved:
+            # the lines under the supplement's own heading (the block's bold title is that heading)
+            lines = _paper_facts.block_text(root, _supplement.ANSWERS, full=True).split(chr(10) * 2, 1)[-1]
+            parts[_supplement.ANSWERS] = _paper_values.fill(lines, self._paper_records(state))[0] if lines.strip() else ""
         if _supplement.LIMITATIONS in moved:
             # the paper's own paragraphs of its Limitations section first, as they stood there, then FI's list
             parts[_supplement.LIMITATIONS] = (_supplement.writer_text(root) + "\n\n"

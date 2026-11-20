@@ -15,7 +15,8 @@ The grammar::
                corr_ci:<metric2>
     <op>       diff (A - B) | ratio (A / B) | rel_diff (A / B - 1); the operand is ``ref``, ``@ <where2>`` (the same
                metric and form there) or ``<metric2>[:<form2>]`` (at the same where)
-    <reducer>  min | max | range | max_abs | argmin | argmax | count_where:<word> (over the ``each`` axes)
+    <reducer>  min | max | range | max_abs | argmin | argmax | count_where:<word> (over the ``each`` axes);
+               ``range:brief`` counts the settings that gave no number where ``range`` names each
     vs         ``| vs ref`` or ``| vs <metric2>`` (a value the plan or each setting sets): the comparison itself, worded by
                FI setting by setting, e.g. ``below <metric2> at all 5 values of sigma (0.914 to 0.927 times <metric2>)``;
                "within" means the reference lies inside the measured value's 95% interval at that setting
@@ -75,6 +76,9 @@ OPS = ("diff", "ratio", "rel_diff")
 VALUE_REDUCERS = ("min", "max", "range", "max_abs")
 REDUCERS = ("min", "max", "range", "max_abs", "argmin", "argmax", "count_where")
 VS = "vs"
+#: ``| range:brief``: a range that counts the settings with no number instead of naming each (FI's answers block in the
+#: paper's body, whose full form, every setting named, is in the supplement: core/paper_facts.py::answers_text).
+RANGE_BRIEF = "brief"
 #: The forms ``vs`` can judge, and the interval form it judges them by (a comparison is decided by the interval, never by a
 #: fixed tolerance).
 _VS_INTERVAL = {"mean": "mean_ci", "sd": "sd_ci", "corr": "corr_ci"}
@@ -275,7 +279,7 @@ class Key:
     operand_metric: str = ""
     operand_form: str = "mean"
     reducer: str = ""
-    word: str = ""  # count_where:<word>
+    word: str = ""  # count_where:<word>; range:brief (the settings with no number counted, not named)
     percent: bool = False
     form_arg: str = ""  # corr:<metric2>
     text: str = ""
@@ -385,7 +389,8 @@ def parse(text: str) -> Key:
         if name.strip() in REDUCERS:
             if kw.get("reducer"):
                 raise _Unfilled("at most one reducer")
-            if (name.strip() == "count_where") != bool(arg2.strip()):
+            if (name.strip() == "count_where") != bool(arg2.strip()) and not (
+                    name.strip() == "range" and arg2.strip() == RANGE_BRIEF):
                 raise _Unfilled("count_where takes a word (count_where:<word>), no other reducer does")
             kw.update(reducer=name.strip(), word=arg2.strip())
             continue
@@ -1401,7 +1406,12 @@ def _reduce(rec: Records, key: Key) -> tuple[Measured, str]:
     if not results:
         raise _Unfilled(f"{key.metric} has no numeric trials at any of the settings")
     combos = kept
-    note = f" (no number {'at' if len(empty) == 1 else 'where'} {_missing_words(empty, each, combos_all)})" if empty else ""
+    if not empty:
+        note = ""
+    elif key.word == RANGE_BRIEF:
+        note = f" (no number at {len(empty)} of {len(combos_all)} settings)"
+    else:
+        note = f" (no number {'at' if len(empty) == 1 else 'where'} {_missing_words(empty, each, combos_all)})"
     xs = [m.value for m in results]
     r = key.reducer
     kind = results[0].kind if key.op == "" else ("ratio" if key.op == "ratio" else "plain")

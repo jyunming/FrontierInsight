@@ -1578,28 +1578,32 @@ def _plain_in(protocol: dict[str, Any], root: Path) -> Any:
     return plain
 
 
-def _answer_parts(rec: Any, metric: str, tries: list[tuple[str, str]], plain: Any = None, how: str = "") -> tuple[str, str, str, bool]:
+def _answer_parts(rec: Any, metric: str, tries: list[tuple[str, str]], plain: Any = None, how: str = "",
+                  brief: bool = False) -> tuple[str, str, str, bool]:
     """The parts of an answer: the words in brackets (``how``, else the result's name), the key FI fills, the words after its
     value, and whether FI could fill one of ``tries``. When it could not, the key is "not answered (why)" and the rest is
-    empty."""
+    empty; ``brief`` (the paper's body) leaves the why out: the full line, in the supplement, says it."""
     got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
     done = next(((k, note) for k, note, v in got if v.filled), None)
     shown = rec.label(metric)
     lead = how or "measured as: " + (shown if shown != metric else "`" + metric + "`")
     if done is None:
         why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
+        said = shown if plain is None else f"\"{plain(metric)}\""
+        if brief:
+            return lead, f"not answered (FI cannot state {said})", "", False
         if plain is None:
             return lead, f"not answered (FI cannot state {shown}: {why})", "", False
-        return lead, f"not answered (FI cannot state \"{plain(metric)}\": {why.replace(metric, plain(metric))})", "", False
+        return lead, f"not answered (FI cannot state {said}: {why.replace(metric, plain(metric))})", "", False
     return lead, done[0], done[1], True
 
 
 def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]], plain: Any = None,
-                 how: str = "") -> str:
+                 how: str = "", brief: bool = False) -> str:
     """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
-    ``name`` said as not answered, with why. ``how`` replaces the words in brackets (the plan's map and its result) when FI
-    worked the number out itself."""
-    lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
+    ``name`` said as not answered, with why (``brief``: without it). ``how`` replaces the words in brackets (the plan's map
+    and its result) when FI worked the number out itself."""
+    lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how, brief)
     return f"- {name} ({lead}): {body}{note}" if ok else f"- {name}: {body}"
 
 
@@ -1647,41 +1651,106 @@ def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], ot
     return [lv for lv in levels if combos <= have.get(json.dumps(lv, default=str), set())]
 
 
-def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> str:
+def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> tuple[str, str]:
     """Why FI states no value for ``metric``, from FI's own records: the check that took the quantity out of the results
     (``rec.left_out``: FI holds a value and withholds it, with the check's note), else the analysis's record of a quantity
-    it could not work out (``derived.json``: its ``why``), else that no record holds one."""
+    it could not work out (``derived.json``: its ``why``), else that no record holds one. ``(the one phrase the paper's
+    body says, the reason in full)``: the record's own words follow the phrase in the full one only."""
     if metric in rec.left_out:
-        return f"FI left \"{plain(metric)}\" out of the results: {str(rec.left_out[metric]).strip() or 'a check of FI removed it'}"
+        head = f"FI left \"{plain(metric)}\" out of the results"
+        return head, f"{head}: {str(rec.left_out[metric]).strip() or 'a check of FI removed it'}"
     record = _read(root, "data/results/derived.json")
     items = record.get("derived") if isinstance(record, dict) else None
     item = items.get(metric) if isinstance(items, dict) else None
     if isinstance(item, dict) and item.get("status") not in (None, "ok") and str(item.get("why") or "").strip():
-        return f"FI could not work out \"{plain(metric)}\": {str(item['why']).strip()}"
-    return f"FI holds no value for \"{plain(metric)}\""
+        head = f"FI could not work out \"{plain(metric)}\""
+        return head, f"{head}: {str(item['why']).strip()}"
+    said = f"FI holds no value for \"{plain(metric)}\""
+    return said, said
 
 
-def answers_text(quest_root: Path | str) -> str:
+#: The most of FI's own words a line of the answers block in the paper's body has (:func:`_brief_words`: every word of it
+#: but the names in it: the question's, the person's words, and the plan's labels of results and settings). Chosen on the
+#: 102 questions of 23 stored papers: every brief line with one value fits within 30 with its interval and its notes,
+#: except a line that also says its unit is not the one asked (31) or that one number answers several questions (36),
+#: which keep that; at 25, four lines of a bias or a spread (27 and 28 words) would go over. A longer line (an answer
+#: for each value of a compared setting) gives its values without their intervals, which stay in the supplement; one
+#: still over is kept whole, never cut or pooled (:func:`_within_cap`).
+BRIEF_WORDS = 30
+
+
+def _differs_with(labels: list[str]) -> str:
+    """The settings a brief answer differs with: each by name when there are one or two, else how many."""
+    if len(labels) <= 2:
+        return " and ".join(labels)
+    return f"{len(labels)} parameters"
+
+
+def _brief_words(line: str, names: list[str], rec: Any) -> int:
+    """How many of FI's own words ``line`` (a brief answers line, keys unfilled) has once filled: the words of the line, its
+    keys filled from ``rec``, less the names in it: the questions' (``names``, the person's words) and the plan's labels of
+    its results and settings (each one name, however many words or symbols the plan gave it)."""
+    filled = _values.without_marks(_values.fill(line, rec)[0])
+    labels = {*names, *(rec.label(m) for m in rec.metrics()), *(rec.label(a) for a in rec.axes())}
+    for name in sorted((n for n in labels if n), key=len, reverse=True):
+        filled = filled.replace(name, " ")
+    return len(filled.replace("- ", " ", 1).split())
+
+
+def _within_cap(candidates: list[str], names: list[str], rec: Any) -> str:
+    """The first of ``candidates`` (brief forms of one line, most said first) whose own words are at most
+    :data:`BRIEF_WORDS`, else the last: a line is never cut, and a compared setting's values are never pooled to fit."""
+    return next((c for c in candidates if _brief_words(c, names, rec) <= BRIEF_WORDS), candidates[-1])
+
+
+#: What a brief value says when its interval is in the supplement only.
+_INTERVAL_THERE = " (interval in the supplement)"
+
+
+def answers_text(quest_root: Path | str, *, brief: bool = False) -> str:
     """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
     and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
     plan maps to nothing FI holds is said as not answered, and why. ``""`` when the topic asks for no main quantity or FI
-    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write."""
+    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write.
+
+    ``brief``: the block as the paper's body carries it (the full one is in the supplement, core/supplement.py ``ANSWERS``):
+    the same answers, each line at most :data:`BRIEF_WORDS` of FI's own words: a range counts the settings that gave no
+    number (``| range:brief``) and names the parameters it differs with only when they are one or two, and a question not
+    answered says the one phrase of why. The numbers are the same keys over the same settings."""
+    full, short = answers_forms(quest_root)
+    return short if brief else full
+
+
+def answers_forms(quest_root: Path | str) -> tuple[str, str]:
+    """:func:`answers_text` in full and brief, from one walk over the questions (``("", "")`` with no block)."""
+    full, short = _answer_lines(Path(quest_root))
+    head = "**Answers to the questions asked.**" + chr(10) * 2
+    return (head + chr(10).join(full), head + chr(10).join(short)) if full else ("", "")
+
+
+def _answer_lines(root: Path) -> tuple[list[str], list[str]]:
+    """The lines of :func:`answers_text`: in full, and brief (one for one, question by question)."""
     from . import topic_requirements as _topic_req
 
-    root = Path(quest_root)
     req = _read(root, f".fi/{_topic_req.FILE}")
     protocol = plan_protocol(root)
     asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
     if not asked or not isinstance(protocol, dict):
-        return ""
+        return [], []
     rec = _values.records_of(root, protocol)
     if rec is None or not rec.cells:
-        return ""
+        return [], []
     plan = _topic_req.view({}, protocol)
     varied = rec.varied()
     estimates = _known_estimates(protocol)
     plain = _plain_in(protocol, root)
     lines: list[str] = []
+    # the brief forms of each line of ``lines``, at the same place, most said first (:func:`_within_cap` keeps one)
+    short: list[list[str]] = []
+
+    def add(line: str, *briefs: str) -> None:
+        lines.append(line)
+        short.append(list(briefs) or [line])
     starts: list[int] = []  # the first line of each question, to find where one question's lines end
     said_names: list[str] = []  # the question each start is
     unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
@@ -1697,7 +1766,8 @@ def answers_text(quest_root: Path | str) -> str:
                          if m.get("unit_conflict")), None)
         mapped = _topic_req.mapping_of(req, plan, "quantities", item)
         if isinstance(conflict, str):  # a plan written before the units were kept as a pair: read as it always was
-            lines.append(f"- {name}: not answered ({conflict})")
+            add(f"- {name}: not answered ({conflict})",
+                f"- {name}: not answered (its result is in another unit than the question asks in)")
             continue
         if conflict:
             unit_spans.append((len(starts) - 1, conflict, mapped))
@@ -1705,17 +1775,20 @@ def answers_text(quest_root: Path | str) -> str:
         # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
         metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
         if not metric:
-            lines.append(f"- {name}: {NO_RESULT if mapped is not None else NO_LINK}")
+            add(f"- {name}: {NO_RESULT if mapped is not None else NO_LINK}")
             continue
         if metric in rec.by_run:
-            lines.append(f"- {name}: not answered (the analysis worked it out once for each replicate and the values differ, "
-                         "so no single value stands for the study)")
+            add(f"- {name}: not answered (the analysis worked it out once for each replicate and the values differ, "
+                "so no single value stands for the study)")
             continue
         if metric not in rec.metrics() and metric not in rec.answers:
-            lines.append(f"- {name}: not answered ({_no_value_reason(root, rec, metric, plain)})")
+            phrase, reason = _no_value_reason(root, rec, metric, plain)
+            add(f"- {name}: not answered ({reason})", f"- {name}: not answered ({phrase})")
             continue
         if metric in rec.answers:
-            lines.append(_answer_line(rec, name, metric, [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]))
+            one = [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]
+            add(_answer_line(rec, name, metric, one),
+                _answer_line(rec, name, metric, [(one[0][0], " (one value from the analysis; no interval)")], brief=True))
             continue
         # The plan's own map may pin the quantity to one value of a setting (``at``); a setting the study compares (the plan's
         # ``comparisons``) is answered once for each of its values, never as one range across them.
@@ -1759,6 +1832,8 @@ def answers_text(quest_root: Path | str) -> str:
             if has_trials and len(has_trials) < len(levels):
                 only_at, levels = len(has_trials) == 1, has_trials
         pieces: list[tuple[Any, str, str, str]] = []
+        brief_pieces: list[tuple[Any, str, str, str]] = []  # the same, brief
+        bare_pieces: list[tuple[Any, str, str, str]] = []  # the same, brief, each value without its interval
         for level in levels:
             here = [a for a in each if a != split] if level is not None else each
             said = [f"{rec.short(a)}=each" for a in here]
@@ -1782,19 +1857,29 @@ def answers_text(quest_root: Path | str) -> str:
                 gap = f"not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)"
                 if len(levels) > 1:
                     pieces.append((level, how, gap, ""))
+                    brief_pieces.append((level, how, gap, ""))
+                    bare_pieces.append((level, how, gap, ""))
                 else:
-                    lines.append(f"- {label}: {gap}")
+                    add(f"- {label}: {gap}")
                 continue
+            brief_tries: list[tuple[str, str]] | None = None
+            bare_tries: list[tuple[str, str]] | None = None  # brief, no interval: used when a line is over the cap
             if said:
                 where = ", ".join([*said, *fixed_here])
                 over = f" (no single value: it differs with {', '.join(rec.label(a) for a in here)}; this is the "
                 end = ", lowest to highest, and the tables give every setting)"
+                # brief: the settings with no number counted (``range:brief``), the parameters named only when one or two,
+                # and a statistic the words in brackets already name ("here worked out as ...") not named again
+                short_end = f", lowest to highest; it differs with {_differs_with([rec.label(a) for a in here])})"
                 if stat == "bias":
                     tries = [(f"{{{{v:{metric} @ {where} | diff ref | range}}}}", over + "mean estimate minus the true value in each setting" + end)]
+                    brief_tries = [(f"{{{{v:{metric} @ {where} | diff ref | range:brief}}}}", " (one per setting" + short_end)]
                 elif stat == "sd":
                     tries = [(f"{{{{v:{metric}:sd @ {where} | range}}}}", over + "standard deviation over the trials in each setting" + end)]
+                    brief_tries = [(f"{{{{v:{metric}:sd @ {where} | range:brief}}}}", " (one per setting" + short_end)]
                 else:
                     tries = [(f"{{{{v:{metric} @ {where} | range}}}}", over + "mean in each setting" + end)]
+                    brief_tries = [(f"{{{{v:{metric} @ {where} | range:brief}}}}", " (mean of each setting" + short_end)]
             else:
                 where = ", ".join(fixed_here)
                 if stat == "bias":
@@ -1802,31 +1887,52 @@ def answers_text(quest_root: Path | str) -> str:
                 elif stat == "sd":
                     tries = [(f"{{{{v:{metric}:sd_ci @ {where}}}}}", " (the standard deviation over the trials)"),
                              (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation over the trials)")]
+                    bare_tries = [(tries[1][0], " (the standard deviation over the trials; " + _INTERVAL_THERE[2:])]
                 else:
                     tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
+                    bare_tries = [(tries[1][0], _INTERVAL_THERE)]
+                # the value alone says its interval is in the supplement only when there is one (else the key with its
+                # interval did not fill, and the line already says why it has none)
+                if bare_tries is not None and not _values.resolve(tries[0][0], rec).filled:
+                    bare_tries = None
+            brief_tries = brief_tries or tries
+            bare_tries = bare_tries or brief_tries
             if len(levels) > 1:
                 lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
                 pieces.append((level, lead, body, note if ok else ""))
+                lead, body, note, ok = _answer_parts(rec, metric, brief_tries, plain, how, brief=True)
+                brief_pieces.append((level, lead, body, note if ok else ""))
+                lead, body, note, ok = _answer_parts(rec, metric, bare_tries, plain, how, brief=True)
+                bare_pieces.append((level, lead, body, note if ok else ""))
             else:
-                lines.append(_answer_line(rec, label, metric, tries, plain, how))
+                add(_answer_line(rec, label, metric, tries, plain, how),
+                    _answer_line(rec, label, metric, brief_tries, plain, how, brief=True),
+                    _answer_line(rec, label, metric, bare_tries, plain, how, brief=True))
         if pieces:
-            # One bullet for the question: each value of the compared setting keeps its own answer, in order, joined here (a
-            # note that every value carries is said once at the end; otherwise each keeps its own, so a note never ends up
-            # beside a value it was not said of).
-            notes = {n for _, _, _, n in pieces if n}
-            shared = notes.pop() if len(notes) == 1 and all(n for _, _, _, n in pieces) else ""
-            lead = next((ld for _, ld, _, _ in pieces if ld), "")
             pins = _pins_not_in(name, rec, at)
             head = name + (f" (when {', '.join(pins)})" if pins else "")
-            each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
-            lines.append(f"- {head} ({lead}), by {rec.label(split)}: {each_value}{shared}")
+            add(_by_value_line(head, rec.label(split), pieces), _by_value_line(head, rec.label(split), brief_pieces),
+                _by_value_line(head, rec.label(split), bare_pieces))
     for place, conflict, mapped in unit_spans:
         start, end = starts[place], starts[place + 1] if place + 1 < len(starts) else len(lines)
         # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
         if start < end and "{{" in lines[end - 1]:
-            lines[end - 1] += _unit_sentence(conflict, mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else "", rec, plain)
-    lines = _shared_numbers_once(lines, starts, said_names)
-    return ("**Answers to the questions asked.**" + chr(10) * 2 + chr(10).join(lines)) if lines else ""
+            metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
+            lines[end - 1] += _unit_sentence(conflict, metric, rec, plain)
+            short[end - 1] = [c + _unit_sentence(conflict, metric, rec, plain, brief=True) for c in short[end - 1]]
+    lines, short = _shared_numbers_once(lines, short, starts, said_names)
+    return lines, [_within_cap(list(dict.fromkeys(c)), said_names, rec) for c in short]
+
+
+def _by_value_line(head: str, setting: str, pieces: list[tuple[Any, str, str, str]]) -> str:
+    """One bullet for a question answered at each value of the compared ``setting``: each value keeps its own answer, in
+    order, joined here (a note that every value carries is said once at the end; otherwise each keeps its own, so a note
+    never ends up beside a value it was not said of)."""
+    notes = {n for _, _, _, n in pieces if n}
+    shared = notes.pop() if len(notes) == 1 and all(n for _, _, _, n in pieces) else ""
+    lead = next((ld for _, ld, _, _ in pieces if ld), "")
+    each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
+    return f"- {head} ({lead}), by {setting}: {each_value}{shared}"
 
 
 _VALUE_KEY = re.compile(r"\{\{v:[^{}]*\}\}")
@@ -1852,30 +1958,45 @@ def _number_place(key_text: str) -> Any:
             where(key.operand_where), key.operand_metric, key.reducer, key.word, key.percent, key.form_arg)
 
 
-def _shared_numbers_once(lines: list[str], starts: list[int], names: list[str]) -> list[str]:
+def _shared_numbers_once(lines: list[str], short: list[list[str]], starts: list[int],
+                         names: list[str]) -> tuple[list[str], list[list[str]]]:
     """``lines`` with the questions that print exactly the same numbers (the same places FI reads, :func:`_number_place`)
     given them once, together: the first one's line names every one of them and says the plan gives these different
     questions one number, so it can be the answer to only one of them. Neither the number (it may be the right answer to
     one of them) nor the fact that it cannot answer both is lost. The places are the ones the lines print, so it holds
     whatever led two questions there (a map with several entries, a result the analysis worked out once whatever the
     setting, a setting the record does not have). A question whose numbers are only some of another's (one setting of a
-    result the other gives for each setting) keeps its own line: in 244 stored studies that case never occurred."""
+    result the other gives for each setting) keeps its own line: in 244 stored studies that case never occurred.
+
+    ``short`` (the brief forms of each of ``lines``) is grouped as ``lines`` are, and says the same in fewer words."""
     spans = [(s, starts[i + 1] if i + 1 < len(starts) else len(lines)) for i, s in enumerate(starts)]
     keys = [frozenset(_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))) for s, e in spans]
     out: list[str] = []
+    out_short: list[list[str]] = []
     for i, (s, e) in enumerate(spans):
         group = [j for j in range(len(spans)) if keys[i] and keys[j] == keys[i]]
         if len(group) < 2:
             out.extend(lines[s:e])
+            out_short.extend(short[s:e])
         elif group[0] == i:
-            here = lines[s:e]
             head = "- " + names[i]
             together = "; ".join(names[j] for j in group)
-            here[0] = "- " + together + here[0][len(head):] if here[0].startswith(head) else here[0]
-            here[-1] += (" (the plan gives these different questions one number, so it can be the answer to only one of "
-                         "them)")
-            out.extend(here)
-    return out
+
+            def joined(here: list[str], note: str) -> list[str]:
+                here = list(here)
+                here[0] = "- " + together + here[0][len(head):] if here[0].startswith(head) else here[0]
+                here[-1] += note
+                return here
+            out.extend(joined(lines[s:e], " (the plan gives these different questions one number, so it can be the "
+                                          "answer to only one of them)"))
+            brief_note = " (one number for these questions: it can answer only one)"
+            # each brief form of the first line and of the last takes the names and the note, as the full lines do
+            forms = [list(c) for c in short[s:e]]
+            for k in range(len(forms)):
+                forms[k] = [joined([c], "")[0] if k == 0 else c for c in forms[k]]
+            forms[-1] = [c + brief_note for c in forms[-1]]
+            out_short.extend(forms)
+    return out, out_short
 
 
 def _unit_words(conflict: dict[str, Any]) -> list[str]:
@@ -1951,10 +2072,13 @@ def unit_notes(quest_root: Path | str) -> list[str]:
     return out
 
 
-def _unit_sentence(conflict: Any, metric: str, rec: Any, plain: Any) -> str:
+def _unit_sentence(conflict: Any, metric: str, rec: Any, plain: Any, brief: bool = False) -> str:
     """The sentence after an answer whose result is in another unit than the question asks in: the result, its unit (the plan's
-    own where the plan declares one, else the unit the plan states for it) and the unit asked; FI converts nothing."""
+    own where the plan declares one, else the unit the plan states for it) and the unit asked; FI converts nothing.
+    ``brief``: the two units only (the paper's body; the line names the result already)."""
     said = _unit_words(conflict)
+    if brief:
+        return f" (in {said[0]}; the question asks in {said[1]}, not converted)"
     result = f"\"{plain(metric)}\"" if metric else "this result"
     lead = "the result used" if conflict.get("declared") else "the plan states that the result used"
     return f" ({lead}, {result}, is in {said[0]}; the question asks in {said[1]}, and FI did not convert it)"
@@ -2224,7 +2348,7 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
     """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
     FI's records, :func:`run_facts_text`); ``""`` when there is none. A block FI sent to the supplement
     (core/supplement.py: the tables always, the Limitations for a page limit) is its pointer there, unless ``full``
-    (what the supplement holds)."""
+    (what the supplement holds); the answers in full, sent there always, leave their short lines and a pointer."""
     if not full and name in (_supplement.TABLES, _supplement.LIMITATIONS) and name in _supplement.moved(quest_root):
         if not block_text(quest_root, name, full=True):
             return ""
@@ -2244,7 +2368,10 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         moved = "" if full else _supplement.moved_sentences_line(_supplement.sentence_count(quest_root))
         return "\n".join(x for x in (limitations_text(quest_root), f"- {moved}" if moved else "") if x)
     if name == "answers":
-        return answers_text(quest_root)
+        whole, short = answers_forms(quest_root)
+        if not full and whole and _supplement.ANSWERS in _supplement.moved(quest_root):
+            return short + chr(10) * 2 + _supplement.answers_pointer()
+        return whole
     rel = _BLOCK_FILES.get(name)
     if rel is None:
         return ""
@@ -2441,8 +2568,8 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
 
 def page_limit_text(quest_root: Path | str) -> str:
     """The sentence for the quality report when the finished paper is longer than the topic's page limit, and the ones
-    that say which of FI's own parts are in the supplement (core/supplement.py): its tables of every setting and its
-    Further reading always, its Limitations for the page limit; ``""`` with neither. The limit is a guideline: the
+    that say which of FI's own parts are in the supplement (core/supplement.py): its tables of every setting, its answers
+    in full and its Further reading always, its Limitations for the page limit; ``""`` with neither. The limit is a guideline: the
     paper does not carry these sentences (QUALITY.md and run.log do)."""
     pages = _read(Path(quest_root), str(PAGE_RECORD))
     over = ""
@@ -2452,8 +2579,9 @@ def page_limit_text(quest_root: Path | str) -> str:
     moved = _supplement.moved(quest_root)
     if not moved or not (Path(quest_root) / _supplement.FILE).is_file():
         return over
-    names = {_supplement.TABLES: "its tables of every setting", _supplement.LIMITATIONS: "its Limitations (one line "
-             "stays in the paper)", _supplement.FURTHER_READING: "its Further reading"}
+    names = {_supplement.TABLES: "its tables of every setting", _supplement.ANSWERS: "its answers to the questions "
+             "asked in full (a short line for each stays in the paper)", _supplement.LIMITATIONS: "its Limitations (one "
+             "line stays in the paper)", _supplement.FURTHER_READING: "its Further reading"}
 
     def listed(parts: list[str]) -> str:
         said = [names[m] for m in parts]
