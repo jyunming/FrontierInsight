@@ -22,6 +22,12 @@ cannot be used (at most :data:`MAX_ASKS` asks of a part in all):
   shows, along which setting, in how many panels (or that it cannot be drawn from the study's numbers). FI draws only the
   figures the contract declares, so a figure named only by file name would be drawn by nobody.
 
+The roles question also asks each result's shape (one number, a curve or a map in each run) and physical bound, a plain
+title for each sub-study and group of results named in code, and the studied system (its parts, what each carries by the
+plan's ids, what touches what); the figures question also asks each figure's reference lines. These are checked apart
+(:data:`EXTRA_WORDS`): one that cannot be used is asked again once, then left out alone with a note, and never changes the
+part's validity or the plan's form.
+
 When every part is usable FI writes ``form: contract`` into the protocol; the model never does. A part that stays
 unusable is left out, named in ``protocol.parts_left_out`` (the contract reads that into its gaps), and the plan stays in
 the older form; a formula still not workable is left out alone, with its gap, and the plan keeps its form; a figure still not declared is
@@ -56,6 +62,15 @@ PART_WORDS = {"roles": "what kind of number each result is, what it may change w
 #: The parts whose answer the plan's form does not wait on: a formula still not workable, or a figure still not declared,
 #: is left out alone.
 _OWN_PARTS = ("formulas", "figures", "answers", "dependents")
+#: What the roles and the figures questions also ask, each checked from FI's records apart from the part's own answer. One
+#: that cannot be used is asked again once (:data:`EXTRA_ASKS` asks in all) and then left out alone, with a note: it never
+#: makes the part itself unusable, so it never moves the plan's form and never stops a study.
+EXTRA_WORDS = {"titles": "a plain title for each sub-study and group of results named in code",
+               "shape": "whether each result is one number, a curve or a map",
+               "bound": "the physical bound of each result",
+               "system": "the studied system (its parts, what each carries and what touches what)",
+               "references": "the reference lines each figure draws"}
+EXTRA_ASKS = 2
 _ROLE_HINT = {"reference": "its plan gives a formula, so it is a reference", "diagnostic": "a check of the plan measures it as a "
               "size of disagreement, so it is a diagnostic"}
 
@@ -93,7 +108,9 @@ def _results_lines(p: dict[str, Any]) -> str:
         if not isinstance(m, dict) or not m.get("id"):
             continue
         fixed = _contract.structural_role(m, violation)
-        lines.append(f"- {m['id']}: {_short(m.get('estimand'), 200)}" + (f" [{_ROLE_HINT[fixed]}]" if fixed else ""))
+        unit = str(m.get("physical_unit") or "").strip()
+        lines.append(f"- {m['id']}: {_short(m.get('estimand'), 200)}" + (f" (in {unit})" if unit else "")
+                     + (f" [{_ROLE_HINT[fixed]}]" if fixed else ""))
     return "\n".join(lines)
 
 
@@ -298,7 +315,8 @@ def _figures_prompt(templates: dict[str, string.Template], design: dict[str, Any
                                    for j, w in _named_results(design).items())]) or "- (nothing)",
         settings=_settings_said(design, settings) or "(the study varies no setting)", max_panels=_contract.MAX_PANELS,
         method=_short(design.get("method")), again=_problems_text(problems, last),
-        record="\n".join(_record_reads(design)), per_trial=", ".join(_per_trial(design)) or "(none)")
+        record="\n".join(_record_reads(design)), per_trial=", ".join(_per_trial(design)) or "(none)",
+        references=_references_lines(design))
 
 
 def _check_figures(value: Any, asked: dict[str, str], design: dict[str, Any]) -> list[str]:
@@ -400,7 +418,9 @@ def _apply_figures(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
         decls[name] = ({"drop": True, "why": _short(row.get("why"), 300)} if row.get("drop") is True else
                        {"shows": list(row["shows"]), "x": row.get("x") or None, "series": row.get("series") or None,
                         "panels": row.get("panels", 1),
-                        **{k: row[k] for k in ("x_scale", "y_scale") if row.get(k) in ("linear", "log")}})
+                        **{k: row[k] for k in ("x_scale", "y_scale") if row.get(k) in ("linear", "log")},
+                        **({"references": list(row["references"])} if isinstance(row.get("references"), list)
+                           and row["references"] else {})})
     # A number the plan names as returned for each setting, which a figure now shows, is declared as a result of the study,
     # computed afterwards by the study's own function (so no run is required to return it), along the settings the figure draws.
     named = _named_results({**design, "protocol": p})
@@ -768,6 +788,140 @@ def _apply_answers(p: dict[str, Any], design: dict[str, Any], answer: dict[str, 
     return {**p, "topic_map": rows}
 
 
+def _along_words(protocol: dict[str, Any]) -> str:
+    """What a curve or a map may run along, as the roles question says it (:func:`core.contract.check_shape` holds an answer
+    to the same names): time or a position, never a setting of the plan."""
+    return "time, a position x, y or z in the system"
+
+
+def _titles_text(protocol: dict[str, Any]) -> str:
+    """The roles question's paragraph asking a plain title for each sub-study and group named in code (``""`` when none)."""
+    wanted = _contract.titles_to_ask(protocol)
+    if not wanted:
+        return ""
+    return ("\nThese names of the plan are written as names in code. Give each the plain title a scientist would write in a "
+            "paper (for example \"Scan of the inlet rate\", not \"inlet_scan\"), at most 80 characters, under \"titles\" in the "
+            "same JSON object beside \"results\": {\"<name>\": \"<title>\"}:\n"
+            + "\n".join(f"- {n} ({what})" for n, what in wanted.items()) + "\n")
+
+
+def _roles_extras(got: Any, value: Any, design: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """``(bad, problems)`` for what the roles answer also says: each result's shape and physical bound, and the studied
+    system (``got["system"]``, only when the answer has the key). ``bad``: ``{"shape": {id: why}, "bound": {id: why},
+    "system": why}`` for each one that cannot be used. A result whose row is missing is the roles check's to say."""
+    bad: dict[str, Any] = {"shape": {}, "bound": {}}
+    p = design.get("protocol") or {}
+    for rid, row in (value.items() if isinstance(value, dict) else []):
+        if not isinstance(row, dict):
+            continue
+        for key, found in (("shape", _contract.check_shape(rid, row, p)),
+                           ("bound", _contract.check_bound(rid, row.get("bound"), design))):
+            if found:
+                bad[key][rid] = "; ".join(found)
+    problems = [*bad["shape"].values(), *bad["bound"].values()]
+    wanted = _contract.titles_to_ask(p)
+    if wanted:
+        said = got.get("titles") if isinstance(got, dict) and isinstance(got.get("titles"), dict) else {}
+        bad["titles"] = {n: "; ".join(why) for n in wanted if (why := _contract.check_title(n, said.get(n)))}
+        problems += list(bad["titles"].values())
+    if isinstance(got, dict) and "system" in got:
+        found = _contract.check_system(got["system"], p)
+        if found:
+            bad["system"] = "; ".join(found[:3])
+            problems += [f"the studied system: {x}" for x in found[:6]]
+    return {k: v for k, v in bad.items() if v}, problems
+
+
+def _apply_role_extras(p: dict[str, Any], value: dict[str, Any], got: Any, bad: dict[str, Any]) -> dict[str, Any]:
+    """``p`` with what the roles answer also says, where it can be used (``bad`` holds the rest, left out): a curve or a map on
+    the result's entry (``shape``, ``along``; a number writes nothing), a physical bound as the entry's ``range`` (``physical``:
+    true; the range check holds every run to it), and the studied system as ``protocol.system``. A range or a shape FI wrote
+    from an earlier answer goes when this answer gives none; a range the plan wrote itself stays. An answer without
+    ``system`` leaves the plan's own as it is."""
+    metrics = []
+    for m in p.get("metrics") or []:
+        row = value.get(str(m.get("id"))) if isinstance(m, dict) else None
+        if isinstance(row, dict):
+            rid = str(m["id"])
+            m = {k: v for k, v in m.items() if k not in ("shape", "along")}
+            if row.get("shape") in ("curve", "map") and rid not in bad.get("shape", {}):
+                m.update({"shape": row["shape"], "along": list(row["along"])})
+            if isinstance(m.get("range"), dict) and m["range"].get("physical") is True:
+                m.pop("range")
+            bound = row.get("bound")
+            if isinstance(bound, dict) and rid not in bad.get("bound", {}) and not isinstance(m.get("range"), dict):
+                unit = str(bound.get("unit") or "").strip()
+                m["range"] = {"min": bound.get("min"), "max": bound.get("max"), "reason": _short(bound.get("why"), 300),
+                              "physical": True, **({"unit": unit} if unit else {})}
+        metrics.append(m)
+    out = {**p, "metrics": metrics}
+    wanted = _contract.titles_to_ask(p)
+    said = got.get("titles") if isinstance(got, dict) and isinstance(got.get("titles"), dict) else {}
+    titles = {n: " ".join(said[n].split()) for n in wanted if n not in bad.get("titles", {}) and isinstance(said.get(n), str)}
+    if titles:  # the plan's reader name of each, where figures and the paper look for one
+        out["labels"] = {**(p.get("labels") if isinstance(p.get("labels"), dict) else {}), **titles}
+    if isinstance(got, dict) and "system" in got and not bad.get("system"):
+        system = got["system"]
+        out = {k: v for k, v in out.items() if k != "system"}
+        if isinstance(system, dict) and system.get("parts"):
+            out["system"] = {"parts": [dict(x) for x in system["parts"]], "links": [dict(x) for x in system.get("links") or []]}
+    return out
+
+
+def _held_contract(design: dict[str, Any]) -> Any:
+    return _contract.from_design({**design, "protocol": {**design["protocol"], "form": "contract"}}, fi_analysis=True)
+
+
+def _references_lines(design: dict[str, Any]) -> str:
+    """The reference values and curves FI holds, for the figures question, one line each."""
+    c = _held_contract(design)
+    lines = []
+    for r in c.results:
+        if r.role == "reference":
+            lines.append(f"- {r.id}: {_short(r.label or r.estimand, 120) or 'a reference value'} (a reference quantity)")
+        elif (isinstance(r.reference, dict) and r.reference) or (isinstance(r.known_value, dict) and r.known_value):
+            lines.append(f"- {r.id}: the plan's {'reference' if r.reference else 'known value'} of {r.id} "
+                         f"(only on a figure that shows {r.id})")
+    lines += [f"- {d.id}: {_short(d.label, 120) or 'a reference value'} (a reference quantity)" for d in c.derived
+              if d.role == "reference"]
+    return "\n".join(lines) or "- (the plan declares no reference value or curve, so answer `references`: [])"
+
+
+def _figure_extras(value: Any, asked: dict[str, str], design: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """``(bad, problems)`` for the reference lines each figure answer names: ``bad`` is ``{"references": {file: why}}`` for
+    each figure whose answer names one FI holds no such reference for (:func:`core.contract.reference_ids`)."""
+    bad: dict[str, str] = {}
+    c = None
+    for name in asked:
+        row = value.get(name) if isinstance(value, dict) else None
+        if not isinstance(row, dict) or row.get("drop") is True or row.get("references") in (None, []):
+            continue
+        refs = row["references"]
+        c = c or _held_contract(design)
+        known = _contract.reference_ids(c.results, c.derived, row.get("shows") if isinstance(row.get("shows"), list) else [])
+        if not isinstance(refs, list) or not all(isinstance(r, str) for r in refs):
+            bad[name] = f"`{name}`: `references` must be a list of names"
+        elif [r for r in refs if r not in known]:
+            bad[name] = (f"`{name}`: {', '.join('`' + r + '`' for r in refs if r not in known)} is no reference FI holds for what "
+                         f"it shows (it may draw {', '.join(known) or 'none'}); answer `references` with those, or []")
+    return ({"references": bad} if bad else {}), list(bad.values())
+
+
+def _left_out_note(bad: dict[str, Any]) -> list[str]:
+    """One sentence for each extra answer left out (``bad`` of :func:`_roles_extras` / :func:`_figure_extras`)."""
+    out = []
+    for key, what in (("titles", "its name is printed as written"), ("shape", "it is read as one number"),
+                      ("bound", "it is held to no physical bound"),
+                      ("references", "the figure is drawn without them")):
+        if bad.get(key):
+            names = ", ".join(f"`{i}`" for i in bad[key])
+            out.append(f"The plan's model did not give {EXTRA_WORDS[key]} in a form FI could use for {names}; {what}.")
+    if bad.get("system"):
+        out.append(f"The plan's model did not give {EXTRA_WORDS['system']} in a form FI could use ({_short(bad['system'], 200)}); "
+                   "the plan states no studied system.")
+    return out
+
+
 def _prompt(part: str, templates: dict[str, string.Template], design: dict[str, Any], names: dict[str, str],
             problems: list[str], last: str, derived: list[str], questions: dict[str, dict[str, str]] | None = None) -> str:
     p = design.get("protocol") or {}
@@ -775,7 +929,8 @@ def _prompt(part: str, templates: dict[str, string.Template], design: dict[str, 
         method=_short(design.get("method")), settings=_settings_lines(p), results=_results_lines(p),
         names=_names_lines(names), equations=", ".join(sorted(_contract._model_equation_ids(p))) or "(none)",
         derived=", ".join(derived) or "(none)", again=_problems_text(problems, last),
-        formula_language=_forms.EXPECTED_FORMULA_LANGUAGE, questions=_questions_lines(questions))
+        formula_language=_forms.EXPECTED_FORMULA_LANGUAGE, questions=_questions_lines(questions), titles=_titles_text(p),
+        along=_along_words(p), names_in_plan=", ".join(_contract.system_names(p)) or "(none)")
 
 
 def _questions_lines(questions: dict[str, dict[str, str]] | None) -> str:
@@ -867,10 +1022,19 @@ def without_answers(design: Any) -> Any:
     results and the keys only FI writes. The methodology audit's verdict is on the rest (core/receipts.design_core)."""
     if not isinstance(design, dict) or not isinstance(design.get("protocol"), dict):
         return design
-    protocol = {k: v for k, v in design["protocol"].items() if k not in (*_FI_KEYS, "named_results", "figure_declarations", "dependent_map")}
+    protocol = {k: v for k, v in design["protocol"].items()
+                if k not in (*_FI_KEYS, "named_results", "figure_declarations", "dependent_map", "system")}
+    if isinstance(protocol.get("labels"), dict):  # a sub-study's or a group's title is FI's answer too
+        groups = _contract.group_names(design["protocol"])
+        labels = {k: v for k, v in protocol["labels"].items() if k not in groups}
+        if labels:
+            protocol["labels"] = labels
+        else:
+            del protocol["labels"]
     if isinstance(protocol.get("metrics"), list):
-        protocol["metrics"] = [{k: v for k, v in m.items() if k not in _ANSWER_KEYS} if isinstance(m, dict) else m
-                               for m in protocol["metrics"]]
+        protocol["metrics"] = [{k: v for k, v in m.items() if k not in _ANSWER_KEYS
+                                and not (k == "range" and isinstance(v, dict) and v.get("physical") is True)}
+                               if isinstance(m, dict) else m for m in protocol["metrics"]]
     for key in _ASKED_ROWS:
         if isinstance(protocol.get(key), list):
             rows = [r["as_planned"] if isinstance(r, dict) and isinstance(r.get("as_planned"), dict) else r
@@ -884,7 +1048,7 @@ def without_answers(design: Any) -> Any:
 
 
 _FI_KEYS = ("form", "parts_left_out", "names_not_asked")
-_ANSWER_KEYS = ("role", "depends_on", "returned")
+_ANSWER_KEYS = ("role", "depends_on", "returned", "shape", "along")
 _ASKED_ROWS = ("comparisons", "derived")
 
 
@@ -982,6 +1146,8 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                         record["new_left_out"] = left_new
                     if made:
                         checking = {**current, "protocol": with_new_results(current["protocol"], made)}
+                extra_bad, extra_problems = (_roles_extras(got, value, current) if part == "roles" else
+                                             _figure_extras(value, faults, current) if part == "figures" else ({}, []))
                 problems = new_problems + (_dependents.check(value, entries, current, taken)
                             + _dependents.check_uncertainties(unsure, current, taken) if part == "dependents" else
                             _check_formulas(value, faults, current) if part == "formulas" else
@@ -989,13 +1155,18 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                             _check_answers(value, faults, checking, *((conflicts, same) if record["asks"] >= MAX_ASKS else ()))
                             if part == "answers" else
                             _contract.check_part(part, value, current))
+                if extra_problems and record["asks"] < EXTRA_ASKS:
+                    problems = problems + extra_problems  # asked again once; after that each is left out alone
                 if problems:
                     continue
+                if part == "figures" and extra_bad:  # a reference FI holds none of is left out; the figure is declared
+                    value = {n: ({k: v for k, v in r.items() if k != "references"} if n in extra_bad["references"] else r)
+                             for n, r in value.items()}
                 p = current["protocol"]
                 if part == "dependents":
                     kept, checked = _dependents.apply(p, value, entries, unsure or None), None
                 elif part == "roles":
-                    kept, checked = _apply_roles(p, value), None
+                    kept, checked = _apply_role_extras(_apply_roles(p, value), value, got, extra_bad), None
                 elif part == "formulas":
                     kept, checked = _apply_formulas(p, value), None
                 elif part == "figures":
@@ -1039,6 +1210,13 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
                                    if r["answer"] == "derived" or (r["answer"] == "reference" and r.get("formula"))]
                 record["valid"] = True
                 record["answer"] = value if part != "comparisons" else value["comparisons"]
+                if part == "roles":
+                    record["system"] = ("left out" if extra_bad.get("system") else "not given" if "system" not in got else
+                                        "stated" if isinstance(got["system"], dict) and got["system"].get("parts") else "none")
+                    if "system" in got:
+                        record["system_answer"] = got["system"]
+                if extra_bad:
+                    record["left_out"] = extra_bad
                 if part == "dependents" and unsure:
                     record["uncertainties"] = unsure
         except Exception:  # noqa: BLE001 -- one part is left out; the others are kept
@@ -1048,6 +1226,9 @@ async def ask_parts(design: Any, ask: Callable[[str], Awaitable[str]], parse: Ca
             problems = ["the call could not be made: " + record["error"].strip().splitlines()[-1][:200]]
         record["problems"] = problems
     left = [PART_WORDS[k] for k, v in out.parts.items() if not v["valid"] and k not in _OWN_PARTS]
+    for rec in out.parts.values():
+        if rec.get("valid") and rec.get("left_out"):
+            out.notes.extend(_left_out_note(rec["left_out"]))
     still = _formula_faults(current) if "formulas" in out.parts and not out.parts["formulas"]["valid"] else {}
     if still:
         out.notes.append("The plan's model was asked for a formula FI can work out for " + ", ".join(f"`{i}`" for i in still)

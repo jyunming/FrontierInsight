@@ -534,6 +534,14 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
                             ".fi/protocol_part_asked.json"))
     for part, rec in _dict(q.contract_parts.get("parts")).items():
         rec = _dict(rec)
+        for key, what in _dict(rec.get("left_out") if rec.get("valid") else None).items():
+            # an extra answer of the roles or figures question left out alone: the part itself, and the plan's form, stand
+            from . import contract_parts as _cparts
+
+            names = ", ".join(f"`{i}`" for i in _dict(what)) if isinstance(what, dict) else ""
+            out.append(_problem("plan", f"the plan was not given {_cparts.EXTRA_WORDS.get(key, key)}"
+                                + (f" for {names}" if names else "") + " in a form FI could use; left out",
+                                "FI's plan check", "disclosed", ".fi/contract_parts.json"))
         if rec and not rec.get("valid"):
             from . import contract_parts as _cparts
 

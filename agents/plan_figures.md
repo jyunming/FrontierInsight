@@ -15,10 +15,13 @@ A figure may instead use as `x` one of the numbers every trial returns ($per_tri
 A figure has at most $max_panels panel(s).
 For each figure also say how its two axes are scaled, `x_scale` and `y_scale`, each "linear" or "log". Answer "log" for an axis when the numbers drawn along it are all above zero and run over several powers of ten (for example an error that falls from 1e-4 to 1e-10 as the steps grow, or settings 20, 200 and 2000), so that a reader can tell the small ones apart. Answer "linear" otherwise, in particular when the numbers can be zero or negative, are differences, proportions or correlations, or stay within a factor of ten or so. The panels of a figure share these two answers, so answer "linear" when they would not all want "log".
 
+For each figure also say which reference lines it draws beside what it shows, `references`: a theory value or curve, or a known value, that a reader compares the figure's numbers with. Name only these, which FI holds a value of; write [] when the figure draws none:
+$references
+
 How the study measures (from your plan):
 $method
 $again
 Answer with one JSON object and nothing else, one entry for each figure above, under its file name exactly as written:
-{"figures": {"<file name>": {"shows": ["<number>"], "x": "<setting>", "series": "<setting or null>", "panels": 1, "x_scale": "linear", "y_scale": "log"}}}
+{"figures": {"<file name>": {"shows": ["<number>"], "x": "<setting>", "series": "<setting or null>", "panels": 1, "x_scale": "linear", "y_scale": "log", "references": []}}}
 Only when the study reports no number to draw and varies no setting, answer a figure:
 {"figures": {"<file name>": {"drop": true, "why": "<one sentence>"}}}
