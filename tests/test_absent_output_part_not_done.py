@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from core import finding_repair
 from core.rerun_check import Verdict
 from tests.test_shown_reach import FILES, _engine, _run, _stops
@@ -299,3 +301,39 @@ def test_a_wrong_value_in_a_record_whose_items_changes_it_still_stops_the_study(
             "    assert r['est_a'] == 9.0, 'the estimate is wrong'\n")
     out, _record, _engine_ = _gate(tmp_path, test, files=files)
     assert _stops(out)
+
+
+def test_a_class_whose_metaclass_runs_code_on_comparison_or_attribute_reads_does_not_turn_a_failing_test_into_a_pass(
+        tmp_path: Path) -> None:
+    # second outside review: a type compared with `in` ran the metaclass's __eq__, and reading the class's name ran its
+    # __getattribute__; either could set the value the test then checks
+    code = {"m.py": ("STATE = {'mean': 0.0}\n\n\ndef _called(name):\n    STATE['mean'] = 1.0\n"
+                     "    with open('calls.txt', 'a') as fh:\n        fh.write(name + '\\n')\n\n\n"
+                     "class Meta(type):\n"
+                     "    def __eq__(cls, other):\n        _called('__eq__')\n        return False\n\n"
+                     "    __hash__ = type.__hash__\n\n"
+                     "    def __getattribute__(cls, name):\n        _called('__getattribute__ ' + name)\n"
+                     "        return type.__getattribute__(cls, name)\n\n\n"
+                     "class Result(metaclass=Meta):\n    pass\n\n\n"
+                     "def run():\n    return Result()\n")}
+    test = "import m\n\n\ndef test_mean():\n    m.run()\n    assert m.STATE['mean'] == 1.0\n"
+    plain = _harness(tmp_path / "a", code, test, capture=False)
+    recorded = _harness(tmp_path / "b", code, test, capture=True)
+    assert plain.status == "fail" and recorded.status == "fail"
+    assert not (tmp_path / "b" / "calls.txt").is_file(), (tmp_path / "b" / "calls.txt").read_text()
+    assert recorded.held["returned"][0]["record"] is False
+
+
+def test_a_pandas_table_is_not_read_so_an_index_of_the_study_s_own_class_never_runs(tmp_path: Path) -> None:
+    # second outside review: a table of exactly pandas' type may hold columns of the study's own Index class, whose
+    # iteration could set the value the test then checks. A table is not read at all: it is not a record of names
+    pytest.importorskip("pandas")
+    code = {"m.py": ("import numpy as np\nimport pandas as pd\n\nSTATE = {'mean': 0.0}\n\n\n"
+                     "class LoudIndex(pd.Index):\n    def __iter__(self):\n        STATE['mean'] = 1.0\n"
+                     "        return super().__iter__()\n\n\n"
+                     "def run():\n    return pd.DataFrame([[0.0]], columns=LoudIndex._simple_new(np.array(['mean'], dtype=object)))\n")}
+    test = "import m\n\n\ndef test_mean():\n    m.run()\n    assert m.STATE['mean'] == 1.0\n"
+    plain = _harness(tmp_path / "a", code, test, capture=False)
+    recorded = _harness(tmp_path / "b", code, test, capture=True)
+    assert plain.status == "fail" and recorded.status == "fail"
+    assert recorded.held["returned"][0]["record"] is False and recorded.held["complete"] is False
