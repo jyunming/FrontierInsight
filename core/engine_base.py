@@ -4755,7 +4755,7 @@ def _replicate_assertions(state: QuestState) -> list[Any]:
         from core import plausibility
 
         design = state.get("design")
-        declared = list(design.get("result_assertions") or []) if isinstance(design, dict) else []
+        declared = _contract.held_assertions(design) if isinstance(design, dict) else []
         return plausibility.parse_assertions(
             {"result_assertions": declared + list(state.get("_skill_assertions") or [])},
         )
@@ -8485,15 +8485,18 @@ def _physical_bound_paths(state: "QuestState") -> set[str]:
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:
-    """The design with a called skill's own range assertions added.
+    """The design with a called skill's own range assertions added, and the ranges on the plan's declared results
+    (:func:`core.contract.held_assertions`: one bound per result).
 
     A skill knows its own valid domain, so a design that calls one need not
     restate its bounds. Design assertions come first: a design that
     deliberately narrows a skill's range keeps its say."""
     design = dict(state.get("design") or {})
-    extra = state.get("_skill_assertions") or []
-    if extra:
-        design["result_assertions"] = list(design.get("result_assertions") or []) + list(extra)
+    # A range on a declared result of the plan (a physical bound FI asked after the plan) is held like the plan's own bounds.
+    held = _contract.held_assertions(design)
+    extra = list(state.get("_skill_assertions") or [])
+    if held or extra:
+        design["result_assertions"] = held + extra
     return design
 
 
