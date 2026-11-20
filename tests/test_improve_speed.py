@@ -124,6 +124,11 @@ def test_a_number_that_differs_only_at_rounding_level_is_the_same_number_and_a_l
     # code says how much it varies (the check on a setting of the plan, after a sample of coarser copies)
     one, one_moved = sp.Sample(values={"s=2": [{"x": 5.0}]}), sp.Sample(values={"s=2": [{"x": 5.0 + 5e-8}]})
     assert sp.disagreements(one, one_moved) and sp.disagreements(one, one_moved, reference=(a,)) == []
+    # one huge value of a number in the unchanged code's sample (a stand-in for "no answer") does not widen its range so
+    # far that a real change at another setting fits in a millionth of it: the number itself bounds rounding level too
+    with_huge = sp.Sample(values={**a.values, "s=4": [{"x": 1e14}]})
+    assert sp.disagreements(with_huge, sp.Sample(values={**moved(s2=5.0 + 1e-4).values, "s=4": [{"x": 1e14}]}))
+    assert sp.disagreements(with_huge, sp.Sample(values={**reordered.values, "s=4": [{"x": 1e14}]})) == []
     # a number that moves at all between two runs of the same code is still left out of the comparison, as before
     assert sp.varying(a, reordered) == {("s=1", 0, "/x"), ("s=2", 0, "/x"), ("s=3", 0, "/x")}
 
@@ -646,9 +651,10 @@ def run_cell(cell):
 '''
 MESH_LOOP = "    total = 0.0\n    for i in range(n * 30000):\n        total += (i % 7) * dx\n"
 MESH_FAST = "    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-#: Exact on a coarse copy (n of 4 or fewer), off by a millionth at the plan's resolution.
+#: Exact on a coarse copy (n of 4 or fewer), off by a ten-thousandth at the plan's resolution (a millionth would sit at
+#: the edge of rounding level: the check there takes how much a number varies from the copies' sample too).
 MESH_COARSE_ONLY = ("    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-                    "    if n > 4:\n        total *= 1.000001\n")
+                    "    if n > 4:\n        total *= 1.0001\n")
 
 
 def _mesh_engine(tmp_path: Path) -> Engine:

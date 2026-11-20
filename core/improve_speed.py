@@ -5,7 +5,8 @@ Every study that does not fit the time allowed, and every study that fits but th
 before the study is sized (a study that does not fit is sped up before it is cut). FI runs a fixed sample of
 the study itself, before and after each edit of the simulation: the same settings, the same trials, the same seeds. An
 edit is kept only when every number the sample returns is the same (to nine digits, or different only at rounding level:
-by no more than :data:`ROUNDING` of how much that number varies over the sample, :func:`compare`; a speed-up must not
+by no more than :data:`ROUNDING` of how much that number varies over the sample and of the number itself,
+:func:`compare`; a speed-up must not
 change what the study measures) and the sample is faster by at least :data:`MIN_SAVING` and by more than the timing's own noise
 (:func:`fast_enough`), and then again in repeated timings of both versions, taken alternately, that do not overlap
 (:func:`clearly_faster`). Nothing the code prints and no time the code reports is read: the harness times the calls.
@@ -39,9 +40,10 @@ MIN_SAVING = 0.10
 CONFIRM_PAIRS = 4
 RTOL, ATOL = 1e-9, 1e-12
 #: Two numbers are also the same when they differ only at rounding level: by no more than this share of how much that
-#: number varies over the unchanged code's sample (its largest value less its smallest, over every setting and trial). An
-#: edit that only adds the same terms in another order (a vectorised sum, a fused loop) moves a result by about 1e-12 to
-#: 1e-8 of itself, which nine digits rejected; a result an edit gets wrong moves by far more than a millionth of its range.
+#: number varies over the unchanged code's sample (its largest value less its smallest, over every setting and trial),
+#: and of the number itself. An edit that only adds the same terms in another order (a vectorised sum, a fused loop)
+#: moves a result by about 1e-12 to 1e-8 of itself, which nine digits rejected; a result an edit gets wrong moves by far
+#: more than a millionth of its range.
 ROUNDING = 1e-6
 #: A study that fits the time allowed and that FI expects to take less than this (padded, the whole study) is not sped
 #: up: the step would cost about as much time as it could save. A study that does not fit is always sped up first.
@@ -319,7 +321,7 @@ def _differences(before: Sample, after: Sample, scale: dict[str, float] | None =
                  ) -> tuple[list[tuple[str, int | None, str, str]], list[tuple[str, int, str, float]]]:
     """Every place the numbers of two samples are not the same, as ``(setting, trial, name, text)``; a setting not run in
     both has ``trial`` and ``name`` empty. With ``scale`` (how much each number varies, :func:`spreads`), a number that
-    differs by no more than :data:`ROUNDING` of its own is the same, at rounding level: those are returned apart, as
+    differs by no more than :data:`ROUNDING` of its own, and of itself, is the same, at rounding level: those are returned apart, as
     ``(setting, trial, name, difference as a share of how much it varies)``. Without it, only nine digits count."""
     bad: list[tuple[str, int | None, str, str]] = []
     rounded: list[tuple[str, int, str, float]] = []
@@ -341,7 +343,9 @@ def _differences(before: Sample, after: Sample, scale: dict[str, float] | None =
                 if math.isfinite(gap) and gap <= ATOL + RTOL * abs(y):
                     continue
                 spread = (scale or {}).get(name, 0.0)
-                if math.isfinite(gap) and spread > 0 and gap <= ROUNDING * spread:
+                # and of the number itself: one huge value of it in the sample (a stand-in for "no answer", say) widens
+                # its range so far that any change would fit in a millionth of it
+                if math.isfinite(gap) and spread > 0 and gap <= ROUNDING * min(spread, max(abs(x), abs(y))):
                     rounded.append((key, t, name, gap / spread))
                     continue
                 bad.append((key, t, name, f"{key} trial {t} {name}: {x:.12g} -> {y:.12g}"))
@@ -369,7 +373,8 @@ def compare(before: Sample, after: Sample, *, ignore: set[tuple[str, int, str]] 
     """Whether ``after`` gives the same numbers as ``before``, the unchanged code's sample. A number is the same when it
     is equal to nine digits, or when it differs only at rounding level: by no more than :data:`ROUNDING` of how much that
     number varies over ``before`` (and over ``reference``, more samples of the unchanged code, for a sample of one setting
-    whose own numbers do not vary). A missing or a new number, a not-a-number for a number, and any larger difference
+    whose own numbers do not vary), and of the number itself (one huge value in the sample cannot widen the range
+    so far that a real change fits in it). A missing or a new number, a not-a-number for a number, and any larger difference
     count as changed. The ``(setting, trial, name)`` of ``ignore`` are left out (see :func:`varying`)."""
     bad, rounded = _differences(before, after, spreads(before, *reference))
     out = Comparison(bad=[text for key, t, name, text in bad if (key, t, name) not in ignore])
