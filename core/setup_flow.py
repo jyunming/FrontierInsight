@@ -35,7 +35,7 @@ import hashlib
 import json
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +55,8 @@ MAX_BOXES = 4
 MAX_LINES = 5
 #: The most lines one entry may wrap to.
 MAX_WRAP = 3
+#: The most characters of one entry or title kept before it is measured (a few lines' worth; the rest ends "...").
+MAX_CHARS = 160
 
 _COLOURS = {"inputs": ("#e8f0fb", "#3b5b8c"), "computation": ("#f1f1f1", "#555555"), "results": ("#e9f5ec", "#3c7a4f")}
 _HEADERS = {"inputs": "Inputs", "computation": "Computation", "results": "Results reported"}
@@ -118,17 +120,27 @@ def _ours(root: Any, record: dict[str, Any] | None, name: str) -> bool:
     return bool(digest) and _digest(Path(str(root)) / "figures" / name) == digest
 
 
+def _drawn_now(root: Any, record: dict[str, Any] | None) -> bool:
+    """Whether FI's record says it drew the set-up figure from the frozen plan as it now stands and its drawing in ``.fi/``
+    is the one recorded."""
+    if not record or not record.get("drawn") or not record.get("file"):
+        return False
+    if _digest(_drawing(root)) != str(record.get("png_sha256") or "-"):
+        return False
+    return str(record.get("protocol_sha256") or "") == _digest(_protocol_file(Path(str(root))))
+
+
 def shown(root: Any) -> str | None:
-    """The file name of FI's set-up figure when the study shows it: FI's record says it drew it from the frozen plan as it
-    now stands, and its drawing in ``.fi/`` is the one recorded. ``None`` otherwise (no record, nothing drawn, a plan
-    changed since). Never raises."""
+    """The file name of FI's set-up figure when the study shows it, ``None`` otherwise: the one fact every figure number,
+    the paper, the poster and the slides go by. Before the write stage puts it in ``figures/`` (at the analysis), it is
+    shown when FI drew it from the frozen plan as it now stands (:func:`_drawn_now`). Once the write stage has tried
+    (``placed`` in the record), it is shown only when that copy worked and ``figures/`` holds the file FI drew: a copy
+    that failed, or a file gone since, gives no set-up figure for every reader alike. Never raises."""
     try:
         record = _record(root)
-        if not record or not record.get("drawn") or not record.get("file"):
+        if not _drawn_now(root, record):
             return None
-        if _digest(_drawing(root)) != str(record.get("png_sha256") or "-"):
-            return None
-        if str(record.get("protocol_sha256") or "") != _digest(_protocol_file(Path(str(root)))):
+        if "placed" in record and not (record["placed"] is True and _ours(root, record, str(record["file"]))):
             return None
         return str(record["file"])
     except Exception:  # noqa: BLE001 -- a record that cannot be read gives no figure, never a failure
@@ -157,7 +169,11 @@ def quality_line(root: Any) -> str | None:
     """The one line ``QUALITY.md`` gives when FI drew no set-up figure for the paper, saying why; ``None`` when it drew one
     or never tried (no paper was written)."""
     record = _record(root)
-    if not record or record.get("drawn"):
+    if not record:
+        return None
+    if record.get("drawn"):
+        if record.get("placed") is False:
+            return f"No set-up figure in the paper: {record.get('why') or 'FI could not put it in figures/'}."
         return None
     return f"No set-up figure in the paper: {record.get('why') or 'FI could not draw it'}."
 
@@ -457,7 +473,16 @@ def build(protocol: Any, steps_record: Any = None, layout_record: Any = None) ->
         return None, "the plan names no result the study reports"
     steps, dashed, cut_steps = _computation(protocol, steps_record, layout_record)
     columns = {"inputs": inputs, **({"computation": steps} if steps else {}), "results": results}
+    # a title or entry is kept to a few lines' worth before anything measures it (a plan's label can be any length)
+    columns = {col: [replace(b, title=_short(b.title), lines=[_short(ln) for ln in b.lines]) for b in boxes]
+               for col, boxes in columns.items()}
     return Flow(columns, shape, dashed=dashed, cut=cut_in or cut_out or cut_steps), ""
+
+
+def _short(text: str) -> str:
+    """``text`` cut to :data:`MAX_CHARS` characters, ending "..." when cut."""
+    text = str(text)
+    return text if len(text) <= MAX_CHARS else text[:MAX_CHARS].rstrip() + " ..."
 
 
 def caption_of(flow: Flow) -> str:
@@ -522,7 +547,9 @@ class _Painter:
         :data:`MAX_WRAP` lines, the last cut with "..." when it does not fit."""
         lines: list[str] = []
         current = ""
-        for word in _TOKEN.findall(entry):
+        for word in _TOKEN.findall(_short(entry)):
+            if len(lines) > MAX_WRAP:
+                break  # more lines than are kept: the rest is never measured
             trial = f"{current} {word}" if current else word
             if current and self.size(trial, size=size, bold=bold)[0] > width:
                 lines.append(current)
@@ -537,6 +564,9 @@ class _Painter:
                 cut = under + 1 if under > 0 else cut
                 head, current = current[:cut], current[cut:]
                 lines.append(head)
+                if len(lines) > MAX_WRAP:
+                    current = ""
+                    break
         if current:
             lines.append(current)
         if len(lines) > MAX_WRAP:
@@ -691,19 +721,38 @@ def place_quietly(root: Path, log: Any = None) -> None:
     """The write stage's call: FI's drawing, when the study shows it (:func:`shown`), copied into ``figures/`` where the
     paper, the poster and the slides embed it. Nothing is drawn here, so the numbers the analysis was given stand. Never
     raises."""
+    record: dict[str, Any] | None = None
     try:
         root = Path(root)
-        name = shown(root)
-        if name is None:
-            _forget_copy(root, _record(root))
+        record = _record(root)
+        if not _drawn_now(root, record):
+            _forget_copy(root, record)
             return
-        target = root / "figures" / name
-        if _digest(target) != _digest(_drawing(root)):
+        target = root / "figures" / str(record["file"])
+        if _digest(target) != str(record["png_sha256"]):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_drawing(root), target)
+        placed = _ours(root, record, str(record["file"]))
+        if placed:
+            record.pop("why", None)
+        else:
+            record["why"] = "FI could not put it in figures/"
+        record["placed"] = placed
+        _write_record(root, record)
     except Exception as exc:  # noqa: BLE001
+        # the copy failed: the record says so, so no figure number, paper, poster or slide counts a set-up figure
+        try:
+            if record is not None and record.get("drawn"):
+                record.update(placed=False, why=f"FI could not put it in figures/ ({type(exc).__name__})")
+                _write_record(Path(root), record)
+        except Exception:  # noqa: BLE001
+            pass
         if log is not None:
-            log.warning("[write] the set-up figure could not be put in figures/ (%r)", exc)
+            log.warning("[write] the set-up figure could not be put in figures/ (%r); the paper goes without it", exc)
+
+
+def _write_record(root: Path, record: dict[str, Any]) -> None:
+    (root / ".fi" / RECORD).write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
 __all__ = ["FILE", "RECORD", "Box", "Flow", "build", "caption", "caption_of", "draw", "draw_quietly", "place_quietly",

@@ -325,3 +325,83 @@ def test_the_checks_of_the_runs_figures_never_count_it(tmp_path: Path) -> None:
 
     assert _Checks()._saved_figures() == [RESULT], "a planned figure the run did not draw is not hidden by FI's figure"
     assert setup_flow.without(root, [RESULT, setup_flow.FILE]) == [RESULT]
+
+
+# ---- a copy that fails, a label of any length, the drawing off the event loop ---------------------------------------
+
+def test_a_copy_into_figures_that_fails_leaves_no_figure_1_anywhere(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from generation._paper_figures import paper_figure_set
+
+    root = _quest(tmp_path, GRID_PLAN)
+    setup_flow.draw(root, [RESULT])
+    assert setup_flow.shown(root) == setup_flow.FILE, "at the analysis the drawing in .fi/ is Figure 1"
+
+    def refuse(*_a, **_k):  # noqa: ANN002, ANN003
+        raise PermissionError("figures/ is read only")
+
+    monkeypatch.setattr(setup_flow.shutil, "copyfile", refuse)
+    setup_flow.place_quietly(root)  # never raises
+    assert not (root / "figures" / setup_flow.FILE).exists()
+    assert setup_flow.shown(root) is None, "the copy failed: one fact says so to every reader"
+    st = {**STATE, "quest_root": str(root)}
+    assert _figure_numbers(st) == {RESULT: 1}, "the run's figures are numbered from 1"
+    paper, _, _ = _place_figures(DRAFT, st, root=root)
+    assert f"figures/{setup_flow.FILE}" not in paper
+    files = sorted(p.name for p in (root / "figures").iterdir())
+    shown, numbers = paper_figure_set(paper, files, dict(STATE), root)
+    assert setup_flow.FILE not in shown and setup_flow.FILE not in numbers
+    assert "could not put it in figures/" in (setup_flow.quality_line(root) or "")
+    # the next write tries again; a copy that works shows it once more
+    monkeypatch.undo()
+    setup_flow.place_quietly(root)
+    assert setup_flow.shown(root) == setup_flow.FILE and setup_flow.quality_line(root) is None
+
+
+def test_a_file_gone_from_figures_after_the_copy_is_not_figure_1(tmp_path: Path) -> None:
+    root = _quest(tmp_path, GRID_PLAN)
+    setup_flow.draw(root, [RESULT])
+    setup_flow.place_quietly(root)
+    assert setup_flow.shown(root) == setup_flow.FILE
+    (root / "figures" / setup_flow.FILE).unlink()
+    assert setup_flow.shown(root) is None and _figure_numbers({**STATE, "quest_root": str(root)}) == {RESULT: 1}
+
+
+def test_a_label_of_a_million_characters_is_drawn_in_bounded_time(tmp_path: Path) -> None:
+    import time
+
+    plan = {**GRID_PLAN, "labels": {**GRID_PLAN["labels"], "temperature_C": "T" * 1_000_000}}
+    root = _quest(tmp_path, plan)
+    setup_flow.draw(_quest(tmp_path / "warm", GRID_PLAN), [])  # matplotlib loaded before the clock starts
+    start = time.monotonic()
+    record = setup_flow.draw(root, [])
+    took = time.monotonic() - start
+    assert took < 10, f"drawing took {took:.1f} s"
+    assert record["drawn"] and all(b["fits"] for b in record["boxes"])
+    longest = max(len(e) for b in record["boxes"] for e in [b["name"], *b["entries"]])
+    assert longest <= setup_flow.MAX_CHARS + 4, "what the record keeps is bounded too"
+    assert all(len(b["lines"]) <= setup_flow.MAX_WRAP * (setup_flow.MAX_LINES + 1) for b in record["boxes"])
+
+
+def test_the_analysis_draws_it_in_a_worker_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from tests.test_fi_places_figures import _engine
+
+    root = _quest(tmp_path, GRID_PLAN)
+    eng = _engine(root)
+    where: list[bool] = []
+    real = setup_flow.draw_quietly
+
+    def spy(*a, **k):  # noqa: ANN002, ANN003
+        where.append(threading.current_thread() is threading.main_thread())
+        return real(*a, **k)
+
+    monkeypatch.setattr(setup_flow, "draw_quietly", spy)
+
+    async def fake_chat(prompt, *, node=None, temperature=None):  # noqa: ANN001
+        return json.dumps({"summary": "s", "key_findings": [], "next_step": "publish"})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    asyncio.run(eng._node_analyze({"result_json": {"yield": 0.4}, "exec_result": {"returncode": 0},  # type: ignore[arg-type]
+                                   "design": {}, **STATE}))
+    assert where == [False], "the event loop's thread is never the one drawing"

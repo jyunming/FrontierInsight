@@ -27,8 +27,11 @@ class AnalyzeStageMixin:
         self._log.info("[analyze] interpreting results")
         from . import setup_flow as _setup_flow
 
-        # FI's set-up figure is Figure 1: drawn before the analysis is shown any figure number; never raises
-        _setup_flow.draw_quietly(self.quest_root, state.get("figures"), self._log)
+        # FI's set-up figure is Figure 1: drawn before the analysis is shown any figure number; never raises. It is drawn
+        # in a worker thread, so the other quests of a fleet go on while matplotlib loads and draws
+        import asyncio as _asyncio
+
+        await _asyncio.to_thread(_setup_flow.draw_quietly, self.quest_root, state.get("figures"), self._log)
         await self._refresh_code_project(
             state, list(state.get("deps") or []),
             "changes since the code was last recorded (the project files FI keeps, or your own edits)",
