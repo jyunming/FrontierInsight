@@ -827,9 +827,12 @@ class CodeStageMixin:
             await self.executor.execute(
                 [str(self.executor.python_path(self.quest_root)), str(self.quest_root / "code" / _analysis_frame.EXPERIMENT_FILE)],
                 cwd=self.quest_root, timeout_s=self.config.execution.timeout_s, env=env)
+            from . import setup_flow as _setup_flow
+
             fig_dir = self.quest_root / "figures"
-            figures = (sorted(p.name for p in fig_dir.iterdir() if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES)
-                       if fig_dir.is_dir() else [])
+            figures = _setup_flow.without(self.quest_root, (  # the run's own figures, never FI's set-up figure
+                sorted(p.name for p in fig_dir.iterdir() if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES)
+                if fig_dir.is_dir() else []))
             records = {**(state.get("figure_records") or {}), **_read_figure_records(self.fi_dir / "figure_records", figures)}
             records = {k: v for k, v in records.items() if k in figures}
             self._figure_fallbacks(records)

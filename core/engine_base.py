@@ -98,6 +98,7 @@ from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import figure_claims as _figure_claims
+from . import setup_flow as _setup_flow
 from . import paper_facts as _paper_facts
 from . import paper_values as _paper_values
 from . import run_facts as _run_facts
@@ -6382,8 +6383,9 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
     the writer credits them and does NOT present them as the quest's own
     results."""
     state = _rooted(state, root)
-    figs = state.get("figures") or []
-    if not figs:
+    setup = _setup_flow.shown(state.get("quest_root"))
+    figs = [f for f in state.get("figures") or [] if Path(str(f)).name != setup]
+    if not figs and not setup:
         return "(none)"
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
     records = state.get("figure_records") or {}
@@ -6413,6 +6415,11 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
                 records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings, calls=calls)
                 + _figure_draws_note(calls) + _figure_menu_note(state, Path(str(f)).stem, calls))
+    if setup in numbers:
+        # FI's set-up figure (core/setup_flow.py): drawn from the plan, not from the run's numbers
+        lines.append(f"- Figure {numbers[setup]}: figures/{setup} — the study's set-up, drawn by FI from the frozen plan "
+                     "(the settings it varies and holds, the steps of its computation, the results it reports). It is "
+                     "not a result: it draws no number of the run. Point to it where the paper describes the method.")
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -7071,12 +7078,16 @@ def _figure_numbers(state: QuestState) -> dict[str, int]:
     """The number of each figure FI puts in the paper, fixed before the paper is written so the prose refers to the
     figures by FI's numbers (the writer is given them with the figure list): the figures the design planned, in the order
     planned, then the run's other figures in the order drawn, one per drawing (:func:`_figure_files_by_stem`). A figure
-    whose own record says it draws nothing has none: it shows the reader nothing."""
+    whose own record says it draws nothing has none: it shows the reader nothing. FI's set-up figure, when its record
+    says FI drew it for the plan as it stands (:func:`core.setup_flow.shown`), comes last: the analysis already names the
+    run's figures by these numbers, so they do not move."""
     records = state.get("figure_records") or {}
     shown = _figure_files_by_stem(state)
+    setup = _setup_flow.shown(state.get("quest_root"))
     order = [shown[Path(name).stem] for name in _planned_figure_order(state)]
     order += [shown[Path(str(f)).stem] for f in state.get("figures") or []]
-    keep = [name for name in dict.fromkeys(order) if not _figure_draws_nothing(records.get(name))]
+    keep = [name for name in dict.fromkeys(order) if name != setup and not _figure_draws_nothing(records.get(name))]
+    keep += [setup] if setup else []
     return {name: i + 1 for i, name in enumerate(keep)}
 
 
@@ -7132,10 +7143,12 @@ def _place_figures(markdown: str, state: QuestState, *,
     lines = text.split("\n")
     placed: list[str] = []
     last = -1
+    setup = _setup_flow.shown(state.get("quest_root"))
     for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
-        caption = _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
-                                       calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
-                                              if state.get("quest_root") else None))
+        caption = (_caption_safe(_setup_flow.caption(state.get("quest_root"))) if name == setup else
+                   _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
+                                        calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
+                                               if state.get("quest_root") else None)))
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
         said = _figure_minimum_sentence(lines, number, name, state)
         at = max(_figure_insertion_line(lines, number), last + 1)

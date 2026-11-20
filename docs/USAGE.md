@@ -847,7 +847,7 @@ paper.pdf                             ← if pandoc + a LaTeX engine
 slides.md / slides.pptx / slides.pdf  ← if `slides` is in output.kinds
 poster.tex / poster.pdf               ← if `poster`
 talk.md                               ← if `speech`
-figures/*.png                         ← every plot the experiment produced
+figures/*.png                         ← every plot the experiment produced, and setup_flow.png: the study's set-up (inputs → computation → results), drawn by FI from the plan and shown in the paper, poster and slides
 data/results/                         ← a copy of the data tables an accepted run wrote (and, with two scripts, raw/); a file, or raw/ as a whole, over 200 MB stays where it is
 code/                                 ← the code that ran, runnable on its own: experiment.py (+ simulate.py), run.py, requirements.txt, README.md, CHANGELOG.md (each change marked Added / Changed / Fixed / Tidied, with a line saying whether the results changed) (+ its own git history)
 run_output/                           ← only if you run `python code/run.py`: its own results, apart from the quest's

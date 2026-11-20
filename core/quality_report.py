@@ -847,7 +847,13 @@ def _scale_problems(root: Any) -> list[dict[str, str]]:
 def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     from . import figure_text_check as _ftc
+    from . import setup_flow as _setup_flow
+
     out.extend(_scale_problems(q.root))
+    # FI's set-up figure was not drawn (records too thin, or a fault): the paper goes without it, said once.
+    no_setup = _setup_flow.quality_line(q.root)
+    if no_setup:
+        out.append(_problem("paper", no_setup, "FI's set-up figure", "disclosed", f".fi/{_setup_flow.RECORD}"))
 
     # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
     # finding here is FI's own fault, disclosed; it stops nothing).
