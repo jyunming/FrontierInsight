@@ -1060,8 +1060,8 @@ def _where(e, by):
     text = "%s: %s" % (type(e).__name__, e)
     at = "derive.py line %d, in %s" % (frames[-1].lineno, frames[-1].name) if frames else "in `%s`" % by
     inner = os.path.basename(tb[-1].filename) if tb else ""
-    full = os.path.abspath(tb[-1].filename).replace(os.sep, "/") if tb else ""
-    stdlib = os.path.dirname(os.path.abspath(os.__file__)).replace(os.sep, "/")
+    full = os.path.normcase(os.path.abspath(tb[-1].filename)).replace(os.sep, "/") if tb else ""
+    stdlib = os.path.normcase(os.path.dirname(os.path.abspath(os.__file__))).replace(os.sep, "/")
     if full and ("/site-packages/" in full or "/dist-packages/" in full or full.startswith(stdlib + "/")):
         at += "; raised in a library (%s line %d)" % (inner, tb[-1].lineno)  # core/pipeline_gate.py LIBRARY_MARK
     elif frames and inner and inner != "derive.py":

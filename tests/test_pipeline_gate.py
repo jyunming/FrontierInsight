@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 from core import pipeline_gate as gate
@@ -376,3 +378,10 @@ async def test_a_not_implemented_error_raised_inside_a_library_keeps_its_earlier
     assert not got.ok and got.exception == "NotImplementedError" and got.kind == gate.SMALL_DATA
     assert gate.kind_of("NotImplementedError", in_library=True) == gate.SMALL_DATA and gate.kind_of("NotImplementedError") == gate.FAULT
     assert not gate.gate_verdict(gate.GateResult(True), got).reject
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows paths are case-insensitive; POSIX ones are not")
+def test_a_library_path_in_other_letter_case_is_still_a_library() -> None:
+    stderr = ('Traceback (most recent call last):\n  File "C:\Work\code\derive.py", line 3, in figure_fig1\n'
+              '  File "C:\Py\Lib\SITE-PACKAGES\libx\core.py", line 9, in draw\nNotImplementedError: backend\n')
+    assert gate.raised_in_library(stderr)

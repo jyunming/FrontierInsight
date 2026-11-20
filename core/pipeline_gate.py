@@ -260,8 +260,8 @@ def raised_in_library(stderr: str) -> bool:
     m = re.search(r'File "([^"]+)"', lines[-1]) if lines else None
     if not m:
         return False
-    path = os.path.abspath(m.group(1)).replace(os.sep, "/")
-    stdlib = os.path.dirname(os.path.abspath(os.__file__)).replace(os.sep, "/")
+    path = os.path.normcase(os.path.abspath(m.group(1))).replace(os.sep, "/")
+    stdlib = os.path.normcase(os.path.dirname(os.path.abspath(os.__file__))).replace(os.sep, "/")
     return "/site-packages/" in path or "/dist-packages/" in path or path.startswith(stdlib + "/")
 
 

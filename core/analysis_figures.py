@@ -142,8 +142,8 @@ def _library_note(err: BaseException) -> str:
     standard library), not in the study's own code: what it raised is then not the figure's own statement (the gate reads this
     sentence, core/pipeline_gate.py ``LIBRARY_MARK``); empty otherwise."""
     tb = traceback.extract_tb(err.__traceback__)
-    path = os.path.abspath(tb[-1].filename).replace("\\", "/") if tb else ""
-    stdlib = os.path.dirname(os.path.abspath(os.__file__)).replace("\\", "/")
+    path = os.path.normcase(os.path.abspath(tb[-1].filename)).replace("\\", "/") if tb else ""
+    stdlib = os.path.normcase(os.path.dirname(os.path.abspath(os.__file__))).replace("\\", "/")
     if path and ("/site-packages/" in path or "/dist-packages/" in path or path.startswith(stdlib + "/")):
         return "; raised in a library (%s line %d)" % (os.path.basename(path), tb[-1].lineno)
     return ""
