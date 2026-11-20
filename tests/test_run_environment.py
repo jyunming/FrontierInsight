@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -113,14 +114,17 @@ def test_a_record_of_a_process_still_running_is_not_touched(tmp_path: Path, capl
     try:
         began = rm._started_at(other.pid)
         _write_record(tmp_path, {"pid": other.pid, "started": began, "seen_at": began, "ended": None})
-        with caplog.at_level(logging.WARNING):
-            found = marker.start()
-        marker.finish()
+        before = (tmp_path / rm.RECORD).read_text(encoding="utf-8")
+        with pytest.raises(rm.QuestStillRunning, match="is still running .*nothing was started"):
+            marker.start()
+        # refused before anything was written: the record, the history and the cache are as they were
+        assert (tmp_path / rm.RECORD).read_text(encoding="utf-8") == before
+        assert not (tmp_path / rm.HISTORY).exists()
+        assert rm.running_elsewhere(tmp_path) is not None
     finally:
         other.kill()
         other.wait()
-    assert found is None and (tmp_path / SHARED_CACHE / "busy.json.lock").is_file()
-    assert any("already runs in another process" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / SHARED_CACHE / "busy.json.lock").is_file()
 
 
 def test_a_record_from_another_computer_is_judged_by_its_last_sign_of_life(tmp_path: Path, caplog) -> None:  # noqa: ANN001
@@ -137,12 +141,14 @@ def test_a_record_from_another_computer_is_judged_by_its_last_sign_of_life(tmp_p
     _write_record(tmp_path, other)
     _cache_with(tmp_path, "theirs.json.lock")
     marker = rm.RunMarker(tmp_path, beat_s=5)
-    with caplog.at_level(logging.WARNING):
-        found = marker.start()
+    with pytest.raises(rm.QuestStillRunning):
+        marker.start()
+    assert (tmp_path / SHARED_CACHE / "theirs.json.lock").is_file()
+    # once its sign of life is old, a run started here goes on, and this computer's records carry its name
+    _write_record(tmp_path, {**other, "seen_at": now - 2 * rm.STALE_S})
+    marker = rm.RunMarker(tmp_path, beat_s=5)
+    assert marker.start() is not None
     marker.finish()
-    assert found is None and (tmp_path / SHARED_CACHE / "theirs.json.lock").is_file()
-    assert any("already runs in another process" in r.getMessage() for r in caplog.records)
-    # this computer's records carry its name, and are judged by their process
     mine = json.loads((tmp_path / rm.RECORD).read_text(encoding="utf-8"))
     assert mine["host"] == rm._host() and not rm.alive(mine)
 
@@ -375,3 +381,166 @@ def test_a_quest_run_finds_a_session_stopped_from_outside_and_records_how_it_end
     assert not (eng.quest_root / SHARED_CACHE / "design_ab12.json.lock").exists()
     record = json.loads((eng.quest_root / rm.RECORD).read_text(encoding="utf-8"))
     assert record["pid"] == os.getpid() and record["ended"] == "failed: RuntimeError"
+
+
+def test_a_second_start_of_a_live_quest_is_refused_with_one_line_and_exit_1_before_anything_is_written(
+        tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    """Two runs of one quest overwrote each other's files (the guard in VS Code could not see a quest reached through a
+    link, or a failed list). The run itself refuses, whichever way it was started, and the engine asks before its first
+    step: nothing of the quest is created, and a record that ended or names no live process goes on as before."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        began = rm._started_at(other.pid)
+        _write_record(tmp_path, {"pid": other.pid, "started": began, "seen_at": began, "ended": None})
+        with pytest.raises(rm.QuestStillRunning) as err:
+            rm.refuse_if_running(tmp_path)
+        assert getattr(err.value, "_fi_failure_shown", False)  # launch.py exits 1 without a traceback
+        said = capsys.readouterr().err
+        assert f"is still running (process {other.pid}" in said and "nothing was started." in said
+        assert sorted(p.name for p in (tmp_path / ".fi").iterdir()) == ["process.json"]
+        # the run_one path: refused before the launch record, the config copy or the index
+        import launch
+        from unittest.mock import MagicMock
+
+        engine = MagicMock()
+        engine.quest_root = tmp_path
+        engine.quest_id = tmp_path.name
+        import asyncio
+
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch.run_one(MagicMock(), supervisor=MagicMock(), engine=engine, resume_quest_id=tmp_path.name))
+        assert sorted(p.name for p in (tmp_path / ".fi").iterdir()) == ["process.json"]
+        engine.run.assert_not_called()
+    finally:
+        other.kill()
+        other.wait()
+    # a record that ended, or names a process that is gone, is not a run: it goes on as before
+    _write_record(tmp_path, {"pid": other.pid, "started": 1.0, "seen_at": 1.0, "ended": None})
+    rm.refuse_if_running(tmp_path)
+    _write_record(tmp_path, {"pid": os.getpid(), "started": rm._started_at(os.getpid()), "seen_at": 1.0, "ended": "finished"})
+    rm.refuse_if_running(tmp_path)
+    # this same process running the quest again is not "another process"
+    _write_record(tmp_path, {"pid": os.getpid(), "started": rm._started_at(os.getpid()), "seen_at": 1.0, "ended": None})
+    rm.refuse_if_running(tmp_path)
+
+
+_RACER = """
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from core import run_marker as rm
+root, go = sys.argv[2], sys.argv[3]
+while not os.path.exists(go):
+    time.sleep(0.001)
+try:
+    rm.RunMarker(root, beat_s=30).start()
+    print("started", flush=True)
+except rm.QuestStillRunning:
+    print("refused", flush=True)
+sys.stdin.read()  # stays alive (and so "running") until the test closes its input
+"""
+
+
+def test_two_starts_at_the_same_instant_on_one_quest_let_exactly_one_run(tmp_path: Path) -> None:
+    """The check that no other process runs the quest and the write of this one's record are one step: six processes
+    released together on a quest with no live record, and exactly one starts; the others are refused."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    quest = tmp_path / "quest"
+    (quest / ".fi").mkdir(parents=True)
+    go = tmp_path / "go"
+    script = tmp_path / "racer.py"
+    script.write_text(_RACER, encoding="utf-8")
+    procs = [subprocess.Popen([sys.executable, str(script), repo, str(quest), str(go)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True) for _ in range(6)]
+    try:
+        time.sleep(1.0)  # every racer is waiting at the gate
+        go.write_text("go", encoding="utf-8")
+        said = [p.stdout.readline().strip() for p in procs]
+    finally:
+        for p in procs:
+            p.stdin.close()
+            p.wait(timeout=30)
+    assert sorted(said) == ["refused"] * 5 + ["started"], said
+    assert not (quest / rm.LOCK).exists()  # the lock is not left behind
+
+
+def test_a_lock_left_by_a_dead_start_is_taken_over(tmp_path: Path) -> None:
+    pid, _ = _dead_pid()
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / rm.LOCK).write_text(json.dumps({"pid": pid, "host": rm._host()}), encoding="utf-8")
+    marker = rm.RunMarker(tmp_path, beat_s=0.05)
+    assert marker.start() is None
+    marker.finish()
+    assert not (tmp_path / rm.LOCK).exists()
+
+
+def test_a_lock_whose_owner_still_runs_is_not_taken_over_however_old_and_the_start_is_refused(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A start paused between making the lock and writing its record (a debugger, a busy machine) still owns it: the
+    next start waits, then refuses, rather than taking it over by age or going on without it."""
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        (tmp_path / ".fi").mkdir()
+        lock = tmp_path / rm.LOCK
+        lock.write_text(json.dumps({"pid": owner.pid, "host": rm._host(), "started": rm._started_at(owner.pid)}),
+                        encoding="utf-8")
+        old = time.time() - 10 * rm.LOCK_STALE_S
+        os.utime(lock, (old, old))
+        monkeypatch.setattr(rm, "LOCK_WAIT_S", 0.3)
+        marker = rm.RunMarker(tmp_path, beat_s=0.05)
+        with pytest.raises(rm.QuestStillRunning):
+            marker.start()
+        assert lock.is_file()  # the owner's lock stays
+        assert not (tmp_path / rm.RECORD).exists()  # and nothing of this start was written
+    finally:
+        owner.kill()
+        owner.wait()
+
+
+def test_a_lock_that_names_no_process_is_taken_over_once_it_is_old(tmp_path: Path) -> None:
+    """A start killed between making the lock and writing into it leaves an empty lock: it names no owner to ask, so
+    its age decides."""
+    (tmp_path / ".fi").mkdir()
+    lock = tmp_path / rm.LOCK
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 10 * rm.LOCK_STALE_S
+    os.utime(lock, (old, old))
+    marker = rm.RunMarker(tmp_path, beat_s=0.05)
+    assert marker.start() is None
+    marker.finish()
+    assert not lock.exists()
+
+
+def test_every_command_that_writes_into_a_quest_refuses_a_live_one_and_writes_nothing(tmp_path: Path) -> None:
+    """`--revise-plan`, `--emit`, `--watch`, `--update`, `--critique`, `--approve-amendment` and `--accept-checks`
+    ask the same question as a resume (core/run_marker.py:refuse_if_running): one line, exit 1, nothing written."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import launch
+
+    out = tmp_path / "outputs"
+    quest = out / "1790000001-demo-aaaaaa"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        began = rm._started_at(other.pid)
+        _write_record(quest, {"pid": other.pid, "host": rm._host(), "started": began, "seen_at": began, "ended": None})
+        cfg = MagicMock()
+        cfg.output.output_dir = out
+        qid = quest.name
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._revise_plan_once(cfg, qid, "change it", supervisor=MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._emit_one(cfg, qid, "slides", supervisor=MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            asyncio.run(launch._watch_quest(cfg, SimpleNamespace(watch=qid, watch_every=None), MagicMock()))
+        with pytest.raises(rm.QuestStillRunning):
+            launch._approve_amendment(str(quest), "someone", out)
+        with pytest.raises(rm.QuestStillRunning):
+            launch._accept_checks(str(quest), "someone", out)
+        with pytest.raises(rm.QuestStillRunning):
+            launch._refuse_if_quest_runs(quest)
+        assert sorted(p.name for p in quest.rglob("*") if p.is_file()) == ["process.json"]
+    finally:
+        other.kill()
+        other.wait()

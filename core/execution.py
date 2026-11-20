@@ -68,9 +68,10 @@ def threads_beside(env: "Mapping[str, str] | None", at_once: int, cores: int | N
     """The environment of one of ``at_once`` processes FI runs at the same time: each numerical library (OpenMP,
     OpenBLAS, MKL, numexpr, numba) told to start at most its share of the cores (``cores // at_once``, at least 1), unless
     ``env`` already says fewer. Left alone, each process starts a thread per core: a simulation whose setting took 1.7 s
-    alone took 8.5 times as long beside 7 others on 16 cores, and 1.4 times with one thread each. ``env`` (``None``: FI's
-    own environment) is returned as it is for one process at a time."""
-    if at_once <= 1:
+    alone took 8.5 times as long beside 7 others on 16 cores, and 1.4 times with one thread each. ``cores`` is the cores the
+    quest's processes share (:func:`quest_cores`; ``None``: every core of the computer). ``env`` (``None``: FI's own
+    environment) is returned as it is for one process at a time on every core."""
+    if at_once <= 1 and not cores:
         return None if env is None else dict(env)
     share = max(1, (cores or os.cpu_count() or 1) // at_once)
     out = dict(os.environ if env is None else env)
@@ -79,6 +80,13 @@ def threads_beside(env: "Mapping[str, str] | None", at_once: int, cores: int | N
         if not (v.isdigit() and 1 <= int(v) <= share):
             out[k] = str(share)
     return out
+
+
+def quest_cores(executor: Any) -> int | None:
+    """The cores the processes of the quest that owns ``executor`` share: the computer's cores divided among the quests
+    of a ``--fleet`` that run at the same time (``Engine`` sets it), ``None`` for a quest run alone (every core)."""
+    cores = getattr(executor, "cores", None)
+    return cores if isinstance(cores, int) and not isinstance(cores, bool) and cores >= 1 else None
 
 
 def plain_exit(returncode: int) -> str:
@@ -345,6 +353,9 @@ class VenvExecutor:
     #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
     #: commit in code/'s history).
     before_run: Any = None
+    #: The cores this quest's processes share (:func:`quest_cores`): set by the Engine of a quest in a ``--fleet``;
+    #: ``None`` for a quest run alone (every core).
+    cores: int | None = None
 
     def __init__(
         self, *, python_version: str = "3.11", system_site_packages: bool = True,
@@ -1074,6 +1085,9 @@ class DockerExecutor:
     #: Awaited before each run when set (the engine's code_project.CodeRuns.before_run: the code as it runs is a
     #: commit in code/'s history).
     before_run: Any = None
+    #: The cores this quest's processes share (:func:`quest_cores`): set by the Engine of a quest in a ``--fleet``;
+    #: ``None`` for a quest run alone (every core).
+    cores: int | None = None
 
     def __init__(
         self, *, image: str = "python:3.11-slim", limits: DockerLimits | None = None,

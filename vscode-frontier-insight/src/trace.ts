@@ -22,7 +22,7 @@ interface RunResult {
 /** How much of the trace's own text is shown before it is cut, from the end (the newest events). */
 const OUTPUT_CHARS = 6000;
 
-export function runLaunch(python: string, repo: string, workDir: string, args: string[]): Promise<RunResult> {
+export function runLaunch(python: string, repo: string, workDir: string, args: string[], timeoutMs?: number): Promise<RunResult> {
     return new Promise((resolve) => {
         const child = spawn(python, [path.join(repo, "launch.py"), ...args], {
             cwd: workDir,
@@ -36,8 +36,10 @@ export function runLaunch(python: string, repo: string, workDir: string, args: s
         let stderr = "";
         child.stdout?.on("data", (d) => (stdout += d));
         child.stderr?.on("data", (d) => (stderr += d));
-        child.on("error", (e) => resolve({ code: -1, stdout, stderr: String(e) }));
-        child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+        // A call that does not answer in time is killed and ends as a failure (exit -1), never left to hang its caller.
+        const timer = timeoutMs ? setTimeout(() => { child.kill(); }, timeoutMs) : undefined;
+        child.on("error", (e) => { if (timer) clearTimeout(timer); resolve({ code: -1, stdout, stderr: String(e) }); });
+        child.on("close", (code) => { if (timer) clearTimeout(timer); resolve({ code: code ?? -1, stdout, stderr }); });
     });
 }
 

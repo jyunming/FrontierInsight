@@ -3,6 +3,7 @@ own. Every test uses a temporary ``FI_HOME`` (tests/conftest.py), never the real
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -229,3 +230,86 @@ def test_rename_by_short_id_from_another_folder_changes_the_title_there_and_in_t
     assert done.returncode == 0, done.stdout + done.stderr
     assert "Energy drift revisited" in (root / "config.yaml").read_text(encoding="utf-8")
     assert quest_index.load()[QID]["title"] == "Energy drift revisited"
+
+
+def _own_folder_quest(folder: Path, qid: str) -> Path:
+    root = folder / "outputs" / qid
+    (root / ".fi").mkdir(parents=True)
+    return root
+
+
+def test_the_quest_list_puts_this_folders_quests_first_then_every_other_one(tmp_path: Path) -> None:
+    """The VS Code extension offered other folders' quests only when its own folder had none, so a round with one
+    folder per study showed one study of three. ``listed`` is the one list the web page and the extension show."""
+    a = _own_folder_quest(tmp_path / "study_a", "1790000001-first-aaaaaa")
+    b = _own_folder_quest(tmp_path / "study_b", "1790000002-second-bbbbbb")
+    c = _own_folder_quest(tmp_path / "study_c", "1790000003-third-cccccc")
+    for root, folder in ((a, "study_a"), (b, "study_b"), (c, "study_c")):
+        quest_index.register(root, working_folder=tmp_path / folder, title=root.name)
+    # a quest in this folder the index never heard of is listed too
+    unknown = _own_folder_quest(tmp_path / "study_b", "1790000009-old-dddddd")
+    got = [e.quest_id for e in quest_index.listed(b.parent)]
+    assert got[:2] == ["1790000009-old-dddddd", "1790000002-second-bbbbbb"]
+    assert sorted(got[2:]) == ["1790000001-first-aaaaaa", "1790000003-third-cccccc"]
+    assert len(got) == len(set(got)) == 4 and unknown.is_dir()
+    # no folder given (or one that is not there): the index alone, as before
+    assert len(quest_index.listed(None)) == 3
+    assert len(quest_index.listed(tmp_path / "nowhere")) == 3
+
+
+def test_the_quest_list_json_carries_each_quests_running_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The extension reads this and offers no second run of a running quest; the status is Python's own rule."""
+    import json
+    import os
+    import time
+
+    psutil = pytest.importorskip("psutil")
+    a = _own_folder_quest(tmp_path / "study_a", "1790000001-first-aaaaaa")
+    b = _own_folder_quest(tmp_path / "study_b", "1790000002-second-bbbbbb")
+    quest_index.register(a, working_folder=tmp_path / "study_a", title="First")
+    quest_index.register(b, working_folder=tmp_path / "study_b", title="Second")
+    me = {"pid": os.getpid(), "started": psutil.Process(os.getpid()).create_time(), "seen_at": time.time(), "ended": None}
+    (a / ".fi" / "process.json").write_text(json.dumps(me), encoding="utf-8")
+    assert launch._list_quests(as_json=True, output_root=b.parent) == 0
+    rows = json.loads(capsys.readouterr().out)["quests"]
+    assert [r["quest_id"] for r in rows] == ["1790000002-second-bbbbbb", "1790000001-first-aaaaaa"]
+    assert [r["status"] for r in rows] == ["stopped", "running"]
+
+
+def test_the_quest_list_has_one_line_per_physical_folder(tmp_path: Path) -> None:
+    """Two index ids on one folder, a letter-case variant of it, or this folder's own quest recorded again, are one
+    quest in the list: the first is kept."""
+    a = _own_folder_quest(tmp_path / "study_a", "1790000001-first-aaaaaa")
+    quest_index.register(a, working_folder=tmp_path / "study_a", title="First")
+    other = _own_folder_quest(tmp_path / "study_b", "1790000002-second-bbbbbb")
+    quest_index.register(other, working_folder=tmp_path / "study_b", title="Second")
+    # the same folder under a second id
+    path = quest_index.index_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    twin = dict(data["quests"]["1790000001-first-aaaaaa"])
+    data["quests"]["1790000005-twin-eeeeee"] = twin
+    path.write_text(json.dumps(data), encoding="utf-8")
+    got = [e.quest_id for e in quest_index.listed(other.parent)]
+    assert len(got) == 2 and got[0] == "1790000002-second-bbbbbb"
+    assert sum(g in ("1790000001-first-aaaaaa", "1790000005-twin-eeeeee") for g in got) == 1
+
+
+def test_the_web_page_lists_quests_in_the_same_order_as_the_shared_list(tmp_path: Path) -> None:
+    """Two quests elsewhere whose most recently seen one has the smaller id: the page and `fi tools quests` agree."""
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    mine = _own_folder_quest(tmp_path / "study_a", "1790000003-mine-cccccc")
+    old = _own_folder_quest(tmp_path / "study_b", "1790000009-zz-old-ffffff")
+    new = _own_folder_quest(tmp_path / "study_c", "1790000001-aa-new-111111")
+    for root, folder in ((mine, "study_a"), (old, "study_b"), (new, "study_c")):
+        quest_index.register(root, working_folder=tmp_path / folder, title=root.name)
+    path = quest_index.index_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["quests"]["1790000009-zz-old-ffffff"]["last_seen"] = "2026-01-01T00:00:00"
+    data["quests"]["1790000001-aa-new-111111"]["last_seen"] = "2026-06-01T00:00:00"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    shared = [e.quest_id for e in quest_index.listed(mine.parent)]
+    page = [q["quest_id"] for q in TestClient(make_app(mine.parent)).get("/api/quests").json()["quests"]]
+    assert page == shared and shared[-2:] == ["1790000001-aa-new-111111", "1790000009-zz-old-ffffff"]

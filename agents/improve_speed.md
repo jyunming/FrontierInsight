@@ -3,7 +3,8 @@
 You are speeding up the simulation of a research study. FI timed the whole study before running it, and it takes long
 enough that a faster simulation saves real time (whether it fits the time allowed is said below). Nothing the study
 measures may change: FI runs a fixed set of trials of the simulation itself, before and after your change, with the same
-random seeds, and a change is kept only when every number the simulation returns is the same as before (to nine digits)
+random seeds, and a change is kept only when every number the simulation returns is the same as before (to nine digits,
+or different only by rounding: a millionth of how much that number varies over the sample and of the number)
 and the time those trials take drops by at least a tenth, and by more than two runs of the unchanged code differ.
 
 ## The topic, as the person wrote it
@@ -20,7 +21,7 @@ $history_block
 
 ## The simulation's code
 
-The files you may change: $editable. Every other file is out of reach, and a change to one is refused.
+The files you may change, each by the path to give as the edit's "file", exactly as listed: $editable. Every other file is out of reach, and a change to one is refused.
 
 $code_block
 
@@ -44,4 +45,4 @@ Rules:
 
 Reply with JSON only, nothing before or after it:
 
-{"file": "simulate.py", "find": "<the exact text to replace>", "replace": "<the text that replaces it>", "why": "<one sentence: what costs the time and why the numbers stay the same>"}
+{"file": "code/simulate.py", "find": "<the exact text to replace>", "replace": "<the text that replaces it>", "why": "<one sentence: what costs the time and why the numbers stay the same>"}

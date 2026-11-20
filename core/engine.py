@@ -167,6 +167,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     # Who repairs code a check finds wrong; ``__init__`` sets it from the config. The class default is the chat model, so an
     # Engine built without ``__init__`` (as several tests do) reads it too.
     _repairs_go_to = "chat"
+    # How many quests run at the same time in this process (``launch.py --fleet``): they share the computer's cores. A quest
+    # run alone, or an Engine built without ``__init__``, is a fleet of one.
+    fleet = 1
 
     def __init__(
         self,
@@ -175,8 +178,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         supervisor: ProxySupervisor | None = None,
         resume_quest_id: str | None = None,
         auto_accept_on_pass: bool | None = None,
+        fleet: int = 1,
     ) -> None:
         self.config = config
+        self.fleet = max(1, int(fleet or 1))
         _warn_if_unsanctioned_provider(config.provider.name)
         # `resume_quest_id` lets a caller re-enter an existing quest
         # (LangGraph's AsyncSqliteSaver keys checkpoints by thread_id,
@@ -225,6 +230,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # Every version of code/ that runs is a commit in code/'s history (core/code_project.py:CodeRuns).
         self._code_runs = _code_project.CodeRuns(self.quest_root, node=lambda: self._audit_node, log=self._log)
         self.executor.before_run = self._code_runs.before_run
+        if self.fleet > 1:
+            # The quests of a fleet share the cores: each process of this quest starts its share of this quest's share
+            # of threads (core/execution.py::threads_beside), the time estimate's timing included.
+            self.executor.cores = max(1, (os.cpu_count() or 1) // self.fleet)
         self.knowledge = Knowledge(config.knowledge)
         self.audit = _audit_log.AuditLog(self.fi_dir / "audit.jsonl", self.quest_id, enabled=config.engine.audit_trace)
         self._audit_node = ""       # the node running now, for events written from inside it
@@ -280,6 +289,17 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self.human_feedback_timeout_s = float(
             config.pauses.timeout_s
         )
+        if self.fleet > 1:
+            how = ("as execution.settings_at_once says" if config.execution.settings_at_once != "auto"
+                   else f"its share of the computer's {os.cpu_count() or 1} cores")
+            self._log.info("[fleet] %d quests run at the same time: this one runs up to %d settings of its study at the "
+                           "same time, %s", self.fleet, self._settings_at_once(), how)
+
+    def _settings_at_once(self) -> int:
+        """How many settings of the study this quest runs at the same time (``execution.settings_at_once``): the number
+        written, or for ``auto`` the computer's cores shared among the quests of its fleet
+        (:func:`core.trial_runner.settings_at_once`)."""
+        return _trial_runner.settings_at_once(self.config.execution.settings_at_once, fleet=self.fleet)
 
     def __del__(self) -> None:
         try:
@@ -325,6 +345,19 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        # This session's marker (core/run_marker.py), taken first and in one step with the check that no other process
+        # runs this quest: a quest another process is running now is not started a second time, nothing of it is touched
+        # and no failure report is written for it. An earlier session that ended without recording an end was stopped
+        # from outside, which is said, and its leftover cache locks are cleared. Ended in the finally below.
+        from .run_marker import QuestStillRunning as _QuestStillRunning, RunMarker as _RunMarker
+
+        self.fi_dir.mkdir(parents=True, exist_ok=True)
+        _marker = _RunMarker(self.quest_root, log=self._log)
+        try:
+            _marker.start()
+        except _QuestStillRunning:
+            _close_quest_logger(self.quest_id)
+            raise
         # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
         # before then is an earlier run's (launch.py prints only this run's).
         self._step_retries: dict[str, tuple[str, int]] = {}
@@ -353,16 +386,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         _arxiv_gate.reset_quest(self.quest_id)
         _quest_ctx = _source_failures.current_quest.set(self.quest_id)
         _run_started_at = _time.time()
-        # This session's marker (core/run_marker.py): an earlier session that ended without recording an end was stopped
-        # from outside, which is said, and its leftover cache locks are cleared. Ended in the finally below.
-        _marker = None
         _ended_how = "finished"
         try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            from .run_marker import RunMarker as _RunMarker
-
-            _marker = _RunMarker(self.quest_root, log=self._log)
-            _marker.start()
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)

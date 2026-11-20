@@ -100,6 +100,51 @@ def test_the_sample_must_return_the_same_numbers_and_take_clearly_less_time() ->
     assert sp.fast_enough(1.0, 0.7) and not sp.fast_enough(0.0, 0.0)
 
 
+def test_a_number_that_differs_only_at_rounding_level_is_the_same_number_and_a_larger_change_is_not() -> None:
+    """A speed-up that only adds the same terms in another order (a vectorised sum, a matrix product regrouped) moved
+    stored results by 1e-8 of their value and was rejected by the nine-digit rule, so a real speed-up was lost. A
+    difference within a millionth of how much that number varies over the unchanged code's sample is now the same
+    number; any larger change, a not-a-number or an infinity still is not."""
+    a = sp.Sample(values={"s=1": [{"x": 1.0}], "s=2": [{"x": 5.0}], "s=3": [{"x": 11.0}]})  # x varies by 10
+
+    def moved(**values: float) -> sp.Sample:
+        return sp.Sample(values={key: [{"x": values.get(key.replace("=", ""), row[0]["x"])}]
+                                 for key, row in a.values.items()})
+
+    reordered = sp.Sample(values={k: [{"x": r[0]["x"] * (1 + 1e-8)}] for k, r in a.values.items()})
+    assert sp.disagreements(a, reordered) == []
+    same = sp.compare(a, reordered)
+    assert same.bad == [] and same.rounded == 3 and 1e-8 < same.largest < 1.2e-8
+    assert same.note() == "3 number(s) differ only by rounding, by at most 1e-08 of how much each varies over the sample"
+    assert sp.compare(a, a).note() == ""
+    # a hundred-thousandth of the range is a change, as are a not-a-number, an infinity and a garbage value
+    for wrong in (moved(s2=5.0 + 1e-4), moved(s2=float("nan")), moved(s2=float("inf")), moved(s2=3.6e14)):
+        assert len(sp.disagreements(a, wrong)) == 1, wrong.values
+    # one setting: the number does not vary there, so only nine digits count, unless another sample of the unchanged
+    # code says how much it varies (the check on a setting of the plan, after a sample of coarser copies)
+    one, one_moved = sp.Sample(values={"s=2": [{"x": 5.0}]}), sp.Sample(values={"s=2": [{"x": 5.0 + 5e-8}]})
+    assert sp.disagreements(one, one_moved) and sp.disagreements(one, one_moved, reference=(a,)) == []
+    # one huge value of a number in the unchanged code's sample (a stand-in for "no answer") does not widen its range so
+    # far that a real change at another setting fits in a millionth of it: the number itself bounds rounding level too
+    with_huge = sp.Sample(values={**a.values, "s=4": [{"x": 1e14}]})
+    assert sp.disagreements(with_huge, sp.Sample(values={**moved(s2=5.0 + 1e-4).values, "s=4": [{"x": 1e14}]}))
+    assert sp.disagreements(with_huge, sp.Sample(values={**reordered.values, "s=4": [{"x": 1e14}]})) == []
+    # a number that moves at all between two runs of the same code is still left out of the comparison, as before
+    assert sp.varying(a, reordered) == {("s=1", 0, "/x"), ("s=2", 0, "/x"), ("s=3", 0, "/x")}
+
+
+@pytest.mark.asyncio
+async def test_a_faster_edit_whose_numbers_differ_only_by_rounding_is_kept_and_says_so(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, rounds=1)
+    rounded = "    total = float(np.sum(x * x)) * (1.0 + 1e-8)\n"  # what a reordered sum does to a result, made certain
+    out = await _speed(engine, _Model([_edit(LOOP, rounded)]), seconds=10_000.0)
+    entry = out["rounds"][0]
+    assert entry["outcome"] == "kept", entry
+    assert "with the same numbers (" in entry["reason"] and "differ only by rounding" in entry["reason"]
+    assert entry["rounding"]["numbers"] > 0 and entry["rounding"]["largest_share"] < sp.ROUNDING
+    assert "differ only by rounding" in (engine.quest_root / "code" / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
 def test_a_change_is_kept_when_it_saves_a_tenth_and_more_than_two_runs_of_the_same_code_differ() -> None:
     """The step kept a change only at a quarter less time, so a study that a change made 15% faster ran at its old speed.
     The rule is now a tenth, and more than the noise FI measured: the two samples of the unchanged code."""
@@ -126,10 +171,10 @@ async def test_a_change_that_alters_a_number_is_not_kept_and_one_that_keeps_them
     model = _Model([_edit(LOOP, CHEAT), _edit(LOOP, FAST)])
     out = await _speed(engine, model, seconds=10_000.0)
     text = (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert out["rounds"][0]["outcome"] == "not kept" and "number(s) of the sample changed" in out["rounds"][0]["reason"]
+    assert out["rounds"][0]["outcome"] == "not kept" and "value(s) of the sample changed" in out["rounds"][0]["reason"]
     # a change not kept does not end the step: the model is asked again, with the reason
     assert out["rounds"][1]["outcome"] == "kept" and out["kept"] is True and out["calls"] >= 2
-    assert "number(s) of the sample changed" in model.prompts[1]
+    assert "value(s) of the sample changed" in model.prompts[1]
     assert "np.sum(x * x)" in text and "x[:200]" not in text
     assert out["speedup"] > 1.5
 
@@ -305,6 +350,71 @@ async def test_a_repeat_that_returns_other_numbers_or_touches_a_guarded_file_or_
     with pytest.raises(OSError):
         await sp.confirm(root, old, new, runner(boom=True), {}, after, 1e6)
     assert (root / "code" / "simulate.py").read_text(encoding="utf-8") == old["simulate.py"]
+
+
+@pytest.mark.asyncio
+async def test_the_repeats_are_held_to_the_unchanged_code_and_their_rounding_is_recorded(tmp_path: Path) -> None:
+    """The repeats of the new code were compared with its own first run, and how much a number varies was taken from it;
+    what they differed by at rounding level was never recorded. They are now held to the unchanged code's sample, and the
+    first comparison's record takes the most numbers and the largest share any repeat showed."""
+    unchanged = sp.Sample(values={"s=1": [{"x": 1.0}], "s=2": [{"x": 5.0}], "s=3": [{"x": 11.0}]})
+
+    def runner(factor: float):
+        calls: list[int] = []
+
+        async def sample(repeats: int = 1) -> sp.Sample:
+            calls.append(1)
+            new = "A = 2" in (root / "code" / "simulate.py").read_text(encoding="utf-8")
+            t = REAL_GAIN[(len(calls) - 1) // 2] if new else BUSY_OLD[(len(calls) - 1) // 2]
+            values = {k: [{"x": r[0]["x"] * (factor if new else 1.0)}] for k, r in unchanged.values.items()}
+            return sp.Sample(seconds=t, times=[t], wall_s=0.1, values=values)
+        return sample
+
+    root, old, new, _after = _confirm_setup(tmp_path, None)
+    after = sp.Sample(seconds=0.7, times=[0.7, 0.75], wall_s=1.0, values=unchanged.values)
+    seen = sp.compare(unchanged, after)
+    assert seen.rounded == 0
+    assert await sp.confirm(root, old, new, runner(1 + 1e-8), {}, after, 1e6, unchanged=unchanged, seen=seen)
+    assert seen.rounded == 3 and 1e-8 < seen.largest < 1.2e-8
+    # repeats that drift past rounding level from the unchanged code are a changed number
+    entry: dict[str, Any] = {}
+    assert not await sp.confirm(root, old, new, runner(1 + 1e-5), entry, after, 1e6, unchanged=unchanged)
+    assert entry["outcome"] == "not kept" and "changed" in entry["reason"]
+
+
+def test_whole_numbers_yes_no_values_texts_and_infinities_are_compared_exactly() -> None:
+    """A whole number was turned into a float and allowed nine digits (1000000000 -> 1000000001 passed), and a yes/no
+    value or a text was never compared at all (False -> True passed). A number that became infinite, or an infinity that
+    changed sign, passed too, while an unchanged infinity was flagged. Only two floats may now differ, at rounding level;
+    every other value is the same only when it is equal."""
+    inf, nan = float("inf"), float("nan")
+
+    def judged(values: list[Any], first: Any) -> bool:
+        rows = {f"s={i}": [{"v": v}] for i, v in enumerate(values)}
+        moved = {**rows, "s=0": [{"v": first}]}
+        return not sp.disagreements(sp.Sample(values=rows), sp.Sample(values=moved))
+
+    assert not judged([1_000_000_000, 999_000_000, 1_001_000_000], 1_000_000_001)
+    assert not judged([False, True, False], True) and not judged(["control", "control"], "treated")
+    assert not judged([1, 2], True) and not judged(["1", 2], 1)  # a yes/no is not a 1, a text is not a number
+    assert judged([3, 2], 3.0) and judged([True, False], True) and judged(["a", "b"], "a")
+    assert judged([inf, 1.0, 2.0], inf) and judged([nan, 1.0, 2.0], nan)
+    for before, after in ((5.0, inf), (inf, 5.0), (-inf, inf), (5.0, nan), (nan, 5.0)):
+        assert not judged([before, 1.0, 9.0], after), (before, after)
+    # a text in a row counts as one of the sample's values
+    assert sp.count_numbers(sp.Sample(values={"k": [{"v": 1.0, "label": "a", "ok": True}]})) == 3
+
+
+def test_a_sample_of_only_texts_and_yes_no_values_is_counted_and_compared_value_by_value() -> None:
+    """A simulation whose outputs are all texts or yes/no values: every one is a value of the sample (counted, and left
+    out only when it changes between two runs of the unchanged code), and a change to any of them is a changed value."""
+    a = sp.Sample(values={"s=1": [{"label": "control", "ok": True}], "s=2": [{"label": "treated", "ok": False}]})
+    again = sp.Sample(values={"s=1": [{"label": "control", "ok": True}], "s=2": [{"label": "other", "ok": False}]})
+    flipped = sp.Sample(values={"s=1": [{"label": "control", "ok": False}], "s=2": [{"label": "treated", "ok": False}]})
+    assert sp.count_numbers(a) == 4
+    assert sp.varying(a, again) == {("s=2", 0, "/label")} and sp.varying(a, a) == set()
+    assert sp.disagreements(a, flipped) == ["s=1 trial 0 /ok: True -> False"]
+    assert sp.disagreements(a, flipped, ignore=sp.varying(a, again)) == ["s=1 trial 0 /ok: True -> False"]
 
 
 def test_the_repeats_are_skipped_when_they_would_cost_more_than_the_change_saves() -> None:
@@ -606,9 +716,10 @@ def run_cell(cell):
 '''
 MESH_LOOP = "    total = 0.0\n    for i in range(n * 30000):\n        total += (i % 7) * dx\n"
 MESH_FAST = "    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-#: Exact on a coarse copy (n of 4 or fewer), off by a millionth at the plan's resolution.
+#: Exact on a coarse copy (n of 4 or fewer), off by a ten-thousandth at the plan's resolution (a millionth would sit at
+#: the edge of rounding level: the check there takes how much a number varies from the copies' sample too).
 MESH_COARSE_ONLY = ("    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-                    "    if n > 4:\n        total *= 1.000001\n")
+                    "    if n > 4:\n        total *= 1.0001\n")
 
 
 def _mesh_engine(tmp_path: Path) -> Engine:
@@ -709,7 +820,7 @@ async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolutio
     out = await _mesh_speed(engine, _edit(MESH_LOOP, MESH_COARSE_ONLY))
     assert out["rounds"] and out["rounds"][0]["outcome"] == "kept", out["rounds"]
     assert out["kept"] is False and out["full_check"]["passed"] is False
-    assert "number(s) changed" in out["full_check"]["why"]
+    assert "value(s) changed" in out["full_check"]["why"]
     assert MESH_LOOP in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     # the change log does not say a change was kept that the check at the plan's resolution dropped
     changelog = engine.quest_root / "code" / "CHANGELOG.md"

@@ -458,7 +458,6 @@ async def disclose(engine: Any, state: Any, py: Any, exec_env: Any, small_record
         from . import optimise as _optimise
         from . import small_run as _small
         from . import split_run as _split_run
-        from . import trial_runner as _trials
 
         protocol = engine._protocol_block(state) or {}
         block = _optimise.block_of(protocol)
@@ -473,7 +472,7 @@ async def disclose(engine: Any, state: Any, py: Any, exec_env: Any, small_record
             got = await run(engine.executor, py, engine.quest_root, simulate.relative_to(engine.quest_root).as_posix(), block,
                             timeout_s=_small.budget(engine.config.execution.timeout_s), env=dict(exec_env or {}),
                             thresholds=thresholds, log=engine._log,
-                            at_once=_trials.settings_at_once(engine.config.execution.settings_at_once))
+                            at_once=engine._settings_at_once())
             if got is None:
                 return
             record = {"key": key, **got.record(), "plan_before": before, "plan_pending": True}

@@ -2830,8 +2830,13 @@ class RunChecksMixin:
         # the simulation first: an analysis that cannot read what the simulation does not return is not the analysis' fault
         to_send = [f for f in new if f.script != "derive.py"] or [f for f in new if f.script == "derive.py"][:1]
         if to_send and ledger["count"] < cap:
+            # what the trials returned when a result that can never get a value went to the simulation: its function is
+            # sent next only when they return something new (small_run.never_value)
+            then = {**(ledger.get("returned") or {}), **{f.key: sorted(str(n) for n in record.get("returned") or [])
+                                                         for f in to_send if f.fact == _small.NEVER and f.script != "derive.py"}}
             _small.update_record(self.quest_root, **{_small.SENT: {  # type: ignore[attr-defined]
-                "faults": ledger["faults"] + [f.key for f in to_send], "count": ledger["count"] + 1}})
+                "faults": ledger["faults"] + [f.key for f in to_send], "count": ledger["count"] + 1,
+                **({"returned": then} if then else {})}})
             for f in faults:
                 if f not in to_send and not (f.send and f.key not in ledger["faults"]):
                     self._small_run_fact(f, after="sent" if f.send else "")
@@ -2889,9 +2894,10 @@ class RunChecksMixin:
                 h.update(path.read_bytes().replace(b"\r\n", b"\n"))
         key = h.hexdigest()[:20]
         kept = record.get("analysis") if isinstance(record.get("analysis"), dict) else {}
-        if kept.get("key") == key:
+        if kept.get("key") == key and isinstance(kept.get("calls"), list):
             got = _gate.GateResult(**{k: v for k, v in kept.items() if k in _gate.GateResult.__dataclass_fields__})
             missing = [m for m in kept.get("no_value") or [] if isinstance(m, dict)]
+            calls = [c for c in kept["calls"] if isinstance(c, dict)]
         else:
             work = self.quest_root / _small.DIR / "analysis"  # type: ignore[attr-defined]
             shutil.rmtree(work, ignore_errors=True)
@@ -2901,16 +2907,60 @@ class RunChecksMixin:
                                                 timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
                                                 raw_dir=raw.parent, work_dir=work)
                 # the declared results FI's own record of that run holds no value of (core/analysis_frame.py)
-                missing = [m for m in _analysis.not_computed(_analysis.read_record(work)) if m["status"] == "missing"]
+                first = _analysis.read_record(work)
+                missing = [m for m in _analysis.not_computed(first) if m["status"] == "missing"]
             except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
                 self._log.warning("[execute] FI's analysis could not be run on the small run's trials: %s", exc)  # type: ignore[attr-defined]
                 return []
             finally:
                 shutil.rmtree(work, ignore_errors=True)
-            _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing})  # type: ignore[attr-defined]
+            # The analysis again on every planned setting only where it can tell something: not after a first run that ran out
+            # of time, was not checked, or left no record of its own, unless the small run returned no trial at all (the first
+            # run then had nothing to analyse, and a function that reads nothing is still told apart on the planned settings).
+            trusted = isinstance(first.get("derived"), dict) and not first.get("from_earlier_run")
+            usable = got.kind != _gate.TIME and (_small.no_trial_values(raw) or (got.kind != _gate.NOT_CHECKED and trusted))
+            calls = await self._small_run_reach(protocol, code, raw, search=search) if usable and not docker else []
+            _small.update_record(self.quest_root, analysis={"key": key, **got.record(), "no_value": missing,  # type: ignore[attr-defined]
+                                                            "calls": calls})
             self._log.info("[execute] FI's analysis on the small run's trials: %s", got.says())  # type: ignore[attr-defined]
         split = _small.analysis_split(got, docker=docker)
-        return [*([split] if split is not None else []), *_small.no_value(missing)]
+        reach = _small.never_value(calls, record, _small.sent(_small.read_record(self.quest_root)))  # type: ignore[attr-defined]
+        # a result whose function can never give it a value is said by that fault, not again as "no value at the small settings"
+        unreachable = {f.quantity for f in reach}
+        return [*([split] if split is not None else []), *reach,
+                *_small.no_value([m for m in missing if m.get("id") not in unreachable])]
+
+    async def _small_run_reach(self, protocol: dict[str, Any], code: Path, raw: Path, *, search: bool) -> list[Any]:
+        """FI's analysis run once more on the small run's trials, on a table that holds every setting of the plan (no trial
+        where the small run ran none), for FI's record of each call of a study's function: what it asked the table for and
+        whether it gave a value (core/small_run.py ``calls_of``). On the small run's own settings alone, a function that
+        reads only at some settings would seem to ask for nothing. ``[]`` (no claim) for a search, a grid FI does not list,
+        or a run that could not be made."""
+        import shutil
+
+        from . import analysis_frame as _analysis
+        from . import pipeline_gate as _gate
+        from . import small_run as _small
+
+        grid = _optimise_search.study_grid(protocol) if isinstance(protocol.get("grid"), dict) else {}
+        planned = None if search else _small.planned_settings(grid)
+        if not planned:
+            return []
+        work = self.quest_root / _small.DIR / "reach"  # type: ignore[attr-defined]
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            got = await _gate.analysis_gate(self.quest_root, code, protocol, search=False,  # type: ignore[attr-defined]
+                                            sandbox=self.config.execution.sandbox,  # type: ignore[attr-defined]
+                                            timeout_s=_small.budget(self.config.execution.timeout_s),  # type: ignore[attr-defined]
+                                            raw_dir=raw.parent, work_dir=work, planned=planned)
+            if got.kind == _gate.TIME:
+                return []  # a run stopped from outside may leave the quest's own earlier record there, not marked as such
+            return _small.calls_of(_analysis.read_record(work))
+        except Exception as exc:  # noqa: BLE001 -- a check that could not run is not a fault of the code
+            self._log.warning("[execute] FI's analysis could not be run on every setting of the plan: %s", exc)  # type: ignore[attr-defined]
+            return []
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     # --- the analysis gate (core/pipeline_gate.py; ``engine.pipeline_gate``, off by default) -------------------------------
     # The baseline of a change is the gate's result for the code that is KEPT (``_gate_kept``: the key of that code and its
@@ -3533,11 +3583,11 @@ class RunChecksMixin:
             shown = [f"{k or 'its only setting'} trial {t} {n}" for k, t, n in names[:3]]
             record["varying"] = shown
             which = sorted({n.strip("/") for _k, _t, n in noisy})
-            log.info("[improve] %d number(s) of the sample change from one run of the unchanged code to the next (%s); a "
-                     "speed-up is judged on the other numbers.", len(noisy),
+            log.info("[improve] %d value(s) of the sample change from one run of the unchanged code to the next (%s); a "
+                     "speed-up is judged on the other values.", len(noisy),
                      ", ".join(which[:3]) + (f" and {len(which) - 3} more" if len(which) > 3 else ""))
             if len(noisy) >= _speed.count_numbers(first):
-                return stop("every number of the sample differs from one run of the unchanged code to the next, so an "
+                return stop("every value of the sample differs from one run of the unchanged code to the next, so an "
                             "edit cannot be judged")
         needed = padded / max(limit_s, 1e-9)
         # What two samples of the same, unchanged code differ by: an edit must save more than this to count as faster.
@@ -3581,7 +3631,7 @@ class RunChecksMixin:
             allowed = _improve.editable(root)
             prompt = self._prompts["improve_speed"].substitute(  # type: ignore[attr-defined]
                 topic_block=self._topic_block(), speed_block=block,  # type: ignore[attr-defined]
-                history_block=_improve.history_block(record["rounds"]), editable=", ".join(allowed) or "(none)",
+                history_block=_improve.history_block(record["rounds"]), editable=_improve.editable_line(allowed),
                 code_block=_improve.code_block(files, allowed), rounds_left=f"This is round {used} of {limit}.")
             from . import skeleton as _skeleton
 
@@ -3612,10 +3662,10 @@ class RunChecksMixin:
                 last_wall_s = time.monotonic() - round_started
                 entry["wall_s"] = round(last_wall_s, 3)
                 continue
-            name = _improve.edited_path(edit)
+            name = _improve.edited_path(edit, allowed)
             candidate = {**files, name: new_text}
             tried.add(_improve.fingerprint(candidate))
-            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit))
+            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit, name))
             _improve.restore(root, candidate)
             saved = _improve.guard_bytes(root)
             before_guard = _improve.guard_hashes(root)
@@ -3631,15 +3681,16 @@ class RunChecksMixin:
                 break
             if after.failed:
                 entry.update(outcome="not kept", reason=f"the sample did not run ({after.failed})")
-            elif (bad := _speed.disagreements(first, after, ignore=noisy)):
-                entry.update(outcome="not kept", reason=f"{len(bad)} number(s) of the sample changed, first: {bad[0]}")
+            elif (same := _speed.compare(first, after, ignore=noisy)).bad:
+                entry.update(outcome="not kept",
+                             reason=f"{len(same.bad)} value(s) of the sample changed, first: {same.bad[0]}")
             elif not _speed.fast_enough(best["sample"].seconds, after.seconds, noise_s):
                 entry.update(outcome="not kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                          f"{best['sample'].seconds:.3f} s: not faster by a tenth and by "
                                                          f"more than the {noise_s:.3f} s two runs of the same code differ")
             elif not await _speed.confirm(root, best["files"], candidate, sample, entry, after,
                                           (before_s - after.seconds) / max(before_s, 1e-9) * study_now, before_s=before_s,
-                                          ignore=noisy,
+                                          ignore=noisy, unchanged=first, seen=same,
                                           guards_touched=lambda: _improve.changed(before_guard, _improve.guard_hashes(root))):
                 if entry.get("outcome") == "aborted":
                     _improve.put_back(root, saved)
@@ -3651,13 +3702,17 @@ class RunChecksMixin:
             else:
                 entry.update(outcome="kept", reason=f"the sample took {after.seconds:.3f} s against "
                                                     f"{best['sample'].seconds:.3f} s, with the same numbers"
+                                                    + (f" ({same.note()})" if same.rounded else "")
                                                     + (f"; timed again, old and new alternating: old {entry['repeats_old']} "
                                                        f"s, new {entry['repeats_new']} s" if entry.get("repeats_old")
                                                        else "; not timed again (it would cost more than it saves)"))
+                if same.rounded:
+                    entry["rounding"] = {"numbers": same.rounded, "largest_share": same.largest}
                 best = {"files": candidate, "sample": after}
                 record["kept"] = True
                 change = (f"speed-up {used}: {edit.why}", _changelog.results(
-                    "no: every number of a fixed sample of trials (the checks' own cases included) is the same, "
+                    "no: every number of a fixed sample of trials (the checks' own cases included) is the same"
+                    + (f" ({same.note()})" if same.rounded else "") + ", "
                     f"and the sample runs {unchanged_s / max(best['sample'].seconds, 1e-9):.1f} times faster."
                     + (f" The sample is copies of the plan's settings {coarser['factor']} times coarser in "
                        + ", ".join(coarser["settings"]) + ", and the change gave the same numbers on a setting of "
@@ -3717,10 +3772,13 @@ class RunChecksMixin:
                 ignore = _speed.varying(old_full, again_full) if not again_full.failed else set()
             _improve.restore(root, best["files"])
             new_full = await at_plan() if not old_full.failed else old_full
-            bad = [] if new_full.failed else _speed.disagreements(old_full, new_full, ignore=ignore)
+            # how much a number varies is taken from the sample too: on one setting of a study with no randomness a number
+            # does not vary, and a difference at rounding level would count as a change there
+            found = _speed.compare(old_full, new_full, ignore=ignore, reference=(first,))
+            bad = [] if new_full.failed else found.bad
             if new_full.failed or bad:
                 why_full = (f"it could not be checked on a setting of the plan ({new_full.failed})" if new_full.failed
-                            else f"on a setting of the plan {len(bad)} number(s) changed, first: {bad[0]}")
+                            else f"on a setting of the plan {len(bad)} value(s) changed, first: {bad[0]}")
                 record["kept"] = False
                 record["full_check"] = {"cell": full, "passed": False, "why": why_full}
                 best = unchanged
@@ -3730,12 +3788,14 @@ class RunChecksMixin:
             else:
                 record["full_check"] = {"cell": full, "passed": True, "old_s": round(old_full.seconds, 3),
                                         "new_s": round(new_full.seconds, 3)}
+                if found.rounded:
+                    record["full_check"]["rounding"] = {"numbers": found.rounded, "largest_share": found.largest}
                 for what, results in pending:
                     await asyncio.to_thread(_code_project.record_change, root, what, category="changed",
                                             results=results, log=log)
                 log.info("[improve] On a setting of the plan itself the sped-up simulation gives the same numbers (%s "
-                         "against %s).", _estimate.plain_duration(new_full.seconds),
-                         _estimate.plain_duration(old_full.seconds))
+                         "against %s)%s.", _estimate.plain_duration(new_full.seconds),
+                         _estimate.plain_duration(old_full.seconds), f"; {found.note()}" if found.rounded else "")
         record["sample_s_before"] = unchanged_s
         record["sample_s_after"] = best["sample"].seconds
         record["speedup"] = unchanged_s / max(best["sample"].seconds, 1e-9)
