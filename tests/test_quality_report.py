@@ -524,10 +524,12 @@ def test_a_figure_not_drawn_or_with_no_file_is_said_once_and_only_if_no_row_name
                     "Figure `fig3` was not drawn: `figure_fig3` stopped with ValueError: x."]  # fig4 has its row; skipped says why itself
 
 
-def test_every_figure_fully_drawn_gets_no_line_and_a_cleaned_folder_is_not_read_as_missing_files(tmp_path: Path) -> None:
+def test_every_figure_fully_drawn_gets_no_line_and_a_missing_or_empty_folder_is_reported(tmp_path: Path) -> None:
     root = tmp_path / "q"
-    _figure_record(root, [_fig("fig1"), _fig("fig2")])  # no figures folder at all: nothing to compare the record with
-    assert _figure_rows(root) == []
+    _figure_record(root, [_fig("fig1"), _fig("fig2")])  # no figures folder at all: both files are missing (FI keeps no record of a clean-up)
+    assert [r.split(",")[0] for r in _figure_rows(root)] == ["Figure `fig1` is recorded as drawn", "Figure `fig2` is recorded as drawn"]
+    (root / "figures").mkdir()  # an empty folder is the same
+    assert len(_figure_rows(root)) == 2
     _w(root / "figures" / "fig1.png", "x")
     _w(root / "figures" / "fig2.png", "x")
     assert _figure_rows(root) == []

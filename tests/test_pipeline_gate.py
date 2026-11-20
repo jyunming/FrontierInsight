@@ -364,3 +364,15 @@ async def test_a_function_that_says_it_is_not_written_is_a_fault_not_too_few_tri
     assert gate.kind_of("NotImplementedError") == gate.FAULT
     assert gate.gate_verdict(gate.GateResult(True), got).reject  # a repair that leaves one in is refused
     assert gate.kind_of("ValueError") == gate.SMALL_DATA and gate.kind_of("RuntimeError") == gate.SMALL_DATA  # the rest is as before
+
+
+async def test_a_not_implemented_error_raised_inside_a_library_keeps_its_earlier_treatment(tmp_path):
+    # a library function that does not support a data shape raises it: that is not the study's function saying it is not written
+    lib = tmp_path / "site-packages"
+    lib.mkdir()
+    (lib / "libx.py").write_text("def go():\n    raise NotImplementedError('backend unsupported')\n", encoding="utf-8")
+    script = OK_SCRIPT.replace('print("RESULT_JSON', f'import sys\n    sys.path.insert(0, {str(lib)!r})\n    import libx\n    libx.go()\n    print("RESULT_JSON')
+    got = await run_gate(tmp_path, script)
+    assert not got.ok and got.exception == "NotImplementedError" and got.kind == gate.SMALL_DATA
+    assert gate.kind_of("NotImplementedError", in_library=True) == gate.SMALL_DATA and gate.kind_of("NotImplementedError") == gate.FAULT
+    assert not gate.gate_verdict(gate.GateResult(True), got).reject

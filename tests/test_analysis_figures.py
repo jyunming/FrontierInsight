@@ -828,7 +828,7 @@ def test_the_record_of_a_drawn_figure_says_which_declared_results_the_body_drew(
     assert out["status"] == "ok"
     want = {"shows": ["r1", "r2"], "drawn": ["r1"], "not_drawn": ["r2"], "labels": {"r1": "First quantity"}}
     assert out["declared"] == {**want, "no_value": ["r2"]}
-    assert json.loads((records / "x.json").read_text(encoding="utf-8"))["declared"] == want
+    assert json.loads((records / "x.json").read_text(encoding="utf-8"))["declared"] == {**want, "no_value": ["r2"]}  # the paper side reads this
     # FI's own record says the figure holds no value of r2, so the figure's status says it is drawn in part (and the step's
     # summary line names it), not "was drawn"
     assert out["said"] == "Figure `x` was partly drawn (x.png): FI holds no value of `r2`."
@@ -1954,3 +1954,17 @@ def test_a_held_one_panel_line_that_is_not_the_tables_value_there_is_still_named
 def test_a_one_panel_hold_of_a_value_the_plan_does_not_have_is_refused(tmp_path, frame5):
     out = _one_panel_hold_run(tmp_path, lambda fig, table: fig.panel(0, mode="c"))
     assert out["status"] == "failed" and "UnknownSetting" in out["why"] and "mode = a, b" in out["why"], out
+
+
+def test_a_default_figure_that_lacks_a_result_with_no_value_is_partly_drawn_too(tmp_path, monkeypatch) -> None:
+    # the plan's own figure (drawn in place of a body that could not be repaired) goes through default_figure, not run_figures
+    records = tmp_path / "records"
+    records.mkdir()
+    monkeypatch.setenv("FI_FIGURE_RECORDS", str(records))
+    (records / "d.json").write_text(json.dumps({"file": "d.png", "axes": []}), encoding="utf-8")
+    spec = {"id": "d", "file": "d.png", "shows": ["r1", "r2"], "x": "a"}
+    table = _real_table()
+    table.gave_values.update({"r1"})
+    out = af._declared_record(spec, table, str(tmp_path), "d.png", None, None)
+    assert out["not_drawn"] == ["r2"] and out["no_value"] == ["r2"]
+    assert json.loads((records / "d.json").read_text(encoding="utf-8"))["declared"]["no_value"] == ["r2"]

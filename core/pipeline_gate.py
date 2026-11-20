@@ -69,6 +69,12 @@ FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_check
 #: changes that, so a figure or a derived result that stops with it is sent back like the others, never "too few trials to tell".
 _HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
                           "SyntaxError", "IndentationError", "TabError", "UnknownResult", "BadArgument", "NotImplementedError"})
+#: The sentence FI's own analysis writes (core/analysis_frame.py ``_where``, core/analysis_figures.py ``_library_note``) when the
+#: innermost frame of what a function raised is in a library, not in the study's code.
+LIBRARY_MARK = "raised in a library"
+#: ``NotImplementedError`` is the study's own statement only when the study's code raised it: one raised inside a library (a
+#: backend that does not support a data shape) says nothing of the study's function and keeps its earlier treatment.
+_OWN_ONLY = frozenset({"NotImplementedError"})
 #: The exceptions that say so only if they show on more data too (too little data can raise them).
 _MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
 _FAULTS = _HARD_FAULTS | _MAYBE_FAULTS
@@ -237,10 +243,26 @@ def last_exception(stderr: str) -> str:
     return ""
 
 
-def kind_of(exception: str) -> str:
+def kind_of(exception: str, in_library: bool = False) -> str:
     """``fault`` for an exception that may say the code is wrong whatever the data (a ``TypeError`` or
-    ``AttributeError`` is confirmed on more trials by :func:`analysis_gate`), else ``small_data``."""
+    ``AttributeError`` is confirmed on more trials by :func:`analysis_gate`), else ``small_data``. One raised inside a library
+    (``in_library``) is a ``fault`` only when it says the library's call is wrong whatever the data, which
+    ``NotImplementedError`` does not."""
+    if in_library and exception in _OWN_ONLY:
+        return SMALL_DATA
     return FAULT if exception in _FAULTS else SMALL_DATA
+
+
+def raised_in_library(stderr: str) -> bool:
+    """Whether the last traceback of ``stderr`` ends in a frame of a library (site-packages or the standard library) rather
+    than in the study's code."""
+    lines = [ln for ln in (stderr or "").splitlines() if ln.lstrip().startswith("File ")]
+    m = re.search(r'File "([^"]+)"', lines[-1]) if lines else None
+    if not m:
+        return False
+    path = os.path.abspath(m.group(1)).replace(os.sep, "/")
+    stdlib = os.path.dirname(os.path.abspath(os.__file__)).replace(os.sep, "/")
+    return "/site-packages/" in path or "/dist-packages/" in path or path.startswith(stdlib + "/")
 
 
 # --- the small copy of the recorded raw ----------------------------------------------------------------------------------
@@ -525,7 +547,7 @@ async def _run_gate(quest_root: Path, code_dir: Path, protocol: dict[str, Any] |
         exc = last_exception(err)
         if run.returncode != 0:
             tail = [ln for ln in err.strip().splitlines() if ln.strip()][-1:] or [f"exit code {run.returncode}"]
-            kind, detail = (kind_of(exc) if exc else SMALL_DATA), tail[0][:300]
+            kind, detail = (kind_of(exc, raised_in_library(err)) if exc else SMALL_DATA), tail[0][:300]
             if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
                 # A folder the analysis reads was too large to copy: a missing input can raise these, so it is not
                 # shown to be the code's fault.
@@ -587,12 +609,13 @@ def _fis_analysis_result(scratch: Path, run: Any, protocol: dict[str, Any] | Non
         # a figure's outcome says "`figure_x` stopped with NameError: ...": the exception's name follows "stopped with"
         m = _EXC_LINE.match(said) or re.search(r"stopped with ([A-Za-z_][\w.]*)(?::|\b)", said)
         exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if m else "")
-        if body and exc == "NotImplementedError":
+        library = LIBRARY_MARK in said or (got["kind"] == "module" and raised_in_library(err))
+        if body and exc == "NotImplementedError" and not library:
             # a function that raises it says in its own body that it is not written: said plainly, naming the figure or result
             reason = re.search(r"NotImplementedError:\s*(.+)", said, re.S)
             said = f"`{body}` is not written yet: it stops with NotImplementedError" + (f" ({reason.group(1).strip().rstrip('.')})" if reason else "")
         status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
-        kind = (kind_of(exc) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
+        kind = (kind_of(exc, library) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
         if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
             kind = SMALL_DATA
             said += f" (a folder too large to copy was left out of the check: {', '.join(left_out)})"
