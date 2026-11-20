@@ -1320,8 +1320,9 @@ CHECKS: tuple[Check, ...] = (
           'the writer once and is shown at the review pause'),
     Check('figure_placed_by_fi', 'core.engine', '_place_figures',
           'write', 'own_record', 'repair',
-          'every figure the run drew goes in under its number, with the caption FI writes from its record; the '
-          "draft's own images are taken out, no model call"),
+          'every figure the run drew goes in under its number, with the caption FI writes from its record, beside '
+          "the text that first refers to it (its number or FI's statement about it); the draft's own images are "
+          'taken out, no model call'),
     Check('figure_web_license_gate', 'core.figure_sources', '_is_free_license',
           'several', 'measured', 'strip',
           'web/arXiv illustrative figure used only with a free/open license (web_figures node, no-simulation or '

@@ -80,9 +80,27 @@ def _figure_order(lines: list[str]) -> dict[int, int] | None:
     return {n: i + 1 for i, n in enumerate(numbers)}
 
 
+# A reference's numbers that are a range ("2-4", "8 to 11"): it names every figure from the first to the last.
+_SPAN_RE = re.compile(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)")
+
+
+def numbers_named(text: str) -> set[int]:
+    """Every figure number the references in ``text`` name: each number of a list ("Figures 2 and 3") and every number
+    a range spans ("Figs. 2-4"). The one reading of a reference: the renumbering below rewrites what it names, and FI
+    places each figure after the text that first names it (``core/engine.py:_figure_reference_end``)."""
+    out: set[int] = set()
+    for m in _REFERENCE_RE.finditer(text):
+        span = _SPAN_RE.fullmatch(m.group("nums"))
+        if span and int(span.group(1)) < int(span.group(3)):
+            out.update(range(int(span.group(1)), int(span.group(3)) + 1))
+        else:
+            out.update(int(d) for d in re.findall(r"\d+", m.group("nums")))
+    return out
+
+
 def _renumbered(text: str, order: dict[int, int]) -> str:
     def one(m: re.Match[str]) -> str:
-        span = re.fullmatch(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)", m.group("nums"))
+        span = _SPAN_RE.fullmatch(m.group("nums"))
         if span and int(span.group(1)) < int(span.group(3)):
             # A range names every figure in it: renumbered, those figures are a range again only when their new
             # numbers are consecutive ("Figs. 2-3" with the two swapped is still "2-3"); otherwise they are listed.

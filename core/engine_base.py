@@ -7128,10 +7128,12 @@ def _place_figures(markdown: str, state: QuestState, *,
 
     Every figure FI numbered (:func:`_figure_numbers`) goes in, under its number, with the caption FI writes from its
     records (:func:`_figure_caption_text`); every image of a run figure the draft wrote itself is taken out first, caption
-    and all, so no caption in the paper is the writer's. Each figure goes after the paragraph whose prose first names it
-    by number, and never before the figure numbered one less, so the paper shows them in number order; one the prose
-    never names goes before the source lists. Idempotent: placing the figures of a paper FI placed them in gives the
-    same paper."""
+    and all, so no caption in the paper is the writer's. Each figure goes beside the text that first refers to it
+    (:func:`_figure_insertion_line`): after the paragraphs that name it by its number or hold one of FI's marks of it. One
+    the prose never refers to goes at the end of the results, before the discussion (else the conclusions, the
+    limitations, the source lists); FI's set-up figure, when the prose never names it, just before the next figure.
+    Figures that go to the same place stand there in number order. Idempotent: placing the figures of a paper FI placed
+    them in gives the same paper."""
     state = _rooted(state, root)
     numbers = _figure_numbers(state)
     text, written = _without_figure_embeds(markdown)
@@ -7141,32 +7143,38 @@ def _place_figures(markdown: str, state: QuestState, *,
     credits = {Path(str(c.get("file") or "")).name: c for c in state.get("figure_credits") or [] if isinstance(c, dict)}
     n_seeds = _replicate_seed_count(state)
     lines = text.split("\n")
-    placed: list[str] = []
-    last = -1
     setup = _setup_flow.shown(state.get("quest_root"))
-    for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
+    by_number = sorted(numbers.items(), key=lambda kv: kv[1])
+    stems = {number: Path(name).stem for name, number in by_number}
+    # Where each figure goes and the sentence FI composes for it are both read from the text before any figure is in it,
+    # so where one figure goes never moves another.
+    plan: list[tuple[int, int, str, tuple[int | None, str] | None]] = []
+    for name, number in by_number:
         caption = (_caption_safe(_setup_flow.caption(state.get("quest_root"))) if name == setup else
                    _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
                                         calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
                                                if state.get("quest_root") else None)))
-        embed = f"![**Figure {number}.** {caption}](figures/{name})"
-        said = _figure_minimum_sentence(lines, number, name, state)
-        at = max(_figure_insertion_line(lines, number), last + 1)
-        if name == setup and _figure_reference_end(lines, number) is None and len(numbers) > 1:
+        at = _figure_insertion_line(lines, number, stems[number])
+        if name == setup and _figure_reference_end(lines, number, stems[number]) is None and number + 1 in stems:
             # FI's set-up figure the prose never names goes just before the next figure, not after every result
-            at = max(_figure_insertion_line(lines, number + 1), last + 1)
-        if at >= len(lines):
-            if not lines or lines[-1].strip():
-                lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper
-            at = len(lines) - 1
-        before_sources = at < len(lines) and bool(_SOURCE_LIST_HEADING_RE.match(lines[at]))
-        block = [embed, ""] if before_sources else ["", embed]
+            at = _figure_insertion_line(lines, number + 1, stems[number + 1])
+        said = _figure_minimum_sentence(lines, number, name, state)
+        plan.append((at, number, f"![**Figure {number}.** {caption}](figures/{name})", said))
+    if any(at >= len(lines) for at, *_rest in plan):
+        if not lines or lines[-1].strip():
+            lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper
+        plan = [(min(at, len(lines) - 1), *rest) for at, *rest in plan]
+    # From the bottom of the paper up, so every place read above stays where it was; at one place the higher number goes
+    # in first, so the figures there stand in number order.
+    for at, _number, embed, said in sorted(plan, key=lambda p: (p[0], p[1]), reverse=True):
+        if not lines[at].strip():
+            block = ["", embed]
+        else:  # a heading or a rule line: the figure, then a blank line
+            block = ([""] if at > 0 and lines[at - 1].strip() else []) + [embed, ""]
         if said is not None:
             block = _figure_with_sentence(lines, said, block)
         lines[at:at] = block
-        last = at + block.index(embed)
-        placed.append(name)
-    return "\n".join(lines), placed, written
+    return "\n".join(lines), [name for name, _number in by_number], written
 
 
 def _figure_minimum_sentence(lines: list[str], number: int, name: str, state: QuestState) -> tuple[int | None, str] | None:
@@ -7180,16 +7188,13 @@ def _figure_minimum_sentence(lines: list[str], number: int, name: str, state: Qu
     calls = _figure_claims.load_calls(state["quest_root"], stem) if state.get("quest_root") else None
     if not calls or calls.get("fallback"):
         return None
-    text = "\n".join(lines)
-    held = (re.search(r"\{\{\s*figure:\s*" + re.escape(stem) + r"(?:\.\w+)?\s*:", text, re.I)
-            or re.search(r"fi:fact-figure-\w+?-" + re.escape(stem) + r"(?:-args[0-9a-f]*)?\s*-->", text))
-    if held:
+    if _holds_figure_mark("\n".join(lines), stem):
         return None
     offers = _figure_offers(state, stem, calls)
     offer = next((o for kind in ("drawn", "range") for o in offers if o["claim"] == kind), None)
     if offer is None:
         return None
-    return _figure_reference_end(lines, number), f"{offer['mark']} (Figure {number})."
+    return _figure_reference_end(lines, number, stem), f"{offer['mark']} (Figure {number})."
 
 
 def _figure_with_sentence(lines: list[str], said: tuple[int | None, str], block: list[str]) -> list[str]:
@@ -7205,6 +7210,25 @@ def _figure_with_sentence(lines: list[str], said: tuple[int | None, str], block:
 
 # A figure the prose names: "Figure 2 shows", "Figures 1 and 2", "Fig. 3".
 _FIGURE_MENTION_RE = re.compile(r"(?<![A-Za-z])(?:figures?|figs?\.?)\s*(\d+)", re.IGNORECASE)
+
+
+def _holds_figure_mark(text: str, stem: str) -> bool:
+    """Whether ``text`` holds one of FI's marks of the figure ``stem``: the writer's ``{{figure:<stem>:...}}`` or the
+    sentence FI rendered from it (``fi:fact-figure-<kind>-<stem>``). A mark names its figure by FI's own file name, so a
+    paragraph that holds one refers to that figure whatever its words."""
+    return bool(re.search(r"\{\{\s*figure:\s*" + re.escape(stem) + r"(?:\.\w+)?\s*:", text, re.I)
+                or re.search(r"fi:fact-figure-\w+?-" + re.escape(stem) + r"(?:-args[0-9a-f]*)?\s*-->", text))
+
+
+def _figure_numbers_named(line: str) -> set[int]:
+    """The figure numbers ``line`` refers to by number, every one a list ("Figures 2 and 3") or a range ("Figures 8 to
+    11") names, read as the paper's renderer reads them when it numbers the figures by place
+    (:func:`generation._figure_captions.numbers_named`), so a reference places a figure and is renumbered alike."""
+    from generation._figure_captions import numbers_named
+
+    return numbers_named(line)
+
+
 _MD_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -7612,9 +7636,16 @@ def _figure_caption_text(
     return _caption_safe(" ".join(parts))
 
 
-def _figure_reference_end(lines: list[str], number: int) -> int | None:
-    """The last line of the paragraph whose prose first names the figure numbered ``number``, else ``None``. Code fences and
-    the captions of figures already in the paper are not prose and are skipped, and so are the source lists."""
+def _figure_reference_end(lines: list[str], number: int, stem: str | None = None) -> int | None:
+    """The last line of the text that first refers to the figure numbered ``number``, else ``None``: the paragraph that
+    first names it by number (:func:`_figure_numbers_named`) or holds one of FI's marks of it (``stem``,
+    :func:`_holds_figure_mark`), and every paragraph right after it that refers to it too, so a figure FI states several
+    things about follows the last of them. Code fences and the captions of figures already in the paper are not prose and
+    are skipped, and so are the source lists."""
+    def refers(line: str) -> bool:
+        return (not _PAPER_IMAGE_RE.search(line) and not _RUN_FIGURE_IMAGE_RE.search(line)
+                and (number in _figure_numbers_named(line) or bool(stem and _holds_figure_mark(line, stem))))
+
     fence: str | None = None
     for i, line in enumerate(lines):
         fence_line = _MD_FENCE_LINE_RE.match(line)
@@ -7623,27 +7654,34 @@ def _figure_reference_end(lines: list[str], number: int) -> int | None:
             continue
         if fence is None and _SOURCE_LIST_HEADING_RE.match(line):
             break  # the source lists are not the paper's prose
-        if fence is not None or _PAPER_IMAGE_RE.search(line) or _RUN_FIGURE_IMAGE_RE.search(line):
+        if fence is not None or not refers(line):
             continue
-        if any(int(m.group(1)) == number for m in _FIGURE_MENTION_RE.finditer(line)):
-            end = i
+        end = i
+        while True:
             while end + 1 < len(lines) and lines[end + 1].strip():
                 end += 1
-            return end
+            start = end + 1
+            while start < len(lines) and not lines[start].strip():
+                start += 1
+            last = start
+            while last + 1 < len(lines) and lines[last + 1].strip():
+                last += 1
+            paragraph = lines[start:last + 1]
+            if (not paragraph or _ANY_HEADING_RE.match(paragraph[0]) or _MD_FENCE_LINE_RE.match(paragraph[0])
+                    or not any(refers(p) for p in paragraph)):
+                return end
+            end = last
     return None
 
 
-def _figure_insertion_line(lines: list[str], number: int) -> int:
-    """Where the figure numbered ``number`` goes: after the paragraph whose
-    prose first names it, else before the paper's source lists, else at the
-    end."""
-    end = _figure_reference_end(lines, number)
+def _figure_insertion_line(lines: list[str], number: int, stem: str | None = None) -> int:
+    """Where the figure numbered ``number`` (file stem ``stem``) goes: after the text that first refers to it
+    (:func:`_figure_reference_end`), else at the end of the results, before the discussion (else the conclusions, the
+    limitations, the source lists: :func:`core.best_design_report.before_discussion_line`), else at the end."""
+    end = _figure_reference_end(lines, number, stem)
     if end is not None:
         return end + 1
-    for i, line in enumerate(lines):
-        if _SOURCE_LIST_HEADING_RE.match(line):
-            return i
-    return len(lines)
+    return _best_report.before_discussion_line(lines)
 
 
 def _parse_json_lenient(

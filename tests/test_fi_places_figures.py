@@ -104,10 +104,25 @@ def test_the_drafts_own_images_and_captions_are_replaced_by_fis() -> None:
     assert len(placed) == 3
 
 
-def test_a_figure_the_prose_names_out_of_order_still_follows_the_one_before_it() -> None:
-    draft = "## Results\n\nFigure 2 shows the cost.\n\nFigure 1 shows the error.\n\n## References\n\n1. A.\n"
+def test_a_figure_the_prose_names_out_of_order_goes_beside_its_own_paragraph() -> None:
+    # Beside the text that names it wins over number order: the paper's renderer numbers the figures by place and
+    # renumbers every reference with them (generation/_figure_captions.py), so the PDF still reads 1, 2, 3.
+    draft = ("## Results\n\nFigure 2 shows the cost.\n\nFigure 1 shows the error.\n\n## Discussion\n\nIt holds.\n\n"
+             "## References\n\n1. A.\n")
     out, _, _ = _place_figures(draft, STATE)  # type: ignore[arg-type]
-    assert _embed_line(out, "error_vs_step.png") < _embed_line(out, "cost_by_size.png") < _embed_line(out, "spread_map.png")
+    lines = out.split("\n")
+    cost, error = _embed_line(out, "cost_by_size.png"), _embed_line(out, "error_vs_step.png")
+    assert lines.index("Figure 2 shows the cost.") < cost < lines.index("Figure 1 shows the error.") < error
+    assert error < _embed_line(out, "spread_map.png") < lines.index("## Discussion")
+
+
+def test_placement_and_the_renderer_read_the_same_figure_numbers_from_a_reference() -> None:
+    from core.engine import _figure_numbers_named
+    from generation._figure_captions import numbers_named
+
+    for line, named in (("Figures 8 to 11 show it.", {8, 9, 10, 11}), ("Figs. 2–4 and Figure 6.", {2, 3, 4, 6}),
+                        ("Figures 1, 2 and 3.", {1, 2, 3}), ("(Figure 5).", {5}), ("See figures/figure3.png.", set())):
+        assert _figure_numbers_named(line) == numbers_named(line) == named, line
 
 
 def test_a_figure_the_prose_never_names_goes_before_the_source_lists() -> None:
@@ -141,6 +156,55 @@ def test_an_image_inside_a_code_fence_is_left_as_it_is() -> None:
 
 def test_with_no_figure_nothing_is_placed() -> None:
     assert _place_figures(DRAFT, {"figures": []}) == (DRAFT, [], 0)  # type: ignore[arg-type]
+
+
+# A draft that refers to two figures only through FI's marks (one written by the writer, one as FI rendered it), in
+# another order than their numbers, and never to the third.
+MARKED = (
+    "# T\n\n## Results\n\n### Spread\n\n"
+    "{{figure:spread_map:drawn @ series=spread, panel=1}}\n\n"
+    "<!-- fi:fact-figure-range-spread_map-args00 -->The spread spans 1 to 2<!-- /fi:fact-figure-range-spread_map-args00 -->"
+    "\n\n### Accuracy\n\nThe error falls as the step shrinks.\n\n"
+    "{{figure:error_vs_step:trend @ series=error, panel=1}}\n\n"
+    "## Discussion\n\nIt holds.\n\n## Limitations\n\nOne seed only.\n\n## References\n\n1. A cited paper.\n"
+)
+
+
+def test_a_figure_referred_to_only_by_fis_marks_goes_beside_them_not_after_the_limitations() -> None:
+    out, placed, _ = _place_figures(MARKED, STATE)  # type: ignore[arg-type]
+    lines = out.split("\n")
+    spread, error = _embed_line(out, "spread_map.png"), _embed_line(out, "error_vs_step.png")
+    rendered = next(i for i, ln in enumerate(lines) if "fi:fact-figure-range-spread_map" in ln)
+    # after the last of the paragraphs that hold its marks, still in its own section
+    assert rendered < spread < lines.index("### Accuracy")
+    assert lines.index("### Accuracy") < error < lines.index("## Discussion")
+    assert "{{figure:error_vs_step" in _paragraph_above(lines, error)
+    assert len(placed) == 3
+
+
+def test_a_figure_the_prose_never_refers_to_goes_at_the_end_of_the_results() -> None:
+    out, _, _ = _place_figures(MARKED, STATE)  # type: ignore[arg-type]
+    lines = out.split("\n")
+    cost = _embed_line(out, "cost_by_size.png")
+    assert _embed_line(out, "error_vs_step.png") < cost < lines.index("## Discussion")
+
+
+def test_every_figure_a_range_or_a_list_of_numbers_names_goes_after_it() -> None:
+    for words in ("Figures 1 to 3 show the error, the cost and the spread.",
+                  "Figures 1, 2 and 3 show the error, the cost and the spread.",
+                  "Figs. 1–3 show the error, the cost and the spread."):
+        draft = f"## Results\n\n{words}\n\nThe end of the results.\n\n## Discussion\n\nIt holds.\n\n## References\n\n1. A.\n"
+        out, _, _ = _place_figures(draft, STATE)  # type: ignore[arg-type]
+        lines = out.split("\n")
+        named = lines.index(words)
+        at = [_embed_line(out, name) for name in ("error_vs_step.png", "cost_by_size.png", "spread_map.png")]
+        assert named < at[0] < at[1] < at[2] < lines.index("The end of the results."), words
+
+
+def test_placing_the_figures_of_a_marked_draft_again_gives_the_same_paper() -> None:
+    once, _, _ = _place_figures(MARKED, STATE)  # type: ignore[arg-type]
+    assert _place_figures(once, STATE)[0] == once  # type: ignore[arg-type]
+    assert _without_figure_embeds(once) == (MARKED, 3)
 
 
 # ---- the caption, from the records only --------------------------------------------------------------------------------
@@ -236,6 +300,33 @@ def test_the_write_node_delivers_every_figure_with_fis_captions_without_spending
         assert f"![**Figure {number}.** {RECORDS[name]['axes'][0]['ylabel']}." in written
     assert "Nothing changes" not in written
     assert "iteration" not in patch, "placing the figures costs no iteration"
+
+
+def test_the_write_node_puts_a_figure_its_draft_refers_to_only_by_fis_mark_beside_that_mark(tmp_path: Path) -> None:
+    # The writer may say nothing of its own about a figure with a call record: its only reference is FI's mark, which
+    # names no number. The delivered paper had every such figure after its last section.
+    eng = _engine(tmp_path)
+    state = _quest(tmp_path, _record(_panel()))
+    (tmp_path / "paper").mkdir(parents=True, exist_ok=True)
+    draft = ("# T\n\n## Abstract\n\nA study.\n\n## Results\n\n### Accuracy\n\nThe error was measured.\n\n"
+             "{{figure:error_vs_step:drawn @ series=error, panel=1}}\n\n### Cost\n\nThe cost was measured.\n\n"
+             "## Discussion\n\nIt holds.\n\n## Limitations\n\nOne seed only.\n")
+
+    async def fake_chat(prompt, *, node=None, temperature=None):  # noqa: ANN001
+        return draft
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    eng._writing_skills_block = lambda state: ""  # type: ignore[assignment]
+    eng._resolve_write_persona = lambda state: ""  # type: ignore[assignment]
+    patch = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0, **state}))  # type: ignore[arg-type]
+
+    lines = Path(patch["paper_md"]).read_text(encoding="utf-8").split("\n")
+    at = next(i for i, ln in enumerate(lines) if "](figures/error_vs_step.png)" in ln)
+    mark = next(i for i, ln in enumerate(lines) if "fi:fact-figure-drawn-error_vs_step" in ln)
+    assert lines.index("### Accuracy") < mark < at < lines.index("### Cost")
+    # the figures the draft never refers to close the results, before the discussion
+    for name in ("cost_by_size.png", "spread_map.png"):
+        assert next(i for i, ln in enumerate(lines) if f"](figures/{name})" in ln) < lines.index("## Discussion")
 
 
 # ---- after the first review -----------------------------------------------------------------------------------------
