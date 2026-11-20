@@ -453,3 +453,70 @@ def test_a_title_never_carries_a_number() -> None:
     assert contract.check_title("valve_scan", "Valve at 2 bar")
     assert contract.check_title("valve_scan", "Scan at 0.5 opening")
     assert contract.check_title("valve_scan", "Valve opening scan") == []
+
+
+# --- second review --------------------------------------------------------------------------------------------------------
+
+
+def test_a_range_with_an_end_that_is_not_a_finite_number_is_never_held() -> None:
+    import pytest
+
+    for end in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            contract.Range(min=0, max=end)
+    d = copy.deepcopy(DESIGN)
+    d["protocol"]["metrics"][1]["range"] = {"min": 0, "max": float("nan"), "reason": "a probability", "physical": True}
+    c = contract.from_design(d)
+    assert c.result("overflow") is not None and c.result("overflow").range is None  # the result stays, the range does not
+    assert any("`overflow`" in g and "finite" in g for g in c.gaps)
+    assert not [a for a in contract.held_assertions(d) if a["path"] == "overflow"]
+
+
+def test_every_bound_the_plan_gives_a_result_is_joined_with_its_physical_bound_into_one() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["result_assertions"] = [{"path": "level_drop", "min": -5, "reason": "the inlet can raise it 5 cm"},
+                              {"path": "level_drop", "max": 60, "reason": "the rim is at 60 cm"}]
+    d["protocol"]["metrics"][0]["range"] = {"max": 50, "reason": "the tank's floor", "physical": True}
+    held = [a for a in contract.held_assertions(d) if a["path"] == "level_drop"]
+    assert [(a.get("min"), a.get("max")) for a in held] == [(-5, 50)]
+    assert all(w in held[0]["reason"] for w in ("5 cm", "rim", "floor"))
+    assert len(plausibility.check_design({"level_drop": 61.0}, {"result_assertions": held})) == 1
+
+
+def test_a_side_whose_kept_limit_is_the_physical_one_may_be_reached_and_the_other_side_not() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["result_assertions"] = [{"path": "overflow", "min": 0, "reason": "a share"}]
+    d["protocol"]["metrics"][1]["range"] = {"max": 1, "reason": "a probability", "physical": True}
+    held = {"result_assertions": contract.held_assertions(d)}
+
+    def every_setting(v: float) -> dict[str, Any]:
+        return {"runs": [{"valve": x, "overflow": v} for x in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)]}
+
+    assert plausibility.check_design(every_setting(1.0), held) == []  # on the physical bound: its physics
+    assert [v.kind for v in plausibility.check_design(every_setting(0.0), held)] == ["at_bound"]  # the plan's own side
+
+
+def test_an_empty_shape_is_no_answer_and_keeps_the_shape_the_protocol_holds() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["protocol"]["metrics"][2].update({"shape": "curve", "along": ["time"]})
+    answer = copy.deepcopy(PLAIN)
+    answer["results"]["level_trace"].update({"shape": "", "bound": None})
+    out = run(Fake(roles=[answer], comparisons=[NO_COMPARE]), d)
+    assert (metric(out, "level_trace")["shape"], metric(out, "level_trace")["along"]) == ("curve", ["time"])
+
+
+def test_a_kept_physical_bound_the_redrafted_plan_no_longer_holds_is_dropped_and_said() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["protocol"]["metrics"][2]["range"] = {"min": 0, "max": 1, "reason": "a share of the depth", "physical": True}
+    d["protocol"]["oracles"].append({"name": "full tank", "kind": "special_case", "check": "the level stays", "expected": 2.0,
+                                     "tolerance": 0.01, "case": {"valve": 0.2, "inlet": 2}, "measure": "level_trace"})
+    fake = Fake(roles=[copy.deepcopy(PLAIN)], comparisons=[NO_COMPARE])
+    out = run(fake, d)
+    assert [p for p, _ in fake.prompts].count("roles") == 1  # the answer said no bound: it is not asked for one again
+    assert "range" not in metric(out, "level_trace") and out.parts["roles"]["valid"]
+    assert out.parts["roles"]["left_out"]["stale_bound"].keys() == {"level_trace"}
+    assert any("`level_trace`" in n and "no longer" in n for n in out.notes)
+    # a kept bound that still holds stays
+    d["protocol"]["oracles"].pop()
+    kept = run(Fake(roles=[copy.deepcopy(PLAIN)], comparisons=[NO_COMPARE]), d)
+    assert metric(kept, "level_trace")["range"]["max"] == 1 and "left_out" not in kept.parts["roles"]

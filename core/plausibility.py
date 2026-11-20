@@ -214,6 +214,8 @@ class Assertion:
     #: The design says this quantity can honestly be exactly on its bound (no failures, a proportion that is 0 or 1 because
     #: the event never happened or always did). Then sitting on the bound is its answer, not a sign of a trivial result.
     may_equal_bound: bool = False
+    #: The same said of one side only (``("max",)``: a probability may be 1, the plan's own lower bound may not be reached).
+    may_equal: tuple[str, ...] = ()
 
     def describe(self) -> str:
         if self.min is not None and self.max is not None:
@@ -953,6 +955,8 @@ def parse_assertions(design: Any) -> list[Assertion]:
                 unit=str(item.get("unit") or "").strip(),
                 reason=str(item.get("reason") or "").strip(),
                 may_equal_bound=item.get("may_equal_bound") is True,
+                may_equal=tuple(s for s in ("min", "max") if s in (item.get("may_equal") or ())
+                                if isinstance(item.get("may_equal"), (list, tuple))),
             )
         )
     return out
@@ -1433,7 +1437,8 @@ def violations(
             if len(every) >= AT_BOUND_MIN_SETTINGS and on_edge >= every:
                 out.append(Violation(a.path, matched[0][2], a, kind="edge_everywhere"))
         for bound, entries in on_bound.items():
-            if a.may_equal_bound or a.path in edge_ok:
+            if a.may_equal_bound or a.path in edge_ok or ("min" in a.may_equal and bound == a.min) \
+                    or ("max" in a.may_equal and bound == a.max):
                 continue  # the design says this quantity can honestly sit on its bound, or its role is physical_bound
             if bound == 0 and a.path in zero_expected:
                 continue  # 0 is this quantity's answer: see "Why a count of failures may sit at 0"

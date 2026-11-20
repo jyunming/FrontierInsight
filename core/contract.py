@@ -74,6 +74,9 @@ class Range(_Strict):
 
     @model_validator(mode="after")
     def _ordered(self) -> "Range":
+        for end in (self.min, self.max):
+            if end is not None and not math.isfinite(end):
+                raise ValueError(f"the range has an end that is not a finite number ({end})")
         if self.min is not None and self.max is not None and self.min > self.max:
             raise ValueError(f"the range's min {self.min} is above its max {self.max}")
         return self
@@ -530,7 +533,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
                 "estimand": str(m.get("estimand") or ""), "observation": str(m.get("unit") or ""),
                 "unit": str(m.get("physical_unit") or ""), "label": str(m.get("label") or labels.get(rid, "")),
                 "depends_on": depends, "returned": m.get("returned") if m.get("returned") in ("each_run", "afterwards") else None,
-                "range": _joined_range(ranges.get(rid), m.get("range")),
+                "range": _joined_range(_finite_range(ranges.get(rid), rid, "the plan's bound on", gaps),
+                                       _finite_range(m.get("range"), rid, "the range on", gaps)),
                 **_shape_of(m, p, gaps),
                 "known_value": m.get("known_value"), "reference": m.get("reference"), "given": _ident(given),
                 "cluster": m.get("cluster"), "paired": bool(m.get("paired")), "exact": m.get("exact") if isinstance(m.get("exact"), bool) else None,
@@ -642,6 +646,21 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
         # A reference between parts that does not hold (a comparison of an undeclared result, a figure along a name
         # that is not a setting): drop the part that holds it, say so, and keep the rest.
         return _without_broken_links(base, parts, gaps, e)
+
+
+def _not_finite(r: Any) -> bool:
+    """Whether the range ``r`` has an end given as a number that is not a finite one (NaN, infinity)."""
+    return isinstance(r, dict) and any(isinstance(v, (int, float)) and not isinstance(v, bool) and not math.isfinite(v)
+                                       for v in (r.get("min"), r.get("max")))
+
+
+def _finite_range(r: Any, rid: str, what: str, gaps: list[str]) -> Any:
+    """``r``, or ``None`` with a gap when an end of it is not a finite number: the range check cannot hold a value to such
+    an end (core/plausibility.py drops it), so the contract does not hold the range either."""
+    if not _not_finite(r):
+        return r
+    gaps.append(f"{what} result `{rid}` has an end that is not a finite number; the result is held to no such bound")
+    return None
 
 
 def _joined_range(asserted: Any, own: Any) -> Any:
@@ -992,39 +1011,51 @@ def check_system(value: Any, protocol: Any) -> list[str]:
 def held_assertions(design: Any) -> list[dict[str, Any]]:
     """The plan's ``result_assertions`` with the range on each declared result held too, for the range check
     (core/plausibility.py) to hold every run to: a physical bound FI asked after the plan, or a range the plan wrote on the
-    entry. One bound per result: a range on a result the plan's own ``result_assertions`` already bounds by the same path is
-    joined into that entry (the tighter limit on each side, both reasons), so a value beyond both gives one finding, not one
-    per bound. A value may sit on the joined bound (``may_equal_bound``) when the plan's entry says so, or when every limit
-    it keeps is the physical bound's. A range that does not overlap the plan's own bound leaves that bound as it is."""
+    entry. One bound per result: every entry of the plan's own ``result_assertions`` on the same path and the range are
+    joined into one (the tightest limit on each side, every reason), so a value beyond them gives one finding, not one per
+    bound. A value may sit on a side of the joined bound when a bound that sets that side's limit says so (a physical bound,
+    or a plan entry with ``may_equal_bound``): both sides, ``may_equal_bound``; one side only, ``may_equal: ["min"]`` or
+    ``["max"]``. A range that does not overlap the plan's own bounds leaves them as they are, and a range with an end that
+    is not a finite number is held to nothing."""
     design = design if isinstance(design, dict) else {}
     p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
     out = [dict(a) if isinstance(a, dict) else a for a in design.get("result_assertions") or []]
     for m in p.get("metrics") or []:
         r = m.get("range") if isinstance(m, dict) else None
         rid = _ident(m.get("id")) if isinstance(m, dict) else None
-        if rid is None or not isinstance(r, dict):
-            continue
+        if rid is None or not isinstance(r, dict) or _not_finite(r):
+            continue  # a range with an end that is not a finite number is held to nothing (the contract says so in a gap)
         lo, hi = (r.get("min") if _is_number(r.get("min")) else None), (r.get("max") if _is_number(r.get("max")) else None)
         if (lo is None and hi is None) or (lo is not None and hi is not None and lo > hi):
             continue
         physical, reason = r.get("physical") is True, str(r.get("reason") or "").strip()
-        i = next((i for i, a in enumerate(out) if isinstance(a, dict) and str(a.get("path") or "").strip() == rid
-                  and (_is_number(a.get("min")) or _is_number(a.get("max")))), None)
-        if i is None:
-            out.append({"path": rid, "min": lo, "max": hi, "unit": str(m.get("physical_unit") or r.get("unit") or ""),
-                        "reason": reason, "may_equal_bound": physical})
-            continue
-        own = out[i]
-        olo, ohi = (own["min"] if _is_number(own.get("min")) else None), (own["max"] if _is_number(own.get("max")) else None)
-        jlo = max(v for v in (lo, olo) if v is not None) if (lo, olo) != (None, None) else None
-        jhi = min(v for v in (hi, ohi) if v is not None) if (hi, ohi) != (None, None) else None
-        if jlo is not None and jhi is not None and jlo > jhi:
-            continue  # they do not overlap: the plan's own bound is the one held (FI's check refuses such an answer)
-        theirs = physical and (jlo is None or jlo == lo) and (jhi is None or jhi == hi)  # every limit kept is the physical one
-        reasons = [x for x in (str(own.get("reason") or "").strip(), reason) if x]
-        out[i] = {**own, "min": jlo, "max": jhi, "unit": str(own.get("unit") or m.get("physical_unit") or r.get("unit") or ""),
-                  "reason": "; ".join(dict.fromkeys(reasons)),
-                  "may_equal_bound": own.get("may_equal_bound") is True or theirs}
+        unit = str(m.get("physical_unit") or r.get("unit") or "")
+        mine = [i for i, a in enumerate(out) if isinstance(a, dict) and str(a.get("path") or "").strip() == rid
+                and (_is_number(a.get("min")) or _is_number(a.get("max"))) and not _not_finite(a)]
+        # every bound on this result, the plan's own entries and the range, with whether a value may sit on it
+        sources = [(a.get("min") if _is_number(a.get("min")) else None, a.get("max") if _is_number(a.get("max")) else None,
+                    a.get("may_equal_bound") is True, str(a.get("reason") or "").strip()) for a in (out[i] for i in mine)]
+        sources.append((lo, hi, physical, reason))
+        lows, highs = [(s[0], s[2]) for s in sources if s[0] is not None], [(s[1], s[2]) for s in sources if s[1] is not None]
+        jlo, jhi = (max(v for v, _ in lows) if lows else None), (min(v for v, _ in highs) if highs else None)
+        if mine and jlo is not None and jhi is not None and jlo > jhi:
+            continue  # they do not overlap: the plan's own bounds are the ones held (FI's check refuses such an answer)
+        # a side may be reached when a bound that sets its kept limit says so (a physical bound: its physics)
+        sides = [side for side, limit, pairs in (("min", jlo, lows), ("max", jhi, highs))
+                 if limit is not None and any(v == limit and ok for v, ok in pairs)]
+        kept = [side for side, limit in (("min", jlo), ("max", jhi)) if limit is not None]
+        joined = {**(out[mine[0]] if mine else {"path": rid}), "min": jlo, "max": jhi,
+                  "unit": str((out[mine[0]].get("unit") if mine else "") or unit),
+                  "reason": "; ".join(dict.fromkeys(s[3] for s in sources if s[3])),
+                  "may_equal_bound": bool(kept) and sides == kept}
+        joined.pop("may_equal", None)
+        if sides and sides != kept:
+            joined["may_equal"] = sides
+        if mine:
+            out[mine[0]] = joined
+            out = [a for i, a in enumerate(out) if i not in mine[1:]]
+        else:
+            out.append(joined)
     return out
 
 

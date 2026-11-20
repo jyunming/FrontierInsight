@@ -69,7 +69,8 @@ EXTRA_WORDS = {"titles": "a plain title for each sub-study and group of results 
                "shape": "whether each result is one number, a curve or a map",
                "bound": "the physical bound of each result",
                "system": "the studied system (its parts, what each carries and what touches what)",
-               "references": "the reference lines each figure draws"}
+               "references": "the reference lines each figure draws",
+               "stale_bound": "a physical bound that still holds the redrafted plan's values"}
 EXTRA_ASKS = 2
 _ROLE_HINT = {"reference": "its plan gives a formula, so it is a reference", "diagnostic": "a check of the plan measures it as a "
               "size of disagreement, so it is a diagnostic"}
@@ -820,6 +821,21 @@ def _roles_extras(got: Any, value: Any, design: dict[str, Any]) -> tuple[dict[st
             if found:
                 bad[key][rid] = "; ".join(found)
     problems = [*bad["shape"].values(), *bad["bound"].values()]
+    # A physical bound the protocol keeps from an earlier answer (this one gives no usable one) is held to the plan as it
+    # now is; one that no longer holds its values is left out and said, not asked for again (the answer said none).
+    stale = {}
+    for m in p.get("metrics") or []:
+        r = m.get("range") if isinstance(m, dict) else None
+        rid = str(m.get("id")) if isinstance(m, dict) else ""
+        row = value.get(rid) if isinstance(value, dict) else None
+        if isinstance(r, dict) and r.get("physical") is True and isinstance(row, dict) and \
+                (not isinstance(row.get("bound"), dict) or rid in bad["bound"]):
+            found = _contract.check_bound(rid, {"min": r.get("min"), "max": r.get("max"), "unit": r.get("unit"),
+                                                "why": r.get("reason") or "kept from an earlier answer"}, design)
+            if found:
+                stale[rid] = "; ".join(found)
+    if stale:
+        bad["stale_bound"] = stale
     wanted = _contract.titles_to_ask(p)
     if wanted:
         said = got.get("titles") if isinstance(got, dict) and isinstance(got.get("titles"), dict) else {}
@@ -837,18 +853,21 @@ def _apply_role_extras(p: dict[str, Any], value: dict[str, Any], got: Any, bad: 
     """``p`` with what the roles answer also says, where it can be used (``bad`` holds the rest, left out): a curve or a map on
     the result's entry (``shape``, ``along``; a number writes nothing), a physical bound as the entry's ``range`` (``physical``:
     true; the range check holds every run to it), and the studied system as ``protocol.system``. Only a usable answer
-    changes what the protocol holds: a bound or a system answered as none (null, missing, no parts) or left out takes none
-    away, so the protocol and its hash stay as they were; a result answered as one number drops a curve it held; a range
-    the plan wrote itself always stays."""
+    changes what the protocol holds: a bound, a shape or a system answered as none (null, missing, empty, no parts) or left
+    out takes none away, so the protocol and its hash stay as they were; a result answered as one number drops a curve it
+    held; a physical bound kept that no longer holds the redrafted plan (``bad["stale_bound"]``) goes; a range the plan
+    wrote itself always stays."""
     metrics = []
     for m in p.get("metrics") or []:
         row = value.get(str(m.get("id"))) if isinstance(m, dict) else None
         if isinstance(row, dict):
             rid = str(m["id"])
-            if row.get("shape") is not None and rid not in bad.get("shape", {}):
+            if row.get("shape") not in (None, "") and rid not in bad.get("shape", {}):
                 m = {k: v for k, v in m.items() if k not in ("shape", "along")}
                 if row["shape"] in ("curve", "map"):
                     m.update({"shape": row["shape"], "along": list(row["along"])})
+            if rid in bad.get("stale_bound", {}):
+                m = {k: v for k, v in m.items() if k != "range"}
             bound = row.get("bound")
             planned = isinstance(m.get("range"), dict) and m["range"].get("physical") is not True
             if isinstance(bound, dict) and rid not in bad.get("bound", {}) and not planned:
@@ -912,6 +931,8 @@ def _left_out_note(bad: dict[str, Any]) -> list[str]:
     out = []
     for key, what in (("titles", "its name is printed as written"), ("shape", "it is read as one number"),
                       ("bound", "it is held to no physical bound"),
+                      ("stale_bound", "the bound kept from an earlier answer no longer holds the plan's values, so it is "
+                       "held to no physical bound"),
                       ("references", "the figure is drawn without them")):
         if bad.get(key):
             names = ", ".join(f"`{i}`" for i in bad[key])
