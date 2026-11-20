@@ -858,24 +858,27 @@ def titles_to_ask(protocol: Any) -> dict[str, str]:
     p = protocol if isinstance(protocol, dict) else {}
     labels = p.get("labels") if isinstance(p.get("labels"), dict) else {}
     out: dict[str, str] = {}
+    taken = set(system_names(p))  # a name that is also a setting's, a constant's or a result's id keeps that one's label
     parts = settings_between_runs(p)[1]
     for sub in parts if isinstance(parts, list) else []:
         name = sub.get("name") if isinstance(sub, dict) else None
-        if is_code_name(name) and not str(labels.get(name) or "").strip():
+        if is_code_name(name) and name not in taken and not str(labels.get(name) or "").strip():
             out.setdefault(name, "a sub-study")
     for m in p.get("metrics") or []:
         name = m.get("family") if isinstance(m, dict) else None
-        if is_code_name(name) and not str(labels.get(name) or "").strip():
+        if is_code_name(name) and name not in taken and not str(labels.get(name) or "").strip():
             out.setdefault(name, "a group of results")
     return out
 
 
 def group_names(protocol: Any) -> set[str]:
-    """The names of the plan's sub-studies and of its groups of results (a result's ``family``)."""
+    """The names of the plan's sub-studies and of its groups of results (a result's ``family``) that are no setting's,
+    constant's or result's id: the labels of these are titles."""
     p = protocol if isinstance(protocol, dict) else {}
     parts = settings_between_runs(p)[1]
     out = {str(s["name"]) for s in parts if isinstance(s, dict) and isinstance(s.get("name"), str)} if isinstance(parts, list) else set()
-    return out | {str(m["family"]) for m in p.get("metrics") or [] if isinstance(m, dict) and isinstance(m.get("family"), str)}
+    out |= {str(m["family"]) for m in p.get("metrics") or [] if isinstance(m, dict) and isinstance(m.get("family"), str)}
+    return out - set(system_names(p))
 
 
 def check_title(name: str, title: Any) -> list[str]:

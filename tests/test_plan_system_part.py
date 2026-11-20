@@ -387,3 +387,25 @@ def test_a_title_that_is_the_code_name_again_is_asked_once_more_then_the_name_st
     assert "valve_scan" not in labels and labels["level_group"] == "Water level"
     assert out.parts["roles"]["left_out"]["titles"].keys() == {"valve_scan"}
     assert any("`valve_scan`" in n and "printed as written" in n for n in out.notes)
+
+
+def test_a_group_named_like_a_result_keeps_that_results_reader_name() -> None:
+    d = coded()
+    d["protocol"]["metrics"][2]["family"] = "level_trace"  # the group of a result is named as that result's id
+    d["protocol"]["labels"]["level_trace"] = "Water level over the hour"
+    assert "level_trace" not in contract.titles_to_ask(d["protocol"])
+    d["protocol"]["labels"].pop("level_trace")
+    assert "level_trace" not in contract.titles_to_ask(d["protocol"])  # never asked, so never written over it
+    d["protocol"]["labels"]["level_trace"] = "Water level over the hour"
+    assert cp.without_answers(d)["protocol"]["labels"]["level_trace"] == "Water level over the hour"
+
+
+def test_a_result_with_the_plans_bound_and_a_physical_bound_is_held_to_both() -> None:
+    from core.engine_base import _asserting_design
+
+    out = run(Fake(roles=[full()], comparisons=[NO_COMPARE]))
+    design = _asserting_design({"design": out.design})
+    below = plausibility.check_design({"overflow": 0.5, "level_drop": -6.0}, design)
+    beyond = plausibility.check_design({"overflow": 0.5, "level_drop": 51.0}, design)
+    assert [v.assertion.min for v in below] == [-5]  # only the plan's own bound reaches below
+    assert len(beyond) == 2  # both bounds say 50 cm: each finding names its own reason
