@@ -380,12 +380,18 @@ def text(limit: int | None, parts: dict[str, str]) -> str:
 
 
 def write(quest_root: Path | str, limit: int | None, parts: dict[str, str]) -> bool:
-    """Write :data:`FILE` from ``parts`` (or remove it when none has text). Returns whether a file is there."""
+    """Write :data:`FILE` from ``parts`` (or remove it when none has text); a file that already says exactly this is
+    left as it is. Returns whether a file is there."""
     path = Path(quest_root) / FILE
     body = text(limit, parts)
     if not body:
         path.unlink(missing_ok=True)
         return False
+    try:
+        if path.read_text(encoding="utf-8") == body:
+            return True
+    except (OSError, UnicodeDecodeError):
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return True

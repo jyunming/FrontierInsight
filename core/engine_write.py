@@ -3109,8 +3109,10 @@ class WriteStageMixin:
         :meth:`_supplement_can_move` finds it in the paper. No model call, no measurement and no rewrite of the body:
         called on each draft where the page check runs and again on the paper as delivered, so a new draft (whose
         reset brought them back) never keeps them. The line for a Further reading moved earlier is written again when a
-        rebuild of the References dropped it. Returns the parts moved now; a supplement that cannot be written puts the
-        paper, the record and the receipts back as they were."""
+        rebuild of the References dropped it. Whatever moved, ``paper/supplement.md`` is then what the records say (a file
+        left unwritten by a stop between a move and its write is written here), so a pointer always has its file.
+        Returns the parts moved now; a supplement that cannot be written puts the paper, the record and the receipts back
+        as they were (and what an earlier move sent there comes back into the paper)."""
         root = self.quest_root
         try:
             text = paper_path.read_text(encoding="utf-8")
@@ -3158,9 +3160,13 @@ class WriteStageMixin:
             self._log.warning("[supplement] FI's own parts could not be moved to the supplement (%s); the paper keeps "
                               "them", e)
             return []
-        if newly or cited:
+        # The paper as it leaves this step points only to a supplement that is there and says what the records say: one
+        # left unwritten (a stop between a move and its write) is written now; written as it should be, it is left as is.
+        if newly or cited or _supplement.anything(root):
             if not self._write_supplement(state, limit):
                 self._restore_files(keep)  # the paper cannot point to a supplement that is not there
+                if not (newly or cited):
+                    self._supplement_reset(state, paper_path)  # pointers from an earlier move: what moved comes back
                 return []
         if newly:
             self._log.info("[supplement] FI moved its own %s to the supplement (%s); the paper keeps one line pointing "

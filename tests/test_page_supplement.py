@@ -210,6 +210,34 @@ def test_the_paper_as_delivered_keeps_them_out_without_a_page_limit(tmp_path: Pa
     assert all(f"- [W{n}] Page {n}." in shown for n in (1, 2, 3))
 
 
+def test_a_stop_between_the_move_and_the_supplement_write_still_delivers_the_file(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    # FI stopped after it moved the parts (the record and the pointers are there) and before it wrote the file
+    for part in sup.ALWAYS:
+        moved = [p for p in sup.ALWAYS if p == part or p in sup.moved(tmp_path)]
+        eng._supplement_move({}, paper, part, paper.read_text(encoding="utf-8"), moved, None)
+    (tmp_path / sup.FILE).unlink(missing_ok=True)
+    text = paper.read_text(encoding="utf-8")
+    assert sup.table_pointer() in text and sup.further_pointer(2) in text
+    # the resumed step finds nothing new to move, and still leaves the file the pointers name
+    assert eng._supplement_always({}, paper, None) == []
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "| a = 1 |" in shown and "- [W1] Page 1." in shown and "- [W2] Page 2." in shown
+    assert paper.read_text(encoding="utf-8") == text
+    # written as it should be, it is not written again
+    before = (tmp_path / sup.FILE).stat().st_mtime_ns
+    real = Path.write_text
+
+    def no_rewrite(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        assert self != tmp_path / sup.FILE, "the supplement was written again with the same text"
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", no_rewrite)
+    eng._supplement_always({}, paper, None)
+    assert (tmp_path / sup.FILE).stat().st_mtime_ns == before
+
+
 def test_a_supplement_page_the_text_comes_to_cite_leaves_the_supplement(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path, topic=NO_LIMIT)
     paper = _put(eng, tmp_path)
