@@ -345,7 +345,7 @@ class ImproveStageMixin:
                 name = _improve.edited_path(edit, allowed)  # `simulate.py`, or `<package>/model.py` for the model's package
                 candidate = {**files, name: new_text}
                 tried.add(_improve.fingerprint(candidate))
-                entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit), ran=True)
+                entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit, name), ran=True)
                 _improve.restore(root, candidate)
                 saved = _improve.guard_bytes(root)
                 tree = _improve.tree_bytes(root)  # code/ as the round starts, git's settings and hooks included

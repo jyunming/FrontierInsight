@@ -3615,7 +3615,7 @@ class RunChecksMixin:
             name = _improve.edited_path(edit, allowed)
             candidate = {**files, name: new_text}
             tried.add(_improve.fingerprint(candidate))
-            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit))
+            entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit, name))
             _improve.restore(root, candidate)
             saved = _improve.guard_bytes(root)
             before_guard = _improve.guard_hashes(root)

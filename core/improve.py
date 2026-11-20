@@ -1003,11 +1003,11 @@ def code_block(files: dict[str, str], allowed: list[str]) -> str:
     return "\n\n".join(out)
 
 
-def diff_text(edit: Edit) -> str:
+def diff_text(edit: Edit, name: str | None = None) -> str:
     def cut(text: str) -> str:
         return text if len(text) <= 1200 else text[:1200] + "..."
 
-    return f"in {edit.file}, replaced:\n{cut(edit.find)}\nwith:\n{cut(edit.replace)}"
+    return f"in {name or edit.file}, replaced:\n{cut(edit.find)}\nwith:\n{cut(edit.replace)}"
 
 
 # --- the record ------------------------------------------------------------------------------------------------------

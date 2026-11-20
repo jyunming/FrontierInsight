@@ -823,3 +823,10 @@ def test_an_ambiguous_bare_name_is_refused_and_names_both_paths() -> None:
 def test_the_files_the_prompt_lists_are_paths_in_code() -> None:
     assert improve.editable_line(["simulate.py", "toy_model/model.py"]) == "code/simulate.py, code/toy_model/model.py"
     assert improve.editable_line([]) == "(none)"
+
+
+def test_the_diff_of_an_accepted_edit_names_the_resolved_path() -> None:
+    edit = improve.Edit(file="model.py", find="a", replace="b", why="w")
+    name = improve.edited_path(edit, ["simulate.py", "toy_model/model.py"])
+    assert improve.diff_text(edit, name).startswith("in toy_model/model.py,")
+    assert improve.diff_text(edit).startswith("in model.py,")  # a refused edit keeps the name it gave
