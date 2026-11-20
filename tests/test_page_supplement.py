@@ -210,10 +210,51 @@ def test_the_paper_as_delivered_keeps_them_out_without_a_page_limit(tmp_path: Pa
     assert all(f"- [W{n}] Page {n}." in shown for n in (1, 2, 3))
 
 
+def test_a_supplement_page_the_text_comes_to_cite_leaves_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert sup.further_labels(tmp_path) == ["W1", "W2"]
+    # a fix of the citation check cites W2 instead of a source that did not say it; the References now list it
+    text = paper.read_text(encoding="utf-8").replace("Text [1].", "Text [W2].")
+    text = text.replace("1. Kermack, W. O. (1927). A contribution.", "- [W2] Page 2. https://example.org/2")
+    paper.write_text(text, encoding="utf-8")
+    eng._supplement_always({}, paper, None)
+    text = paper.read_text(encoding="utf-8")
+    assert sup.further_labels(tmp_path) == ["W1"] and sup.further_pointer(1) in text and text.count("Further reading: ") == 1
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "- [W1] Page 1." in shown and "[W2]" not in shown
+
+
+def test_the_citation_check_may_cite_a_page_that_is_in_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    from core import citation_support as cs
+
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert "[W1]" not in paper.read_text(encoding="utf-8")
+    seen: dict[str, Any] = {}
+    real = cs.Source
+
+    def spy(*a, **k):  # noqa: ANN002, ANN003
+        src = real(*a, **k)
+        seen[src.label] = src.usable
+        return src
+
+    monkeypatch.setattr(cs, "Source", spy)
+    web = {"content": "Page 1 text.", "metadata": {"source": "web_search", "kind": "web_page", "title": "Page 1",
+                                                   "url": "https://example.org/1", "site": "example.org"}}
+    state = {"topic": eng.config.topic, "paper_md": str(paper), "review": {}, "literature": [web]}
+    asyncio.run(eng._check_citations(state))  # type: ignore[arg-type]
+    assert seen.get("W1") is True, "a page the paper lists in its supplement stays usable for a fix"
+
+
 def test_a_tables_block_without_a_table_stays_where_it_is(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path, topic=NO_LIMIT)
     paper = _put(eng, tmp_path)
-    note = "Results for all 512 settings are in the supplementary table `paper/results_by_setting.csv`."
+    note = "Results for all 40 settings are in the supplementary table `paper/results_by_setting.csv`."
     (tmp_path / ".fi" / "results_table.md").write_text(note + "\n", encoding="utf-8")
     eng._restate_limitations({}, "test", path=paper)
     _pages(monkeypatch, 0)

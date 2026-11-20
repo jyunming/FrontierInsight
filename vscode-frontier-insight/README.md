@@ -108,7 +108,8 @@ fewer), the model is asked which sentences of the background and discussion to
 take out, and the engine decides what may go. A paper still over is delivered as
 written, and QUALITY.md says so.
 Without a limit the paper keeps its usual layout and
-length.
+length (its tables of every setting and its Further reading still go to the
+supplement).
 
 ## One-time setup
 

@@ -1724,7 +1724,8 @@ class WriteStageMixin:
 
         literature = state.get("literature") or []
         audience = self.config.output.audience
-        listed = set(web_pages_listed(paper) or [])
+        # the pages the paper lists, its Further reading in the supplement among them (every paper keeps it there)
+        listed = set(web_pages_listed(paper) or []) | set(_supplement.further_labels(self.quest_root))
         sources: dict[str, _cs.Source] = {}
         for label, meta, item in _labelled_sources(literature, audience):
             text, _readings = _split_figure_readings(_item_content(item))
@@ -3120,6 +3121,7 @@ class WriteStageMixin:
                           _receipts.path(root, "claim_check"), _receipts.path(root, "citation_check"))}
         parts = _supplement.moved(root)
         newly: list[str] = []
+        cited: set[str] = set()
         try:
             for part in _supplement.ALWAYS:
                 if not self._supplement_can_move(part, text):
@@ -3131,9 +3133,20 @@ class WriteStageMixin:
                 newly.append(part)
                 self._supplement_move(state, paper_path, part, text, parts, limit)
                 text = paper_path.read_text(encoding="utf-8")
+            # a page the text now cites (a fix of the citation check may cite one) is listed under the References, so
+            # it leaves the supplement's Further reading
+            labels = _supplement.further_labels(root)
+            cited = set(labels) & _web_labels_cited(text)
+            if cited:
+                kept = [x for x in labels if x not in cited]
+                lines = [ln for ln in _supplement.further_text(root).split("\n")
+                         if ln.strip() and _further_label(ln) not in cited]
+                parts = [p for p in parts if p != _supplement.FURTHER_READING or kept]
+                _supplement.save(root, parts, limit=limit, further=kept, further_lines="\n".join(lines),
+                                 writer=_supplement.writer_text(root), section=_supplement.writer_section(root))
             n = len(_supplement.further_labels(root))
             pointed = _with_further_pointer(text, n)
-            if n and pointed != text:
+            if pointed != text and (n or cited):
                 before = paper_path.read_bytes()
                 paper_path.write_text(pointed, encoding="utf-8")
                 for check in ("claim_check", "citation_check"):
@@ -3145,10 +3158,11 @@ class WriteStageMixin:
             self._log.warning("[supplement] FI's own parts could not be moved to the supplement (%s); the paper keeps "
                               "them", e)
             return []
-        if newly:
+        if newly or cited:
             if not self._write_supplement(state, limit):
                 self._restore_files(keep)  # the paper cannot point to a supplement that is not there
                 return []
+        if newly:
             self._log.info("[supplement] FI moved its own %s to the supplement (%s); the paper keeps one line pointing "
                            "to each", " and ".join(_supplement.NAMES[p] for p in newly), _supplement.SHOWN)
         return newly
