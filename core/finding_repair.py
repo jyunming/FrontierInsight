@@ -105,6 +105,11 @@ def judged(name, e, path):
     return {{"test": name, "status": "error", "kind": "exception", "place": place, "at": at, "line": line,
              "detail": said(e)}}
 
+HELD = {{}}
+
+def RUN(fn, path):
+    fn()
+{capture}
 out = {{}}
 for given in {paths!r}:
     path = os.path.abspath(given)
@@ -122,9 +127,12 @@ for given in {paths!r}:
                              "detail": "the file defines no test_* function"}})
         for n in names:
             try:
-                getattr(mod, n)()
+                RUN(getattr(mod, n), path)
             except BaseException as e:
-                results.append(judged(n, e, path))
+                row = judged(n, e, path)
+                if row.get("status") == "fail" and HELD.get(id(e)) is not None:
+                    row["held"] = HELD[id(e)]
+                results.append(row)
             else:
                 results.append({{"test": n, "status": "pass", "detail": ""}})
     out[given] = results
@@ -196,8 +204,140 @@ def runs_nothing_on_import(path: Path) -> bool:
     return True
 
 
-def harness_source(code_dir: str, paths: list[str]) -> str:
-    return HARNESS.format(code=str(code_dir), paths=[str(p) for p in paths], mark=MARK)
+#: Added to :data:`HARNESS` when FI also records what a failing test was given (``harness_source(..., capture=True)``): every
+#: value a function of the study's code returned to the test, and the records the test held when its assertion failed, as
+#: the names they hold (keys of a mapping, columns of a table, fields of an object, and those of the records inside them).
+#: ``record`` says whether a returned value is a record of names at all (a bare number or array is not), and ``complete``
+#: whether FI listed everything: a value it cannot list, too many values or names, or nesting too deep make it false.
+#: ``failures``: per failing test function, the line its assertion failed on and the names of that frame that held nothing
+#: (``None`` or an empty container) at that moment.
+CAPTURE = '''
+import collections.abc as _abc, types as _types
+
+_PLAIN = (type(None), bool, int, float, complex, str, bytes)
+_NOT_RECORDS = (_types.FunctionType, _types.BuiltinFunctionType, _types.MethodType, _types.ModuleType, type)
+
+def _names(value, out, state, depth=0):
+    if state["seen"] > 20000 or depth > 5:
+        state["complete"] = False
+        return
+    state["seen"] += 1
+    if isinstance(value, _PLAIN) or isinstance(value, _NOT_RECORDS):
+        return
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None and getattr(value, "shape", None) is not None:
+        names = getattr(dtype, "names", None)
+        if names:
+            out.update(str(n) for n in names)
+        elif str(getattr(dtype, "kind", "")) == "O":
+            try:
+                flat = list(value.ravel()[:1000])
+            except Exception:
+                state["complete"] = False
+                return
+            for v in flat:
+                _names(v, out, state, depth + 1)
+        return
+    if isinstance(value, _abc.Mapping):
+        for k, v in list(value.items())[:2000]:
+            out.add(str(k))
+            _names(v, out, state, depth + 1)
+        if len(value) > 2000:
+            state["complete"] = False
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+        for v in items[:1000]:
+            _names(v, out, state, depth + 1)
+        if len(items) > 1000:
+            state["complete"] = False
+        return
+    keys = getattr(value, "keys", None)
+    if callable(keys):
+        try:
+            out.update(str(k) for k in list(keys())[:2000])
+            return
+        except Exception:
+            state["complete"] = False
+            return
+    fields = getattr(value, "__dict__", None)
+    slots = getattr(type(value), "__slots__", None)
+    if isinstance(fields, dict) or slots:
+        for k, v in list((fields or {}).items()):
+            out.add(str(k))
+            _names(v, out, state, depth + 1)
+        for k in ([slots] if isinstance(slots, str) else list(slots or [])):
+            out.add(str(k))
+            if hasattr(value, k):
+                _names(getattr(value, k), out, state, depth + 1)
+        return
+    state["complete"] = False
+
+def _is_record(value):
+    if isinstance(value, _abc.Mapping) or getattr(getattr(value, "dtype", None), "names", None):
+        return True
+    if isinstance(value, _PLAIN) or isinstance(value, _NOT_RECORDS) or getattr(value, "shape", None) is not None:
+        return False
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return False
+    return callable(getattr(value, "keys", None)) or isinstance(getattr(value, "__dict__", None), dict)
+
+def RUN(fn, path):
+    returned, state = [], {"seen": 0, "complete": True}
+    test_file = os.path.abspath(path)
+    inside = code_dir + os.sep
+
+    def watch(frame, event, arg):
+        if event != "return" or frame.f_back is None:
+            return
+        if os.path.abspath(frame.f_back.f_code.co_filename) != test_file:
+            return
+        if not os.path.abspath(frame.f_code.co_filename).startswith(inside):
+            return
+        if frame.f_code.co_name == "__init__" and arg is None:
+            return
+        if len(returned) >= 200:
+            state["complete"] = False
+            return
+        names = set()
+        _names(arg, names, state)
+        returned.append({"function": frame.f_code.co_name, "record": _is_record(arg), "names": sorted(names)})
+
+    sys.setprofile(watch)
+    try:
+        fn()
+    except AssertionError as e:
+        sys.setprofile(None)
+        held = set()
+        for r in returned:
+            held.update(r["names"])
+        tb, line, empty = e.__traceback__, 0, []
+        while tb is not None:
+            frame = tb.tb_frame
+            if os.path.abspath(frame.f_code.co_filename) == test_file:
+                local = dict(frame.f_locals)
+                for v in list(local.values()):
+                    _names(v, held, state)
+                # the frame the assertion failed in (the innermost of the test file): its line, and its names that hold
+                # nothing (None or an empty container)
+                line = tb.tb_lineno
+                empty = sorted(k for k, v in local.items()
+                               if v is None or isinstance(v, (list, tuple, set, frozenset, dict, _abc.Mapping)) and len(v) == 0)
+            tb = tb.tb_next
+        if len(held) > 5000:
+            state["complete"] = False
+        HELD[id(e)] = {"returned": returned, "names": sorted(held)[:5000], "complete": state["complete"],
+                       "failures": [{"line": line, "empty": empty}]}
+        raise
+    finally:
+        sys.setprofile(None)
+'''
+
+
+def harness_source(code_dir: str, paths: list[str], capture: bool = False) -> str:
+    """The harness that runs ``paths`` with ``code_dir`` on the path. ``capture``: also record, for a test that fails by its
+    assertion, what the study's code gave it (:data:`CAPTURE`, in ``TestRun.held``)."""
+    return HARNESS.format(code=str(code_dir), paths=[str(p) for p in paths], mark=MARK, capture=CAPTURE if capture else "")
 
 
 @dataclass
@@ -214,6 +354,9 @@ class TestRun:
     place: str = ""
     at: str = ""
     line: str = ""
+    #: For a failure run with ``capture``: what the study's code returned to the test and the names of the records it held
+    #: when its assertion failed (:data:`CAPTURE`); ``None`` otherwise.
+    held: dict[str, Any] | None = None
 
 
 def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
@@ -244,9 +387,21 @@ def parse_runs(stdout: str, paths: list[str]) -> dict[str, TestRun]:
         at = str(first.get("at") or "")
         detail = (f"{first.get('test')}: {first.get('detail') or 'the assertion failed'}"
                   + (f" (at {at})" if at and not fails else ""))
+        held = _held_of(fails)
         out[path] = TestRun("fail" if fails else "error", detail, str(first.get("kind") or ""),
-                            str(first.get("place") or ""), at, str(first.get("line") or ""))
+                            str(first.get("place") or ""), at, str(first.get("line") or ""), held)
     return out
+
+
+def _held_of(fails: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What every failing test function of a file was given (:data:`CAPTURE`), together: ``None`` unless each one has it."""
+    helds = [r.get("held") for r in fails]
+    if not helds or not all(isinstance(h, dict) for h in helds):
+        return None
+    return {"returned": [x for h in helds for x in (h.get("returned") or [])],
+            "names": sorted({str(n) for h in helds for n in (h.get("names") or [])}),
+            "complete": all(h.get("complete") is True for h in helds),
+            "failures": [x for h in helds for x in (h.get("failures") or [])]}
 
 
 def regressions(before: dict[str, str], after: dict[str, str]) -> list[str]:

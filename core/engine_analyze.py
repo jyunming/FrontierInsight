@@ -20,6 +20,13 @@ from .engine_base import (  # noqa: F401
 )
 
 
+
+def _absent_how(names: list[str]) -> str:
+    """How a finding whose test looks for names the code never gave it is judged: what the record and the logs say."""
+    return (f"its test looks for {', '.join(names)[:160]}, which nothing the study's code gave the test holds and FI's own "
+            "records of the run hold no value for: a part not done, not a wrong number")
+
+
 class AnalyzeStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -1156,7 +1163,8 @@ class AnalyzeStageMixin:
         record = _code_review.load(self.quest_root)
         # What an earlier pass of the gate decided about an issue is decided again on this run's code and results.
         stale = [i for i in _code_findings.issues_of(record).values()
-                 if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None)])]
+                 if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None),
+                                                 i.pop("held_at_failure", None)])]
         if stale:
             _code_review.save(self.quest_root, record)
         names = _code_review.headline_names(state.get("design"), self._protocol_block(state))
@@ -1238,7 +1246,14 @@ class AnalyzeStageMixin:
                 continue
             runs = [await self._rerun_finding_test(rel)]
             if runs[0] is None or runs[0].status != "pass":
-                runs.append(await self._rerun_finding_test(rel))  # a test that does not pass is run once more
+                # a test that does not pass is run once more, this time recording what the study's code gave it (a record of
+                # names FI can compare with the names the test looks for); a run that then gives no answer leaves the first one
+                runs.append(await self._rerun_finding_test(rel, capture=True))
+            held = getattr(runs[-1], "held", None) if len(runs) > 1 and runs[-1] is not None and runs[-1].status == "fail" else None
+            for target in {id(x): x for x in (issue, saved) if isinstance(x, dict)}.values():
+                target.pop("held_at_failure", None)
+                if isinstance(held, dict):
+                    target["held_at_failure"] = held
             # a pass in either run clears it (a flaky test stops nothing); else a failing assertion in either run stands
             # (an error in the other run does not hide it); else an error; else no answer at all
             given = [r for r in runs if r is not None]
@@ -2034,7 +2049,7 @@ class AnalyzeStageMixin:
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif _code_review.missing_quantities(record, issue):
-                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach, moved)
             elif not (reach is not None and reach.ids) and (keys := _code_review.keys_of_issue(record, issue, result)):
                 # Only a quest with no frozen plan (no records of FI's to place a finding by): the finding's own quantity names the
                 # keys. A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
@@ -2044,7 +2059,9 @@ class AnalyzeStageMixin:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
                                                "them out"))
             elif _code_review.not_obtained(record, issue, result, declared):
-                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach, moved)
+            elif not moved and (absent := self._absent_at_failure(issue, result, reach)):
+                not_done.append((issue, how + "; " + _absent_how(absent), absent))
             else:
                 # The records of FI's (the plan's frozen protocol, the trials, the call graph) do not place the finding, and the
                 # reader's words are not a record: nothing is left out or kept on them.
@@ -2164,15 +2181,31 @@ class AnalyzeStageMixin:
 
     @staticmethod
     def _part_not_done_or_stop(stops: list, not_done: list, issue: dict[str, Any], how: str, record: dict[str, Any], result: Any,
-                               declared: list[str] | None, reach: "_shown_reach.Reach | None") -> None:
+                               declared: list[str] | None, reach: "_shown_reach.Reach | None", moved: bool = False) -> None:
         """A finding that a plan quantity is not computed: a part not done only when FI's own record of the run shows no value
         was worked out for it AND the failing test reads no reported key that holds a value (the test would place the finding on
-        that key). Otherwise the test may stand for a value reported under another name, and the quest stops."""
+        that key), or when what FI recorded as the test ran shows the names it looks for were never given to it
+        (:meth:`_absent_at_failure`) and no rerun moved a number. Otherwise the test may stand for a value reported under
+        another name, and the quest stops."""
         absent = _code_review.not_obtained(record, issue, result, declared)
         if absent and not (reach is not None and reach.reads_held_key(issue, result)):
             not_done.append((issue, how, absent))
+        elif not moved and (gone := AnalyzeStageMixin._absent_at_failure(issue, result, reach)):
+            not_done.append((issue, how + "; " + _absent_how(gone), gone))
         else:
             stops.append((issue, how + "; " + _UNPLACED_FINDING))
+
+    @staticmethod
+    def _absent_at_failure(issue: dict[str, Any], result: Any, reach: "_shown_reach.Reach | None") -> list[str]:
+        """The names a finding's failing test looks for that FI saw the study's code never give it, read from what FI recorded
+        when it ran the test again (``held_at_failure``) and from FI's own records of the run (:meth:`core.shown_reach.Reach.
+        absent_names`); ``[]`` when that is not shown."""
+        if reach is None:
+            return []
+        try:
+            return reach.absent_names(issue, result, issue.get("held_at_failure"))
+        except Exception:  # noqa: BLE001 - what cannot be read shows nothing absent: the finding is judged as before
+            return []
 
     @staticmethod
     def _in_results(names: list[str], result: Any) -> bool:
@@ -2226,11 +2259,12 @@ class AnalyzeStageMixin:
             return False
         return True
 
-    async def _rerun_finding_test(self, rel: str) -> Any:
+    async def _rerun_finding_test(self, rel: str, capture: bool = False) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process
-        printed no answer (it ran past its time, or ended the process)."""
+        printed no answer (it ran past its time, or ended the process). ``capture``: a failure also records what the study's
+        code returned to the test and the records it held (``TestRun.held``)."""
         try:
-            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel])],
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel], capture=capture)],
                                                      timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S,
                                                      env=self._finding_test_env(stand_ins=False))
         except Exception as exc:  # noqa: BLE001 - a run past its time limit raises from the executor
