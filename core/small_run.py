@@ -31,6 +31,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from . import execution as _execution
@@ -46,6 +47,11 @@ TRIALS = 3
 BUDGET_FRAC = 0.1
 BUDGET_MIN_S = 30
 BUDGET_MAX_S = 180
+#: Seconds past the budget that the settings run together are given to stop (their process trees killed) before they are
+#: cancelled: the small run returns within the budget plus this, whatever a stuck process does after it is told to stop.
+CLEANUP_S = 5.0
+#: The clock of the time budget (a seam for tests: they give it a clock they advance themselves).
+_clock = time.monotonic
 DIR = Path(".fi") / "small_run"
 RECORD = Path(".fi") / "small_run.json"
 #: The small run's trials in the record format of a study, which FI's analysis is run on before the long run.
@@ -311,7 +317,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
     folder.mkdir(parents=True, exist_ok=True)
     (quest_root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
     (quest_root / _trials.HARNESS_PATH).write_text(_trials.HARNESS_SOURCE, encoding="utf-8")
-    started = time.monotonic()
+    started = _clock()
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
     executor = _trials._outside_executor(executor, quest_root)
     chosen = settings(grid)
@@ -333,7 +339,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
     async def start(task: dict[str, Any], setting: Setting, run_env: dict[str, str] | None) -> Any:
         """The process of one setting, given what is left of the time (for a study of parts, its share of it); ``None``
         when no time is left (the setting is timed out without starting)."""
-        left = int(timeout_s - (time.monotonic() - started))
+        left = int(timeout_s - (_clock() - started))
         if parts_run:
             # an equal share of what is left with those still waiting for a place
             left = left // max(1, math.ceil(waiting[0] / slots))
@@ -362,22 +368,58 @@ async def run(executor: Any, python: Path | str, quest_root: Path, module: str, 
         if metered:
             executor.meter = gate.note
 
-        async def one(task: dict[str, Any], setting: Setting) -> str:
-            async with gate.slot():
-                result = await start(task, setting, run_env)
-            return "" if result is None else _read_setting(quest_root, task, setting, result)
+        first_bad = [len(tasks)]  # the first setting, in the plan's order, that could not load the simulation
 
+        async def one(index: int, task: dict[str, Any], setting: Setting) -> str:
+            async with gate.slot():
+                if index > first_bad[0]:
+                    return ""  # one before it could not load the simulation: as one after another, this is never started
+                result = await start(task, setting, run_env)
+                error = "" if result is None else _read_setting(quest_root, task, setting, result)
+                if error:
+                    first_bad[0] = min(first_bad[0], index)  # said before the place is given up: no waiting setting starts
+            return error
+
+        jobs = [asyncio.ensure_future(one(i, task, setting)) for i, (task, setting) in enumerate(tasks)]
+        position = {job: i for i, job in enumerate(jobs)}
+        pending = set(jobs)
+        stopping: set[asyncio.Future] = set()  # cancelled because an earlier setting could not load the simulation
+        hard_stop = started + timeout_s + CLEANUP_S  # the whole small run, cleanup included, ends by then
         try:
-            errors = await asyncio.gather(*(one(task, setting) for task, setting in tasks))
+            while pending:
+                left = hard_stop - _clock()
+                if left <= 0:
+                    break
+                done, pending = await asyncio.wait(pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+                for job in done:
+                    if job.exception() is not None:
+                        raise job.exception()  # type: ignore[misc]  # an executor that raised: the finally stops the rest
+                # No setting after the first that could not load the simulation is started or waited for (the one-at-a-time
+                # run stopped there); those before it are still run, as they were before it.
+                stopping |= {job for job in pending if position[job] > first_bad[0]}
+                pending -= stopping
+                for job in stopping:
+                    job.cancel()
         finally:
+            # Whatever is not finished (the time is out, one raised) is cancelled and awaited: the executor then stops its
+            # process tree, and nothing runs on after this returns.
+            for job in pending:
+                job.cancel()
+            if pending | stopping:
+                await asyncio.gather(*(pending | stopping), return_exceptions=True)
             if metered:
                 executor.meter = meter_before
-        for (_task, setting), error in zip(tasks, errors):
+        stopped = SimpleNamespace(timed_out=True)
+        for (task, setting), job in zip(tasks, jobs):
             out.append(setting)
+            if job.cancelled():
+                _read_setting(quest_root, task, setting, stopped)  # what it wrote; the trials it did not finish: timed out
+                continue
+            error = job.result()
             if error:
                 load_error = error
                 break  # as one after another: the settings up to the first that could not load the simulation
-    got = SmallRun(out, load_error, time.monotonic() - started, axes)
+    got = SmallRun(out, load_error, _clock() - started, axes)
     try:
         (quest_root / TRIALS_PATH).parent.mkdir(parents=True, exist_ok=True)
         (quest_root / TRIALS_PATH).write_text(json.dumps(got.trials(thresholds), allow_nan=True, default=str),
