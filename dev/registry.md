@@ -326,7 +326,8 @@ same PR that adds, splits or renames one.
   `_stop_if_the_search_cannot_start` too.
 - `core/best_design_report.py` — what a search for the best design hands over: `section` / `for_paper` (the paper's
   "Best design found" section from `results/best_design.json` and `needs/OPTIMUM_CHECK.json`), `mark_paper` /
-  `without_block` (between `<!-- fi:best-design -->` markers; `Engine._mark_best_design` in `_node_write`;
+  `without_block` (between `<!-- fi:best-design -->` markers; `Engine._mark_best_design` in `_node_write`; a section the
+  writer gave FI's heading keeps that one heading and FI's record goes at its end, `_writer_section`;
   `insert_before_discussion` also places `{{results_table}}`),
   `strip_for_checks` (the claim check), `records` (the best design's rows), `write_note` (the writer's note), `summary_line` / `files` (the `[FI] best design:` lines in
   `launch._report_best_design`, the web quest API's `best_design`, the VS Code chat), `write_readable`
