@@ -2962,8 +2962,9 @@ class WriteStageMixin:
         tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
         text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
         holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
-        is already its pointer (the supplement would hold nothing more). The answers move only when their full lines
-        say more than the short ones the paper keeps."""
+        is already its pointer (the supplement would hold nothing more). The answers move only when the paper is shorter
+        for it: their full lines, filled, are longer than the short ones with the line that points to the supplement
+        (a study whose full lines add only a few words keeps them in the paper)."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
@@ -2973,7 +2974,13 @@ class WriteStageMixin:
             return bool(_paper_facts.limitations_text(self.quest_root))
         if part == _supplement.ANSWERS:
             full, short = _paper_facts.answers_forms(self.quest_root)
-            return bool(full) and short != full
+            if not full or short == full:
+                return False
+            rec = self._paper_records({})  # type: ignore[arg-type]
+
+            def words(block: str) -> int:
+                return len(_paper_values.without_marks(_paper_values.fill(block, rec)[0]).split())
+            return words(full) > words(short) + len(_supplement.answers_pointer().split())
         block = _paper_facts.block_text(self.quest_root, part, full=True)
         return any(line.lstrip().startswith("|") for line in block.splitlines())
 

@@ -4,7 +4,7 @@ Every paper sends three of FI's own parts here, with or without a page limit and
 (``Engine._supplement_always``): its tables of every setting (:data:`TABLES`; the paper keeps one sentence that points
 here, :func:`table_pointer`) when the block holds a table, its answers to the questions asked in full (:data:`ANSWERS`;
 the paper keeps one short line for each question, core/paper_facts.py::answers_text with ``brief``, and a line that
-points here, :func:`answers_pointer`) when the full lines say more than the short ones, and its Further reading
+points here, :func:`answers_pointer`) when that makes the paper shorter, and its Further reading
 (:data:`FURTHER_READING`; the References keep one line that says how many pages it lists and where,
 :func:`further_pointer`) when the text cites none of its pages. These are :data:`ALWAYS`.
 
