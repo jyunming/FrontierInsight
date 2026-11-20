@@ -88,3 +88,21 @@ def test_an_entry_point_imported_from_a_helper_counts() -> None:
         "it does not define run_trial, which FI calls and the script has now")
     assert f(OLD, "import pkg as run_cell\nfrom pkg.fixed import run_trial\n", "simulate.py")
     assert f(OLD, "run_cell: object\nfrom pkg.fixed import run_trial\n", "simulate.py")
+
+
+def test_an_oracle_is_what_the_module_binds_not_a_word_in_its_text() -> None:
+    """A trial-mode repair for a check with no case needs ``oracle`` bound at the module's top level, read as Python binds
+    it: FI takes ``oracle`` from the module when it calls it, so one imported from a helper is one; a comment, a function
+    whose name only starts with the word, or a ``def oracle`` nested in another function is none."""
+    f = trial_runner.repair_breaks_contract
+    checks = [{"name": "drift"}]  # no case: the script's own oracle() answers it
+    imported = GOOD + "from checks import oracle\n"
+    assert f(OLD, imported, "simulate.py", oracles=checks, trial=True) == ""
+    assert f(OLD, GOOD + "\n\ndef oracle():\n    return {'drift': 0.0}\n", "simulate.py", oracles=checks, trial=True) == ""
+    refused = "it defines no oracle() and some check has no case FI can run"
+    assert f(OLD, GOOD + "# def oracle() is not needed here\n", "simulate.py", oracles=checks, trial=True) == refused
+    assert f(OLD, GOOD + "\n\ndef oracle_helper():\n    return {'drift': 0.0}\n", "simulate.py", oracles=checks,
+             trial=True) == refused
+    nested = GOOD + "\n\ndef outer():\n    def oracle():\n        return {'drift': 0.0}\n    return oracle\n"
+    assert f(OLD, nested, "simulate.py", oracles=checks, trial=True) == refused
+    assert f(OLD, GOOD, "simulate.py", oracles=[{"name": "drift", "case": {"a": 1}, "measure": "x"}], trial=True) == ""

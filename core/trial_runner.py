@@ -1575,8 +1575,9 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     script (a bare word such as a placeholder parses as Python and defines nothing) is refused here.
 
     ``oracles`` is given by a repair made for the oracle checks and adds what those need: in a trial-mode quest
-    (``trial``) the text must define ``oracle()`` or every check must have a case FI runs; otherwise the script must
-    carry the ``FI_ORACLE`` marker. This is the one place that rule is written; every repair path asks it.
+    (``trial``) the module must bind ``oracle`` at its top level (a ``def``, or a name imported from a helper: FI takes it
+    from the module when it calls it) or every check must have a case FI runs; otherwise the script must carry the
+    ``FI_ORACLE`` marker. This is the one place that rule is written; every repair path asks it.
     """
     try:
         tree = ast.parse(new or "")
@@ -1593,7 +1594,8 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
         if framed:
             return framed
     if oracles is not None:
-        if trial and not ("def oracle" in new or all(_oracle.case_of(o) for o in oracles)):
+        # read as Python binds it, not as text: a comment or `def oracle_helper` is no oracle(), an import of one is
+        if trial and not ("oracle" in _top_level_names(tree) or all(_oracle.case_of(o) for o in oracles)):
             return "it defines no oracle() and some check has no case FI can run"
         if not trial and "FI_ORACLE" not in new:
             return "it does not honour FI_ORACLE"
