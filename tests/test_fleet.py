@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -349,3 +350,118 @@ async def test_a_round_of_improvement_runs_the_trials_at_the_quests_share(
     _rows, problems = await engine._improve_measure({"grid": {"x": [1.0, 2.0]}}, [], {"y"})
     assert handed == [4]
     assert any("the trials could not be run" in p for p in problems)
+
+
+# --- the threads of a fleet's processes: each process its share of the quest's share of the cores ---
+
+
+def _sharing_executor(cores: int | None):
+    """Runs a command in this interpreter's environment, keeping the environment each process was given."""
+    from tests.test_optimise_runner import LocalExecutor
+
+    class _Sharing(LocalExecutor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cores = cores
+            self.envs: list[dict[str, str]] = []
+
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
+            self.envs.append(dict(env or {}))
+            return await super().execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    return _Sharing()
+
+
+def _trial_quest(tmp_path: Path) -> Path:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / ".fi").mkdir()
+    (root / "code" / "simulate.py").write_text(
+        "def run_trial(cell, seed):\n    return {'y': float(cell['x'])}\n\n\n"
+        "def run_cell(cell):\n    return {'y': float(cell['x'])}\n", encoding="utf-8")
+    return root
+
+
+def test_an_engine_of_a_fleet_gives_its_executor_its_share_of_the_cores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quest of a fleet of 2 on 16 cores: its processes share 8 cores; a quest alone does not limit them."""
+    from core import execution
+
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    assert execution.quest_cores(Engine(_make_cfg(tmp_path, "two"), fleet=2).executor) == 8
+    assert execution.quest_cores(Engine(_make_cfg(tmp_path, "one")).executor) is None
+
+
+@pytest.mark.parametrize(("cores", "threads"), [(8, "1"), (None, "2")])
+def test_the_trials_of_a_quest_in_a_fleet_start_their_share_of_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cores: int | None, threads: str,
+) -> None:
+    """8 settings at once of a quest whose processes share 8 of 16 cores: 1 thread each (2 quests x 8 x 1 = 16); alone,
+    2 each (8 x 2 = 16)."""
+    import sys
+
+    from core import trial_runner
+
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    root = _trial_quest(tmp_path)
+    executor = _sharing_executor(cores)
+    run = asyncio.run(trial_runner.run_trials(
+        executor, sys.executable, root, "code/simulate.py", {"x": [1.0, 2.0]}, runs_per_setting=1, base_seed=0,
+        deterministic=True, timeout_s=120, env=dict(os.environ), at_once=8))
+    assert run.ok_trials == 2
+    assert executor.envs and {e.get("OMP_NUM_THREADS") for e in executor.envs} == {threads}
+
+
+def test_the_check_of_settings_sharing_a_process_runs_on_the_quests_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check whether settings may share a process (core/trial_runner.py::measure_grouping), 2 at once on a quest's
+    8 of 16 cores: 4 threads each, not 8."""
+    import sys
+
+    from core import trial_runner
+
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    root = _trial_quest(tmp_path)
+    executor = _sharing_executor(8)
+    asyncio.run(trial_runner.measure_grouping(
+        executor, sys.executable, root, "code/simulate.py", {"x": [1.0, 2.0, 3.0, 4.0]}, runs_per_setting=1,
+        base_seed=0, deterministic=True, timeout_s=120, per_process=2, cost=None,
+        env=dict(os.environ), at_once=2))
+    assert executor.envs and {e.get("OMP_NUM_THREADS") for e in executor.envs} == {"4"}
+
+
+def test_a_search_s_designs_at_once_start_the_quests_share_of_threads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A search's designs run together (core/optimise.py::EvaluationPool), 8 at once on a quest's 8 of 16 cores: 1
+    thread each."""
+    from core import optimise
+
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    root = _trial_quest(tmp_path)
+    pool = optimise.EvaluationPool(_sharing_executor(8), "python", root, "code/simulate.py", "run_trial", at_once=8,
+                                   runs=1, base_seed=0, deadline=1e12, env={"PATH": "p"}, thresholds=None)
+    assert pool.env is not None and pool.env["OMP_NUM_THREADS"] == "1"
+
+
+def test_the_time_estimate_times_settings_at_once_on_the_quests_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timing of how much slower settings run together (core/run_estimate.py::slowdown_at_once) gives each copy the
+    same threads the run gives it: 8 copies on a quest's 8 of 16 cores, 1 thread each."""
+    import sys
+
+    from core import run_estimate as est
+
+    seen: list[str | None] = []
+
+    async def timed(*a, name, env, **k):  # noqa: ANN001, ANN003
+        seen.append((env or {}).get("OMP_NUM_THREADS"))
+        return est.Probe(None, None, {}, 1.0), ""
+
+    monkeypatch.setattr(est, "_time_one", timed)
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+    factor, _ = asyncio.run(est.slowdown_at_once(_sharing_executor(8), sys.executable, Path("."), "m.py", {}, at_once=8,
+                                                 runs=1, deterministic=True, timeout_s=10, env={"PATH": "p"},
+                                                 thresholds={}))
+    assert factor == 1.0 and seen == [None] + ["1"] * 8

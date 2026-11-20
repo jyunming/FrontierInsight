@@ -609,3 +609,17 @@ def test_processes_run_at_the_same_time_each_get_their_share_of_the_cores(monkey
     monkeypatch.setenv("OMP_NUM_THREADS", "16")
     assert threads_beside(None, 4, cores=16)["OMP_NUM_THREADS"] == "4"
 
+
+def test_one_process_of_a_quest_in_a_fleet_starts_at_most_the_quests_share_of_threads() -> None:
+    """A quest of a fleet whose processes share 4 cores: even one process at a time starts at most 4 threads; a quest
+    alone (no share) is left as it is. An executor that says no share (or a stand-in that says nothing usable) has none."""
+    from unittest.mock import MagicMock
+
+    from core.execution import quest_cores, threads_beside
+
+    assert threads_beside({"OMP_NUM_THREADS": "16"}, 1, cores=4)["OMP_NUM_THREADS"] == "4"
+    assert threads_beside({"OMP_NUM_THREADS": "16"}, 1) == {"OMP_NUM_THREADS": "16"}
+    assert quest_cores(type("E", (), {"cores": 4})()) == 4
+    assert quest_cores(type("E", (), {"cores": None})()) is None
+    assert quest_cores(MagicMock()) is None and quest_cores(object()) is None
+

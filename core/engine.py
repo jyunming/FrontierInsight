@@ -230,6 +230,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # Every version of code/ that runs is a commit in code/'s history (core/code_project.py:CodeRuns).
         self._code_runs = _code_project.CodeRuns(self.quest_root, node=lambda: self._audit_node, log=self._log)
         self.executor.before_run = self._code_runs.before_run
+        if self.fleet > 1:
+            # The quests of a fleet share the cores: each process of this quest starts its share of this quest's share
+            # of threads (core/execution.py::threads_beside), the time estimate's timing included.
+            self.executor.cores = max(1, (os.cpu_count() or 1) // self.fleet)
         self.knowledge = Knowledge(config.knowledge)
         self.audit = _audit_log.AuditLog(self.fi_dir / "audit.jsonl", self.quest_id, enabled=config.engine.audit_trace)
         self._audit_node = ""       # the node running now, for events written from inside it
