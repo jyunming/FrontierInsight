@@ -275,7 +275,7 @@ def test_the_range_check_fires_on_a_value_beyond_the_physical_bound() -> None:
     out = run(Fake(roles=[full()], comparisons=[NO_COMPARE]))
     design = _asserting_design({"design": out.design})
     paths = {(a["path"], a["min"], a["max"]) for a in design["result_assertions"]}
-    assert ("overflow", 0, 1) in paths and ("level_drop", None, 50) in paths
+    assert ("overflow", 0, 1) in paths and ("level_drop", -5, 50) in paths
     assert any(a.path == "overflow" for a in _replicate_assertions({"design": out.design}))
     beyond = plausibility.check_design({"overflow": 1.2, "level_drop": 10.0}, design)
     assert [v.assertion.path for v in beyond] == ["overflow"]
@@ -408,4 +408,48 @@ def test_a_result_with_the_plans_bound_and_a_physical_bound_is_held_to_both() ->
     below = plausibility.check_design({"overflow": 0.5, "level_drop": -6.0}, design)
     beyond = plausibility.check_design({"overflow": 0.5, "level_drop": 51.0}, design)
     assert [v.assertion.min for v in below] == [-5]  # only the plan's own bound reaches below
-    assert len(beyond) == 2  # both bounds say 50 cm: each finding names its own reason
+    # both bounds say 50 cm: one bound per result, so one finding per value beyond it, and it gives both reasons
+    assert [(a["path"], a["min"], a["max"]) for a in design["result_assertions"] if a["path"] == "level_drop"] == [
+        ("level_drop", -5, 50)]
+    assert len(beyond) == 1
+    assert "50 cm deep" in beyond[0].assertion.reason and "tank's floor" in beyond[0].assertion.reason
+    # the plan's own limit is the tighter one below, so sitting on it is not allowed as a physical bound would be
+    assert not beyond[0].assertion.may_equal_bound
+
+
+def test_a_bound_that_is_not_a_finite_number_is_asked_again_once_then_left_out() -> None:
+    for lo in (float("nan"), float("inf"), float("-inf")):
+        assert contract.check_bound("overflow", {"min": lo, "max": 1, "why": "a probability"}, DESIGN), lo
+    bad = full()
+    bad["results"]["overflow"]["bound"] = {"min": float("nan"), "max": 1, "why": "a probability"}
+    fake = Fake(roles=[bad, copy.deepcopy(bad)], comparisons=[NO_COMPARE])
+    out = run(fake)
+    assert [p for p, _ in fake.prompts].count("roles") == 2 and "finite" in fake.prompts[1][1]
+    assert "range" not in metric(out, "overflow") and out.parts["roles"]["valid"]
+    assert out.parts["roles"]["left_out"]["bound"].keys() == {"overflow"}
+    assert any("`overflow`" in n for n in out.notes)
+
+
+def test_an_answer_of_no_system_never_takes_away_the_plans_own() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["protocol"]["system"] = copy.deepcopy(SYSTEM)
+    silent = run(Fake(roles=[copy.deepcopy(PLAIN)], comparisons=[NO_COMPARE]), d)
+    for answer in ({**copy.deepcopy(PLAIN), "system": None}, {**copy.deepcopy(PLAIN), "system": {"parts": [], "links": []}}):
+        out = run(Fake(roles=[answer], comparisons=[NO_COMPARE]), d)
+        assert out.design["protocol"]["system"] == SYSTEM
+        assert frozen_protocol.sha256(out.design["protocol"]) == frozen_protocol.sha256(silent.design["protocol"])
+
+
+def test_an_answer_of_no_bound_never_takes_away_a_bound_the_protocol_holds() -> None:
+    d = copy.deepcopy(DESIGN)
+    d["protocol"]["metrics"][1]["range"] = {"min": 0, "max": 1, "reason": "a probability", "physical": True}
+    answer = copy.deepcopy(PLAIN)
+    answer["results"]["overflow"]["bound"] = None
+    out = run(Fake(roles=[answer], comparisons=[NO_COMPARE]), d)
+    assert metric(out, "overflow")["range"] == d["protocol"]["metrics"][1]["range"]
+
+
+def test_a_title_never_carries_a_number() -> None:
+    assert contract.check_title("valve_scan", "Valve at 2 bar")
+    assert contract.check_title("valve_scan", "Scan at 0.5 opening")
+    assert contract.check_title("valve_scan", "Valve opening scan") == []

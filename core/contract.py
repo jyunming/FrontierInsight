@@ -38,6 +38,7 @@ by its file name.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from typing import Any, Literal
 
@@ -658,7 +659,8 @@ def _joined_range(asserted: Any, own: Any) -> Any:
 
 
 def _is_number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """A finite number (the range check reads no other: core/plausibility.py drops a NaN or an infinite end)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _shape_of(m: dict[str, Any], protocol: dict[str, Any], gaps: list[str]) -> dict[str, Any]:
@@ -819,7 +821,7 @@ def check_bound(rid: str, bound: Any, design: Any) -> list[str]:
     lo, hi = bound.get("min"), bound.get("max")
     out = []
     if (lo is not None and not _is_number(lo)) or (hi is not None and not _is_number(hi)):
-        return [f"`{rid}`: the bound's `min` and `max` must be numbers (or null)"]
+        return [f"`{rid}`: the bound's `min` and `max` must be finite numbers (or null for no bound on that side)"]
     if lo is None and hi is None:
         return [f"`{rid}`: a bound gives `min`, `max` or both; answer `bound`: null when physics fixes none"]
     if lo is not None and hi is not None and lo > hi:
@@ -883,7 +885,8 @@ def group_names(protocol: Any) -> set[str]:
 
 def check_title(name: str, title: Any) -> list[str]:
     """Why ``title``, the plain title an answer gives the sub-study or group ``name``, cannot be used; empty when it can:
-    words a scientist would write, not a name in code and not the name itself written again."""
+    words a scientist would write, not a name in code, not the name itself written again, and no number in it (a number a
+    title typed would be one FI does not hold)."""
     if not isinstance(title, str) or not title.strip():
         return [f"`{name}` needs a plain title"]
     text = " ".join(title.split())
@@ -891,6 +894,9 @@ def check_title(name: str, title: Any) -> list[str]:
         return [f"`{name}`: the title is longer than 80 characters; shorten it"]
     if "_" in text or is_code_name(text) or text.lower().replace(" ", "_") == name.lower():
         return [f"`{name}`: \"{text}\" is the name in code again; give the title a scientist would write in a paper"]
+    if _NUMBER_IN_TEXT.search(text):
+        return [f"`{name}`: the title \"{text}\" has a number in it; FI states every number from the plan by its id, so "
+                "write the title without it (for example \"at a fixed noise\")"]
     return []
 
 
@@ -983,25 +989,42 @@ def check_system(value: Any, protocol: Any) -> list[str]:
     return out
 
 
-def range_assertions(design: Any) -> list[dict[str, Any]]:
-    """The bounds the ranges on the plan's declared results give, written as ``result_assertions`` entries (``path``, ``min``,
-    ``max``, ``unit``, ``reason``), for the range check (core/plausibility.py) to hold every run to: a physical bound FI asked
-    after the plan, or a range the plan wrote on the entry. A physical bound may be reached (``may_equal_bound``). An entry
-    the plan's own ``result_assertions`` already has, with the same numbers, is not repeated."""
+def held_assertions(design: Any) -> list[dict[str, Any]]:
+    """The plan's ``result_assertions`` with the range on each declared result held too, for the range check
+    (core/plausibility.py) to hold every run to: a physical bound FI asked after the plan, or a range the plan wrote on the
+    entry. One bound per result: a range on a result the plan's own ``result_assertions`` already bounds by the same path is
+    joined into that entry (the tighter limit on each side, both reasons), so a value beyond both gives one finding, not one
+    per bound. A value may sit on the joined bound (``may_equal_bound``) when the plan's entry says so, or when every limit
+    it keeps is the physical bound's. A range that does not overlap the plan's own bound leaves that bound as it is."""
     design = design if isinstance(design, dict) else {}
     p = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
-    have = {(str(a.get("path")), a.get("min"), a.get("max")) for a in design.get("result_assertions") or [] if isinstance(a, dict)}
-    out = []
+    out = [dict(a) if isinstance(a, dict) else a for a in design.get("result_assertions") or []]
     for m in p.get("metrics") or []:
         r = m.get("range") if isinstance(m, dict) else None
         rid = _ident(m.get("id")) if isinstance(m, dict) else None
         if rid is None or not isinstance(r, dict):
             continue
         lo, hi = (r.get("min") if _is_number(r.get("min")) else None), (r.get("max") if _is_number(r.get("max")) else None)
-        if (lo is None and hi is None) or (rid, lo, hi) in have or (lo is not None and hi is not None and lo > hi):
+        if (lo is None and hi is None) or (lo is not None and hi is not None and lo > hi):
             continue
-        out.append({"path": rid, "min": lo, "max": hi, "unit": str(m.get("physical_unit") or r.get("unit") or ""),
-                    "reason": str(r.get("reason") or ""), "may_equal_bound": r.get("physical") is True})
+        physical, reason = r.get("physical") is True, str(r.get("reason") or "").strip()
+        i = next((i for i, a in enumerate(out) if isinstance(a, dict) and str(a.get("path") or "").strip() == rid
+                  and (_is_number(a.get("min")) or _is_number(a.get("max")))), None)
+        if i is None:
+            out.append({"path": rid, "min": lo, "max": hi, "unit": str(m.get("physical_unit") or r.get("unit") or ""),
+                        "reason": reason, "may_equal_bound": physical})
+            continue
+        own = out[i]
+        olo, ohi = (own["min"] if _is_number(own.get("min")) else None), (own["max"] if _is_number(own.get("max")) else None)
+        jlo = max(v for v in (lo, olo) if v is not None) if (lo, olo) != (None, None) else None
+        jhi = min(v for v in (hi, ohi) if v is not None) if (hi, ohi) != (None, None) else None
+        if jlo is not None and jhi is not None and jlo > jhi:
+            continue  # they do not overlap: the plan's own bound is the one held (FI's check refuses such an answer)
+        theirs = physical and (jlo is None or jlo == lo) and (jhi is None or jhi == hi)  # every limit kept is the physical one
+        reasons = [x for x in (str(own.get("reason") or "").strip(), reason) if x]
+        out[i] = {**own, "min": jlo, "max": jhi, "unit": str(own.get("unit") or m.get("physical_unit") or r.get("unit") or ""),
+                  "reason": "; ".join(dict.fromkeys(reasons)),
+                  "may_equal_bound": own.get("may_equal_bound") is True or theirs}
     return out
 
 

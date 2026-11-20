@@ -800,7 +800,8 @@ def _titles_text(protocol: dict[str, Any]) -> str:
     if not wanted:
         return ""
     return ("\nThese names of the plan are written as names in code. Give each the plain title a scientist would write in a "
-            "paper (for example \"Scan of the inlet rate\", not \"inlet_scan\"), at most 80 characters, under \"titles\" in the "
+            "paper (for example \"Scan of the inlet rate\", not \"inlet_scan\"), at most 80 characters and with no number in it "
+            "(say \"at a fixed rate\", not \"at 2 L/min\"), under \"titles\" in the "
             "same JSON object beside \"results\": {\"<name>\": \"<title>\"}:\n"
             + "\n".join(f"- {n} ({what})" for n, what in wanted.items()) + "\n")
 
@@ -835,21 +836,22 @@ def _roles_extras(got: Any, value: Any, design: dict[str, Any]) -> tuple[dict[st
 def _apply_role_extras(p: dict[str, Any], value: dict[str, Any], got: Any, bad: dict[str, Any]) -> dict[str, Any]:
     """``p`` with what the roles answer also says, where it can be used (``bad`` holds the rest, left out): a curve or a map on
     the result's entry (``shape``, ``along``; a number writes nothing), a physical bound as the entry's ``range`` (``physical``:
-    true; the range check holds every run to it), and the studied system as ``protocol.system``. A range or a shape FI wrote
-    from an earlier answer goes when this answer gives none; a range the plan wrote itself stays. An answer without
-    ``system`` leaves the plan's own as it is."""
+    true; the range check holds every run to it), and the studied system as ``protocol.system``. Only a usable answer
+    changes what the protocol holds: a bound or a system answered as none (null, missing, no parts) or left out takes none
+    away, so the protocol and its hash stay as they were; a result answered as one number drops a curve it held; a range
+    the plan wrote itself always stays."""
     metrics = []
     for m in p.get("metrics") or []:
         row = value.get(str(m.get("id"))) if isinstance(m, dict) else None
         if isinstance(row, dict):
             rid = str(m["id"])
-            m = {k: v for k, v in m.items() if k not in ("shape", "along")}
-            if row.get("shape") in ("curve", "map") and rid not in bad.get("shape", {}):
-                m.update({"shape": row["shape"], "along": list(row["along"])})
-            if isinstance(m.get("range"), dict) and m["range"].get("physical") is True:
-                m.pop("range")
+            if row.get("shape") is not None and rid not in bad.get("shape", {}):
+                m = {k: v for k, v in m.items() if k not in ("shape", "along")}
+                if row["shape"] in ("curve", "map"):
+                    m.update({"shape": row["shape"], "along": list(row["along"])})
             bound = row.get("bound")
-            if isinstance(bound, dict) and rid not in bad.get("bound", {}) and not isinstance(m.get("range"), dict):
+            planned = isinstance(m.get("range"), dict) and m["range"].get("physical") is not True
+            if isinstance(bound, dict) and rid not in bad.get("bound", {}) and not planned:
                 unit = str(bound.get("unit") or "").strip()
                 m["range"] = {"min": bound.get("min"), "max": bound.get("max"), "reason": _short(bound.get("why"), 300),
                               "physical": True, **({"unit": unit} if unit else {})}
@@ -860,11 +862,9 @@ def _apply_role_extras(p: dict[str, Any], value: dict[str, Any], got: Any, bad: 
     titles = {n: " ".join(said[n].split()) for n in wanted if n not in bad.get("titles", {}) and isinstance(said.get(n), str)}
     if titles:  # the plan's reader name of each, where figures and the paper look for one
         out["labels"] = {**(p.get("labels") if isinstance(p.get("labels"), dict) else {}), **titles}
-    if isinstance(got, dict) and "system" in got and not bad.get("system"):
-        system = got["system"]
-        out = {k: v for k, v in out.items() if k != "system"}
-        if isinstance(system, dict) and system.get("parts"):
-            out["system"] = {"parts": [dict(x) for x in system["parts"]], "links": [dict(x) for x in system.get("links") or []]}
+    system = got.get("system") if isinstance(got, dict) and not bad.get("system") else None
+    if isinstance(system, dict) and system.get("parts"):
+        out["system"] = {"parts": [dict(x) for x in system["parts"]], "links": [dict(x) for x in system.get("links") or []]}
     return out
 
 
