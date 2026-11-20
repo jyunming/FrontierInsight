@@ -1,11 +1,16 @@
-"""The supplement a paper over its page limit sends FI's own parts to.
+"""The supplement FI's own parts go to, out of the paper's body.
 
-A paper rendered over the topic's page limit loses FI's own text first, in a fixed order and without a model call, one
-part at a time until it fits (``Engine._fit_with_supplement``): its tables of every setting (:data:`TABLES`), then its
-Limitations (:data:`LIMITATIONS`: the section keeps one line that says how many things FI recorded, names each part of
-the topic the study did not do, and points here; the paper's own paragraphs of that section go with it, see
-:func:`take_writer_limitations`), then its Further reading (:data:`FURTHER_READING`). The References stay. What moved
-is written, unchanged, to ``paper/supplement.md`` (:data:`FILE`), which ships with the paper.
+Every paper sends two of FI's own parts here, with or without a page limit and without a model call
+(``Engine._supplement_always``): its tables of every setting (:data:`TABLES`; the paper keeps one sentence that points
+here, :func:`table_pointer`) when the block holds a table, and its Further reading (:data:`FURTHER_READING`; the
+References keep one line that says how many pages it lists and where, :func:`further_pointer`) when the text cites
+none of its pages. These are :data:`ALWAYS`.
+
+A paper rendered over the topic's page limit then loses its Limitations too (:data:`LIMITATIONS`, after the parts
+above: ``Engine._fit_with_supplement``): the section keeps one line that says how many things FI recorded, names each
+part of the topic the study did not do, and points here; the paper's own paragraphs of that section go with it, see
+:func:`take_writer_limitations`. The References stay. What moved is written, unchanged, to ``paper/supplement.md``
+(:data:`FILE`), which ships with the paper.
 
 Sentences the page trim takes out of the paper's background and discussion (core/paper_trim.py, after FI's parts)
 move here too, under :data:`SENTENCES`, each with the section it came from; their own record (:data:`TRIM_RECORD`)
@@ -32,19 +37,24 @@ TRIM_RECORD = Path(".fi") / "supplement_trim.json"
 TABLES, LIMITATIONS, FURTHER_READING = "results_table", "limitations", "further_reading"
 SENTENCES = "moved_sentences"
 ORDER = (TABLES, LIMITATIONS, FURTHER_READING)
+#: The parts every paper sends here, with or without a page limit; the others move only for a page limit.
+ALWAYS = (TABLES, FURTHER_READING)
 _TITLES = {TABLES: "Results for every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading",
            SENTENCES: "Sentences moved for length"}
 #: How much of the text on each side of a moved sentence its record keeps, to find its place again (never past the
 #: paragraph it stood in).
 _ANCHOR = 60
 BLANK = chr(10) * 2
+#: What the supplement's first lines call each part.
+_WHY = {TABLES: "tables of every setting", FURTHER_READING: "Further reading", LIMITATIONS: "the Limitations in full",
+        SENTENCES: "some sentences of its text"}
 #: What the run log calls each part.
 NAMES = {TABLES: "tables of every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading"}
 
 
 def read(quest_root: Path | str) -> dict[str, Any]:
-    """The record: ``{"moved": [...], "further_reading": [labels], "limit": n}``; ``{}`` when nothing moved or it cannot
-    be read."""
+    """The record: ``{"moved": [...], "further_reading": [labels], "limit": n}`` (``limit`` ``None`` without a page
+    limit); ``{}`` when nothing moved or it cannot be read."""
     try:
         data = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -213,7 +223,7 @@ def put_back_writer_limitations(text: str, before: str, after: str) -> str | Non
                      blocks)
 
 
-def save(quest_root: Path | str, parts: list[str], *, limit: int, further: list[str] | None = None,
+def save(quest_root: Path | str, parts: list[str], *, limit: int | None, further: list[str] | None = None,
          further_lines: str = "", writer: str = "", section: tuple[str, str] | None = None) -> None:
     """Keep ``parts`` as moved (none: the record and the file go); ``further``/``further_lines``: the labels and the
     entry lines of the Further reading that moved; ``writer``: the paper's own Limitations paragraphs that moved, and
@@ -224,7 +234,7 @@ def save(quest_root: Path | str, parts: list[str], *, limit: int, further: list[
         (root / RECORD).unlink(missing_ok=True)
         (root / FILE).unlink(missing_ok=True)
         return
-    data: dict[str, Any] = {"moved": parts, "limit": int(limit)}
+    data: dict[str, Any] = {"moved": parts, "limit": None if limit is None else int(limit)}
     if FURTHER_READING in parts:
         data["further_reading"] = list(further or [])
         data["further_reading_text"] = further_lines
@@ -344,27 +354,61 @@ def moved_sentences_line(n: int) -> str:
             "written.")
 
 
+def _listed(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def text(limit: int | None, parts: dict[str, str]) -> str:
     """The supplement's Markdown: one section per moved part with text, in :data:`ORDER`, then the moved sentences
-    (:data:`SENTENCES`); ``""`` with none."""
-    sections = [f"## {_TITLES[p]}\n\n{parts[p].strip()}\n" for p in (*ORDER, SENTENCES) if (parts.get(p) or "").strip()]
-    if not sections:
+    (:data:`SENTENCES`); ``""`` with none. Its first lines say why each part is here: the tables of every setting and
+    the Further reading are always kept here, the others moved for the page limit (``limit``: its pages, ``None``
+    without one)."""
+    shown = [p for p in (*ORDER, SENTENCES) if (parts.get(p) or "").strip()]
+    if not shown:
         return ""
-    within = f" within its page limit of {limit} pages" if limit else " within its page limit"
-    return (f"# Supplement\n\nFI moved these parts of the paper here to keep the paper{within}; nothing in them was "
-            "changed.\n\n" + "\n".join(sections))
+    sections = [f"## {_TITLES[p]}\n\n{parts[p].strip()}\n" for p in shown]
+    always = [_WHY[p] for p in shown if p in ALWAYS]
+    for_limit = [_WHY[p] for p in shown if p not in ALWAYS]
+    said = ["These parts of the paper stand here as FI wrote them; nothing in them was changed."]
+    if always:
+        said.append(f"FI always keeps the paper's {_listed(always)} here, out of its main text.")
+    if for_limit:
+        within = f" within its page limit of {limit} pages" if limit else " within its page limit"
+        listed = _listed(for_limit)
+        said.append(f"{listed[0].upper()}{listed[1:]} moved here to keep the paper{within}.")
+    return "# Supplement\n\n" + " ".join(said) + "\n\n" + "\n".join(sections)
 
 
 def write(quest_root: Path | str, limit: int | None, parts: dict[str, str]) -> bool:
-    """Write :data:`FILE` from ``parts`` (or remove it when none has text). Returns whether a file is there."""
+    """Write :data:`FILE` from ``parts`` (or remove it when none has text); a file that already says exactly this is
+    left as it is. Returns whether a file is there."""
     path = Path(quest_root) / FILE
     body = text(limit, parts)
     if not body:
         path.unlink(missing_ok=True)
         return False
+    try:
+        if path.read_text(encoding="utf-8") == body:
+            return True
+    except (OSError, UnicodeDecodeError):
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return True
+
+
+def further_pointer(n: int) -> str:
+    """The line the References keep when the Further reading moved here: how many web pages it lists and where
+    (``""`` for none)."""
+    if n <= 0:
+        return ""
+    return (f"Further reading: {n} web page{'s' if n != 1 else ''} the text does not cite "
+            f"{'are' if n != 1 else 'is'} listed in the supplement (`{SHOWN}`).")
+
+
+#: The line :func:`further_pointer` writes, whatever its count.
+FURTHER_POINTER = re.compile(r"^Further reading: \d+ web pages? the text does not cite (?:are|is) listed in the "
+                             r"supplement \(`" + re.escape(SHOWN) + r"`\)\.[ \t]*$", re.M)
 
 
 def table_pointer() -> str:

@@ -957,7 +957,7 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     cells = _trial_table._record(Path(quest_root))
     if not cells:
         return [], None
-    summarised = _trial_table.summaries(cells, _metric_spec.proportion_ids(protocol))
+    summarised = _trial_table.summaries(cells, _metric_spec.proportion_ids(protocol), _trial_table.declared_results(protocol))
     protocol = _without_left_out(protocol, Path(quest_root))
     built = build(summarised, protocol, _grid_keys.code_files(Path(quest_root) / "code"), judged, labels)
     return _trial_table.rows_of(summarised, _diagnostics(protocol)), built

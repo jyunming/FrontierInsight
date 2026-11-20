@@ -7,6 +7,7 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
+    _ANY_HEADING_RE, _REFERENCES_HEADING_LINE_RE,
     Any, Callable, DEFAULT_PAPER_FORMAT, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_NOTE, Path, QuestState,
     SCIENTIFIC_PAPER_FORMATS, _CITATION_SOURCE_CHARS, _CLAIM_EVIDENCE_CHARS, _CLAIM_FAULTS_TAKEN_OUT,
     _CODE_REEXECUTES, _ModelAnswerProblem, _NO_SIM_WRITE_NOTE, _PAGE_LIMIT_HIT, _PAPER_PROMPT_CHARS, _REFINE_POINT_RE,
@@ -60,6 +61,29 @@ def _with_further_lines(text: str, lines: str) -> str:
     tail = text[block.end:]
     section = "## Further reading\n\n" + "\n".join([*entries, *missing]) + ("\n\n" if tail.strip() else "\n")
     return text[:block.start] + section + tail.lstrip("\n")
+
+
+def _without_further_pointer(text: str) -> str:
+    """``text`` without the line the References keep for a Further reading in the supplement
+    (core/supplement.py ``further_pointer``), and the blank lines before it."""
+    new = re.sub(r"\n*" + _supplement.FURTHER_POINTER.pattern, "", text, flags=re.M)
+    return new if new == text or new.endswith("\n") else new + "\n"
+
+
+def _with_further_pointer(text: str, n: int) -> str:
+    """``text`` with one line saying that its Further reading of ``n`` web pages is in the supplement, as the last line
+    of its References (at the end of the paper when it has none: where the Further reading stood); with ``n`` 0, none."""
+    text = _without_further_pointer(text)
+    line = _supplement.further_pointer(n)
+    if not line:
+        return text
+    m = _REFERENCES_HEADING_LINE_RE.search(text)
+    if m is None:
+        return text.rstrip() + "\n\n" + line + "\n"
+    level = len(m.group(1))
+    end = next((h.start() for h in _ANY_HEADING_RE.finditer(text, m.end()) if len(h.group(1)) <= level), len(text))
+    tail = text[end:]
+    return text[:end].rstrip() + "\n\n" + line + ("\n\n" + tail.lstrip("\n") if tail.strip() else "\n")
 
 
 class WriteStageMixin:
@@ -161,7 +185,8 @@ class WriteStageMixin:
             evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         try:
             trial_rows = _trial_table.write(self.quest_root, _skeleton.diagnostic_names(self._protocol_block(state)),
-                                            _metric_spec.proportion_ids(self._protocol_block(state)))
+                                            _metric_spec.proportion_ids(self._protocol_block(state)),
+                                            _trial_table.declared_results(self._protocol_block(state)))
             try:  # every setting with its reference value (core/results_by_setting.py), for a table too long to give
                 by_setting = _results_by_setting.write(
                     self.quest_root, self._protocol_block(state), self._judged_checks(),
@@ -1611,6 +1636,11 @@ class WriteStageMixin:
         self._state_unsupported_claims({**state, **out}, mark=True)  # type: ignore[arg-type]
         limit = resolve_page_limit(self.config)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
+        checked = Path(paper_path).read_text(encoding="utf-8") if paper_path and Path(paper_path).is_file() else None
+        if paper_path and Path(paper_path).is_file():
+            # Every paper as delivered keeps its tables of every setting and its Further reading in the supplement,
+            # with or without a page limit (the citation check above may have started a new Further reading list).
+            self._supplement_always({**state, **out}, Path(paper_path), limit)  # type: ignore[arg-type]
         if limit is not None and paper_path and Path(paper_path).is_file():
             now: QuestState = {**state, **out}  # type: ignore[assignment]
             # The supplement holds what the records say now (the Limitations were just written again); one that cannot
@@ -1633,7 +1663,29 @@ class WriteStageMixin:
             elif measured is not None:
                 # Within the limit (after a move, or as it was): no earlier measurement over it speaks for this paper.
                 (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
+        if checked is not None:
+            self._citation_record_follows(checked, Path(paper_path))
         return out
+
+    def _citation_record_follows(self, checked: str, path: Path) -> None:
+        """The citation check's record names the paper it left (``final_sha``), so a pass over that same paper (a resume)
+        asks nothing again. FI's own moves to the supplement after it (no citation added, moved or taken out) leave a
+        different paper: when the record names ``checked``, the paper the check left, it now names the paper as moved."""
+        try:
+            now = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        if now == checked:
+            return
+        record_path = self.fi_dir / _cs.FILE
+        try:
+            rec = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(rec, dict) or rec.get("final_sha") != _cs.paper_hash(_paper_facts.without_unconfirmed(checked)):
+            return
+        rec["final_sha"] = _cs.paper_hash(_paper_facts.without_unconfirmed(now))
+        self._citation_record_save(record_path, rec)
 
     async def _check_citations(self, state: QuestState) -> QuestState:
         """Read every citation of the paper that is about to be delivered against the retrieved text of its source, and
@@ -1676,7 +1728,8 @@ class WriteStageMixin:
 
         literature = state.get("literature") or []
         audience = self.config.output.audience
-        listed = set(web_pages_listed(paper) or [])
+        # the pages the paper lists, its Further reading in the supplement among them (every paper keeps it there)
+        listed = set(web_pages_listed(paper) or []) | set(_supplement.further_labels(self.quest_root))
         sources: dict[str, _cs.Source] = {}
         for label, meta, item in _labelled_sources(literature, audience):
             text, _readings = _split_figure_readings(_item_content(item))
@@ -2907,7 +2960,9 @@ class WriteStageMixin:
     def _supplement_can_move(self, part: str, text: str) -> bool:
         """Whether FI's own ``part`` (core/supplement.py ``ORDER``) is in the paper ``text`` with something to move: its
         tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
-        text cites none of its pages (a citation would name nothing in the paper)."""
+        text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
+        holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
+        is already its pointer (the supplement would hold nothing more)."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
@@ -2915,7 +2970,8 @@ class WriteStageMixin:
             return False
         if part == _supplement.LIMITATIONS:
             return bool(_paper_facts.limitations_text(self.quest_root))
-        return bool(_paper_facts.block_text(self.quest_root, part, full=True))
+        block = _paper_facts.block_text(self.quest_root, part, full=True)
+        return any(line.lstrip().startswith("|") for line in block.splitlines())
 
     def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
         """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
@@ -2943,10 +2999,12 @@ class WriteStageMixin:
 
     def _supplement_reset(self, state: QuestState, paper_path: Path) -> bool:
         """A new draft is measured with all of FI's parts in it: what an earlier draft sent to the supplement comes back
-        (FI's blocks written in full again, the Further reading lines put back after the References, the paper's own
-        Limitations paragraphs put back under that heading when the section holds none of the writer's prose: a draft
-        that wrote its own does not get the old ones too) and the record and the file go. Returns whether the paper
-        changed."""
+        (FI's blocks written in full again, the Further reading lines put back after the References in place of the line
+        that pointed to them, the paper's own Limitations paragraphs put back under that heading when the section holds
+        none of the writer's prose: a draft that wrote its own does not get the old ones too) and the record and the
+        file go. Every caller that measures or delivers the draft then sends the parts every paper keeps in the
+        supplement there again (:meth:`_supplement_always`), so they come back only to be decided again. Returns
+        whether the paper changed."""
         root = self.quest_root
         places = _supplement.sentences(root)
         if not _supplement.read(root) and not places:
@@ -2976,6 +3034,7 @@ class WriteStageMixin:
                                    "from, so they are not put back into it; the draft is measured as written")
                 else:
                     new = back
+            new = _without_further_pointer(new)
             if lines:
                 new = _with_further_lines(new, lines)
             if new != text:
@@ -3005,16 +3064,131 @@ class WriteStageMixin:
                               "the supplement", e)
             return False
 
+    def _supplement_move(self, state: QuestState, paper_path: Path, part: str, text: str, parts: list[str],
+                         limit: int | None) -> None:
+        """Move FI's own ``part`` out of the paper ``text`` (at ``paper_path``) to the supplement's record, ``parts``
+        being everything moved with it: the Further reading list whole (the References keep one line saying how many
+        pages it lists and where), a block as its pointer (the Limitations with the paper's own paragraphs of that
+        section). FI's text, no claim of its own, so the claim check's and the citation check's receipts move to the
+        paper that carries it. No model call; ``paper/supplement.md`` is written by the caller."""
+        root = self.quest_root
+        if part == _supplement.FURTHER_READING:
+            # with a list moved before (the citation check's renumbering can start a new one), the two are one list
+            block = _further_reading_block(text)
+            entries = "\n".join(block.lines[i] for i in block.entries) if block else ""
+            new_labels = list(block.labels) if block else []
+            old = [ln for ln in _supplement.further_text(root).split("\n")
+                   if ln.strip() and _further_label(ln) not in new_labels]  # the list in the paper now is current
+            labels = [*[x for x in _supplement.further_labels(root) if x not in new_labels], *new_labels]
+            _supplement.save(root, parts, limit=limit, further=labels,
+                             further_lines="\n".join([*old, *([entries] if entries.strip() else [])]),
+                             writer=_supplement.writer_text(root), section=_supplement.writer_section(root))
+            before = paper_path.read_bytes()
+            paper_path.write_text(_with_further_pointer(_trim_further_reading(text, 0), len(labels)), encoding="utf-8")
+            for check in ("claim_check", "citation_check"):
+                _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                     "FI moved its own Further reading list to the supplement and added no claim")
+            return
+        writer, section = _supplement.writer_text(root), _supplement.writer_section(root)
+        if part == _supplement.LIMITATIONS:
+            left, taken = _supplement.take_writer_limitations(text)
+            if taken:
+                section = (_supplement.section_body(text) or "", _supplement.section_body(left) or "")
+                before = paper_path.read_bytes()
+                paper_path.write_text(left, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                         "FI moved the paper's own Limitations paragraphs to the supplement "
+                                         "unchanged and added no claim")
+                writer = taken
+        _supplement.save(root, parts, limit=limit, further=_supplement.further_labels(root),
+                         further_lines=_supplement.further_text(root), writer=writer, section=section)
+        self._restate_limitations(state, "FI moved one of its own blocks to the supplement and added no claim",
+                                  path=paper_path)
+
+    def _supplement_always(self, state: QuestState, paper_path: Path, limit: int | None) -> list[str]:
+        """Send the parts every paper keeps in its supplement there (core/supplement.py ``ALWAYS``): its tables of every
+        setting (the paper keeps a pointer) and its Further reading (the References keep one line saying how many pages
+        it lists and where), with or without a page limit (``limit``, ``None`` without one), each when
+        :meth:`_supplement_can_move` finds it in the paper. No model call, no measurement and no rewrite of the body:
+        called on each draft where the page check runs and again on the paper as delivered, so a new draft (whose
+        reset brought them back) never keeps them. The line for a Further reading moved earlier is written again when a
+        rebuild of the References dropped it. Whatever moved, ``paper/supplement.md`` is then what the records say (a file
+        left unwritten by a stop between a move and its write is written here), so a pointer always has its file.
+        Returns the parts moved now; a supplement that cannot be written puts the paper, the record and the receipts back
+        as they were (and what an earlier move sent there comes back into the paper)."""
+        root = self.quest_root
+        try:
+            text = paper_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+        keep = {f: (f.read_bytes() if f.is_file() else None)
+                for f in (paper_path, root / _supplement.RECORD, root / _supplement.FILE,
+                          _receipts.path(root, "claim_check"), _receipts.path(root, "citation_check"))}
+        parts = _supplement.moved(root)
+        newly: list[str] = []
+        cited: set[str] = set()
+        try:
+            for part in _supplement.ALWAYS:
+                if not self._supplement_can_move(part, text):
+                    continue
+                if part in parts and part != _supplement.FURTHER_READING:
+                    continue  # already its pointer
+                if part not in parts:
+                    parts.append(part)
+                newly.append(part)
+                self._supplement_move(state, paper_path, part, text, parts, limit)
+                text = paper_path.read_text(encoding="utf-8")
+            # a page the text now cites (a fix of the citation check may cite one) is listed under the References, so
+            # it leaves the supplement's Further reading
+            labels = _supplement.further_labels(root)
+            cited = set(labels) & _web_labels_cited(text)
+            if cited:
+                kept = [x for x in labels if x not in cited]
+                lines = [ln for ln in _supplement.further_text(root).split("\n")
+                         if ln.strip() and _further_label(ln) not in cited]
+                parts = [p for p in parts if p != _supplement.FURTHER_READING or kept]
+                _supplement.save(root, parts, limit=limit, further=kept, further_lines="\n".join(lines),
+                                 writer=_supplement.writer_text(root), section=_supplement.writer_section(root))
+            n = len(_supplement.further_labels(root))
+            pointed = _with_further_pointer(text, n)
+            if pointed != text and (n or cited):
+                before = paper_path.read_bytes()
+                paper_path.write_text(pointed, encoding="utf-8")
+                for check in ("claim_check", "citation_check"):
+                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
+                                         "FI wrote again the line that points to its Further reading in the supplement "
+                                         "and added no claim")
+        except (OSError, UnicodeDecodeError) as e:
+            self._restore_files(keep)
+            self._log.warning("[supplement] FI's own parts could not be moved to the supplement (%s); the paper keeps "
+                              "them", e)
+            return []
+        # The paper as it leaves this step points only to a supplement that is there and says what the records say: one
+        # left unwritten (a stop between a move and its write) is written now; written as it should be, it is left as is.
+        if newly or cited or _supplement.anything(root):
+            if not self._write_supplement(state, limit):
+                self._restore_files(keep)  # the paper cannot point to a supplement that is not there
+                if not (newly or cited):
+                    self._supplement_reset(state, paper_path)  # pointers from an earlier move: what moved comes back
+                return []
+        if newly:
+            self._log.info("[supplement] FI moved its own %s to the supplement (%s); the paper keeps one line pointing "
+                           "to each", " and ".join(_supplement.NAMES[p] for p in newly), _supplement.SHOWN)
+        return newly
+
     async def _fit_with_supplement(
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
     ) -> tuple[dict[str, Any], list[str]] | None:
         """Bring a paper over the page limit toward it by moving FI's own parts to the supplement, in a fixed order and
-        without a model call (core/supplement.py): its tables of every setting, then its Limitations (one line stays:
-        how many things FI recorded, each part of the topic the study did not do by name, and where they are; the
-        paper's own paragraphs of that section go with it, except a figure, a table or a paragraph that cites a
-        source), then its Further reading. The References stay. After each part the paper is rendered again, and the move stops as soon
-        as it fits; a paper still over with all of them moved keeps them moved (it is shorter, and the sentence trim
-        that may follow has less to take). What moved goes into ``paper/supplement.md`` unchanged.
+        without a model call (core/supplement.py ``ORDER``). Its tables of every setting and its Further reading are
+        already there (every paper sends them: :meth:`_supplement_always`), so what this moves is its Limitations (one
+        line stays: how many things FI recorded, each part of the topic the study did not do by name, and where they
+        are; the paper's own paragraphs of that section go with it, except a figure, a table or a paragraph that cites a
+        source), and either of the other two still in the paper. The References stay. After each part the paper is
+        rendered again, and the move stops as soon as it fits; a paper still over with all of them moved keeps them
+        moved (it is shorter, and the sentence trim that may follow has less to take). What moved goes into
+        ``paper/supplement.md`` unchanged.
 
         On 16 stored papers (limit 4, all over it, mean 6.9 pages) FI's own parts alone gave mean 4.9 pages and 4 of
         16 within the limit; with the writer's Limitations paragraphs too, mean 4.75 and 6 of 16.
@@ -3041,39 +3215,7 @@ class WriteStageMixin:
             if part not in parts:
                 parts.append(part)
             newly.append(part)
-            if part == _supplement.FURTHER_READING:
-                # with a list moved before (the citation check's renumbering can start a new one), the two are one list
-                block = _further_reading_block(text)
-                entries = "\n".join(block.lines[i] for i in block.entries) if block else ""
-                new_labels = list(block.labels) if block else []
-                old = [ln for ln in _supplement.further_text(root).split("\n")
-                       if ln.strip() and _further_label(ln) not in new_labels]  # the list in the paper now is current
-                labels = [*[x for x in _supplement.further_labels(root) if x not in new_labels], *new_labels]
-                _supplement.save(root, parts, limit=limit, further=labels,
-                                 further_lines="\n".join([*old, *([entries] if entries.strip() else [])]),
-                                 writer=_supplement.writer_text(root), section=_supplement.writer_section(root))
-                before = paper_path.read_bytes()
-                paper_path.write_text(_trim_further_reading(text, 0), encoding="utf-8")
-                for check in ("claim_check", "citation_check"):
-                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
-                                         "FI moved its own Further reading list to the supplement and added no claim")
-            else:
-                writer, section = _supplement.writer_text(root), _supplement.writer_section(root)
-                if part == _supplement.LIMITATIONS:
-                    left, taken = _supplement.take_writer_limitations(text)
-                    if taken:
-                        section = (_supplement.section_body(text) or "", _supplement.section_body(left) or "")
-                        before = paper_path.read_bytes()
-                        paper_path.write_text(left, encoding="utf-8")
-                        for check in ("claim_check", "citation_check"):
-                            _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
-                                                 "FI moved the paper's own Limitations paragraphs to the supplement "
-                                                 "unchanged and added no claim")
-                        writer = taken
-                _supplement.save(root, parts, limit=limit, further=_supplement.further_labels(root),
-                                 further_lines=_supplement.further_text(root), writer=writer, section=section)
-                self._restate_limitations(state, "FI moved one of its own blocks to the supplement and added no claim",
-                                          path=paper_path)
+            self._supplement_move(state, paper_path, part, text, parts, limit)
             text = paper_path.read_text(encoding="utf-8")
             found = await self._measure_draft_pages(paper_path, state)
             if found is None:
@@ -3415,18 +3557,24 @@ class WriteStageMixin:
         self, state: QuestState, paper_path: str | Path | None,
     ) -> dict[str, Any] | None:
         """The page-limit part of the review: the record for ``review["page_limit"]``.
-        Without a page limit nothing is rendered and the record is empty, as it is
-        when the draft cannot be measured. The limit is a guideline: a draft over it
-        is never sent back to be shortened. FI's own parts go to the supplement
-        (:meth:`_fit_with_supplement`), then a few sentences of
-        background and discussion are taken out (:meth:`_trim_body_to_fit`), and what is
-        still over goes on record for the quality report and the log."""
+        Every draft first sends the parts every paper keeps in the supplement there
+        (:meth:`_supplement_always`: its tables of every setting and its Further
+        reading), with or without a limit. Without a page limit nothing is rendered
+        and the record is empty, as it is when the draft cannot be measured. The
+        limit is a guideline: a draft over it is never sent back to be shortened.
+        FI's other own parts go to the supplement (:meth:`_fit_with_supplement`),
+        then a few sentences of background and discussion are taken out
+        (:meth:`_trim_body_to_fit`), and what is still over goes on record for the
+        quality report and the log."""
         limit = resolve_page_limit(self.config)
-        if limit is None or not paper_path or not Path(paper_path).is_file():
+        if not paper_path or not Path(paper_path).is_file():
             return None
         # A new draft is measured with all of FI's own parts in it: what an earlier draft sent to the supplement is
-        # decided again.
+        # decided again, and the parts every paper keeps there go there at once.
         self._supplement_reset(state, Path(paper_path))
+        self._supplement_always(state, Path(paper_path), limit)
+        if limit is None:
+            return None
         measured = await self._measure_draft_pages(Path(paper_path), state)
         if measured is None:
             return None
