@@ -12,7 +12,8 @@ that crashed a real analysis), in a scratch copy of the quest. No model is asked
 with a ``kind``:
 
 * ``fault``: the code is wrong whatever the data: a name that is not defined (including a definition placed after the
-  main guard), an import or syntax error, a run that ended without its ``RESULT_JSON`` line; and a ``TypeError`` or
+  main guard), an import or syntax error, a function that raises ``NotImplementedError`` (it is not written yet), a run that
+  ended without its ``RESULT_JSON`` line; and a ``TypeError`` or
   ``AttributeError`` that shows at the same place of the code on a larger copy of the record too (3 trials can cause
   one: a fit with more parameters than points, a helper that returns ``None`` for a small ``n``).
 * ``small_data``: the outcome 3 trials can explain (a ``ValueError`` in a fit, a missing setting, a figure that was not
@@ -64,8 +65,10 @@ FAULT, SMALL_DATA, TIME, NOT_CHECKED = "fault", "small_data", "time", "not_check
 #: the plan does not declare, or one read in a form the record does not hold): the record's shape decides it, and the small
 #: copy keeps every setting and compared value of that shape, so more trials never change it. The figure calls of the frame raise
 #: ``UnknownResult`` for a name the plan does not declare and ``BadArgument`` for a value outside a closed list (core/frame_figure.py).
+#: ``NotImplementedError`` is a function that says in its own body it is not written (an explicit ``raise``): no number of trials
+#: changes that, so a figure or a derived result that stops with it is sent back like the others, never "too few trials to tell".
 _HARD_FAULTS = frozenset({"NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError",
-                          "SyntaxError", "IndentationError", "TabError", "UnknownResult", "BadArgument"})
+                          "SyntaxError", "IndentationError", "TabError", "UnknownResult", "BadArgument", "NotImplementedError"})
 #: The exceptions that say so only if they show on more data too (too little data can raise them).
 _MAYBE_FAULTS = frozenset({"AttributeError", "TypeError"})
 _FAULTS = _HARD_FAULTS | _MAYBE_FAULTS
@@ -584,6 +587,10 @@ def _fis_analysis_result(scratch: Path, run: Any, protocol: dict[str, Any] | Non
         # a figure's outcome says "`figure_x` stopped with NameError: ...": the exception's name follows "stopped with"
         m = _EXC_LINE.match(said) or re.search(r"stopped with ([A-Za-z_][\w.]*)(?::|\b)", said)
         exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if m else "")
+        if body and exc == "NotImplementedError":
+            # a function that raises it says in its own body that it is not written: said plainly, naming the figure or result
+            reason = re.search(r"NotImplementedError:\s*(.+)", said, re.S)
+            said = f"`{body}` is not written yet: it stops with NotImplementedError" + (f" ({reason.group(1).strip().rstrip('.')})" if reason else "")
         status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
         kind = (kind_of(exc) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
         if kind == FAULT and exc in _MAYBE_FAULTS and left_out:

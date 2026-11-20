@@ -477,3 +477,57 @@ def test_a_current_record_of_untraced_numbers_is_listed_as_kept(tmp_path: Path) 
     _w(root / ".fi" / "paper_record_check.json", {"hits": [], "untraced_numbers": _OLD_RECORD["removed_numbers"]})
     text = qr.render(qr.build(root))
     assert "Numbers not traced to the plan" in text and "Numbers taken out of the paper" not in text
+
+
+# ---- a planned figure FI's own record does not show fully drawn ----------------------------------------------------------
+def _figure_record(root: Path, figures: list[dict[str, Any]], computed_missing: tuple[str, ...] = ()) -> None:
+    _w(root / "data" / "results" / "derived.json",
+       {"schema": "fi.derived/v1", "derived": {}, "figures": figures, "figures_said": "",
+        "not_computed": [{"id": i, "status": "missing", "why": "no value"} for i in computed_missing]})
+
+
+def _fig(fid: str, status: str = "ok", no_value: tuple[str, ...] = (), why: str = "", not_drawn: tuple[str, ...] = ()) -> dict[str, Any]:
+    out: dict[str, Any] = {"id": fid, "file": f"{fid}.png", "status": status, "why": why, "said": ""}
+    if status == "ok":
+        out["declared"] = {"shows": ["r1", *no_value, *not_drawn], "drawn": ["r1"], "not_drawn": [*no_value, *not_drawn], "labels": {},
+                           **({"no_value": list(no_value)} if no_value else {})}
+    return out
+
+
+def _figure_rows(root: Path) -> list[str]:
+    return [p["text"] for p in qr._planned_figure_problems(qr._Quest(root))]
+
+
+def test_a_figure_drawn_in_part_gets_one_plain_line_and_a_missing_result_keeps_its_one(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    _w(root / "figures" / "fig1.png", "x")
+    _w(root / "figures" / "fig3.png", "x")
+    _figure_record(root, [_fig("fig1"), _fig("fig3", no_value=("ratio",), not_drawn=("other",))], computed_missing=("ratio",))
+    rows = _figure_rows(root)  # `other` has a value that no read returned: FI cannot say it is missing from the figure
+    assert rows == ["Figure `fig3` was drawn in part: FI holds no value of `ratio`, which the plan says it shows."]
+    results = [p["text"] for p in qr._analysis_problems(qr._Quest(root))]
+    assert [t for t in results if t.startswith("ratio was not computed")] != [] and len(results) == 2  # the result's own line, and the figure's
+    report = qr.build(root, running=False)
+    texts = [p["text"] for s in report["stages"] for p in s["problems"]["items"]]
+    assert sum("`fig3`" in t for t in texts) == 1
+
+
+def test_a_figure_not_drawn_or_with_no_file_is_said_once_and_only_if_no_row_names_it(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    _w(root / "figures" / "fig1.png", "x")  # fig2's file was never kept; the folder holds another figure
+    _figure_record(root, [_fig("fig1"), _fig("fig2"), _fig("fig3", "failed", why="`figure_fig3` stopped with ValueError: x"),
+                          _fig("fig4", "failed", why="its function raised"), _fig("scan_map", "skipped", why="no setting changed")])
+    _w(root / ".fi" / "cannot_repair.json", {"problems": [{"text": "Figure `fig4` could not be drawn from the run's results.",
+                                                           "source": "read", "check": "figure_dropped"}]})
+    rows = _figure_rows(root)
+    assert rows == ["Figure `fig2` is recorded as drawn, but its file `fig2.png` is not in the figures folder.",
+                    "Figure `fig3` was not drawn: `figure_fig3` stopped with ValueError: x."]  # fig4 has its row; skipped says why itself
+
+
+def test_every_figure_fully_drawn_gets_no_line_and_a_cleaned_folder_is_not_read_as_missing_files(tmp_path: Path) -> None:
+    root = tmp_path / "q"
+    _figure_record(root, [_fig("fig1"), _fig("fig2")])  # no figures folder at all: nothing to compare the record with
+    assert _figure_rows(root) == []
+    _w(root / "figures" / "fig1.png", "x")
+    _w(root / "figures" / "fig2.png", "x")
+    assert _figure_rows(root) == []

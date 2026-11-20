@@ -353,3 +353,14 @@ async def test_a_name_refused_by_fis_figure_calls_is_a_fault_on_any_copy(tmp_pat
     other = await run_gate(tmp_path, plain, name="p")  # the same words in a plain ValueError keep the small-copy treatment
     assert other.kind == gate.SMALL_DATA and other.exception == "ValueError"
     assert gate.kind_of("BadArgument") == gate.FAULT and gate.kind_of("ValueError") == gate.SMALL_DATA
+
+
+async def test_a_function_that_says_it_is_not_written_is_a_fault_not_too_few_trials(tmp_path):
+    # An explicit `raise NotImplementedError` is the function's own statement that it is not written: no number of trials
+    # changes it, so the gate does not file it under "too few trials to tell" (as it did for a figure of a real study).
+    script = OK_SCRIPT.replace('print("RESULT_JSON', 'raise NotImplementedError("the quantity is not among the results a trial may return")\n    print("RESULT_JSON')
+    got = await run_gate(tmp_path, script)
+    assert not got.ok and got.stage == "derive" and got.kind == gate.FAULT and got.exception == "NotImplementedError"
+    assert gate.kind_of("NotImplementedError") == gate.FAULT
+    assert gate.gate_verdict(gate.GateResult(True), got).reject  # a repair that leaves one in is refused
+    assert gate.kind_of("ValueError") == gate.SMALL_DATA and gate.kind_of("RuntimeError") == gate.SMALL_DATA  # the rest is as before

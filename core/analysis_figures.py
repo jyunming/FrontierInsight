@@ -823,6 +823,7 @@ def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_d
         name = "figure_%s" % spec.get("id")
         body = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
         out.append(_draw_one(spec, body, table, out_dir, _plan_for(spec, namespace, table)))
+    _mark_partly(out, table, records)
     return out
 
 
@@ -1632,13 +1633,42 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
 
 
 # ---- what is said and the exit code ---------------------------------------------------------------------------------------------
+def partly_drawn(outcome: dict[str, Any]) -> list[str]:
+    """The results a drawn figure was declared to show, whose values FI holds nowhere (``declared.no_value``, set by
+    :func:`run_figures`): empty for a figure that drew them all, one that was not drawn, or one with no such record. A result
+    FI holds a value of that the figure's reads did not return (``declared.not_drawn``) is not in it: the body may draw it
+    another way (a reference line, a series of its own), and only the saved axes say what is drawn."""
+    declared = outcome.get("declared") if isinstance(outcome, dict) and outcome.get("status") == "ok" else None
+    left = declared.get("no_value") if isinstance(declared, dict) else None
+    return [str(r) for r in left] if isinstance(left, list) else []
+
+
+def _mark_partly(outcomes: list[dict[str, Any]], table: Any, records: Any) -> None:
+    """A drawn figure that was declared to show a result FI holds no value of, at any setting, is said to be partly drawn: its
+    ``declared.no_value`` names them and its ``said`` says so. FI's own record decides (a result with no value cannot be on
+    the figure); a result with a value that no read returned is left as it was. A table that cannot be asked claims nothing."""
+    for o in outcomes:
+        declared = o.get("declared") if o.get("status") == "ok" else None
+        if not isinstance(declared, dict) or not declared.get("not_drawn"):
+            continue
+        try:
+            left = [str(r) for r in declared["not_drawn"] if not _holds_any(table, str(r), records)]
+        except Exception:  # noqa: BLE001 -- no claim
+            continue
+        if left:
+            declared["no_value"] = left
+            o["said"] = "Figure `%s` was partly drawn (%s): FI holds no value of %s." % (
+                o.get("id"), o.get("file"), ", ".join("`%s`" % r for r in left))
+
+
 def said(outcomes: list[dict[str, Any]]) -> str:
-    """The figure step in plain words: how many were drawn and, one sentence each, every one that was not and why."""
+    """The figure step in plain words: how many were drawn and, one sentence each, every one that was not (and why) or was
+    drawn in part."""
     if not outcomes:
         return ""
     drawn = [o for o in outcomes if o.get("status") == "ok"]
     lines = ["%d of %d figure(s) drawn." % (len(drawn), len(outcomes))]
-    lines += [o["said"] for o in outcomes if o.get("status") != "ok" and o.get("said")]
+    lines += [o["said"] for o in outcomes if (o.get("status") != "ok" or partly_drawn(o)) and o.get("said")]
     lines += [o["note"] for o in outcomes if o.get("note")]
     return " ".join(lines)
 

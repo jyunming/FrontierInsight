@@ -827,8 +827,37 @@ def test_the_record_of_a_drawn_figure_says_which_declared_results_the_body_drew(
     out = af.run_figures([spec], {"figure_x": figure_x}, table, str(tmp_path / "figs"))[0]
     assert out["status"] == "ok"
     want = {"shows": ["r1", "r2"], "drawn": ["r1"], "not_drawn": ["r2"], "labels": {"r1": "First quantity"}}
-    assert out["declared"] == want
+    assert out["declared"] == {**want, "no_value": ["r2"]}
     assert json.loads((records / "x.json").read_text(encoding="utf-8"))["declared"] == want
+    # FI's own record says the figure holds no value of r2, so the figure's status says it is drawn in part (and the step's
+    # summary line names it), not "was drawn"
+    assert out["said"] == "Figure `x` was partly drawn (x.png): FI holds no value of `r2`."
+    assert out["declared"]["no_value"] == ["r2"] and af.partly_drawn(out) == ["r2"]
+    assert "partly drawn" in af.said([out]) and af.exit_code([out]) == 0
+
+
+def test_a_result_with_a_value_that_no_read_returned_is_not_said_to_be_missing(tmp_path) -> None:
+    # r3 has values at every setting, but the body draws from r1 only: FI cannot tell the figure lacks r3 (the body may draw it
+    # another way), so it is in not_drawn and the figure is not said to be partly drawn; r2 has no value, so it is.
+    from core import frame_table, skeleton
+
+    sys.modules["fi_table"] = frame_table
+    ns: dict[str, Any] = {"fi_table": frame_table}
+    exec(compile(skeleton.RUNTIME, "fi_frame.py", "exec"), ns)  # noqa: S102 -- FI's own runtime text
+    cells = [{"cell": {"a": a}, "key": "a=%d" % a, "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"r1": {"values": [1.0 * a, 2.0 * a]}, "r2": {"values": [float("nan")]},
+                          "r3": {"values": [3.0 * a, 4.0 * a]}}} for a in (1, 2, 3)]
+
+    def figure_x(fig, table):
+        fig.axes[0].plot(table.values("r1", "a=1"))
+
+    out = _shown(tmp_path, figure_x, shows=("r1", "r2", "r3"), table=ns["Table"](cells, ["r1", "r2", "r3"]))
+    assert out["status"] == "ok" and out["declared"]["not_drawn"] == ["r2", "r3"]
+    assert out["declared"]["no_value"] == ["r2"] and af.partly_drawn(out) == ["r2"]
+    assert out["said"] == "Figure `x` was partly drawn (x.png): FI holds no value of `r2`."
+    only = _shown(tmp_path, figure_x, shows=("r1", "r3"), table=ns["Table"](cells, ["r1", "r2", "r3"]))
+    assert only["declared"]["not_drawn"] == ["r3"] and "no_value" not in only["declared"] and af.partly_drawn(only) == []
+    assert only["said"].endswith("was drawn (x.png).") and af.said([only]) == "1 of 1 figure(s) drawn."
 
 
 def test_a_body_that_reads_only_with_level_rows_or_reference_has_drawn_that_result(tmp_path) -> None:
@@ -841,6 +870,7 @@ def test_a_body_that_reads_only_with_level_rows_or_reference_has_drawn_that_resu
     out = _shown(tmp_path, figure_x, shows=("r1", "r3"), table=table)
     assert out["status"] == "ok", out["why"]
     assert out["declared"]["drawn"] == ["r1", "r3"] and out["declared"]["not_drawn"] == []
+    assert out["said"].endswith("was drawn (x.png).") and af.partly_drawn(out) == [] and af.said([out]) == "1 of 1 figure(s) drawn."
 
 
 def test_a_read_form_is_given_only_for_a_way_that_works_for_that_kind_of_result(tmp_path) -> None:
