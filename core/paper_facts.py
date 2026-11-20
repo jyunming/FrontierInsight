@@ -1004,6 +1004,9 @@ def _trial_check_items(root: Path, add: Any) -> None:
     for q in cal.get("quantities") or []:
         if isinstance(q, dict) and q.get("fault") and rec.get("action") == _trial_checks.DISCLOSE:
             _disclosed_item(root, q, add)
+    for q in cal.get("counted_as_misses") or []:
+        if isinstance(q, dict):
+            _counted_as_misses_item(root, q, add)
     for q in [*(cal.get("quantities") or []), *(cal.get("inside") or [])]:
         if not isinstance(q, dict) or q.get("fault") or not q.get("below"):
             continue
@@ -1098,6 +1101,45 @@ def _disclosed_item(root: Path, q: dict[str, Any], add: Any) -> None:
         what + kept + f". {tail}; FI does not hand on the reported error or interval of {held} (they are not in the results "
         "table or in the numbers the paper can quote), and the estimates themselves are reported as they were computed"),
         key=f"disclosed-{q.get('kind')}-{label}")
+
+
+def _counted_as_misses_item(root: Path, q: dict[str, Any], add: Any) -> None:
+    """The coverage of a reported interval counted over every trial that ran, each trial that gave no interval a miss, where
+    it is grossly low and the coverage FI judged the intervals on (the trials that gave an estimate) is not
+    (core/trial_checks.py ``counted_as_misses``): the study went on, and the paper states FI's count, with the trials, beside
+    the coverage over the trials that gave an estimate. The results table may show only the study's own coverage, over the
+    trials that gave a value (and leaves it out where it is the same everywhere), so this is where FI's count reaches the
+    paper."""
+    settings = [s for s in q.get("settings") or [] if isinstance(s, dict) and isinstance(s.get("value"), (int, float))]
+    marked = [s for s in settings if s.get("gross")]
+    pooled = q.get("pooled") if isinstance(q.get("pooled"), dict) else None
+    plain = _label_of_names(root, q.get("names") or [], "")
+    label = _one(q.get("label"))
+    shown = f'"{plain}"' if plain else f"`{label}`"
+    level = q.get("level")
+    pct = f"{float(level):.0%}" if isinstance(level, (int, float)) else "their stated level"
+
+    def counted(s: dict[str, Any], key: str) -> str:
+        n = int(s.get("n") or 0)
+        v = float(s["value"])
+        given = s.get("given")
+        rest = (f", {float(given):.2f} of those that gave an estimate" if isinstance(given, (int, float)) else
+                ", too few of them gave an estimate to judge those alone")
+        return f"{key}: {v:.2f}, {round(v * n):,} of {n:,} trials{rest}"
+
+    if marked:
+        where = "every setting" if len(marked) == len(settings) else f"{len(marked)} of {len(settings)} settings"
+        listed = "; ".join(counted(s, s.get("key") or "the one setting") for s in marked[:6]) + (
+            f"; and {len(marked) - 6} more" if len(marked) > 6 else "")
+    elif pooled is not None and pooled.get("gross") and isinstance(pooled.get("value"), (int, float)):
+        where = "the settings taken together"
+        listed = counted(pooled, "all settings together")
+    else:
+        return
+    add(CALIBRATION, f"{plain or label or 'a reported interval'}: trials with no interval counted as misses", _sentence(
+        f"Counting each trial that gave no interval as a miss, the {pct} intervals reported for {shown} contain the true "
+        f"value in far fewer trials than {pct} in {where} ({listed}). FI judged the intervals on the trials that gave an "
+        "estimate; the trials that gave none are stated apart"), key=f"counted-misses-{label}")
 
 
 def _power_limit_item(root: Path, cal: dict[str, Any], add: Any) -> None:

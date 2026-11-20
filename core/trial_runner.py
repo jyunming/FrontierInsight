@@ -2305,6 +2305,8 @@ class TrialsRunner:
                                   q.label)
                 if not q.fault and q.below:
                     self.log.info("[execute] %s; below the level in %d setting(s): reported, not a fault", q.says(), q.below)
+            for q in verdict.calibration.counted_as_misses:
+                self.log.info("[execute] %s", q.says())
             if not verdict.calibration.checked:
                 self.log.info("[execute] calibration not checked: %s", "; ".join(verdict.calibration.not_checked)[:400])
             for u in verdict.undefined[:8]:
