@@ -468,17 +468,21 @@ def _review(eng: Engine, tmp_path: Path, **state: Any) -> dict[str, Any]:
 def test_a_draft_over_the_limit_is_recorded_and_never_sent_back_to_be_shortened(
     tmp_path: Path, monkeypatch, panel: bool,
 ) -> None:
-    """The limit is a guideline: Further reading is fitted and the trim is offered, but a draft still over it forces
-    no hit, no iteration and no rewrite. The overrun goes on record for QUALITY.md."""
+    """The limit is a guideline: the trim is offered, but a draft still over it forces no hit, no iteration and no
+    rewrite. The overrun goes on record for QUALITY.md."""
+    from core import supplement
+
     eng = _engine(tmp_path, panel=panel)
     calls = _measured(monkeypatch, 5)
     patch = _review(eng, tmp_path, iteration=2)
-    # The paper lists a Further reading entry: it moves to the supplement and the paper is measured again;
-    # still 5 pages, the body is what is over, and nothing else of the paper changes.
-    assert calls == [tmp_path / "paper" / "paper.md", tmp_path / "paper" / "paper.md"]
-    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == PAPER[:PAPER.index("## Further reading")].rstrip() + "\n"
+    # The paper lists a Further reading entry: it goes to the supplement before the paper is measured (every paper
+    # keeps it there), and the References keep one line pointing to it; still 5 pages, the body is what is over, and
+    # nothing else of the paper changes.
+    assert calls == [tmp_path / "paper" / "paper.md"]
+    assert (tmp_path / "paper" / "paper.md").read_text(encoding="utf-8") == (
+        PAPER[:PAPER.index("## Further reading")].rstrip() + "\n\n" + supplement.further_pointer(1) + "\n")
     assert patch["review"]["must_flag_hits"] == []
-    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4, "supplement": ["further_reading"]}
+    assert patch["review"]["page_limit"] == {"pages": 5, "limit": 4}
     assert "iteration" not in patch and "page_limit_rewrites" not in patch
     assert json.loads((tmp_path / ".fi" / "page_limit.json").read_text()) == {"pages": 5, "limit": 4, "final": True}
     assert eng._route_after_review({"review": patch["review"], "iteration": 0}) == "done"  # type: ignore[arg-type]
