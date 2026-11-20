@@ -1693,7 +1693,8 @@ def _brief_words(line: str, names: list[str], rec: Any) -> int:
     filled = _values.without_marks(_values.fill(line, rec)[0])
     labels = {*names, *(rec.label(m) for m in rec.metrics()), *(rec.label(a) for a in rec.axes())}
     for name in sorted((n for n in labels if n), key=len, reverse=True):
-        filled = filled.replace(name, " ")
+        # a whole name only: a setting called ``n`` takes no letter out of FI's words
+        filled = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", " ", filled)
     return len(filled.replace("- ", " ", 1).split())
 
 
@@ -1714,9 +1715,10 @@ def answers_text(quest_root: Path | str, *, brief: bool = False) -> str:
     holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write.
 
     ``brief``: the block as the paper's body carries it (the full one is in the supplement, core/supplement.py ``ANSWERS``):
-    the same answers, each line at most :data:`BRIEF_WORDS` of FI's own words: a range counts the settings that gave no
-    number (``| range:brief``) and names the parameters it differs with only when they are one or two, and a question not
-    answered says the one phrase of why. The numbers are the same keys over the same settings."""
+    the same answers in fewer words: a range counts the settings that gave no number (``| range:brief``) and names the
+    parameters it differs with only when they are one or two, and a question not answered says the one phrase of why. A
+    line over :data:`BRIEF_WORDS` of FI's own words gives its values without their intervals; one still over is kept whole
+    (never cut, a compared setting's values never pooled). The numbers are the same keys over the same settings."""
     full, short = answers_forms(quest_root)
     return short if brief else full
 

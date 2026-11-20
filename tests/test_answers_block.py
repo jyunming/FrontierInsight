@@ -608,3 +608,18 @@ def test_a_line_over_the_cap_gives_its_values_without_their_intervals(tmp_path, 
     assert brief.count("{{v:gap @ n=") == len(levels) and "| range" not in brief
     assert brief.endswith("(interval in the supplement)")
     assert all(f"{n}: " in brief for n in levels)
+
+
+def test_a_settings_short_name_takes_no_letter_out_of_the_words_counted() -> None:
+    """Before: names were taken out of a line as text, so a setting called ``t`` took the letter out of every word."""
+    def rec_of(axis: str):
+        cells = [{"cell": {axis: v}, "key": f"{axis}={v}", "planned": 2, "ok": 2, "failed": 0,
+                  "metrics": {"decay_rate": {"values": [0.1 * v, 0.2 * v], "trials": [0, 1], "count": 2, "total": 0.0,
+                                             "non_finite": 0}}} for v in (1, 2, 3)]
+        return pv.from_cells(cells, PROTOCOL)
+
+    def line(axis: str) -> str:
+        return (f"- decay rate (measured as: Decay rate): {{{{v:decay_rate @ {axis}=each | range:brief}}}} "
+                f"(mean of each setting, lowest to highest; it differs with {axis})")
+    counts = {axis: pf._brief_words(line(axis), ["decay rate"], rec_of(axis)) for axis in ("t", "dose")}
+    assert counts["t"] == counts["dose"] == 17
