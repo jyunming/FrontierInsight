@@ -6394,6 +6394,11 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
     shown = _figure_files_by_stem(state)
     settings = _run_settings(state)
     lines: list[str] = []
+    if setup in numbers:
+        # FI's set-up figure (core/setup_flow.py): drawn from the plan, not from the run's numbers
+        lines.append(f"- Figure {numbers[setup]}: figures/{setup} — the study's set-up, drawn by FI from the frozen plan "
+                     "(the settings it varies and holds, the steps of its computation, the results it reports). It is "
+                     "not a result: it draws no number of the run. Point to it where the paper describes the method.")
     for f in figs:
         c = credits.get(f)
         number = numbers.get(Path(str(f)).name)
@@ -6415,11 +6420,6 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
             lines.append(f"- Figure {number}: figures/{f}" + _figure_record_note(
                 records.get(f), n_seeds=n_seeds, results=state.get("result_json"), settings=settings, calls=calls)
                 + _figure_draws_note(calls) + _figure_menu_note(state, Path(str(f)).stem, calls))
-    if setup in numbers:
-        # FI's set-up figure (core/setup_flow.py): drawn from the plan, not from the run's numbers
-        lines.append(f"- Figure {numbers[setup]}: figures/{setup} — the study's set-up, drawn by FI from the frozen plan "
-                     "(the settings it varies and holds, the steps of its computation, the results it reports). It is "
-                     "not a result: it draws no number of the run. Point to it where the paper describes the method.")
     if any(_panel_place(ax.get("grid")) for f in figs for ax in ((records.get(f) or {}).get("axes") or [])
            if isinstance(ax, dict)):
         lines.append(
@@ -7079,15 +7079,15 @@ def _figure_numbers(state: QuestState) -> dict[str, int]:
     figures by FI's numbers (the writer is given them with the figure list): the figures the design planned, in the order
     planned, then the run's other figures in the order drawn, one per drawing (:func:`_figure_files_by_stem`). A figure
     whose own record says it draws nothing has none: it shows the reader nothing. FI's set-up figure, when its record
-    says FI drew it for the plan as it stands (:func:`core.setup_flow.shown`), comes last: the analysis already names the
-    run's figures by these numbers, so they do not move."""
+    says FI drew it for the plan as it stands (:func:`core.setup_flow.shown`), is Figure 1: it is drawn at the start of the
+    analysis, before any figure is given a number, so the analysis names the figures by these same numbers."""
     records = state.get("figure_records") or {}
     shown = _figure_files_by_stem(state)
     setup = _setup_flow.shown(state.get("quest_root"))
     order = [shown[Path(name).stem] for name in _planned_figure_order(state)]
     order += [shown[Path(str(f)).stem] for f in state.get("figures") or []]
-    keep = [name for name in dict.fromkeys(order) if name != setup and not _figure_draws_nothing(records.get(name))]
-    keep += [setup] if setup else []
+    keep = ([setup] if setup else []) + [name for name in dict.fromkeys(order)
+                                         if name != setup and not _figure_draws_nothing(records.get(name))]
     return {name: i + 1 for i, name in enumerate(keep)}
 
 
@@ -7152,6 +7152,9 @@ def _place_figures(markdown: str, state: QuestState, *,
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
         said = _figure_minimum_sentence(lines, number, name, state)
         at = max(_figure_insertion_line(lines, number), last + 1)
+        if name == setup and _figure_reference_end(lines, number) is None and len(numbers) > 1:
+            # FI's set-up figure the prose never names goes just before the next figure, not after every result
+            at = max(_figure_insertion_line(lines, number + 1), last + 1)
         if at >= len(lines):
             if not lines or lines[-1].strip():
                 lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper

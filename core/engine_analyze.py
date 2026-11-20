@@ -25,6 +25,10 @@ class AnalyzeStageMixin:
 
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
+        from . import setup_flow as _setup_flow
+
+        # FI's set-up figure is Figure 1: drawn before the analysis is shown any figure number; never raises
+        _setup_flow.draw_quietly(self.quest_root, state.get("figures"), self._log)
         await self._refresh_code_project(
             state, list(state.get("deps") or []),
             "changes since the code was last recorded (the project files FI keeps, or your own edits)",

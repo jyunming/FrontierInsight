@@ -9,18 +9,24 @@ steps of its computation to the results it reports. Every word and number on it 
 - ``.fi/function_steps.json``: which of the plan's equations and steps passed their own check before the run;
 - ``.fi/code_layout.json``: whether the code was written whole instead (then no step has a check of its own to show).
 
-A reader's name is the plan's label of a quantity (:func:`core.results_by_setting.plain_label`, the rule FI's own tables
-use), never a function name of the code. Long lists are cut to their first entries with "and N more" in the figure, and
-the caption FI writes says so; no number is typed by a model.
+A quantity is named by the plan's own name for a reader (``protocol.labels``, else a metric's ``label``), with its unit;
+one the plan gives no such name is never printed by its code name, only counted in its box's "and N more". A value or a
+name the plan wrote as text is shown in its own words, an underscore read as a space. An equation is shown only by a name
+the plan gives it (ids such as E1 say nothing to a reader), and a step by its card's name. Long lists are cut to their
+first entries with "and N more", which the caption FI writes says; no number is typed by a model.
 
-The figure is drawn at the start of every write (:func:`draw_quietly`), after the last run (each run empties
-``figures/``), into ``figures/setup_flow.png``. FI's record of what it drew is ``.fi/setup_flow.json``: the boxes and
-their text, the caption, and the digests of the file and of the frozen plan it was drawn from (or why nothing was
-drawn). That record, not the file name, is what tells the rest of FI that this figure is not a result: it is not in
-``state["figures"]`` (the run's own figures), the checks that judge result figures never read it (:func:`without`), and
-the paper numbers it after the run's figures (:func:`shown`, read by ``core.engine._figure_numbers``) with FI's caption.
-Records too thin to show a flow (no frozen plan, nothing varied, no result named) give no figure and one line in
-``QUALITY.md`` (:func:`quality_line`); a fault here never stops a study and never raises out of the write stage.
+The figure is the paper's Figure 1, so it must exist before FI gives any figure a number: the analysis is the first step
+that is shown the numbered figure list (``core.engine._figure_list_for_prompt``) and writes prose that names figures by
+number, which the writer then reads. So it is drawn at the start of every analysis (:func:`draw_quietly`, called by
+``Engine._node_analyze``), when the frozen plan and the final code's function steps exist, into ``.fi/setup_flow.png``
+(each run empties ``figures/``), and the write stage copies it into ``figures/`` (:func:`place_quietly`). FI's record
+of what it drew is ``.fi/setup_flow.json``: the boxes and their text, the caption, and the digests of the drawing and of
+the frozen plan it was drawn from (or why nothing was drawn). That record, not the file name, is what tells the rest of
+FI that this figure is not a result: it is not in ``state["figures"]`` (the run's own figures), the checks that judge
+result figures never read it (:func:`without`), and ``core.engine._figure_numbers`` numbers it first (:func:`shown`) in
+the analysis, the paper, the poster and the slides alike, with FI's caption. Records too thin to show a flow (no frozen
+plan, nothing varied, no result named) give no figure and one line in ``QUALITY.md`` (:func:`quality_line`); a fault
+here never stops a study and never raises.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -97,6 +104,11 @@ def _record(root: Any) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
+def _drawing(root: Any) -> Path:
+    """Where FI keeps its drawing until the write stage copies it into ``figures/`` (a run empties ``figures/``)."""
+    return Path(str(root)) / ".fi" / FILE
+
+
 def _ours(root: Any, record: dict[str, Any] | None, name: str) -> bool:
     """Whether ``figures/<name>`` is the set-up figure FI drew, by its record: the record names the file, says it was
     drawn, and the file there has the digest FI recorded (a run's own figure saved under that name is not FI's)."""
@@ -107,12 +119,14 @@ def _ours(root: Any, record: dict[str, Any] | None, name: str) -> bool:
 
 
 def shown(root: Any) -> str | None:
-    """The file name of FI's set-up figure when the paper shows it: FI's record says it drew it from the frozen plan as
-    it now stands, and ``figures/`` holds that drawing. ``None`` otherwise (no record, nothing drawn, a plan changed
-    since, a run that emptied ``figures/``). Never raises."""
+    """The file name of FI's set-up figure when the study shows it: FI's record says it drew it from the frozen plan as it
+    now stands, and its drawing in ``.fi/`` is the one recorded. ``None`` otherwise (no record, nothing drawn, a plan
+    changed since). Never raises."""
     try:
         record = _record(root)
-        if not record or not _ours(root, record, str(record.get("file") or "")):
+        if not record or not record.get("drawn") or not record.get("file"):
+            return None
+        if _digest(_drawing(root)) != str(record.get("png_sha256") or "-"):
             return None
         if str(record.get("protocol_sha256") or "") != _digest(_protocol_file(Path(str(root)))):
             return None
@@ -173,31 +187,55 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _words(text: Any) -> str:
+    """A name or a value the plan wrote as text, as a reader reads it: its own words, an underscore read as a space
+    (``stress_free`` is "stress free"); nothing else in it is changed."""
+    return " ".join(str(text).replace("_", " ").split())
+
+
+def _value(value: Any) -> str:
+    return _num(value) if _is_num(value) or isinstance(value, bool) else _words(value)
+
+
 def _values(values: Any) -> str:
     """What a setting takes: its values when there are at most four, else its range and how many."""
     if not isinstance(values, list):
-        return _num(values)
+        return _value(values)
     if len(values) <= 4:
-        return ", ".join(_num(v) for v in values)
+        return ", ".join(_value(v) for v in values)
     if all(_is_num(v) for v in values):
         return f"{_num(min(values))} to {_num(max(values))} ({len(values)} values)"
-    return ", ".join(_num(v) for v in values[:3]) + f", and {len(values) - 3} more"
+    return ", ".join(_value(v) for v in values[:3]) + f", and {len(values) - 3} more"
 
 
 def _label(protocol: dict[str, Any], name: str) -> str:
-    from .results_by_setting import plain_label
-
-    return plain_label(protocol, str(name))
+    """The plan's own name of a quantity for a reader (``protocol.labels``, else a metric's ``label``), its unit included;
+    ``""`` when the plan gives it none. A quantity with no such name is never printed by its code name: it is counted in
+    its box's "and N more"."""
+    labels = protocol.get("labels")
+    text = labels.get(str(name)) if isinstance(labels, dict) else None
+    if not (isinstance(text, str) and text.strip()):
+        text = next((m.get("label") for m in protocol.get("metrics") or []
+                     if isinstance(m, dict) and str(m.get("id")) == str(name) and isinstance(m.get("label"), str)), None)
+    return " ".join(text.split()) if isinstance(text, str) and text.strip() else ""
 
 
 def _has_unit(label: str) -> bool:
     return "(" in label
 
 
-def _cut(lines: list[str], what: str, limit: int = MAX_LINES) -> tuple[list[str], bool]:
-    if len(lines) <= limit:
+def _cut(lines: list[str], what: str, limit: int = MAX_LINES, hidden: int = 0) -> tuple[list[str], bool]:
+    """At most ``limit`` lines; what is left, with the ``hidden`` entries the plan gives no reader's name, is counted in a
+    last line "and N more <what>" (``what`` is a plural; one is said in the singular)."""
+    extra = hidden
+    if len(lines) + (1 if extra else 0) > limit:
+        keep = limit - 1
+        extra += len(lines) - keep
+        lines = lines[:keep]
+    if not extra:
         return lines, False
-    return lines[: limit - 1] + [f"and {len(lines) - limit + 1} more {what}"], True
+    noun = what[:-1] if extra == 1 and what.endswith("s") and not what.endswith("ss") else what
+    return lines + [f"and {extra} more {noun}".rstrip() if lines else f"{extra} {noun}".rstrip()], True
 
 
 def _cap_boxes(boxes: list[Box], what: str, limit: int) -> tuple[list[Box], bool]:
@@ -211,32 +249,36 @@ def _cap_boxes(boxes: list[Box], what: str, limit: int) -> tuple[list[Box], bool
     return boxes[: limit - 1] + [Box(f"and {len(rest)} more {what}", lines, source="+")], True
 
 
-def _settings_held(protocol: dict[str, Any]) -> list[str]:
+def _settings_held(protocol: dict[str, Any]) -> tuple[list[str], int]:
+    """The values the study holds fixed that the plan names for a reader, and how many others it holds (counted only)."""
     out: list[str] = []
+    hidden = 0
     runs = protocol.get("runs_per_setting")
     if _is_num(runs) and runs:
         out.append(f"Runs per setting: {_num(runs)}")
+    held: list[tuple[str, Any]] = []
     grid = protocol.get("grid")
     if isinstance(grid, dict):
         varied = _varied_ids(protocol)
         for key, vals in grid.items():
             if key in varied:
                 continue
-            one = vals[0] if isinstance(vals, list) and len(vals) == 1 else vals if not isinstance(vals, list) else None
-            if one is not None and (_is_num(one) or isinstance(one, str) and len(one) <= 24):
-                out.append(f"{_label(protocol, key)}: {_num(one)}")
+            held.append((key, vals[0] if isinstance(vals, list) and len(vals) == 1 else
+                         vals if not isinstance(vals, list) else None))
     search = protocol.get("optimisation")
     fixed = search.get("fixed") if isinstance(search, dict) else None
     if isinstance(fixed, dict):
-        for key, val in fixed.items():
-            if _is_num(val) or isinstance(val, str) and len(val) <= 24:
-                out.append(f"{_label(protocol, key)}: {_num(val)}")
+        held += list(fixed.items())
     constants = protocol.get("constants")
     if isinstance(constants, dict):
-        for key, val in constants.items():
-            if _is_num(val):
-                out.append(f"{_label(protocol, key)} = {_num(val)}")
-    return out
+        held += [(k, v) for k, v in constants.items() if _is_num(v)]
+    for key, val in held:
+        label = _label(protocol, key)
+        if label and (_is_num(val) or isinstance(val, str) and len(val) <= 24):
+            out.append(f"{label}: {_value(val)}")
+        elif val is not None:
+            hidden += 1
+    return out, hidden
 
 
 def _varied_ids(protocol: dict[str, Any]) -> set[str]:
@@ -261,36 +303,39 @@ def _inputs(protocol: dict[str, Any]) -> tuple[list[Box], str, bool]:
         lines = []
         for v in variables:
             label = _label(protocol, v["name"])
+            if not label:
+                continue
             span = f"{_num(v.get('low'))} to {_num(v.get('high'))}" if v.get("low") is not None and v.get("high") is not None \
                 else "searched"
             unit = str(v.get("unit") or "").strip()
             if unit and unit.lower() not in ("dimensionless", "-", "none") and not _has_unit(label):
                 span += f" {unit}"
             lines.append(f"{label}: {span}")
-        lines, cut = _cut(lines, "design variables")
+        lines, cut = _cut(lines, "design variables", hidden=len(variables) - len(lines))
         boxes.append(Box("Design search over", lines, source="optimisation.design_variables"))
     elif subs:
         shape = "sub_studies"
         for i, sub in enumerate(subs):
-            lines = [f"{_label(protocol, k)}: {_values(grid.get(k))}" if k in grid else _label(protocol, k)
-                     for k in (str(x) for x in sub.get("vary") or [])]
-            lines, c = _cut(lines, "settings")
+            keys = [str(x) for x in sub.get("vary") or []]
+            lines = [f"{_label(protocol, k)}: {_values(grid[k])}" if k in grid else _label(protocol, k)
+                     for k in keys if _label(protocol, k)]
+            lines, c = _cut(lines, "settings", hidden=len(keys) - len(lines))
             cut = cut or c
-            boxes.append(Box(" ".join(str(sub.get("name") or f"sub-study {i + 1}").split()), lines,
-                             source=f"sub_studies[{i}]"))
+            boxes.append(Box(_words(sub.get("name") or f"sub-study {i + 1}"), lines, source=f"sub_studies[{i}]"))
         boxes, c = _cap_boxes(boxes, "sub-studies", MAX_BOXES - 1)
         cut = cut or c
     else:
         varied = [k for k, v in grid.items() if isinstance(v, list) and len(v) > 1]
         if varied:
             shape = "grid"
-            lines, cut = _cut([f"{_label(protocol, k)}: {_values(grid[k])}" for k in varied], "settings")
+            named = [f"{_label(protocol, k)}: {_values(grid[k])}" for k in varied if _label(protocol, k)]
+            lines, cut = _cut(named, "settings", hidden=len(varied) - len(named))
             boxes.append(Box("Settings varied", lines, source="grid"))
     if not boxes:
         return [], "", False
-    held = _settings_held(protocol)
-    if held:
-        lines, c = _cut(held, "held fixed")
+    held, hidden = _settings_held(protocol)
+    if held or hidden:
+        lines, c = _cut(held, "held fixed", hidden=hidden)
         cut = cut or c
         boxes.append(Box("Held fixed", lines, source="runs_per_setting, grid, optimisation.fixed, constants"))
     return boxes, shape, cut
@@ -312,46 +357,35 @@ def _statuses(steps_record: Any, layout_record: Any) -> dict[str, str]:
 def _computation(protocol: dict[str, Any], steps_record: Any, layout_record: Any) -> tuple[list[Box], bool, bool]:
     model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
     status = _statuses(steps_record, layout_record)
-    steps = [s for s in model.get("steps") or [] if isinstance(s, dict) and (s.get("name") or s.get("id"))]
+    steps = [s for s in model.get("steps") or [] if isinstance(s, dict) and str(s.get("name") or "").strip()]
     equations = [e for e in model.get("equations") or [] if isinstance(e, dict) and e.get("id")]
     boxes: list[Box] = []
     dashed = cut = False
-    ids = [str(e["id"]) for e in equations] or ([] if steps else list(status))
-    room = MAX_BOXES - (1 if ids else 0)
+    # An equation is shown by the name the plan gives it; the plan's ids (E1, E2, ...) say nothing to a reader, so a plan
+    # that records only ids and formulas gives no equations box.
+    named = [_words(e.get("name") or e.get("title")) for e in equations
+             if str(e.get("name") or e.get("title") or "").strip()]
+    room = MAX_BOXES - (1 if named else 0)
     one_box = len(steps) > room  # too many steps for a box each: one box lists them
     rows: list[str] = []
     for s in steps:
         ident = str(s.get("id") or "")
-        name = " ".join(str(s.get("name") or ident).split())
-        title = f"{ident} {name}".strip() if ident and ident != name else name
-        uses = [str(u) for u in s.get("uses") or [] if str(u).strip()]
+        title = " ".join(str(s.get("name") or "").split())
+        if not title:
+            continue
         failed = status.get(ident) == "failed"
         if one_box:
             rows.append(title + (" (its check did not pass)" if failed else ""))
             continue
         dashed = dashed or failed
-        lines = [f"uses {', '.join(uses)}"] if uses else []
-        if failed:
-            lines.append("its check did not pass")
-        boxes.append(Box(title, lines, dashed=failed, source=f"model.steps.{ident}"))
+        boxes.append(Box(title, ["its check did not pass"] if failed else [], dashed=failed,
+                         source=f"model.steps.{ident}"))
     if one_box:
         rows, cut = _cut(rows, "steps")
         boxes.append(Box("Steps of the method", rows, source="model.steps"))
-    if ids:
-        failed = [i for i in ids if status.get(i) == "failed"]
-        if steps:
-            lines = [", ".join(ids)]
-        else:
-            lines = []
-            for e in equations:
-                formula = " ".join(str(e.get("formula") or "").split())
-                lines.append(f"{e['id']}: {formula}" if formula else str(e["id"]))
-            if not lines:
-                lines = [", ".join(ids)]
-            lines, c = _cut(lines, "equations", MAX_LINES - (1 if failed else 0))
-            cut = cut or c
-        if failed:
-            lines.append("check did not pass: " + ", ".join(failed))
+    if named:
+        lines, c = _cut(named, "equations", 4, hidden=len(equations) - len(named))
+        cut = cut or c
         boxes.append(Box("Model equations", lines, source="model.equations"))
     return boxes, dashed, cut
 
@@ -364,33 +398,41 @@ def _results(protocol: dict[str, Any]) -> tuple[list[Box], bool]:
     if isinstance(objective, dict) and objective.get("quantity"):
         label = _label(protocol, objective["quantity"])
         unit = str(objective.get("unit") or "").strip()
-        if unit and not _has_unit(label):
+        if label and unit and not _has_unit(label):
             label += f" ({unit})"
-        lines = [f"{str(objective.get('direction') or 'optimise').strip()} {label}"]
-        for c in (search or {}).get("constraints") or []:
-            if isinstance(c, dict) and c.get("quantity") and c.get("limit") is not None:
-                name = _label(protocol, c["quantity"])
-                if name != str(c["quantity"]):  # an expression of code names is not a reader's: counted, not shown
-                    lines.append(f"with {name} {c['limit']}")
+        lines = [f"{str(objective.get('direction') or 'optimise').strip()} {label or 'the objective the plan names'}"]
+        constraints = [c for c in (search or {}).get("constraints") or []
+                       if isinstance(c, dict) and c.get("quantity") and c.get("limit") is not None]
+        shown = [f"with {_label(protocol, c['quantity'])} {c['limit']}" for c in constraints
+                 if _label(protocol, c["quantity"])]
+        lines, c = _cut(lines + shown, "conditions", hidden=len(constraints) - len(shown))
+        cut = cut or c
         boxes.append(Box("Objective", lines, source="optimisation.objective"))
     families: dict[str, list[str]] = {}
+    unnamed: dict[str, int] = {}
     for m in protocol.get("metrics") or []:
         if not isinstance(m, dict) or not m.get("id") or str(m.get("role") or "result") != "result":
             continue
+        family = _words(m.get("family") or "")
+        families.setdefault(family, [])
         label = _label(protocol, m["id"])
+        if not label:
+            unnamed[family] = unnamed.get(family, 0) + 1
+            continue
         unit = str(m.get("physical_unit") or "").strip()
         if unit and not _has_unit(label):
             label += f" ({unit})"
-        families.setdefault(" ".join(str(m.get("family") or "").split()), []).append(label)
+        families[family].append(label)
     for fam, labels in families.items():
-        lines, c = _cut(labels, "results", 4)
+        lines, c = _cut(labels, "results", 4, hidden=unnamed.get(fam, 0))
         cut = cut or c
         boxes.append(Box(fam[:1].upper() + fam[1:] if fam else "Results", lines, source=f"metrics:{fam}"))
     derived = [d for d in protocol.get("derived") or [] if isinstance(d, dict) and d.get("id")
                and str(d.get("role") or "result") == "result"]
     if derived and len(boxes) < MAX_BOXES:
-        lines, c = _cut([" ".join(str(d["label"]).split()) if isinstance(d.get("label"), str) and d["label"].strip()
-                         else _label(protocol, d["id"]) for d in derived], "worked out", 4)
+        named = [" ".join(str(d["label"]).split()) if isinstance(d.get("label"), str) and d["label"].strip()
+                 else _label(protocol, d["id"]) for d in derived]
+        lines, c = _cut([n for n in named if n], "results", 4, hidden=sum(1 for n in named if not n))
         cut = cut or c
         boxes.append(Box("Worked out from the runs", lines, source="derived"))
     boxes, c = _cap_boxes(boxes, "result groups", MAX_BOXES)
@@ -420,7 +462,8 @@ def caption_of(flow: Flow) -> str:
             "grid": "the settings it varies and the values it holds fixed"}.get(flow.shape, "its inputs")
     parts = [f"How the study is set up, drawn by FI from the study's frozen plan (not a result of the run): {left} (left)"]
     if "computation" in flow.columns:
-        parts.append("the steps and equations of its computation (middle)")
+        equations = any(b.source == "model.equations" for b in flow.columns["computation"])
+        parts.append(f"the steps{' and equations' if equations else ''} of its computation (middle)")
     parts.append("and the results it reports (right)")
     text = ", ".join(parts[:-1]) + (", " if len(parts) > 2 else " ") + parts[-1] + "."
     if flow.dashed:
@@ -433,7 +476,9 @@ def caption_of(flow: Flow) -> str:
 # --------------------------------------------------------------------------------------------------- drawing
 
 
-_TOKEN = re.compile(r"\S*\$[^$]*\$\S*|\S+")
+#: A word of a label: a ``$...$`` span (spaces inside it included) with the characters joined to it, or any other run
+#: of non-space characters.
+_TOKEN = re.compile(r"[^\s$]*(?:\$[^$]*\$[^\s$]*)+|\S+")
 
 
 def _plain(text: str) -> str:
@@ -480,7 +525,8 @@ class _Painter:
             else:
                 current = trial
             while self.size(current, size=size, bold=bold)[0] > width and len(current) > 4:
-                # a single word wider than the box: broken where it fits
+                # a single word wider than the box: broken where it fits (a formula in it is then read as its words)
+                current = _plain(current) if "$" in current else current
                 cut = max(1, int(len(current) * width / max(self.size(current, size=size, bold=bold)[0], 1e-6)) - 1)
                 under = current.rfind("_", 0, cut)  # a name in parts is broken after one of its parts
                 cut = under + 1 if under > 0 else cut
@@ -574,52 +620,58 @@ def render(flow: Flow, png: Path) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------------------------------- the write stage's call
 
 
+def _forget_copy(root: Path, old: dict[str, Any] | None) -> None:
+    """Take FI's earlier copy out of ``figures/`` (only the file its record says it drew there)."""
+    if old and _ours(root, old, FILE):
+        (root / "figures" / FILE).unlink(missing_ok=True)
+
+
 def draw(root: Path, run_figures: list[str] | None = None) -> dict[str, Any]:
-    """Draw FI's set-up figure for the quest at ``root`` and write its record; returns the record. Raises on a fault
-    (:func:`draw_quietly` is the write stage's call)."""
+    """Draw FI's set-up figure for the quest at ``root`` into ``.fi/`` and write its record; returns the record. Raises on
+    a fault (:func:`draw_quietly` is the analysis stage's call)."""
     root = Path(root)
     record_path = root / ".fi" / RECORD
     record_path.parent.mkdir(parents=True, exist_ok=True)
-    png = root / "figures" / FILE
-    protocol_digest = _digest(_protocol_file(root))
-    record: dict[str, Any] = {"schema": SCHEMA, "file": FILE, "drawn": False, "protocol_sha256": protocol_digest}
-    if FILE in {Path(str(f)).name for f in run_figures or []}:
-        record["why"] = f"the run drew a figure of its own named {FILE}"
-        record_path.write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
-        return record
-    from . import frozen_protocol as _frozen
+    old = _record(root)
+    png = _drawing(root)
+    record: dict[str, Any] = {"schema": SCHEMA, "file": FILE, "drawn": False,
+                              "protocol_sha256": _digest(_protocol_file(root))}
+    flow, why = None, f"the run drew a figure of its own named {FILE}"
+    if FILE not in {Path(str(f)).name for f in run_figures or []}:
+        from . import frozen_protocol as _frozen
 
-    flow, why = build(_frozen.protocol_of(root), _json(root / ".fi" / "function_steps.json"),
-                      _json(root / ".fi" / "code_layout.json"))
+        flow, why = build(_frozen.protocol_of(root), _json(root / ".fi" / "function_steps.json"),
+                          _json(root / ".fi" / "code_layout.json"))
     if flow is None:
         # an earlier drawing of FI's is not shown for a plan that no longer gives one
-        old = _record(root)
-        if old and _ours(root, old, FILE):
-            png.unlink(missing_ok=True)
+        _forget_copy(root, old)
+        png.unlink(missing_ok=True)
         record["why"] = why
         record_path.write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
         return record
     boxes = render(flow, png)
     record.update(drawn=True, png_sha256=_digest(png), caption=caption_of(flow), shape=flow.shape, boxes=boxes)
+    if old and old.get("png_sha256") != record["png_sha256"]:
+        _forget_copy(root, old)  # the write stage copies the new drawing
     record_path.write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
     return record
 
 
 def draw_quietly(root: Path, run_figures: list[str] | None, log: Any = None) -> None:
-    """:func:`draw` for the write stage: a fault is recorded (one ``QUALITY.md`` line) and logged, never raised."""
+    """:func:`draw` for the analysis stage: a fault is recorded (one ``QUALITY.md`` line) and logged, never raised."""
     old = None
     try:
         old = _record(root)
         record = draw(Path(root), run_figures)
         if log is not None:
             if record.get("drawn"):
-                log.info("[write] FI drew the study's set-up figure from its records (figures/%s)", FILE)
+                log.info("[analyze] FI drew the study's set-up figure from its records (Figure 1 of the paper)")
             else:
-                log.info("[write] no set-up figure: %s", record.get("why"))
+                log.info("[analyze] no set-up figure: %s", record.get("why"))
     except Exception as exc:  # noqa: BLE001 -- the figure is extra: a paper without it is today's paper
         try:
-            if old and _ours(root, old, FILE):  # an earlier drawing of FI's is not left for a plan it may not show
-                (Path(root) / "figures" / FILE).unlink(missing_ok=True)
+            _forget_copy(Path(root), old)
+            _drawing(root).unlink(missing_ok=True)
             path = Path(root) / ".fi" / RECORD
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"schema": SCHEMA, "file": FILE, "drawn": False,
@@ -627,8 +679,27 @@ def draw_quietly(root: Path, run_figures: list[str] | None, log: Any = None) -> 
         except Exception:  # noqa: BLE001
             pass
         if log is not None:
-            log.warning("[write] the set-up figure could not be drawn (%r); the paper goes on without it", exc)
+            log.warning("[analyze] the set-up figure could not be drawn (%r); the study goes on without it", exc)
 
 
-__all__ = ["FILE", "RECORD", "Box", "Flow", "build", "caption", "caption_of", "draw", "draw_quietly", "quality_line",
-           "render", "shown", "without"]
+def place_quietly(root: Path, log: Any = None) -> None:
+    """The write stage's call: FI's drawing, when the study shows it (:func:`shown`), copied into ``figures/`` where the
+    paper, the poster and the slides embed it. Nothing is drawn here, so the numbers the analysis was given stand. Never
+    raises."""
+    try:
+        root = Path(root)
+        name = shown(root)
+        if name is None:
+            _forget_copy(root, _record(root))
+            return
+        target = root / "figures" / name
+        if _digest(target) != _digest(_drawing(root)):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_drawing(root), target)
+    except Exception as exc:  # noqa: BLE001
+        if log is not None:
+            log.warning("[write] the set-up figure could not be put in figures/ (%r)", exc)
+
+
+__all__ = ["FILE", "RECORD", "Box", "Flow", "build", "caption", "caption_of", "draw", "draw_quietly", "place_quietly",
+           "quality_line", "render", "shown", "without"]
