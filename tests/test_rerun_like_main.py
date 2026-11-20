@@ -249,6 +249,17 @@ def test_a_study_whose_numbers_are_only_in_fis_record_of_its_trials_is_run_again
     moved = _repaired(root, tmp_path, "c1", SIM.replace("* 1.0", "* 1.5"))  # known positive
     v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, PROTOCOL, 120, None, at_once=2))
     assert v.status == "changed", v
+    # planted: an analysis that crashes is no run, though the trial runner wrote its record of the trials again
+    crash = _repaired(root, tmp_path, "c2", SIM + "# repaired\n")
+    (crash / "experiment.py").write_text("raise RuntimeError('the analysis fails')\n", encoding="utf-8")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, crash, PROTOCOL, 120, None, at_once=2))
+    assert v.status == "could_not" and v.crashed, v
+    # planted: a repair of the analysis alone compares nothing here (it runs on the delivered record of the trials, and the
+    # analysis writes no result file FI reads), so it is never "unchanged"
+    analysis = rerun_check.copy_code(root, tmp_path / "c3")
+    (analysis / "experiment.py").write_text("print('a repaired analysis')\n", encoding="utf-8")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, analysis, PROTOCOL, 120, None, at_once=2))
+    assert v.mode == "analysis only" and v.status == "could_not", v
 
 
 def test_settings_that_shared_a_process_in_the_delivered_run_share_one_in_the_rerun(

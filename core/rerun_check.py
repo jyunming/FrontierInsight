@@ -794,7 +794,9 @@ async def _analysis(executor: Any, python: Path | str, code: Path, trials: Path,
 
 def _ended(ran: Any, out: Path, names: list[str], timeout_s: float, mode: str, secs: float,
            info: dict[str, Any]) -> tuple[str, Path | None, str, float, bool]:
-    wrote = (not names or wrote_results(out, names)) and (out / "raw" / "trials.json").is_file()
+    # no result file to write (the delivered numbers are FI's record of the trials, rewritten by the trial runner): the
+    # analysis must still end cleanly, so a crash in it is never read as a run
+    wrote = (wrote_results(out, names) if names else ran.returncode == 0) and (out / "raw" / "trials.json").is_file()
     if getattr(ran, "timed_out", False):
         info["timed_out"] = True
         return mode, None, f"the repaired study did not finish within {int(timeout_s)} s", secs, False
@@ -817,16 +819,14 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
     says it would take longer than ``timeout_s`` (:func:`expected_seconds`): the answer is then "could not rerun" at 0 s. A
     run that ends with a non-zero code after writing its results counts as a run (FI's analysis frame ends some studies that
     way). The run wrote results when it wrote what the delivered run's numbers are read from (:func:`result_names`), not a
-    file name this module fixes: an older study writes ``result.json``, and a study whose delivered run left no result file
-    is read from FI's record of its trials alone. ``info`` gets ``timed_out`` when the run ran out of
+    file name this module fixes: an older study writes ``result.json``, and a study whose delivered run left no result file FI
+    reads is read, through FI's trial runner, from FI's record of its trials alone. ``info`` gets ``timed_out`` when the run ran out of
     its time."""
     began = time.monotonic()
     quest_root = Path(quest_root)
     base_root = Path(results_root or quest_root)
     raw_trials = base_root / "raw" / "trials.json"
     names = result_names(base_root, derived)
-    if raw_trials.is_file() and not wrote_results(base_root, names):
-        names = []  # the delivered numbers are read from FI's record of the trials alone: that record is what a rerun writes
     info = info if info is not None else {}
     if analysis_only(files) and raw_trials.is_file():
         mode = "analysis only"
@@ -838,8 +838,12 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
     if why:
         return mode, None, why, 0.0, False
     if at_once is not None and isinstance(protocol, dict):
+        # a delivered run with no result file FI reads has its numbers in FI's record of the trials alone: that record,
+        # which the trial runner writes again, is what the rerun must write (only on this path: an analysis-only rerun
+        # copies the delivered record, so there the analysis's own result file is still required)
+        trials_only = raw_trials.is_file() and not wrote_results(base_root, names)
         return await _run_like_main(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work, int(at_once),
-                                    names, say=say, finding=finding, info=info, began=began)
+                                    [] if trials_only else names, say=say, finding=finding, info=info, began=began)
     out = copy / "output"
     if not (copy / "run.py").is_file():
         return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
