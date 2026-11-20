@@ -137,6 +137,18 @@ def _last_frame(text: str) -> str:
         return pick
 
 
+def _library_note(err: BaseException) -> str:
+    """``; raised in a library (<file> line <n>)`` when the innermost frame of the error is in a library (site-packages or the
+    standard library), not in the study's own code: what it raised is then not the figure's own statement (the gate reads this
+    sentence, core/pipeline_gate.py ``LIBRARY_MARK``); empty otherwise."""
+    tb = traceback.extract_tb(err.__traceback__)
+    path = os.path.normcase(os.path.abspath(tb[-1].filename)).replace("\\", "/") if tb else ""
+    stdlib = os.path.normcase(os.path.dirname(os.path.abspath(os.__file__))).replace("\\", "/")
+    if path and ("/site-packages/" in path or "/dist-packages/" in path or path.startswith(stdlib + "/")):
+        return "; raised in a library (%s line %d)" % (os.path.basename(path), tb[-1].lineno)
+    return ""
+
+
 def _outcome(fid: str, file: str, status: str, why: str = "") -> dict[str, Any]:
     said = {"ok": "Figure `%s` was drawn (%s)." % (fid, file),
             "not_written": "Figure `%s` was not drawn: its `figure_%s` is not written yet." % (fid, fid),
@@ -272,7 +284,8 @@ def _drew_nothing(spec: dict[str, Any], table: Any) -> str:
     return _with_forms(text + (" The last read raised %s." % err.rstrip(".") if err else "") + ("\n" + readable if readable else ""), spec, table)
 
 
-def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str, summary: dict[str, Any] | None = None) -> dict[str, Any]:
+def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str, summary: dict[str, Any] | None = None,
+                     derived: Any = None) -> dict[str, Any]:
     """What the figure was declared to show next to what its body drew, from the table's own tracking of the reads that gave
     values (``Table.gave_values``): ``{"shows", "drawn", "not_drawn", "labels"}``, the labels being the plan's own for each
     declared result. It is added to the figure's record (``FI_FIGURE_RECORDS/<stem>.json``, written when the figure was saved)
@@ -287,6 +300,9 @@ def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str, 
         labels = spec.get("result_labels") if isinstance(spec.get("result_labels"), dict) else {}
         got = {"shows": ids, "drawn": [r for r in ids if r in gave], "not_drawn": [r for r in ids if r not in gave],
                "labels": {r: str(labels[r]) for r in ids if labels.get(r)}}
+        none = _no_value(table, got["not_drawn"], derived)
+        if none:  # in the record the paper side reads too, not only in the outcome
+            got["no_value"] = none
     if summary:
         got = dict(got, calls=summary["calls"], raw_panels=summary["raw_panels"])
     if not got:
@@ -305,7 +321,8 @@ def _declared_record(spec: dict[str, Any], table: Any, out_dir: str, file: str, 
     return got
 
 
-def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: dict[str, Any] | None = None) -> dict[str, Any]:
+def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: dict[str, Any] | None = None,
+              derived: Any = None) -> dict[str, Any]:
     """Draw one declared figure. A fault of the model's body is ``failed`` / ``refused`` (its repair); a fault of FI's own lines
     (making the figure, handing it over, the folder) is ``fi_fault`` and is never sent to the model."""
     fid, file = str(spec.get("id")), str(spec.get("file") or "%s.png" % spec.get("id"))
@@ -342,7 +359,7 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
                 return _outcome(fid, file, "not_written")
             if did:
                 return _outcome(fid, file, "refused", _misuse_text(name, did[0]))
-            where = _last_frame(traceback.format_exc())
+            where = _last_frame(traceback.format_exc()) + _library_note(err)
             return _outcome(fid, file, "failed", _with_forms(
                 "`figure_%s` stopped with %s: %s (%s)." % (fid, type(err).__name__, err, where), spec, table))
         if did:
@@ -386,9 +403,11 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
             drawn = handle.record()
             summary = _calls_summary(drawn)
             removed = list(drawn.get("removed") or [])  # lines left out in the last run: FI could not say what they are
-        declared = _declared_record(spec, table, out_dir, file, summary)
+        declared = _declared_record(spec, table, out_dir, file, summary, derived)
         done = dict(_outcome(fid, file, "ok"), panels=panel_record, **({"declared": declared} if declared else {}),
                     **({"removed": removed} if removed else {}))
+        if declared.get("no_value"):
+            done["said"] = _partly_said(fid, file, declared["no_value"])
         if summary:
             done["note"] = _checked_line(fid, summary)
         return done
@@ -822,7 +841,7 @@ def run_figures(figures: list[dict[str, Any]], namespace: Any, table: Any, out_d
     for spec in figures or []:
         name = "figure_%s" % spec.get("id")
         body = namespace.get(name) if isinstance(namespace, dict) else getattr(namespace, name, None)
-        out.append(_draw_one(spec, body, table, out_dir, _plan_for(spec, namespace, table)))
+        out.append(_draw_one(spec, body, table, out_dir, _plan_for(spec, namespace, table), records))
     return out
 
 
@@ -1553,12 +1572,14 @@ def default_figure(spec: dict[str, Any], table: Any, out_dir: str, namespace: An
         fig.savefig(os.path.join(out_dir, file))  # the recorder of the house style notes what the figure draws
         if x_result:
             _only_drawn(table, spec, {line[3] for lines in drawn for line in lines})
-        declared = _declared_record(spec, table, out_dir, file)
+        declared = _declared_record(spec, table, out_dir, file, None, derived)
         out = dict(_outcome(fid, file, "ok", note), fallback=True, **({"panels": record} if record else {}),
                    **({"declared": declared} if declared else {}), **({"held": hold} if hold else {}),
                    **({"paired": True} if x_result else {}))
         if note:
             out["note"] = note
+        if declared.get("no_value"):
+            out["said"] = _partly_said(fid, file, declared["no_value"])
         return out
     except Exception as err:
         _remove(out_dir, file)
@@ -1619,7 +1640,7 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
         if x_result:
             _only_drawn(tbl, spec, points_of)
 
-    out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan)  # the lines above are read with the plan's own series
+    out = _draw_one(dict(spec, series=None) if mixed else spec, body, table, out_dir, plan, derived)  # the lines above are read with the plan's own series
     if out.get("status") != "ok":
         _remove(out_dir, file)
         _remove_calls(file)
@@ -1632,13 +1653,37 @@ def _default_with_calls(spec: dict[str, Any], table: Any, out_dir: str, namespac
 
 
 # ---- what is said and the exit code ---------------------------------------------------------------------------------------------
+def partly_drawn(outcome: dict[str, Any]) -> list[str]:
+    """The results a drawn figure was declared to show, whose values FI holds nowhere (``declared.no_value``, set where the
+    figure is drawn and kept in its stored record): empty for a figure that drew them all, one that was not drawn, or one with no such record. A result
+    FI holds a value of that the figure's reads did not return (``declared.not_drawn``) is not in it: the body may draw it
+    another way (a reference line, a series of its own), and only the saved axes say what is drawn."""
+    declared = outcome.get("declared") if isinstance(outcome, dict) and outcome.get("status") == "ok" else None
+    left = declared.get("no_value") if isinstance(declared, dict) else None
+    return [str(r) for r in left] if isinstance(left, list) else []
+
+
+def _no_value(table: Any, ids: list[str], derived: Any = None) -> list[str]:
+    """The declared results among ``ids`` that FI holds no value of at any setting (a trial's, a compared value's or a derived
+    one, :func:`_holds_any`): a figure cannot show them. A table that cannot be asked claims nothing."""
+    try:
+        return [str(r) for r in ids if not _holds_any(table, str(r), derived)]
+    except Exception:  # noqa: BLE001 -- no claim
+        return []
+
+
+def _partly_said(fid: str, file: str, left: list[str]) -> str:
+    return "Figure `%s` was partly drawn (%s): FI holds no value of %s." % (fid, file, ", ".join("`%s`" % r for r in left))
+
+
 def said(outcomes: list[dict[str, Any]]) -> str:
-    """The figure step in plain words: how many were drawn and, one sentence each, every one that was not and why."""
+    """The figure step in plain words: how many were drawn and, one sentence each, every one that was not (and why) or was
+    drawn in part."""
     if not outcomes:
         return ""
     drawn = [o for o in outcomes if o.get("status") == "ok"]
     lines = ["%d of %d figure(s) drawn." % (len(drawn), len(outcomes))]
-    lines += [o["said"] for o in outcomes if o.get("status") != "ok" and o.get("said")]
+    lines += [o["said"] for o in outcomes if (o.get("status") != "ok" or partly_drawn(o)) and o.get("said")]
     lines += [o["note"] for o in outcomes if o.get("note")]
     return " ".join(lines)
 

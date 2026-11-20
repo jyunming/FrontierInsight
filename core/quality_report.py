@@ -832,6 +832,37 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
                             + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
                             "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
+    out.extend(_planned_figure_problems(q))
+    return out
+
+
+def _planned_figure_problems(q: _Quest) -> list[dict[str, str]]:
+    """One row for each planned figure FI's record (``derived.json``) does not show fully drawn: drawn in part (it was declared
+    to show a result FI holds no value of, ``declared.no_value``), recorded as drawn with no file (also when the figures
+    folder is missing or empty: FI keeps no record of a folder cleaned on purpose), or not drawn (a figure FI left out on its own account, ``skipped``, says why itself). A figure FI could not draw
+    already has its row from ``cannot_repair.json`` (core/engine_code.py), so it gets none here; a result with no value has its
+    row in :func:`_analysis_problems`. It is disclosed; nothing stops and no number changes."""
+    from . import analysis_figures as _figures
+    from . import analysis_frame as _analysis
+
+    out: list[dict[str, str]] = []
+    has_row = " ".join(str(p.get("text") or "") for p in map(_dict, _list(q.cannot_repair.get("problems")))
+                       if p.get("check") in ("figure_dropped", "figure_fi_fault"))
+    folder = q.root / "figures"
+    for o in (x for x in _list(_analysis.read_record(q.root).get("figures")) if isinstance(x, dict) and x.get("id")):
+        fid, name = str(o["id"]), Path(str(o.get("file") or "")).name
+        if o.get("status") == "skipped" or f"Figure `{fid}`" in has_row:
+            continue
+        left = _figures.partly_drawn(o)
+        if left:
+            text = f"Figure `{fid}` was drawn in part: FI holds no value of " + ", ".join(f"`{r}`" for r in left) + ", which the plan says it shows"
+        elif o.get("status") == "ok" and name and not (folder / name).is_file():
+            text = f"Figure `{fid}` is recorded as drawn, but its file `{name}` is not in the figures folder"
+        elif o.get("status") != "ok":
+            text = f"Figure `{fid}` was not drawn" + (f": {_one(o['why'], 160).rstrip('.')}" if o.get("why") else "")
+        else:
+            continue
+        out.append(_problem("analysis", text + ".", "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
     return out
 
 

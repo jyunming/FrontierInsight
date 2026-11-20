@@ -594,6 +594,103 @@ def test_the_gate_judges_a_figure_function_that_names_nothing_a_fault(tmp_path: 
     assert got.kind == pipeline_gate.FAULT and got.body == "figure_fig1" and "NameError" in got.detail
 
 
+def test_the_gate_sends_back_a_figure_function_that_is_not_written_and_says_so(tmp_path: Path) -> None:
+    # A figure function that raises NotImplementedError is a fault of the code (it is the function's own statement), named
+    # with the figure and said plainly, not "too few trials to tell".
+    from types import SimpleNamespace
+
+    from core import pipeline_gate
+
+    engine = _engine(tmp_path)
+    code = _fis_quest(engine, FIGURED)
+    body = ("\ndef figure_fig1(fig, table):\n    raise NotImplementedError('the second quantity is not among the results a trial "
+            "may return')\n")
+    text, note = af.compose(FIGURED, DERIVE + body, (code / "derive.py").read_text(encoding="utf-8"))
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    cells = [{"cell": {"rate": r, "dose": d}, "key": f"rate={r},dose={d}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"growth": {"values": [r * d, r * d + 0.1], "trials": [0, 1]}}} for r in (0.1, 0.2) for d in (1, 2)]
+    (engine.quest_root / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "cells": cells}),
+                                                           encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_TRIALS")}
+    r = subprocess.run([sys.executable, "experiment.py"], cwd=code, env=env, capture_output=True, text=True, timeout=300,
+                       creationflags=NO_WINDOW)
+    assert r.returncode == 1
+    got = pipeline_gate._fis_analysis_result(engine.quest_root, SimpleNamespace(returncode=r.returncode, stdout=r.stdout,
+                                                                                 stderr=r.stderr), FIGURED["protocol"], {}, [])
+    assert got.kind == pipeline_gate.FAULT and got.exception == "NotImplementedError" and got.body == "figure_fig1"
+    assert got.detail.startswith("`figure_fig1` is not written yet") and "second quantity" in got.detail
+    from core import small_run
+
+    sent = small_run.analysis_split(got)
+    assert sent is not None and sent.send and sent.body == "figure_fig1" and "is not written yet" in sent.why
+
+
+def test_the_gate_sends_back_a_derived_result_function_that_is_not_written_and_says_so(tmp_path: Path) -> None:
+    # The same for a derived result's function.
+    from types import SimpleNamespace
+
+    from core import pipeline_gate
+
+    engine = _engine(tmp_path)
+    code = _fis_quest(engine, FIGURED)
+    body = "\ndef derive_peak(table):\n    raise NotImplementedError('the peak needs a quantity no trial returns')\n"
+    text, note = af.compose(FIGURED, body, (code / "derive.py").read_text(encoding="utf-8"))
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    cells = [{"cell": {"rate": r, "dose": d}, "key": f"rate={r},dose={d}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"growth": {"values": [r * d, r * d + 0.1], "trials": [0, 1]}}} for r in (0.1, 0.2) for d in (1, 2)]
+    (engine.quest_root / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "cells": cells}),
+                                                           encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_TRIALS")}
+    r = subprocess.run([sys.executable, "experiment.py"], cwd=code, env=env, capture_output=True, text=True, timeout=300,
+                       creationflags=NO_WINDOW)
+    assert r.returncode == 1, r.stderr[-400:]
+    got = pipeline_gate._fis_analysis_result(engine.quest_root, SimpleNamespace(returncode=r.returncode, stdout=r.stdout,
+                                                                                 stderr=r.stderr), FIGURED["protocol"], {}, [])
+    assert got.kind == pipeline_gate.FAULT and got.exception == "NotImplementedError" and got.body == "derive_peak"
+    assert got.detail.startswith("`derive_peak` is not written yet") and "needs a quantity" in got.detail
+    from core import small_run
+
+    sent = small_run.analysis_split(got)
+    assert sent is not None and sent.send and sent.body == "derive_peak" and "is not written yet" in sent.why
+
+
+@pytest.mark.parametrize("which", ["figure", "derive"])
+def test_a_not_implemented_error_raised_inside_a_library_is_not_a_function_left_unwritten(tmp_path: Path, which: str) -> None:
+    # The study's function calls a library that raises NotImplementedError for a data shape: that says nothing of the function,
+    # so the gate keeps the earlier treatment (too few trials to tell) and does not say the function is not written.
+    from types import SimpleNamespace
+
+    from core import pipeline_gate
+
+    lib = tmp_path / "site-packages"
+    lib.mkdir()
+    (lib / "libx.py").write_text("def go():\n    raise NotImplementedError('backend unsupported')\n", encoding="utf-8")
+    engine = _engine(tmp_path)
+    code = _fis_quest(engine, FIGURED)
+    call = f"    import sys\n    sys.path.insert(0, {str(lib)!r})\n    import libx\n    libx.go()\n"
+    if which == "figure":
+        body = "\ndef figure_fig1(fig, table):\n" + call
+        text, note = af.compose(FIGURED, DERIVE + body, (code / "derive.py").read_text(encoding="utf-8"))
+    else:
+        body = "\ndef derive_peak(table):\n" + call
+        text, note = af.compose(FIGURED, body, (code / "derive.py").read_text(encoding="utf-8"))
+    (code / "derive.py").write_text(text, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(exist_ok=True)
+    cells = [{"cell": {"rate": r, "dose": d}, "key": f"rate={r},dose={d}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"growth": {"values": [r * d, r * d + 0.1], "trials": [0, 1]}}} for r in (0.1, 0.2) for d in (1, 2)]
+    (engine.quest_root / "raw" / "trials.json").write_text(json.dumps({"schema": "fi.trials/v1", "cells": cells}), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "FI_TRIALS")}
+    r = subprocess.run([sys.executable, "experiment.py"], cwd=code, env=env, capture_output=True, text=True, timeout=300,
+                       creationflags=NO_WINDOW)
+    assert r.returncode == 1, r.stderr[-400:]
+    got = pipeline_gate._fis_analysis_result(engine.quest_root, SimpleNamespace(returncode=r.returncode, stdout=r.stdout,
+                                                                                 stderr=r.stderr), FIGURED["protocol"], {}, [])
+    assert got.exception == "NotImplementedError" and got.kind == pipeline_gate.SMALL_DATA
+    assert "not written yet" not in got.detail and "raised in a library" in got.detail
+
+
 def test_a_finding_repair_of_derive_py_says_what_of_the_file_is_fis() -> None:
     derive = af.derive_source(DESIGN)
     assert skeleton.repair_note(derive) == skeleton.DERIVE_FINDING_NOTE and "frame" in skeleton.DERIVE_FINDING_NOTE
