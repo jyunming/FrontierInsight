@@ -575,10 +575,105 @@ def no_value(missing: list[dict[str, Any]]) -> list[Fault]:
             for m in missing if m.get("id")]
 
 
+#: The fact of :func:`never_value`: a result the analysis cannot give a value of, whatever the trials give.
+NEVER = "never_value"
+
+
+def planned_settings(grid: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """Every setting of the plan's grid, as the study's run makes them (:func:`core.trial_runner.cells`), or ``None`` when FI
+    does not list them (a grid larger than FI runs, or one it cannot read): then nothing is judged on them."""
+    try:
+        if getattr(grid, "sub_studies", None):
+            return _trials.cells(grid)
+        # the axes :func:`settings` takes, so a setting the small run ran has the same key here
+        return _trials.cells({str(k): list(v) for k, v in (grid or {}).items() if isinstance(v, (list, tuple)) and len(v)})
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def no_trial_values(trials_path: Path | str) -> bool:
+    """Whether the small run's record of its trials (:data:`TRIALS_PATH`) holds no value of any trial: none ran to the end."""
+    try:
+        cells = json.loads(Path(trials_path).read_text(encoding="utf-8")).get("cells") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return not any(isinstance(c, dict) and c.get("metrics") for c in cells)
+
+
+def calls_of(derived: dict[str, Any]) -> list[dict[str, Any]]:
+    """What FI's record of an analysis run (``derived.json``) says of each call of a study's function that works out a declared
+    quantity of a counting role: ``{"id", "by", "status", "asked", "gave", "why"}``, ``asked`` being every name the call asked
+    the table for (refused reads too) and ``gave`` whether it gave a finite value anywhere. Only calls the record holds
+    ``asked`` for (a record of an older frame makes no claim)."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(derived, dict) or derived.get("from_earlier_run"):
+        return out  # the run stopped before it wrote its own record: what is there is an earlier run's
+    records = derived.get("derived") if isinstance(derived.get("derived"), dict) else {}
+    for ident, rec in records.items():
+        if not isinstance(rec, dict) or not isinstance(rec.get("asked"), list):
+            continue
+        by = str(rec.get("by") or "")
+        if not by.startswith("derive_") or str(rec.get("role") or "result") not in COUNTING_ROLES:
+            continue
+        values = [rec.get("value")] + list((rec.get("by_setting") or {}).values()) \
+            + list(((rec.get("by_level") or {}).get("values") or {}).values())
+        gave = any(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+        why = next((str(w) for w in (rec.get("missing") or {}).values() if w), "") if isinstance(rec.get("missing"), dict) else ""
+        out.append({"id": str(ident), "by": by, "status": str(rec.get("status") or ""), "asked": [str(n) for n in rec["asked"]],
+                    # whether the call read the record's shape (its settings, parts, compared factors); unknown counts as read
+                    "looked": rec.get("looked") is not False, "gave": gave, "why": why})
+    return out
+
+
+def never_value(calls: list[dict[str, Any]], record: dict[str, Any], ledger: dict[str, Any] | None = None) -> list[Fault]:
+    """A declared result FI's analysis can give no value of whatever the trials give, from FI's record of one call of its
+    function on a table that holds every setting of the plan (:func:`calls_of`): the call ended, gave no value, and read
+    nothing of the table at all (not a result, not even its settings: a function that looks at the settings and finds too
+    few, or none of the kind it needs, is honest about the plan), or asked only for names no trial of the small run returned (that one only when a trial ran to the
+    end, since none returned anything otherwise). Exact, so sent back: first to the simulation (it must return what the
+    result is worked out from), then to the function itself, once the simulation was sent back for it (``ledger``,
+    :func:`sent`) and its trials now return a name they did not return then (a repair that added nothing leaves nothing new
+    for the function to read: a result the plan's settings cannot give, or one that is two others, costs one send-back,
+    not two). A call that read a returned name and found too few values, or that raised, is not one of these."""
+    returned = _returned_forms(record)
+    ran = any(int(s.get("ok") or 0) >= 1 for s in _settings_of(record))
+    names = sorted(returned)
+    have = (", ".join(f"`{n}`" for n in names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "")) or "nothing"
+    led = ledger if isinstance(ledger, dict) else {}
+    then = led.get("returned") if isinstance(led.get("returned"), dict) else {}
+    out: list[Fault] = []
+    for c in calls:
+        if c.get("status") != "ok" or c.get("gave"):
+            continue
+        asked = sorted(set(c.get("asked") or []))
+        if not asked and c.get("looked", True):
+            continue  # it read the settings and gave no value from them: the plan's settings may be too few for it
+        if asked and not (ran and not any(_is_returned(n, returned) for n in asked)):
+            continue
+        ident, by = c["id"], c["by"]
+        what = ("asks the trials for nothing" if not asked else
+                "asks only for " + ", ".join(f"`{n}`" for n in asked) + ", which no trial returns")
+        said = f" (it says: {c['why'][:200]})" if c.get("why") else ""
+        head = f"FI's small run: `{by}` {what}, so `{ident}` can never get a value{said}"
+        given = f"the trials return {have}" if ran else "no trial of the small run ran to the end"
+        out.append(Fault(NEVER, ident, f"{head}; {given}. Make each trial return what `{ident}` is worked out from.",
+                         fact=NEVER))
+        key = f"{NEVER}:{ident}"
+        if key not in (led.get("faults") or []) or not (returned - set(then.get(key) or [])):
+            continue  # the simulation first; then the function only when the trials return something new
+        out.append(Fault(ANALYSIS, by, f"{head}; {given}. Work `{ident}` out from what the trials return.",
+                         script="derive.py", body=by, fact=NEVER))
+    return out
+
+
 def sent(record: dict[str, Any]) -> dict[str, Any]:
-    """The faults sent back so far in this quest: ``{"faults": [key, ...], "count": send-backs made}``."""
+    """The faults sent back so far in this quest: ``{"faults": [key, ...], "count": send-backs made}``, and ``returned``
+    when a :func:`never_value` fault was sent to the simulation: ``{key: the names the trials returned then}``."""
     got = record.get(SENT) if isinstance(record.get(SENT), dict) else {}
-    return {"faults": [str(k) for k in got.get("faults") or []], "count": int(got.get("count") or 0)}
+    out: dict[str, Any] = {"faults": [str(k) for k in got.get("faults") or []], "count": int(got.get("count") or 0)}
+    if isinstance(got.get("returned"), dict):
+        out["returned"] = {str(k): [str(n) for n in v] for k, v in got["returned"].items() if isinstance(v, list)}
+    return out
 
 
 async def baseline_answer(executor: Any, python: Any, quest_root: Path, module: str, block: dict[str, Any], *,

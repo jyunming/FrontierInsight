@@ -577,6 +577,43 @@ def test_the_reference_of_a_result_is_fis_formula_and_a_reference_body_is_called
     assert record["derived"]["shown"]["by_setting"] == {k: pytest.approx(2.0 * c["cell"]["rate"]) for k, c in zip(KEYS, RECORD["cells"])}
 
 
+def test_each_call_records_every_name_it_asked_for_also_a_refused_one(tmp_path: Path) -> None:
+    """FI's record of one call of a body: every name it asked the table for, a read that was refused too, whatever another
+    body asked before (``inputs`` keeps only names served for the first time in the whole analysis, so it cannot say what one
+    call asked for). Before, there was no such record."""
+    bodies = """
+    def derive_first(table):
+        return {k: table.mean("growth", k) for k in table.keys()}
+
+    def derive_second(table):
+        return {k: table.mean("growth", k) for k in table.keys()}
+
+    def derive_gives_up(table):
+        return table.missing("the colony's lag is not among the results a trial returns")
+
+    def derive_unheld(table):
+        try:
+            table.values("lag", table.keys()[0])
+        except Exception:
+            return table.missing("no lag is recorded")
+        return 1.0
+
+    def derive_levels_only(table):
+        table.per_level("wobble", table.keys()[0])
+        return table.missing("nothing compared inside the runs")
+    """
+    ids = ("first", "second", "gives_up", "unheld", "levels_only")
+    _code, _printed, rec, _err = _run(_quest(tmp_path, _design([_derived(i) for i in ids]), bodies))
+    got = {i: rec["derived"][i] for i in ids}
+    assert got["first"]["asked"] == ["growth"] and got["first"]["inputs"] == ["growth"]
+    assert got["second"]["asked"] == ["growth"] and got["second"]["inputs"] == [], "served before: inputs says nothing"
+    assert got["gives_up"]["asked"] == [] and got["gives_up"]["status"] == "ok"
+    # whether the call read the record's settings, before FI's own reads of them
+    assert got["gives_up"]["looked"] is False and got["first"]["looked"] is True
+    assert got["unheld"]["asked"] == ["lag"], "a read the table refused is still a name the call asked for"
+    assert got["levels_only"]["asked"] == ["wobble"]
+
+
 def test_a_body_sees_the_sub_studies_and_what_it_served_is_recorded(tmp_path: Path) -> None:
     bodies = """
     def derive_peak(table):

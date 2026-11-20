@@ -364,6 +364,16 @@ def _noting(method):
     return wrapper
 
 
+def _asking(check):
+    """Keep every name a read asks the table for (``asked``), in order, also a name the read then refuses: FI's record of what
+    one call of a function asked for (the frame clears it before each call)."""
+    def wrapper(self, name):
+        self.asked.append(name)
+        return check(self, name)
+    wrapper.__name__, wrapper.__doc__ = check.__name__, check.__doc__
+    return wrapper
+
+
 class Table:
     """FI's own record of the trials (``raw/trials.json``), read-only, held to the results the plan declares. Reading an id the
     plan does not declare raises ``UnknownResult`` naming the declared ones; ``served`` lists the ids that were read. A setting
@@ -390,6 +400,8 @@ class Table:
         self._parts = dict(parts or {})
         self._derived = {}  # id -> {setting key: value}: the quantities FI derives for each setting (``set_derived``)
         self.served = []
+        self.asked = []  # every name a read asked for since the frame last cleared it, refused or not (``_asking``)
+        self.looked = []  # each read of the record's shape (its settings, parts, compared factors) since the frame last cleared it
         self._settings = {}
         self._by_setting = {}
         for c in self._cells:
@@ -446,6 +458,7 @@ class Table:
             self.gave_values.add(name)
         return got
 
+    @_asking
     def _check(self, name):
         if name not in self.declared and name not in self.inputs and name not in self.own:
             returned = sorted(set(self.inputs) | set(self.own))
@@ -467,6 +480,7 @@ class Table:
                             "take one of them (for example `table.at(...)[0]`) or loop over them" % (list(key),))
 
     def _cell(self, key):
+        self.looked.append("setting")
         self._one_key(key)
         if key not in self._settings:
             raise KeyError("`%s` is not a setting of the study; the settings are: %s" % (key, ", ".join(self.keys())))
@@ -474,6 +488,7 @@ class Table:
 
     def keys(self):
         """The settings of the study, FI's names, in the record's order."""
+        self.looked.append("keys")
         return [k for k, c in self._settings.items() if c["metrics"] or c.get("planned")]
 
     def setting(self, key):
@@ -483,11 +498,13 @@ class Table:
     def per_level(self, name, key):
         """The values (or combinations) the runs of setting ``key`` compared inside them that ``name`` is recorded under, as
         ``level_means`` names them; ``[]`` for a result recorded once for the setting (or not at all)."""
+        self.asked.append(name)
         self._cell(key)
         return [text for text, _c in self._level_cells(name, key)]
 
     def compared(self):
         """The names of the factors FI recorded as compared inside the runs (any setting), sorted; ``[]`` when none."""
+        self.looked.append("compared")
         return sorted({a for cs in self._by_setting.values() for c in cs for a in (c.get("level") or {})})
 
     def _metric(self, name, key):
@@ -629,6 +646,7 @@ class Table:
 
     def known(self):
         """The ids of the results the plan gives a true value and an interval (``known_value``): the ones ``coverage`` and ``bias`` serve."""
+        self.looked.append("known")
         return sorted(n for n, spec in self._known.items() if n in self.declared and isinstance(spec, dict) and len(spec.get("interval") or ()) == 2)
 
     @_noting
@@ -843,6 +861,7 @@ class Table:
 
     def part(self, name):
         """The keys of the settings of the part ``name`` of a study made of parts."""
+        self.looked.append("part")
         if name not in self._parts:
             raise UnknownResult("`%s` is not a part of the study; the parts are: %s" % (name, ", ".join(sorted(self._parts)) or "(none)"))
         return list(self._parts[name])
