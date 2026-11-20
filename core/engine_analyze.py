@@ -1288,8 +1288,10 @@ class AnalyzeStageMixin:
         out: dict[str, Any] = {}
         version = _code_review.version(self.quest_root / "code")
         done: dict[str, Any] = {}  # the same repair of two findings is run once
-        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s)
-        budget = [_rerun_check.TOTAL_FACTOR * (allowed or 0.0)]  # all the runs of one check together
+        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s,
+                                            at_once=self._rerun_at_once(_frozen.protocol_of(self.quest_root)))
+        # all the reruns of the whole study in one check together (a rerun of the analysis alone is not counted)
+        budget = [_rerun_check.total_allowed(allowed, self.config.execution.timeout_s)]
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
         from . import reuse_key as _reuse_key
@@ -1301,17 +1303,15 @@ class AnalyzeStageMixin:
             disputed = sorted(str(x) for x in issue.get("disputed") or []) if strict else []
             # The key of the answer (core/reuse_key.py): every file of the study, the finding's own test, the repairs kept for it
             # and how it was asked. A strict answer (the disputed quantities compared key by key) also stands for an ordinary
-            # one, never the other way round. Only a measured answer is reused: "could not" is asked again.
+            # one, never the other way round. Only a measured answer is reused here: "could not" is asked again (but a repaired
+            # code that already crashed or ran out of its whole time is not run again: :meth:`_rerun_one`).
             repairs = [p for _n, p in await asyncio.to_thread(_code_project.refused_patches, self.quest_root, fid, log=self._log)]
             test_rel = str(issue.get("test") or "")
             # also what the comparison is made against: the plan's protocol, the time allowed, the results the study delivered, and
             # what the finding says
-            results = self.quest_root / "data" / "results"
             extra = {"protocol": _reuse_key.digest_text(json.dumps(_frozen.protocol_of(self.quest_root) or {}, sort_keys=True, default=str)),
                      "allowed": int(allowed or 0),
-                     "delivered": {p.relative_to(self.quest_root).as_posix(): _reuse_key.digest(p)
-                                   for folder in (results, self.quest_root / "raw") if folder.is_dir()
-                                   for p in sorted(folder.glob("*.json"))},
+                     "delivered": self._rerun_delivered(),
                      "finding": _reuse_key.digest_text(json.dumps({k: issue.get(k) for k in ("text", "test", "file", "line", "where", "note", "fix", "name")},
                                                                   sort_keys=True, default=str))}
             mine = _reuse_key.rerun(self.quest_root, fid, test=test_rel, repairs=repairs, strict=strict, disputed=disputed, extra=extra)
@@ -1337,6 +1337,33 @@ class AnalyzeStageMixin:
             self._log_rerun(fid, out[fid])
         _code_review.save(self.quest_root, record)
         return out
+
+    def _rerun_at_once(self, protocol: Any) -> int | None:
+        """How many settings at the same time a rerun of the whole study runs (:func:`core.rerun_check.parallel`): as many as
+        the delivered run had, ``None`` for a study run again through its own ``run.py``."""
+        return _rerun_check.parallel(self.quest_root, protocol, self._settings_at_once())
+
+    def _rerun_delivered(self) -> dict[str, str]:
+        """The hash of each result file and record of the trials the study delivered: what a rerun is compared with."""
+        from . import reuse_key as _reuse_key
+
+        return {p.relative_to(self.quest_root).as_posix(): _reuse_key.digest(p)
+                for folder in (self.quest_root / "data" / "results", self.quest_root / "raw") if folder.is_dir()
+                for p in sorted(folder.glob("*.json"))}
+
+    #: The most answers "could not rerun" kept by repaired code (:meth:`_rerun_one`); the oldest go first.
+    RERUN_COULD_NOT_KEPT = 50
+
+    def _rerun_lasting_key(self, code_version: str, allowed: float, at_once: int | None, strict: bool,
+                           disputed: list[str]) -> str:
+        """The key of an answer "could not rerun" that the same repaired code would get again: the repaired code, what it is
+        compared with, the time a rerun is allowed and how it runs, and FI's own rules for the answer."""
+        from . import reuse_key as _reuse_key
+
+        return _reuse_key.digest_text(json.dumps({
+            "code": code_version, "delivered": self._rerun_delivered(), "allowed": int(allowed), "at_once": at_once,
+            "strict": bool(strict), "disputed": sorted(disputed), "rules": _reuse_key.digest(Path(_rerun_check.__file__))},
+            sort_keys=True, default=str))
 
     def _log_rerun(self, fid: str, v: Any) -> None:
         if v.status == "could_not":
@@ -1380,10 +1407,13 @@ class AnalyzeStageMixin:
             # the copy would run in a container that has none of the quest's data: no rerun, and no request spent on one
             return _rerun_check.Verdict("could_not", "the study runs in Docker, where a copy of the code has no data to run on")
         protocol = _frozen.protocol_of(self.quest_root) or (self._protocol_block(state) if isinstance(state, dict) else None)
-        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s)
+        at_once = self._rerun_at_once(protocol)
+        allowed = _rerun_check.time_allowed(self.quest_root, self.config.execution.timeout_s, at_once=at_once)
         if allowed is None:
             return _rerun_check.Verdict("could_not", "FI has no record of how long the study took, so a rerun cannot be bounded")
         fid = str(issue.get("id"))
+        disputed = sorted(str(x) for x in issue.get("disputed") or []) if strict else []
+        fields = _rerun_check.Verdict.__dataclass_fields__
         work = Path(tempfile.mkdtemp(prefix="fi_repair_"))
         try:
             source = ""
@@ -1440,16 +1470,36 @@ class AnalyzeStageMixin:
                 key = _code_review.version(copy_dir)
                 if key in done:
                     return done[key]
-                if budget is not None and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
+                # The same repaired code already could not be run again in an earlier check (it crashed, or it did not finish in
+                # the whole time a rerun is allowed): that answer stands, and the study is not run again for it.
+                lasting = self._rerun_lasting_key(key, allowed, at_once, strict, disputed)
+                kept = (record.get("rerun_could_not") or {}).get(lasting)
+                if isinstance(kept, dict):
+                    verdict = _rerun_check.Verdict(**{k: v for k, v in kept.items() if k in fields})
+                    self._log.info("[evidence_gate] %s: this repaired code could not be run again in an earlier check (%s); "
+                                   "that answer is used and the study is not run again for it", fid, verdict.why)
+                    if verdict.crashed and _round == 0:
+                        problem = ("FI ran the study with your repair and it did not run to the end: " + verdict.why
+                                   + ". The repair may use only the results the plan declares.")
+                        copy_dir = None
+                        continue
+                    done[key] = verdict
+                    return verdict
+                # A repair of the analysis alone is run again on the recorded trials in seconds: it is not counted against the
+                # time of the check.
+                only_analysis = _rerun_check.analysis_only(
+                    sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
+                counts = budget is not None and not only_analysis
+                if counts and min(allowed, budget[0]) < _rerun_check.FLOOR_S:  # no time left: not even the small run
                     return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
                 refused = await self._repair_small_run_refusal(copy_dir, protocol, env)
-                if budget is not None:
+                if counts:
                     budget[0] -= time.monotonic() - began  # the small run is part of the time of the check
                     began = time.monotonic()
-                left = allowed if budget is None else min(allowed, budget[0])
+                left = min(allowed, budget[0]) if counts else allowed
                 if left < _rerun_check.FLOOR_S and not refused:
                     return _rerun_check.Verdict("could_not", "the time FI allows for running the study again in one check is spent")
                 if refused:
@@ -1460,9 +1510,15 @@ class AnalyzeStageMixin:
                     verdict = await _rerun_check.judge(self.executor, python, self.quest_root, copy_dir, protocol, left, env,
                                                        source=source, results_root=self.quest_root,
                                                        disputed=list(issue.get("disputed") or []) if strict else None,
-                                                       finding=str(issue.get("id") or ""))
-                if budget is not None:
+                                                       finding=str(issue.get("id") or ""), at_once=at_once)
+                if counts:
                     budget[0] -= time.monotonic() - began
+                if verdict.status == "could_not" and (verdict.crashed or (verdict.timed_out and left >= allowed)):
+                    # what the same repaired code would get again: kept by that code, so a later check does not run it again
+                    kept_all = record.get("rerun_could_not") if isinstance(record.get("rerun_could_not"), dict) else {}
+                    kept_all.pop(lasting, None)
+                    kept_all[lasting] = verdict.record()
+                    record["rerun_could_not"] = dict(list(kept_all.items())[-self.RERUN_COULD_NOT_KEPT:])
                 if verdict.status == "could_not" and verdict.crashed and _round == 0:
                     problem = ("FI ran the study with your repair and it did not run to the end: " + verdict.why
                                + ". The repair may use only the results the plan declares.")

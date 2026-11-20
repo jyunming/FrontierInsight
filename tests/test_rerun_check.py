@@ -721,8 +721,10 @@ def test_a_rerun_repair_that_gave_no_usable_file_is_one_request(tmp_path: Path, 
     assert asked == [""] and record["rerun_calls"] == 1
 
 
-def test_nothing_is_run_when_the_time_of_the_check_is_spent_and_no_request_is_spent_in_docker(
+def test_an_analysis_repair_runs_when_the_time_of_the_check_is_spent_and_no_request_is_spent_in_docker(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rerun of the analysis alone takes seconds and is not counted against the time of the check: it is run even when the
+    time for the reruns of the whole study is spent (old code: "could not rerun", the time is spent)."""
     engine, root, issue, record = _engine_with_code(tmp_path)
     asked: list[int] = []
     judged: list[int] = []
@@ -737,9 +739,11 @@ def test_nothing_is_run_when_the_time_of_the_check_is_spent_and_no_request_is_sp
 
     monkeypatch.setattr(rerun_check, "judge", judge)
     engine._ask_repair_on_copy = ask  # type: ignore[method-assign,assignment]
-    got = asyncio.run(engine._rerun_one(issue, record, {}, {}, [5.0]))  # all the time one check may spend is gone
-    assert got.status == "could_not" and "spent" in got.why and judged == []
+    budget = [5.0]  # all the time one check may spend on the whole study is gone
+    got = asyncio.run(engine._rerun_one(issue, record, {}, {}, budget))
+    assert got.status == "unchanged" and judged == [1] and budget == [5.0]
     engine.config.execution.sandbox = "docker"
+    judged.clear()
     asked.clear()
     got = asyncio.run(engine._rerun_one(issue, record, {}, {}))
     assert got.status == "could_not" and "Docker" in got.why and asked == [] and judged == []

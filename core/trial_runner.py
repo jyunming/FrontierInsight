@@ -695,6 +695,11 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
     return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
 
 
+def summary_of(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The per-setting summary (``raw/trials.json``) of ``runs``, as :func:`run_trials` writes it."""
+    return _summary(runs, thresholds)
+
+
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
           deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
           paired: bool = False, thresholds: dict[str, Any] | None = None,
@@ -830,6 +835,7 @@ async def run_trials(
     in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, cost: Any = None,
     first_cells: int | None = None, per_process: int = 1, groups: list[list[str]] | None = None,
     group_allowance_s: float | None = None, reuse: "GroupedRun | None" = None,
+    cell_list: list[dict[str, Any]] | None = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -840,7 +846,8 @@ async def run_trials(
     The ledger and the summary are the same whatever the settings per process are. ``reuse``: the first run of
     :func:`measure_grouping` (:class:`GroupedRun`); when it is this very study (:meth:`GroupedRun.problem` finds nothing
     against it) its processes are not started again and their results are the run's, else the study runs as usual and the
-    log says why."""
+    log says why. ``cell_list``: run only these settings of ``grid``, in this order (a rerun of the settings an earlier run
+    of the study delivered numbers for, :mod:`core.rerun_check`); not with ``first_cells`` or ``reuse``."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -849,6 +856,8 @@ async def run_trials(
     if int(per_process or 1) > 1 or groups:
         (quest_root / GROUP_HARNESS_PATH).write_text(GROUP_HARNESS_SOURCE, encoding="utf-8")
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
+    if cell_list is not None and (first_cells is not None or reuse is not None):
+        raise ValueError("run_trials: cell_list runs the settings it names, so it takes no first_cells or reuse")
     lazy = first_cells is not None
     plan: list[dict[str, Any]] = []
     reused: dict[int, tuple[Any, float]] = {}
@@ -873,7 +882,7 @@ async def run_trials(
     if not lazy and not reused:
         plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                      deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
-                     thresholds=thresholds, in_each_run=in_each_run)
+                     thresholds=thresholds, in_each_run=in_each_run, cell_list=cell_list)
         if on_plan is not None:
             on_plan(plan)
     results: dict[int, Any] = {}
