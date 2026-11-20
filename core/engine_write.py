@@ -922,7 +922,11 @@ class WriteStageMixin:
         Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
         log says so. An ``## Abstract`` heading with no body under it (only a comment, say: the writer's note to itself) is
         taken out first, so the paper never carries an empty Abstract beside its real one."""
-        markdown = _paper_sections.without_bodiless_abstract(markdown)
+        emptied = _paper_sections.without_bodiless_abstract(markdown)
+        if emptied != markdown:
+            self._log.info("[write] the draft had an Abstract heading with nothing under it (only a comment); it was "
+                           "taken out")
+            markdown = emptied
         if not _paper_sections.missing_abstract(markdown):
             return markdown
         self._log.warning("[write] the draft has no Abstract; asking for it from the draft")
