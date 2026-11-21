@@ -1,7 +1,8 @@
 """After a repair of simulate.py FI calls the function it will call for the study, and keeps the repair only when that call
 still returns the study's results (core/trial_runner.py::entry_returns_study, Engine._simulation_repair_fault); a
-``run_trial`` that delegates to ``run_cell`` is kept when FI called it with two seeds and the numbers were the same
-(core/trial_runner.py::settle_aggregate). Neutral made-up simulations, run through FI's real harness."""
+``run_trial`` that runs ``run_cell`` is told from FI's own record of one call of it: ``run_cell`` entered and a random
+generator drawn from inside it (core/trial_runner.py::settle_aggregate). Neutral made-up simulations, run through FI's
+real harness."""
 
 from __future__ import annotations
 
@@ -105,15 +106,18 @@ async def test_nothing_is_judged_when_no_result_is_named_or_the_call_cannot_be_m
 
 
 @pytest.mark.asyncio
-async def test_a_run_trial_that_delegates_to_a_deterministic_run_cell_is_kept_once_fi_called_it_twice(tmp_path: Path) -> None:
+async def test_a_run_trial_that_delegates_to_a_run_cell_without_randomness_is_kept_once_fi_called_it(tmp_path: Path) -> None:
     root = _quest(tmp_path, DELEGATING)
     source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert tr.trial_aggregates(source, root), "the reading of the code alone still names it"
+    assert tr.trial_aggregates(source), "the reading of the code alone still names it"
+    assert tr.trial_aggregates(source, root) == "", "but with a quest only a record decides, and there is none yet"
+    assert tr.trial_needs_call_record(source, root)
     assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
-    assert tr.trial_aggregates(source, root) == "", "the measured fact is what decides"
-    assert tr.trial_aggregates(source + "# changed\n", root), "another text of the file is measured again"
+    assert tr.trial_aggregates(source, root) == "", "the call record is what decides"
+    assert not tr.trial_needs_call_record(source, root)
+    assert tr.trial_needs_call_record(source + "# changed\n", root), "another text of the file is called again"
     record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
-    assert record["same"] is True
+    assert record["aggregates"] is False and record["run_cell_entered"] == 1 and record["generators_drawn"] == 0
 
 
 @pytest.mark.asyncio
@@ -122,6 +126,8 @@ async def test_a_run_trial_that_returns_a_random_mean_is_still_named(tmp_path: P
     source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert not await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
     assert "run_trial must run ONE trial" in tr.trial_aggregates(source, root)
+    record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+    assert record["aggregates"] is True and record["run_cell_entered"] == 1 and record["generators_drawn"] >= 1
 
 
 def _gave(engine: Engine, *names: str) -> None:
@@ -232,7 +238,8 @@ def run_trial(cell, trial_id=0, seed=0):
 async def test_a_call_that_cannot_be_finished_leaves_no_guessed_shape_rule_in_force(tmp_path: Path) -> None:
     root = _quest(tmp_path, SLOW_DELEGATING)
     source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
-    assert tr.trial_aggregates(source, root), "the code's shape alone names it before anything is measured"
+    assert tr.trial_aggregates(source), "the code's shape alone names it before anything is measured"
+    assert tr.trial_aggregates(source, root) == "", "but it does not refuse"
     done = await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=3)
     assert done is None, "not measured is neither the same nor different"
     assert tr.trial_aggregates(source, root) == "", "the shape rule alone does not refuse"
@@ -348,7 +355,7 @@ async def test_a_change_in_the_package_alone_makes_the_measurement_stale(tmp_pat
     assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
     assert tr.trial_aggregates(source, root) == ""
     (package / "model.py").write_text("import random\n\ndef value():\n    return random.random()\n", encoding="utf-8")
-    assert tr.trial_aggregates(source, root), "the file is the same, the package is not: measured again"
+    assert tr.trial_needs_call_record(source, root), "the file is the same, the package is not: called again"
 
 
 class _Clock:
@@ -428,10 +435,10 @@ async def test_a_metric_returned_as_its_counts_is_a_returned_metric(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_the_two_seed_calls_share_the_time_they_are_given(tmp_path: Path) -> None:
+async def test_a_call_that_does_not_finish_in_the_time_given_is_not_recorded(tmp_path: Path) -> None:
     root = _quest(tmp_path, SLOW_TRIAL)
-    # each call takes ~2.5 s: with 4 s for both, the second has less than it needs (before: each was given the whole 4 s)
-    done = await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=4)
+    # the call takes ~2.5 s and is given 1 s
+    done = await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=1)
     assert done is None
 
 
@@ -456,7 +463,7 @@ async def test_the_record_of_a_measurement_is_stale_when_a_helper_changes(tmp_pa
     assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
     assert tr.trial_aggregates(source, root) == ""
     (root / "code" / "helper.py").write_text("import random\n\ndef value():\n    return random.random()\n", encoding="utf-8")
-    assert tr.trial_aggregates(source, root), "the helper changed: measured again"
+    assert tr.trial_needs_call_record(source, root), "the helper changed: called again"
 
 
 @pytest.mark.asyncio
@@ -527,3 +534,238 @@ async def test_with_no_record_that_the_entry_returns_a_headline_nothing_is_judge
     state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
     assert await engine._simulation_repair_fault(state, CHECK_ONLY) == "", "never a refusal on a guess"
     assert "was not judged" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+# ---- the call record decides, not two equal seeds and not the shape of the code (backlog -432, G13) -----------------------
+
+# A discrete outcome that is the same for every seed (every draw is below 2), averaged over 20 draws: two seeds give equal
+# numbers, yet the number is a mean over 20 draws.
+MEAN_OF_DRAWS = '''
+import random
+
+def run_cell(cell):
+    return {"yield_rate": sum(random.random() < 2 for _ in range(20)) / 20}
+
+def run_trial(cell, trial_id=0, seed=0):
+    random.seed(seed)
+    return run_cell(cell)
+'''
+
+# The same, reached through a name FI's reading of the code does not follow.
+MEAN_THROUGH_GETATTR = '''
+import random, types
+
+def run_cell(cell):
+    rng = random.Random(7)
+    return {"yield_rate": sum(rng.random() < 2 for _ in range(20)) / 20}
+
+def _helper(cell):
+    return getattr(types.SimpleNamespace(**globals()), "run_" + "cell")(cell)
+
+def run_trial(cell, trial_id=0, seed=0):
+    return _helper(cell)
+'''
+
+# One draw per call; run_cell is how a cell is built from trials.
+ONE_DRAW = '''
+import random
+
+def run_trial(cell, trial_id=0, seed=0):
+    return {"yield_rate": float(random.Random(seed).random() < 2)}
+
+def run_cell(cell):
+    return {"yield_rate": sum(run_trial(cell, i, i)["yield_rate"] for i in range(20)) / 20}
+'''
+
+NUMPY_MEAN = '''
+import types
+import numpy as np
+
+def run_cell(cell):
+    rng = np.random.default_rng(3)
+    return {"yield_rate": float((rng.random(20) < 2).mean())}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return getattr(types.SimpleNamespace(**globals()), "run_" + "cell")(cell)
+'''
+
+DECORATED_MEAN = '''
+import functools, random
+
+def _kept(fn):
+    @functools.wraps(fn)
+    def inner(*a, **k):
+        return fn(*a, **k)
+    return inner
+
+@_kept
+def run_cell(cell):
+    rng = random.Random(11)
+    return {"yield_rate": sum(rng.random() < 2 for _ in range(20)) / 20}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return run_cell(cell)
+'''
+
+
+async def _settled(tmp_path: Path, source: str) -> bool | None:
+    root = _quest(tmp_path, source)
+    return await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
+
+
+@pytest.mark.asyncio
+async def test_a_mean_of_many_draws_is_named_although_two_seeds_give_the_same_number(tmp_path: Path) -> None:
+    root = _quest(tmp_path, MEAN_OF_DRAWS)
+    assert tr.trial_aggregates(MEAN_OF_DRAWS)  # the reading of the code names it too, as a first sight
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
+                                     timeout_s=60) is False
+    assert "run_trial must run ONE trial" in tr.trial_aggregates(MEAN_OF_DRAWS, root)
+
+
+@pytest.mark.asyncio
+async def test_a_mean_reached_through_a_lookup_by_name_is_named_by_the_record(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "a", MEAN_THROUGH_GETATTR)
+    assert tr.trial_aggregates(MEAN_THROUGH_GETATTR, root) == "", "the reading of the code does not see it"
+    assert tr.trial_needs_call_record(MEAN_THROUGH_GETATTR, root), "but FI has not called it yet"
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
+                                     timeout_s=60) is False
+    assert "run_trial must run ONE trial" in tr.trial_aggregates(MEAN_THROUGH_GETATTR, root)
+    assert not tr.trial_needs_call_record(MEAN_THROUGH_GETATTR, root), "kept: not called again"
+    # a generator of numpy and a run_cell kept inside a decorator are seen as well
+    pytest.importorskip("numpy")
+    assert await _settled(tmp_path / "b", NUMPY_MEAN) is False
+    assert await _settled(tmp_path / "c", DECORATED_MEAN) is False
+
+
+@pytest.mark.asyncio
+async def test_one_draw_per_call_is_not_named_and_costs_one_call(tmp_path: Path) -> None:
+    root = _quest(tmp_path, ONE_DRAW)
+    assert tr.trial_aggregates(ONE_DRAW, root) == ""
+    assert tr.trial_needs_call_record(ONE_DRAW, root)  # run_cell is named in the file: FI calls run_trial once to see
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
+                                     timeout_s=60) is True
+    record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+    assert record["aggregates"] is False and record["run_cell_entered"] == 0
+    assert not tr.trial_needs_call_record(ONE_DRAW, root)
+    # a run_trial that never names run_cell needs no call at all
+    lone = "def run_trial(cell, trial_id=0, seed=0):\n    return {'yield_rate': 1.0}\n"
+    assert not tr.trial_needs_call_record(lone, root)
+
+
+@pytest.mark.asyncio
+async def test_a_call_record_of_another_text_or_of_the_older_kind_is_not_one(tmp_path: Path) -> None:
+    root = _quest(tmp_path, MEAN_OF_DRAWS)
+    record = root / tr.ONE_TRIAL_RECORD
+    record.parent.mkdir(parents=True)
+    # the older record held two seeds' numbers ("same"): it decides nothing
+    record.write_text(json.dumps({"sha256": tr.code_inputs_sha(root, MEAN_OF_DRAWS), "same": True, "differing": []}),
+                      encoding="utf-8")
+    assert tr.trial_needs_call_record(MEAN_OF_DRAWS, root)
+    assert tr.trial_aggregates(MEAN_OF_DRAWS, root) == "", "the old record decides nothing, and neither does the reading"
+
+
+@pytest.mark.asyncio
+async def test_the_repair_check_refuses_a_mean_of_many_draws_through_the_real_harness(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    (code / "simulate.py").write_text(MEAN_THROUGH_GETATTR, encoding="utf-8")
+    assert await engine._simulation_repair_fault(state, MEAN_THROUGH_GETATTR) == tr.TRIAL_AGGREGATE_WHY
+
+
+# What FI's watching of the random generators must not change for the study, and what it cannot see.
+TYPE_CHECKING_ONE_DRAW = '''
+import numpy as np
+
+def run_trial(cell, trial_id=0, seed=0):
+    rng = np.random.default_rng(seed)
+    legacy = np.random.RandomState(seed)
+    assert isinstance(rng, np.random.Generator) and isinstance(legacy, np.random.RandomState)
+    assert isinstance(np.random.mtrand._rand, np.random.RandomState)
+    return {"yield_rate": float(rng.random() + legacy.rand())}
+
+def run_cell(cell):
+    return {"yield_rate": sum(run_trial(cell, i, i)["yield_rate"] for i in range(5)) / 5}
+'''
+
+# A mean over 20 draws from a generator of the study's own writing: not a source FI watches.
+OWN_GENERATOR_MEAN = '''
+def _next(state):
+    return (state * 1103515245 + 12345) % 2147483648
+
+def run_cell(cell):
+    state, total = 7, 0.0
+    for _ in range(20):
+        state = _next(state)
+        total += state / 2147483648
+    return {"yield_rate": total / 20}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return run_cell(cell)
+'''
+
+
+@pytest.mark.asyncio
+async def test_watching_the_generators_does_not_change_what_the_study_sees(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")
+    root = _quest(tmp_path, TYPE_CHECKING_ONE_DRAW)
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
+                                     timeout_s=60) is True, "the study's own type checks held while it was watched"
+    record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+    assert record["aggregates"] is False and record["run_cell_entered"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_mean_over_draws_of_a_generator_fi_does_not_watch_is_not_named(tmp_path: Path) -> None:
+    # The limit of the record, said here so it is not a surprise: run_cell is entered, but no draw of a known generator is
+    # seen, so the call is taken for a setting without randomness (the same as a deterministic run_cell).
+    root = _quest(tmp_path, OWN_GENERATOR_MEAN)
+    assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
+                                     timeout_s=60) is True
+    record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+    assert record["run_cell_entered"] == 1 and record["generators_drawn"] == 0
+
+
+@pytest.mark.asyncio
+async def test_code_the_reading_did_not_name_goes_on_to_the_entry_check_when_the_call_cannot_be_recorded(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    called: list[str] = []
+
+    async def entry(*a: Any, **k: Any) -> str:
+        called.append("entry")
+        return ""
+
+    async def not_recorded(*a: Any, **k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(estimate, "entry_returns_study", entry)
+    monkeypatch.setattr(tr, "settle_aggregate", not_recorded)
+    _gave(engine, "yield_rate")
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    (code / "simulate.py").write_text(ONE_DRAW, encoding="utf-8")
+    assert not tr.trial_aggregates(ONE_DRAW), "the reading names nothing in this file"
+    assert await engine._simulation_repair_fault(state, ONE_DRAW) == ""
+    assert called == ["entry"], "an unrecorded call of an unflagged file does not skip the study's entry check"
+
+
+@pytest.mark.asyncio
+async def test_with_no_first_setting_the_reading_of_the_code_does_not_refuse(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    monkeypatch.setattr(engine, "_first_study_cell", lambda protocol: None)  # the plan gives no first setting
+    state: dict[str, Any] = {"design": {"protocol": PROTOCOL}}
+    (code / "simulate.py").write_text(DELEGATING, encoding="utf-8")
+    assert tr.trial_aggregates(DELEGATING), "the reading names it"
+    assert await engine._simulation_repair_fault(state, DELEGATING) == ""
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "could not measure whether run_trial runs one trial" in log

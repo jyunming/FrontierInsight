@@ -429,6 +429,136 @@ main()
 '''
 HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n" + HARNESS_BODY
 
+#: What FI's own checking run adds to the harness to see what ``run_trial`` really calls (:func:`settle_aggregate`). It is a
+#: file of its own, used for that one call only, so the harness the study's trials run under (whose text is part of every
+#: key of a stored record) is not changed. Standard library only. After the study is loaded, ``run_cell`` is changed in place
+#: (its code is swapped for a call of the counter, so every way of reaching it, a name, an alias, a table, ``getattr``, an
+#: import, ends in the counter), and each random generator the study makes (``random.Random``, ``numpy.random.default_rng``,
+#: ``numpy.random.RandomState``) or shares (the global ones) is remembered. The row of the call then says how often
+#: ``run_cell`` was entered and how many generators were drawn from while it ran (a generator whose state moved on; the first
+#: 256 generators a run makes are watched). A random number made another way (a generator of the study's own writing, ``torch``) is not seen.
+AGGREGATE_SPY_SOURCE = r'''
+_fi_rec = {"entered": 0, "drew": 0, "patched": None}
+_fi_rngs = []
+
+def _fi_sig(g):
+    try:
+        import random as _r
+        if isinstance(g, _r.Random):
+            return repr(g.getstate())
+        if hasattr(g, "bit_generator"):
+            return repr(g.bit_generator.state)
+        if hasattr(g, "get_state"):
+            st = g.get_state()
+            return repr((st[0], st[1].tobytes(), st[2:]))
+    except Exception:
+        return None
+    return None
+
+def _fi_remember(g):
+    if len(_fi_rngs) < 256:  # a study that makes a generator per trial would otherwise keep them all
+        _fi_rngs.append([g, _fi_sig(g)])
+
+def _fi_install_rngs():
+    import random as _r
+    _init = _r.Random.__init__
+    def _random_init(self, *a, **k):
+        _init(self, *a, **k)
+        _fi_remember(self)
+    _r.Random.__init__ = _random_init
+    _fi_remember(_r._inst)
+    try:
+        import numpy.random as _npr
+    except Exception:
+        return
+    _make = _npr.default_rng
+    def _default_rng(*a, **k):
+        g = _make(*a, **k)
+        _fi_remember(g)
+        return g
+    _npr.default_rng = _default_rng
+    base = getattr(_npr, "RandomState", None)
+    try:
+        class _Meta(type):
+            def __instancecheck__(cls, obj):  # a RandomState made elsewhere (scipy, the global one) is still one
+                return isinstance(obj, base)
+
+        def _state_init(self, *a, **k):
+            base.__init__(self, *a, **k)
+            _fi_remember(self)
+        _npr.RandomState = _Meta("RandomState", (base,), {"__init__": _state_init})
+    except Exception:
+        pass
+    try:
+        _fi_remember(_npr.mtrand._rand)
+    except Exception:
+        pass
+
+def _fi_patch_cell(mod):
+    import types
+    f = getattr(mod, "run_cell", None)
+    if f is None:
+        _fi_rec["patched"] = True  # nothing to reach
+        return
+    if not isinstance(f, types.FunctionType):
+        _fi_rec["patched"] = False
+        return
+    orig = types.FunctionType(f.__code__, f.__globals__, f.__name__, f.__defaults__, f.__closure__)
+    orig.__kwdefaults__ = f.__kwdefaults__
+    depth = [0]
+
+    def hook(*a, **k):
+        _fi_rec["entered"] += 1
+        if depth[0]:
+            return orig(*a, **k)
+        depth[0] += 1
+        for item in _fi_rngs:
+            item[1] = _fi_sig(item[0])
+        try:
+            return orig(*a, **k)
+        finally:
+            depth[0] -= 1
+            _fi_rec["drew"] += sum(1 for g, before in _fi_rngs if before is not None and _fi_sig(g) != before)
+    try:
+        f.__globals__["__fi_cell_hook__"] = hook
+        scope = {}
+        exec("def __fi_w(*a, **k):\n    return __fi_cell_hook__(*a, **k)\n", f.__globals__, scope)
+        f.__code__ = scope["__fi_w"].__code__
+        f.__defaults__ = None
+        f.__kwdefaults__ = None
+        _fi_rec["patched"] = True
+    except Exception:
+        try:
+            mod.run_cell = hook  # a function with a closure (a decorator's): only a call by the module's name is seen
+            _fi_rec["patched"] = "name"
+        except Exception:
+            _fi_rec["patched"] = False
+
+try:
+    _fi_install_rngs()
+except Exception:
+    pass
+_fi_load_plain = _fi_load_study
+
+def _fi_load_study(path):
+    mod = _fi_load_plain(path)
+    try:
+        _fi_patch_cell(mod)
+    except Exception:
+        _fi_rec["patched"] = False
+    return mod
+
+_fi_cell_reads_plain = cell_reads
+
+def cell_reads(cell):
+    got = _fi_cell_reads_plain(cell)
+    got["call_record"] = dict(_fi_rec)
+    return got
+'''
+AGGREGATE_HARNESS_SOURCE = (Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOAD_STUDY_SOURCE + "\n"
+                            + AGGREGATE_SPY_SOURCE + "\n" + HARNESS_BODY)
+AGGREGATE_HARNESS_PATH = Path(".fi") / "trial_aggregate_harness.py"
+
 
 def _without_audit(text: str) -> str:
     """``text`` without the blocks between the ``#<audit-begin>`` and ``#<audit-end>`` lines."""
@@ -1794,32 +1924,44 @@ class _Module:
 
 
 def trial_aggregates(source: str, quest_root: Path | str | None = None) -> str:
-    """A plain sentence when ``run_trial`` in ``source`` (read, never run) is not one trial because it reaches ``run_cell``
-    (it calls or names it, directly or through any number of the file's own functions and names, an alias such as
-    ``_run = run_cell`` or ``run_trial = run_cell``, a table of functions, or an imported ``run_cell``), and ``""``
-    otherwise.
+    """A plain sentence when ``run_trial`` in ``source`` is not one trial because it runs ``run_cell``, the setting's own
+    number (the mean over many trials for a random study), and ``""`` otherwise. FI's harness calls ``run_trial`` once per
+    trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every trial as long as a whole
+    cell (the study would not fit its time) and every kept "trial" a mean of many (understated standard errors). The
+    converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged.
 
-    ``run_cell`` is the setting's own number, the mean over many trials for a random study. FI's harness calls
-    ``run_trial`` once per trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every
-    trial as long as a whole cell (the study would not fit its time) and every kept "trial" a mean of many (wrong
-    statistics). The converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged. Not
-    followed: a function looked up by a computed string (``globals()[name]``), ``getattr``, and code in other files.
-
-    The reading is only where the question starts: the harm is a setting's number that is a mean over trials, and a
-    setting whose number does not change with the trial (FI called this very entry on one setting with two seeds and the
-    numbers were the same, :func:`settle_aggregate`, kept in :data:`ONE_TRIAL_RECORD` for this text of the file) has
-    one trial for its number whatever the entry calls. With ``quest_root``, that measured fact is read first."""
+    With ``quest_root`` what decides is FI's own record of a call of ``run_trial`` (:func:`settle_aggregate`, a checking run
+    for this text of the file): ``run_cell`` was entered and a random generator was drawn from inside it. With no record
+    (nothing was called yet) it names nothing, and :func:`trial_needs_call_record` says the call is still to be made.
+    Without ``quest_root`` only the reading of the code, which is not run, answers (the disclosure of where to look, and
+    what a test of the reading uses): ``run_trial`` reaches ``run_cell`` by a call or a name, directly or through the file's
+    own functions, an alias such as ``_run = run_cell``, a table of functions, or an imported ``run_cell``. That reading
+    does not follow a function looked up by a computed string (``globals()[name]``), ``getattr``, or code in other files;
+    the record sees all of them."""
     mod = _Module(source)
     if not mod.ok or "run_trial" not in mod.nodes:
         return ""
+    if quest_root is not None:
+        record = _call_record(quest_root, source)
+        return TRIAL_AGGREGATE_WHY if record is not None and record.get("aggregates") is True else ""
     if not mod.reaches("run_trial", "run_cell", calls_only=False):
-        return ""
-    if quest_root is not None and one_trial_measured(quest_root, source):
         return ""
     return TRIAL_AGGREGATE_WHY
 
 
 ONE_TRIAL_RECORD = Path(".fi") / "trials" / "one_trial.json"
+
+
+def trial_needs_call_record(source: str, quest_root: Path | str) -> bool:
+    """Whether FI has yet to call ``run_trial`` of this text of the file to see whether it runs ``run_cell``: the file
+    defines ``run_trial`` and names ``run_cell``, and no record of such a call (:data:`ONE_TRIAL_RECORD`) is kept for it.
+    A file that never names ``run_cell`` needs no call (a ``run_cell`` of another file is reached through a name here)."""
+    mod = _Module(source)
+    if not mod.ok or "run_trial" not in mod.nodes:
+        return False
+    if "run_cell" not in mod.nodes and "run_cell" not in mod.alias.values() and not re.search(r"\brun_cell\b", source):
+        return False
+    return _call_record(quest_root, source) is None
 
 
 def code_inputs_sha(quest_root: Path | str, source: str = "") -> str:
@@ -1831,73 +1973,71 @@ def code_inputs_sha(quest_root: Path | str, source: str = "") -> str:
     return _reuse.simulation_sha(quest_root, source)
 
 
-def one_trial_measured(quest_root: Path | str, source: str) -> bool:
-    """Whether the shape rule is set aside for this text of simulate.py: FI measured that its ``run_trial`` gives the same
-    numbers whatever the trial, or tried and could not measure it (:func:`settle_aggregate`); only a measured difference
-    keeps the rule in force."""
+def _call_record(quest_root: Path | str, source: str) -> dict[str, Any] | None:
+    """FI's record of the call of ``run_trial`` for this text of simulate.py (``aggregates``: True, False, or None when the
+    call could not be made), or ``None`` when there is none for it (a record of another text, or of the older kind that
+    held two seeds' numbers, is not one)."""
     try:
         record = json.loads((Path(quest_root) / ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return isinstance(record, dict) and record.get("sha256") == code_inputs_sha(quest_root, source) and record.get("same") is not False
+        return None
+    if not isinstance(record, dict) or "aggregates" not in record or record.get("sha256") != code_inputs_sha(quest_root, source):
+        return None
+    return record
 
 
 async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                            inside: dict[str, list[Any]] | None = None, timeout_s: int, env: dict[str, str] | None = None,
                            thresholds: dict[str, Any] | None = None, log: Any = None,
                            kind: str = "scan") -> bool | None:
-    """Whether a ``run_trial`` that :func:`trial_aggregates` names by its code is harmless: FI calls it on ``cell`` with two
-    seeds, each call in a new process (``timeout_s``: the time the two calls share), and when every number that
-    is not the call's own time is the same, the setting's number does not depend on the trial (a study without randomness,
-    whose ``run_cell`` is its one trial): ``True``; ``False`` when a number changed. ``None`` when the calls could not be
-    finished: a guess from the code's shape does not stand in for a measurement, so the rule is then set aside for this
-    text of the file (and said in the log). The answer is kept in :data:`ONE_TRIAL_RECORD`."""
+    """Whether ``run_trial`` runs one trial. FI calls it once on ``cell`` in a checking run, in a new process whose harness
+    records what the call reaches (:data:`AGGREGATE_SPY_SOURCE`): how often ``run_cell`` was entered and how many random
+    generators were drawn from while it ran. ``False`` (it aggregates) when ``run_cell`` was entered and a generator was
+    drawn from inside it, that is, the number returned is a mean over trials FI cannot see one by one; ``True`` when
+    ``run_cell`` was not entered (one draw, or a call that only some inputs reach), or was entered without any random draw
+    seen (a setting without randomness, whose ``run_cell`` is its one trial). ``None`` when the call could not be finished
+    or ``run_cell`` could not be watched: a guess does not stand in for a record, so nothing is refused (and the log says
+    so). The answer is kept in :data:`ONE_TRIAL_RECORD` for this text of the file."""
     path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
     module = _relative_module(quest_root, path)
     try:
         source = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    if one_trial_measured(quest_root, source):
-        return True
+    kept = _call_record(quest_root, source)
+    if kept is not None:
+        return None if kept.get("aggregates") is None else not kept["aggregates"]
     inside = {str(k): list(v) for k, v in (inside or {}).items()}
     levels = _in_run.level_cells(inside) if inside else None
     given = {**cell, **inside}
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
-    key = cell_key(cell)
-    got: list[tuple[dict[str, float], float]] = []
-    began = time.monotonic()
-    for step in (0, 1):
-        # ``timeout_s`` is the whole time the two calls share: each is given what is left of it.
-        left = int(timeout_s - (time.monotonic() - began))
-        rows, _result = await _run_batch(executor, python, Path(quest_root), module, entry="run_trial", cell=dict(given),
-                                         trials=[{"trial": 0, "seed": trial_seed(base, key, step)}],
-                                         timeout_s=max(1, left), env=env, thresholds=thresholds, levels=levels, log=log,
-                                         kind=kind)
-        row = next((r for r in rows if r.get("status") == "ok"), None)
-        if row is None:
-            if log is not None:
-                log.warning("[execute] FI could not measure whether run_trial runs one trial (calling it with two seeds on the "
-                            "plan's first setting did not finish within %s s); the reading of the code alone does not refuse it",
-                            timeout_s)
-            _write_one_trial(quest_root, source, None, [])
-            return None
-        seconds = row.get("duration_s")
-        got.append(({_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})},
-                    float(seconds) if isinstance(seconds, (int, float)) else 0.0))
-    (a, sa), (b, sb) = got
-    moved = [n for n in set(a) | set(b) if n not in a or n not in b or not _same_value(a[n], b[n])]
-    same = bool(a) and all(n in a and n in b and _is_run_time((a[n], sa), (b[n], sb)) for n in moved)
-    _write_one_trial(quest_root, source, same, moved)
-    return same
+    rows, _result = await _run_batch(executor, python, Path(quest_root), module, entry="run_trial", cell=dict(given),
+                                     trials=[{"trial": 0, "seed": trial_seed(base, cell_key(cell), 0)}],
+                                     timeout_s=max(1, int(timeout_s)), env=env, thresholds=thresholds, levels=levels, log=log,
+                                     kind=kind, spy_aggregate=True)
+    row = next((r for r in rows if r.get("status") == "ok"), None)
+    seen = row.get("call_record") if row is not None else None
+    if not isinstance(seen, dict) or seen.get("patched") is False:
+        if log is not None:
+            log.warning("[execute] FI could not record whether run_trial runs one trial (calling it once on the plan's first "
+                        "setting gave no usable record within %s s: it did not finish, raised an error, or run_cell could "
+                        "not be watched); the reading of the code alone does not refuse it", timeout_s)
+        _write_one_trial(quest_root, source, None, 0, 0)
+        return None
+    entered, drew = int(seen.get("entered") or 0), int(seen.get("drew") or 0)
+    aggregates = entered > 0 and drew > 0
+    if entered > 0 and drew == 0 and log is not None:
+        log.info("[execute] run_trial entered run_cell without a random draw FI can see: taken as a setting without randomness")
+    _write_one_trial(quest_root, source, aggregates, entered, drew)
+    return not aggregates
 
 
-def _write_one_trial(quest_root: Path | str, source: str, same: bool | None, moved: list[str]) -> None:
+def _write_one_trial(quest_root: Path | str, source: str, aggregates: bool | None, entered: int, drew: int) -> None:
     try:
         record = Path(quest_root) / ONE_TRIAL_RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps({"sha256": code_inputs_sha(quest_root, source), "same": same, "differing": sorted(moved)[:6]}),
-                          encoding="utf-8")
+        record.write_text(json.dumps({"sha256": code_inputs_sha(quest_root, source), "aggregates": aggregates,
+                                      "run_cell_entered": entered, "generators_drawn": drew}), encoding="utf-8")
     except OSError:
         pass
 
@@ -2572,15 +2712,18 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
                      thresholds: dict[str, Any] | None, spy_trial: bool = False,
                      levels: list[dict[str, Any]] | None = None,
                      budget_s: float | None = None, log: Any = None,
-                     kind: str = "check") -> tuple[list[dict[str, Any]], Any]:
+                     kind: str = "check", spy_aggregate: bool = False) -> tuple[list[dict[str, Any]], Any]:
     """Call one entry function for each of ``trials`` (``trial``, ``seed``) in ONE process: ``(the rows FI's harness
     wrote, in order, the process result)``. ``budget_s``: no trial is started that would not end within it (the first
     always runs); ``timeout_s`` stops the process. A row is a ``load_error``, or a trial with ``status`` ``ok`` (its
-    ``values``) or ``failed``."""
+    ``values``) or ``failed``. ``spy_aggregate``: FI's own checking call of ``run_trial`` (:func:`settle_aggregate`): the
+    harness of :data:`AGGREGATE_SPY_SOURCE`, whose rows carry a ``call_record``."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
-    (quest_root / HARNESS_PATH).write_text(HARNESS_SOURCE, encoding="utf-8")
+    harness_path, harness_text = ((AGGREGATE_HARNESS_PATH, AGGREGATE_HARNESS_SOURCE) if spy_aggregate
+                                  else (HARNESS_PATH, HARNESS_SOURCE))
+    (quest_root / harness_path).write_text(harness_text, encoding="utf-8")
     spec = work / "oracle.json"
     out = work / "oracle.out.jsonl"
     out.unlink(missing_ok=True)
@@ -2593,7 +2736,7 @@ async def _run_batch(executor: Any, python: Path | str, quest_root: Path, module
                     encoding="utf-8")
     # From a copy of code/ outside the quest folder (core/outside_run.py), as every cell of the study runs.
     result = await _outside_executor(executor, quest_root, log).execute(
-        [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
+        [str(python), harness_path.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
     )
     try:

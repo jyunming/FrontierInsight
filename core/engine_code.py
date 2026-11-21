@@ -3333,8 +3333,9 @@ class CodeStageMixin:
 
     async def _simulation_entry_fault(self, state: QuestState, new_code: str) -> str:
         """The checks of the study's entry (without the analysis gate). Two facts, both from FI's own calls
-        of the code: a ``run_trial`` that its code shows reaching ``run_cell`` is kept when FI called it with two seeds on
-        the plan's first setting and the numbers were the same (one trial is the setting's number); and the function FI
+        of the code: a ``run_trial`` that FI called once on the plan's first setting and that entered ``run_cell`` and
+        drew random numbers there is a mean over trials, not one trial (the record of that call decides, never the shape
+        of the code); and the function FI
         calls for the study, called once on that setting within the small run's time, must return at least one of the
         study's headline results (FI's record of the plan), or a repair that routes every setting to a check branch
         leaves a study with no result."""
@@ -3373,12 +3374,14 @@ class CodeStageMixin:
             return ""
         protocol = self._protocol_block(state)
         first = self._first_study_cell(protocol) if isinstance(protocol, dict) else None
-        aggregate = _trial_runner.trial_aggregates(new_code, self.quest_root)
+        reading = _trial_runner.trial_aggregates(new_code)  # the code's shape: only said, never decides
+        aggregate = _trial_runner.trial_aggregates(new_code, self.quest_root)  # FI's record of a call, when there is one
+        wanted = bool(aggregate) or _trial_runner.trial_needs_call_record(new_code, self.quest_root)
         if first is None:
-            if aggregate:
+            if reading and not aggregate:
                 self._log.warning("[execute] FI could not measure whether run_trial runs one trial (the plan gives no first "
                                   "setting to call it on); the reading of the code alone does not refuse it")
-            return ""
+            return _trial_runner.TRIAL_AGGREGATE_WHY if aggregate else ""
         cell, inside, kind = first
         py = self.executor.python_path(self.quest_root)
         env = dict(self.__dict__.get("_last_exec_env") or {})
@@ -3396,17 +3399,17 @@ class CodeStageMixin:
         module = f"code/{_split_run.SIMULATE_NAME}"
         thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
         try:
-            if aggregate:
+            if wanted:
                 settled = await self._await_with_heartbeat(
                     _trial_runner.settle_aggregate(
                         self.executor, py, self.quest_root, module, cell=cell, inside=inside,
                         timeout_s=max(1, min(int(self.config.execution.timeout_s), left())), env=env,
                         thresholds=thresholds, log=self._log, kind=kind),
-                    label="calling the repaired trial function with two seeds")
+                    label="calling the repaired trial function once to see what it reaches")
                 if settled is False:
                     return _trial_runner.TRIAL_AGGREGATE_WHY
-                if settled is None:
-                    return ""  # not judged, and no third call
+                if settled is None and reading:
+                    return ""  # code the reading named and FI could not record: not judged, and no third call
             if left() < 1:
                 self._log.warning("[execute] the check of the repaired code ran out of its %d s before the study's entry "
                                   "was called: not judged", int(budget))

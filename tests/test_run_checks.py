@@ -609,10 +609,33 @@ async def test_a_run_trial_that_is_a_cell_aggregate_goes_back_to_the_code_not_to
     patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
     assert patch is not None and patch["exec_result"]["failed_script"] == "simulate.py"
     assert "run_trial must run ONE trial" in patch["exec_result"]["stderr_tail"]
-    # the plan is not asked to shrink the grid and no setting is timed; FI called the code twice, with two seeds, to settle it
-    assert model.asked == [] and ex.calls == 2
+    # the plan is not asked to shrink the grid and no setting is timed; FI called the code once, and the record of that call
+    # (run_cell entered, random numbers drawn in it) settled it
+    assert model.asked == [] and ex.calls == 1
     assert "too_long" not in patch["exec_result"]
     assert "run_trial must run ONE trial" in _log(eng)
+
+
+# The same mean, reached through a name the reading of the code does not follow: only FI's record of a call sees it.
+AGGREGATING_BY_LOOKUP = '''import random, types
+
+def run_trial(cell, trial, seed):
+    return getattr(types.SimpleNamespace(**globals()), "run_" + "cell")(cell)
+
+def run_cell(cell):
+    rng = random.Random(5)
+    return {"y": sum(float(cell["n"]) * rng.random() for _ in range(1000)) / 1000}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_run_trial_that_reaches_a_cell_aggregate_by_a_lookup_goes_back_to_the_code(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600)
+    (eng.quest_root / "code" / "simulate.py").write_text(AGGREGATING_BY_LOOKUP, encoding="utf-8")
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and patch["exec_result"]["failed_script"] == "simulate.py"
+    assert "run_trial must run ONE trial" in patch["exec_result"]["stderr_tail"]
+    assert model.asked == [] and ex.calls == 1
 
 
 @pytest.mark.asyncio

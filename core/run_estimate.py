@@ -875,7 +875,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
     module's notes); without it only an undefined metric is a finding. Nothing here is a judgement about the science: a metric
     undefined everywhere, and, when the code shows it is built from no setting, one that never moves while others do and an
     output that is the same everywhere. ``stochastic``: the study runs ``run_trial`` once per trial (not ``run_cell``); then a
-    ``run_trial`` that reaches ``run_cell`` (FI's own reading of the code, :func:`core.trial_runner.trial_aggregates`) is a
+    ``run_trial`` that runs ``run_cell`` (FI's record of a call of it, :func:`core.trial_runner.trial_aggregates`) is a
     finding: every trial of the study would be the setting's whole mean, as long as a cell and with the statistics of a
     mean, whatever the pilot's few trials returned."""
     from . import flat_output as _flat
