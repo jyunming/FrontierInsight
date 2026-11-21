@@ -52,3 +52,24 @@ def test_the_effect_flags_a_helper_no_result_reaches(tmp_path: Path) -> None:
     assert isinstance(reach, shown_reach.Reach)
     eff = reach._helper_effect("model.py", "helper_unused")
     assert eff is not None and eff.unreached and not eff.left_out and root.exists()
+
+
+def test_a_printed_key_that_is_the_main_result_stops_the_paper_as_a_reached_result_does(tmp_path: Path) -> None:
+    out, _record = _run(_engine(tmp_path), UNUSED, file="model.py", function="helper_unused", quantity="est_a", headline=("est_a",))
+    assert out is not None and out["stuck_reason"] == "shown_fault_open"
+    assert "est_a" in out["rationale"]
+
+
+def test_only_a_printed_key_that_is_the_quantity_itself_is_left_out(tmp_path: Path, monkeypatch) -> None:
+    """A longer quantity name does not take a shorter printed key with it (`accuracy_bias` is not `accuracy`)."""
+    monkeypatch.setattr("tests.test_shown_reach.RESULT", {"noise=0.1": {"accuracy": 0.9, "est_a": 2.0}})
+    out, record = _run(_engine(tmp_path), UNUSED, file="model.py", function="helper_unused", quantity="accuracy_bias")
+    assert out is None
+    assert "at_gate" not in record["issues"]["F-1"]
+
+
+def test_a_printed_nan_is_no_value_and_releases_the_finding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("tests.test_shown_reach.RESULT", {"noise=0.1": {"est_b": float("nan"), "est_a": 2.0}})
+    out, record = _run(_engine(tmp_path), UNUSED, file="model.py", function="helper_unused", quantity="est_b")
+    assert out is None
+    assert "at_gate" not in record["issues"]["F-1"]

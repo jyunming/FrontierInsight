@@ -323,6 +323,38 @@ def _called_from(fns: dict[str, ast.AST], start: str) -> set[str]:
     return called
 
 
+def _printed_exactly(result: Any, wanted: set[str]) -> set[str]:
+    """The keys of the printed results, at any depth, that are one of the names ``wanted`` (normalised, the whole name: no
+    prefix, no longer or shorter form) and hold a finite number, or a list or mapping with one. NaN and infinity are no value."""
+    import math
+
+    def holds(v: Any) -> bool:
+        if isinstance(v, bool) or v is None:
+            return False
+        if isinstance(v, (int, float)):
+            return math.isfinite(v)
+        if isinstance(v, dict):
+            return any(holds(x) for x in v.values())
+        if isinstance(v, (list, tuple)):
+            return any(holds(x) for x in v)
+        return False
+
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if _norm(k) in wanted and holds(v):
+                    out.add(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
+
+
 class Reach:
     """The records of one quest, read once, and the question put to them: what does the fault a finding's test showed do to
     the results (:meth:`effect`)?"""
@@ -558,10 +590,15 @@ class Reach:
         places; a quantity the run prints no number for is released as before."""
         if not eff.unreached or eff.stop or eff.left_out or eff.figures or eff.not_done or eff.plan_text or eff.probes                 or eff.extra_keys or eff.cannot or result is None:
             return eff
-        keys = sorted({k for n in _code_review.quantity_names(record, issue) for k in _code_review.named_in_results(n, result)})
+        wanted = {_norm(n) for n in _code_review.quantity_names(record, issue)} - {""}
+        keys = sorted(_printed_exactly(result, wanted))
         if keys:
             eff.extra_keys = keys
             eff.why += "; the run prints a value for " + ", ".join(keys[:4]) + ", so it is left out, not released"
+            main = {_norm(i) for i in self.headline} | {_norm(h) for h in self.headline_raw}
+            hit = [k for k in keys if _norm(k) in main]
+            if hit and self.headline_stops:  # the same main-result rule as for a result a function reaches (:meth:`_judge`)
+                eff.stop = f"the main result {', '.join(hit)} is among what it changes (the run prints a value for it)"
         return eff
 
     def reads_held_key(self, issue: dict[str, Any], result: Any) -> bool:
