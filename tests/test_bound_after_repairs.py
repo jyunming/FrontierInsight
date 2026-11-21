@@ -265,6 +265,22 @@ def test_a_figure_whose_shared_y_axis_draws_the_quantity_is_dropped(tmp_path: Pa
     assert rc.figures_on_axis(tmp_path, {"yield_frac"}) == ["by_series.png", "shared.png"]
 
 
+def test_a_figure_with_a_reference_line_at_the_quantity_is_dropped(tmp_path: Path) -> None:
+    (tmp_path / "figures").mkdir()
+    (tmp_path / ".fi" / "figure_records").mkdir(parents=True)
+    refs = {  # a line read from the table keeps the result it is drawn at; a plan reference is named by its own id
+        "table_line": [{"id": "refline1", "axis": "y", "value": 1.2, "source": "table", "at": "yield_frac"}],
+        "plan_line": [{"id": "yield_frac", "axis": "y", "value": 1.0, "source": "plan"}],
+        "other_line": [{"id": "refline1", "axis": "y", "value": 2.0, "source": "table", "at": "load"}],
+    }
+    for stem, r in refs.items():
+        (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
+        (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(json.dumps({"panels": [
+            {"panel": 1, "x": {"id": "bed"}, "y": {"what": "load"}, "series": [{"id": "load", "what": "load"}], "refs": r}]}),
+            encoding="utf-8")
+    assert rc.figures_on_axis(tmp_path, {"yield_frac"}) == ["plan_line.png", "table_line.png"]
+
+
 def test_each_left_out_quantity_is_given_the_note_of_its_own_check(tmp_path: Path) -> None:
     (tmp_path / "needs").mkdir()
     (tmp_path / "needs" / "RESULT_CHECK.json").write_text(json.dumps({

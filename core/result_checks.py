@@ -299,7 +299,8 @@ def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) ->
     """The saved figures (file names in ``figures/``) that draw one of ``quantities`` on an axis or as a series, by FI's
     record of each drawing call (``.fi/figure_records/<stem>.calls.json``: a panel's ``x.id``, ``y.what`` and series
     ids). A y axis several results share counts for each of them, and so does the result each series records it draws
-    (``what``). Only what FI tied to the quantity counts: an axis or a series the record calls ``neutral`` (FI could not check
+    (``what``), and so does a reference line (``refs``: the result a line read from the table is drawn at, ``at``, or the
+    plan's reference id). Only what FI tied to the quantity counts: an axis or a series the record calls ``neutral`` (FI could not check
     that it draws that quantity, core/frame_figure.py) does not. A figure with no such record is not listed."""
     root, wanted = Path(quest_root), {str(q) for q in quantities}
     folder, records = root / "figures", root / ".fi" / "figure_records"
@@ -317,7 +318,10 @@ def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) ->
             # same way; each series also keeps the result it draws (`what`). "other" is FI's word for a y it could not tie.
             named = {str(x.get("id") or "") if not x.get("neutral") else "",
                      *(str(y.get("what") or "").split(" / ") if not y.get("neutral") else ()),
-                     *(str(s.get("id") or "") for s in series), *(str(s.get("what") or "") for s in series)} - {"", "other"}
+                     *(str(s.get("id") or "") for s in series), *(str(s.get("what") or "") for s in series),
+                     # a reference line: the result a line read from the table is drawn at, or the plan's reference id
+                     *(str(r.get("at") or "") if r.get("source") == "table" else str(r.get("id") or "")
+                       for r in p.get("refs") or [] if isinstance(r, dict))} - {"", "other"}
             if named & wanted:
                 stems.add(path.name[: -len(".calls.json")])
     return sorted(f.name for f in folder.iterdir() if f.is_file() and f.stem in stems and f.suffix.lower() != ".json")

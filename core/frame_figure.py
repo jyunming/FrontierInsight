@@ -1616,7 +1616,9 @@ class FigureCalls:
         draw = ax.axhline if axis == "y" else ax.axvline
         art = draw(float(number), linestyle=":", color="0.2", label=label)
         self._tag(art)
-        rec["refs"].append({"id": ident, "axis": axis, "value": float(number), "label": label, "source": source})
+        # a line read from the table keeps the result it is drawn at, so a check of that result finds the figure
+        rec["refs"].append({"id": ident, "axis": axis, "value": float(number), "label": label, "source": source,
+                            **({"at": str(at)} if source == "table" else {})})
         self._remember(panel, "refs", art)
         self._group_bars(panel)
         return art
