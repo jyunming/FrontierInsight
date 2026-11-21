@@ -1,10 +1,12 @@
 """The supplement FI's own parts go to, out of the paper's body.
 
-Every paper sends two of FI's own parts here, with or without a page limit and without a model call
+Every paper sends three of FI's own parts here, with or without a page limit and without a model call
 (``Engine._supplement_always``): its tables of every setting (:data:`TABLES`; the paper keeps one sentence that points
-here, :func:`table_pointer`) when the block holds a table, and its Further reading (:data:`FURTHER_READING`; the
-References keep one line that says how many pages it lists and where, :func:`further_pointer`) when the text cites
-none of its pages. These are :data:`ALWAYS`.
+here, :func:`table_pointer`) when the block holds a table, its answers to the questions asked in full (:data:`ANSWERS`;
+the paper keeps one short line for each question, core/paper_facts.py::answers_text with ``brief``, and a line that
+points here, :func:`answers_pointer`) when that makes the paper shorter, and its Further reading
+(:data:`FURTHER_READING`; the References keep one line that says how many pages it lists and where,
+:func:`further_pointer`) when the text cites none of its pages. These are :data:`ALWAYS`.
 
 A paper rendered over the topic's page limit then loses its Limitations too (:data:`LIMITATIONS`, after the parts
 above: ``Engine._fit_with_supplement``): the section keeps one line that says how many things FI recorded, names each
@@ -35,21 +37,23 @@ FILE = Path("paper") / "supplement.md"
 SHOWN = "paper/supplement.md"
 TRIM_RECORD = Path(".fi") / "supplement_trim.json"
 TABLES, LIMITATIONS, FURTHER_READING = "results_table", "limitations", "further_reading"
+ANSWERS = "answers"
 SENTENCES = "moved_sentences"
-ORDER = (TABLES, LIMITATIONS, FURTHER_READING)
+ORDER = (TABLES, ANSWERS, LIMITATIONS, FURTHER_READING)
 #: The parts every paper sends here, with or without a page limit; the others move only for a page limit.
-ALWAYS = (TABLES, FURTHER_READING)
-_TITLES = {TABLES: "Results for every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading",
-           SENTENCES: "Sentences moved for length"}
+ALWAYS = (TABLES, ANSWERS, FURTHER_READING)
+_TITLES = {TABLES: "Results for every setting", ANSWERS: "Answers to the questions asked, in full",
+           LIMITATIONS: "Limitations", FURTHER_READING: "Further reading", SENTENCES: "Sentences moved for length"}
 #: How much of the text on each side of a moved sentence its record keeps, to find its place again (never past the
 #: paragraph it stood in).
 _ANCHOR = 60
 BLANK = chr(10) * 2
 #: What the supplement's first lines call each part.
-_WHY = {TABLES: "tables of every setting", FURTHER_READING: "Further reading", LIMITATIONS: "the Limitations in full",
-        SENTENCES: "some sentences of its text"}
+_WHY = {TABLES: "tables of every setting", ANSWERS: "answers to the questions asked in full",
+        FURTHER_READING: "Further reading", LIMITATIONS: "the Limitations in full", SENTENCES: "some sentences of its text"}
 #: What the run log calls each part.
-NAMES = {TABLES: "tables of every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading"}
+NAMES = {TABLES: "tables of every setting", ANSWERS: "answers in full", LIMITATIONS: "Limitations",
+         FURTHER_READING: "Further reading"}
 
 
 def read(quest_root: Path | str) -> dict[str, Any]:
@@ -409,6 +413,12 @@ def further_pointer(n: int) -> str:
 #: The line :func:`further_pointer` writes, whatever its count.
 FURTHER_POINTER = re.compile(r"^Further reading: \d+ web pages? the text does not cite (?:are|is) listed in the "
                              r"supplement \(`" + re.escape(SHOWN) + r"`\)\.[ \t]*$", re.M)
+
+
+def answers_pointer() -> str:
+    """The line after the paper's short answers when the answers in full are here."""
+    return (f"Each answer in full, with every setting that gave no number and every reason a question is not answered, is "
+            f"in the supplement (`{SHOWN}`).")
 
 
 def table_pointer() -> str:
