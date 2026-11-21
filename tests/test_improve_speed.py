@@ -4,6 +4,7 @@ the sample itself on this interpreter. No real model is called."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from pathlib import Path
@@ -33,6 +34,38 @@ FAST = ("    total = float(np.sum(x * x))\n")
 LOOP = "    total = 0.0\n    for v in x:\n        total += v * v\n"
 CHEAT = "    x = x[:200]\n    total = 0.0\n    for v in x:\n        total += v * v\n"
 ANALYSIS = "print('RESULT_JSON: {}')\n"
+
+
+@pytest.fixture
+def fake_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The time FI measures for a sample comes from the test, not from the machine. The sample still runs for real (its
+    numbers are what FI compares); only the seconds it reports are replaced, by a fixed cost worked out from the simulation's
+    text: one unit and one more for every loop in it, so code with fewer loops is faster and code with more is slower, on
+    a fast runner, a slow one or a busy one alike."""
+    real = sp.run_sample
+
+    async def run_sample(executor: Any, python: Any, quest_root: Any, module: str, *args: Any, **kw: Any) -> sp.Sample:
+        out = await real(executor, python, quest_root, module, *args, **kw)
+        if not out.failed:
+            text = (Path(quest_root) / module).read_text(encoding="utf-8")
+            cost = 0.01 * (1 + text.count("for "))
+            out.seconds, out.times = cost, [cost] * max(1, len(out.times))
+        return out
+
+    real_time_one = est._time_one
+
+    async def time_one(*args: Any, **kw: Any) -> Any:
+        # A setting timed for the step is given a generous limit (the process start on a busy machine can pass the few
+        # seconds the step's share leaves) and reports a fixed cost when it finished, so which settings the sample keeps
+        # and the time each is allowed do not depend on how fast the machine ran it.
+        kw["timeout_s"] = max(int(kw.get("timeout_s") or 0), 60)
+        probe, why = await real_time_one(*args, **kw)
+        if probe is not None and not probe.at_least:
+            probe = dataclasses.replace(probe, seconds=0.5, fixed_s=None, per_trial_s=None)
+        return probe, why
+
+    monkeypatch.setattr(sp, "run_sample", run_sample)
+    monkeypatch.setattr(est, "_time_one", time_one)
 
 
 class _Model:
@@ -208,7 +241,7 @@ async def test_an_edit_that_changes_a_real_result_is_not_kept_though_a_varying_n
 
 
 @pytest.mark.asyncio
-async def test_a_change_that_is_not_faster_is_put_back(tmp_path: Path) -> None:
+async def test_a_change_that_is_not_faster_is_put_back(fake_clock: None, tmp_path: Path) -> None:
     # The change does the same sum three more times and throws it away: the same numbers, clearly slower. (A change that
     # does nothing at all can come out faster by chance on a loaded machine, so it does not test this reliably.)
     engine = _engine(tmp_path, rounds=1)
@@ -668,7 +701,7 @@ async def test_the_rounds_go_on_while_each_saves_a_tenth_even_when_the_study_alr
 
 
 @pytest.mark.asyncio
-async def test_the_rounds_stop_when_a_round_costs_more_time_than_it_saves_on_the_study(tmp_path: Path) -> None:
+async def test_the_rounds_stop_when_a_round_costs_more_time_than_it_saves_on_the_study(fake_clock: None, tmp_path: Path) -> None:
     """A round's wall time (the model's answer and the sample) is set against what it saves on the study: on a study of a
     second and a half, a kept change saves less than the round took, and the rounds stop there."""
     engine = _engine(tmp_path, rounds=3)
@@ -708,7 +741,7 @@ def run_cell(cell):
     dx = float(cell["dx"])
     n = int(round(1.0 / dx))
     if n > 4:
-        time.sleep(4)
+        time.sleep(1)
     total = 0.0
     for i in range(n * 30000):
         total += (i % 7) * dx
@@ -716,10 +749,10 @@ def run_cell(cell):
 '''
 MESH_LOOP = "    total = 0.0\n    for i in range(n * 30000):\n        total += (i % 7) * dx\n"
 MESH_FAST = "    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-#: Exact on a coarse copy (n of 4 or fewer), off by a ten-thousandth at the plan's resolution (a millionth would sit at
+#: Exact on a coarse copy (n of 5 or fewer), off by a ten-thousandth at the plan's resolution (a millionth would sit at
 #: the edge of rounding level: the check there takes how much a number varies from the copies' sample too).
 MESH_COARSE_ONLY = ("    total = float(np.sum(np.arange(n * 30000) % 7)) * dx\n"
-                    "    if n > 4:\n        total *= 1.0001\n")
+                    "    if n > 5:\n        total *= 1.0001\n")
 
 
 def _mesh_engine(tmp_path: Path) -> Engine:
@@ -775,7 +808,7 @@ def test_the_step_has_time_of_its_own_when_the_timing_used_its_share() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(tmp_path: Path) -> None:
+async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(fake_clock: None, tmp_path: Path) -> None:
     """Two live studies were never sped up: no setting of the sample finished in the time for timing (one took minutes,
     one hours). The sample is now copies of them made coarser in the plan's numerical settings, coarser until one
     finishes, and a kept change is checked once more on the plan's own setting."""
@@ -792,7 +825,7 @@ async def test_a_study_whose_settings_never_finish_is_sped_up_on_coarser_copies(
 
 @pytest.mark.asyncio
 async def test_the_check_on_the_plan_s_own_setting_stays_within_the_step_s_own_time(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake_clock: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check on the plan's setting had a one-minute floor for each of its runs: a step with less time of its own
     ran over it. Its runs share the step's own time (24 s here)."""
     from core import improve_speed as _speed
@@ -813,7 +846,8 @@ async def test_the_check_on_the_plan_s_own_setting_stays_within_the_step_s_own_t
 
 
 @pytest.mark.asyncio
-async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolution_is_not_kept(tmp_path: Path) -> None:
+async def test_a_change_exact_on_the_coarse_copy_and_not_at_the_plan_s_resolution_is_not_kept(
+        fake_clock: None, tmp_path: Path) -> None:
     """Planted fault: a change that gives the same numbers on every coarse copy and other numbers at the plan's own
     resolution passes the coarse sample; the check on the plan's setting catches it and the code is left as it was."""
     engine = _mesh_engine(tmp_path)
