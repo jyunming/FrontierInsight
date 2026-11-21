@@ -456,3 +456,14 @@ def test_a_test_that_runs_no_study_code_and_reads_no_result_file_is_still_not_sh
 def test_opening_the_null_device_does_not_make_the_recording_unclear(tmp_path: Path) -> None:
     test = "import os\nimport study\n\n\ndef test_x():\n    open(os.devnull).close()\n    assert study.__name__ == 'x', 'wrong'\n"
     assert _unwatched(tmp_path, test) is False
+
+
+def test_a_child_process_makes_the_recording_unclear_only_when_it_runs_python(tmp_path: Path) -> None:
+    other = "cmd /c ver" if sys.platform == "win32" else "echo hi"
+    plain = ("import os\nimport study\n\n\ndef test_x():\n    os.system(%r)\n    assert study.__name__ == 'x', 'wrong'\n" % other)
+    assert _unwatched(tmp_path, plain, name="plain.py") is False
+    py = ("import subprocess, sys\nimport study\n\n\ndef test_x():\n    subprocess.run([sys.executable, '-c', 'pass'])\n"
+          "    assert study.__name__ == 'x', 'wrong'\n")
+    assert _unwatched(tmp_path, py, name="py.py") is True
+    named = ("import os\nimport study\n\n\ndef test_x():\n    os.system('python -c pass')\n    assert study.__name__ == 'x', 'wrong'\n")
+    assert _unwatched(tmp_path, named, name="named.py") is True

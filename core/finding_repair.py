@@ -225,7 +225,7 @@ def runs_nothing_on_import(path: Path) -> bool:
 #: ``failures``: per failing test function, the line its assertion failed on and the names of that frame that held nothing
 #: (``None`` or an empty container) at that moment.
 CAPTURE = '''
-import collections as _coll, types as _types, abc as _abcmeta, threading
+import collections as _coll, types as _types, abc as _abcmeta, threading, re as _re
 try:  # FI's own import, made before any test runs: a NumPy array is read only when it is exactly this type
     import numpy as _np
     _NDARRAY = _np.ndarray
@@ -341,7 +341,34 @@ _IN_STUDY = {}
 _ROOT = os.path.dirname(os.path.abspath(code_dir))
 _RESULT_DIRS = ("results", "raw", "data", "output", "outputs")
 _RESULT_EXT = (".json", ".csv", ".npy", ".npz", ".pkl", ".pickle", ".txt", ".parquet", ".h5", ".hdf5", ".dat")
-_CHILD = ("subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec", "os.fork", "os.forkpty", "_winapi.CreateProcess")
+_CHILD = ("subprocess.Popen", "_posixsubprocess.fork_exec", "os.system", "os.posix_spawn", "os.spawn", "os.exec", "_winapi.CreateProcess")
+_FORKS = ("os.fork", "os.forkpty")
+_PYTHON = _re.compile("^(python|pythonw|py|pypy)[0-9.]*([.]exe)?$", _re.I)
+
+def _words(x, out, depth=0):
+    # the strings of an argument (a program, a command line or an argument list), split into words
+    if depth > 4:
+        return
+    if type(x) is bytes:
+        x = os.fsdecode(x)
+    if type(x) is str:
+        out.append(x)
+        out.extend(w.strip(chr(34) + chr(39)) for w in x.split())
+    elif isinstance(x, (list, tuple)):
+        for y in x:
+            _words(y, out, depth + 1)
+    elif hasattr(x, "__fspath__"):
+        _words(os.fspath(x), out, depth + 1)
+
+def _runs_python(args):
+    # a child process counts only when its program or an argument names a Python interpreter (or this one)
+    out = []
+    for a in args:
+        _words(a, out)
+    for w in out:
+        if w == sys.executable or _PYTHON.match(os.path.basename(w.replace(chr(92), "/"))):
+            return True
+    return any(sys.executable in w for w in out)
 
 def _audit(event, args):
     # a hook cannot be removed, so it acts only while the test file is imported or a test runs. What it flags is something
@@ -349,14 +376,11 @@ def _audit(event, args):
     if not STUDY["on"]:
         return
     try:
-        if event in _CHILD or event.startswith("os.exec") or event.startswith("os.spawn"):
-            # the interpreter's own platform probe (`ver`, run by a library such as scipy at import) is not the study
-            f = sys._getframe(1)
-            while f is not None:
-                if os.path.basename(f.f_code.co_filename) == "platform.py":
-                    return
-                f = f.f_back
+        if event in _FORKS:
             STUDY["unclear"] = True
+        elif event in _CHILD or event.startswith("os.exec") or event.startswith("os.spawn"):
+            if _runs_python(args):
+                STUDY["unclear"] = True
         elif event == "open" and args:
             path, mode = args[0], (args[1] if len(args) > 1 else None)
             if type(path) is bytes:
