@@ -60,9 +60,11 @@ async def test_a_definition_after_the_main_guard_is_a_fault(tmp_path):
     script = OK_SCRIPT.replace("def summarise", "def unused").replace('summarise(data["cells"])', "later(data)")
     script += "\n\ndef later(data):\n    return {}\n"
     got = await run_gate(tmp_path, script)
-    assert not got.ok and got.kind == gate.FAULT and got.stage == "static"
-    assert got.late == ["experiment.py:later"] and "line" in got.where
+    # the run raises the NameError (it decides); the reading of the code names which definition it is
+    assert not got.ok and got.kind == gate.FAULT and got.stage == "derive" and got.exception == "NameError"
+    assert got.late == ["experiment.py:later"] and "experiment.py" in got.where
     assert "main guard" not in got.detail and "starts the script" in got.detail
+    assert gate.gate_verdict(gate.GateResult(True), got).reject
 
 
 def test_a_definition_after_the_guard_that_nothing_reaches_is_not_a_fault():
@@ -143,11 +145,35 @@ def test_a_change_is_not_refused_when_the_code_already_failed_before():
 
 def test_a_definition_after_the_guard_that_the_code_before_did_not_have_is_refused_even_when_it_stopped_later():
     before = gate.GateResult(False, "derive", gate.FAULT, "", "AttributeError", "AttributeError")
-    after = gate.GateResult(False, "static", gate.FAULT, "code/experiment.py line 9", "`f` is defined after", "NameError",
-                            late=["experiment.py:f"])
+    after = gate.GateResult(False, "derive", gate.FAULT, "code/experiment.py line 9",
+                            "NameError: name 'f' is not defined", "NameError", late=["experiment.py:f"])
     assert gate.gate_verdict(before, after).reject
-    same = gate.GateResult(False, "static", gate.FAULT, "", "x", "NameError", late=["experiment.py:f"])
+    same = gate.GateResult(False, "derive", gate.FAULT, "", "x", "NameError", late=["experiment.py:f"])
     assert not gate.gate_verdict(same, after).reject
+    # the reading alone, with a run that raised something else, is no new fault of that kind
+    other = gate.GateResult(False, "derive", gate.FAULT, "", "ImportError: no module", "ImportError", late=["experiment.py:f"])
+    assert not gate.gate_verdict(before, other).reject
+
+
+async def test_a_definition_after_the_guard_on_a_branch_that_never_runs_stops_nothing_and_is_said(tmp_path):
+    """The reading of the code names every definition after the main guard the guard could reach, also on a branch that
+    never runs; the gate's own run decides, so such code passes and the reading is said."""
+    script = OK_SCRIPT.replace("    main()", "    if False:\n        later()\n    main()") + "\n\ndef later():\n    return {}\n"
+    assert list(gate.late_definitions(script)) == ["later"]  # what the reading says
+    got = await run_gate(tmp_path, script)
+    assert got.ok and got.late == ["experiment.py:later"]
+    verdict = gate.gate_verdict(gate.GateResult(True), got)
+    assert not verdict.reject and "`later`" in verdict.disclose and "did not need" in verdict.disclose
+
+
+async def test_a_late_definition_in_a_script_the_gate_does_not_run_is_said_not_a_stop(tmp_path):
+    """simulate.py's own main block is not what the gate runs: its reading is said with the outcome, never a stop."""
+    quest = make_quest(tmp_path / "q")
+    code = make_code(tmp_path / "c", OK_SCRIPT)
+    (code / "simulate.py").write_text('if __name__ == "__main__":\n    selftest()\n\ndef selftest():\n    pass\n',
+                                      encoding="utf-8")
+    got = await gate.analysis_gate(quest, code, None, timeout_s=60)
+    assert got.ok and got.late == ["simulate.py:selftest"]
 
 
 def _raise_if_short(exc: str, below: int) -> str:

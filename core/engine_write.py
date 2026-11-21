@@ -957,7 +957,13 @@ class WriteStageMixin:
     async def _ensure_abstract(self, state: QuestState, markdown: str) -> str:
         """``markdown`` with an ``## Abstract`` (core/paper_sections.py). A draft without one is not sent whole again: the
         Abstract alone is asked for, from the draft, once; a reply that is empty or fails leaves the draft as it was and the
-        log says so."""
+        log says so. An ``## Abstract`` heading with no body under it (only a comment, say: the writer's note to itself) is
+        taken out first, so the paper never carries an empty Abstract beside its real one."""
+        emptied = _paper_sections.without_bodiless_abstract(markdown)
+        if emptied != markdown:
+            self._log.info("[write] the draft had an Abstract heading with nothing under it (only a comment); it was "
+                           "taken out")
+            markdown = emptied
         if not _paper_sections.missing_abstract(markdown):
             return markdown
         self._log.warning("[write] the draft has no Abstract; asking for it from the draft")
@@ -2972,7 +2978,9 @@ class WriteStageMixin:
         tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
         text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
         holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
-        is already its pointer (the supplement would hold nothing more)."""
+        is already its pointer (the supplement would hold nothing more). The answers move only when the paper is shorter
+        for it: their full lines, filled, are longer than the short ones with the line that points to the supplement
+        (a study whose full lines add only a few words keeps them in the paper)."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
@@ -2980,18 +2988,32 @@ class WriteStageMixin:
             return False
         if part == _supplement.LIMITATIONS:
             return bool(_paper_facts.limitations_text(self.quest_root))
+        if part == _supplement.ANSWERS:
+            full, short = _paper_facts.answers_forms(self.quest_root)
+            if not full or short == full:
+                return False
+            rec = self._paper_records({})  # type: ignore[arg-type]
+
+            def words(block: str) -> int:
+                return len(_paper_values.without_marks(_paper_values.fill(block, rec)[0]).split())
+            return words(full) > words(short) + len(_supplement.answers_pointer().split())
         block = _paper_facts.block_text(self.quest_root, part, full=True)
         return any(line.lstrip().startswith("|") for line in block.splitlines())
 
     def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
         """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
-        tables and the Limitations as FI would have put them in the paper, the Further reading as it was listed. No model
-        call. Returns ``False`` only when the file could not be written."""
+        tables, the answers in full and the Limitations as FI would have put them in the paper (the answers' result
+        numbers filled from the same records as the paper's, without changing the paper's record of them), the Further
+        reading as it was listed. No model call. Returns ``False`` only when the file could not be written."""
         root = self.quest_root
         moved = _supplement.moved(root)
         parts: dict[str, str] = {}
         if _supplement.TABLES in moved:
             parts[_supplement.TABLES] = _paper_facts.block_text(root, _supplement.TABLES, full=True)
+        if _supplement.ANSWERS in moved:
+            # the lines under the supplement's own heading (the block's bold title is that heading)
+            lines = _paper_facts.block_text(root, _supplement.ANSWERS, full=True).split(chr(10) * 2, 1)[-1]
+            parts[_supplement.ANSWERS] = _paper_values.fill(lines, self._paper_records(state))[0] if lines.strip() else ""
         if _supplement.LIMITATIONS in moved:
             # the paper's own paragraphs of its Limitations section first, as they stood there, then FI's list
             parts[_supplement.LIMITATIONS] = (_supplement.writer_text(root) + "\n\n"

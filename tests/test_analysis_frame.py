@@ -148,7 +148,11 @@ def test_what_a_repair_may_and_may_not_change_in_derive() -> None:
     assert "parameters" in af.analysis_problem(old, body.replace("def derive_peak(table):", "def derive_peak(table, extra):"), "derive.py")
     assert "missing" in af.analysis_problem(old, body.replace("def derive_peak(table):", "def derive_other(table):"), "derive.py")
     assert "RESULTS" in af.analysis_problem(old, body + "\nRESULTS = ()\n", "derive.py")
-    assert "imported" in af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    print(1)\n', "derive.py")
+    # FI imports derive.py and never runs it as a script, so the study's own main block never runs under FI: not refused
+    assert af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    print(1)\n', "derive.py") == ""
+    assert af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    pass\n', "derive.py") == ""
+    # a main block that rebinds a name of the frame is still refused for that
+    assert "RESULTS" in af.analysis_problem(old, body + '\nif __name__ == "__main__":\n    RESULTS = ()\n', "derive.py")
     assert af.analysis_problem(old, "def (", "derive.py") != ""  # not Python
 
 
@@ -1067,16 +1071,19 @@ def test_plan_of_gives_every_figure_the_settings_a_panel_may_hold_and_their_labe
 
 
 def _clamp_check(tmp_path: Path, body: str) -> list[Any]:
-    """The violations the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py."""
+    """The cap warnings the engine finds for a result exactly on the top of a declared range, with the study's ``body`` in derive.py
+    (never a violation: a cap is said, not a reason to send the run back)."""
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     quest = _quest(tmp_path, _design(), body)
     state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
              "design": {"result_assertions": [{"path": "growth", "min": 0.4, "max": 1.0, "unit": "x"}]}}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
-    return _assertion_violations(Engine._in_force(stub, state))
+    checked = Engine._in_force(stub, state)
+    assert not [v for v in _assertion_violations(checked) if v.kind.startswith("clamped")]  # a cap never sends a run back
+    return _assertion_warnings(checked)
 
 
 def test_the_study_code_is_derive_without_fi_s_frame_and_none_when_the_analysis_is_not_fis(tmp_path: Path) -> None:
@@ -1101,7 +1108,7 @@ def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> 
     derive.py and ``simulate`` as the trial code. ``growth`` is a trial result, ``gain`` a quantity derived from it."""
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     design = _design([_derived("gain")])
     design["result_assertions"] = [{"path": path, "min": 0.0, "max": 1.0, "unit": "x"}]
@@ -1109,7 +1116,9 @@ def _split_check(tmp_path: Path, derive_body: str, simulate: str, path: str) -> 
     (quest / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
     state = {"result_json": {"s": {path: 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"), "design": design}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: None)
-    return _assertion_violations(Engine._in_force(stub, state))
+    checked = Engine._in_force(stub, state)
+    assert not [v for v in _assertion_violations(checked) if v.kind.startswith("clamped")]  # a cap never sends a run back
+    return _assertion_warnings(checked)
 
 
 _CAP = "def derive_gain(table):\n    return min(table.mean('growth'), 1.0)\n"
@@ -1121,7 +1130,7 @@ def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path:
     # The state's design carries no protocol; the one in force (the frozen one) is merged in, and the split reads that.
     from types import SimpleNamespace
 
-    from core.engine import Engine, _assertion_violations
+    from core.engine import Engine, _assertion_violations, _assertion_warnings
 
     full = _design([_derived("gain")])
     quest = _quest(tmp_path, full)
@@ -1129,7 +1138,8 @@ def test_the_split_uses_the_protocol_in_force_when_the_design_has_none(tmp_path:
     state = {"result_json": {"s": {"growth": 1.0}}, "code": (quest / "code" / "experiment.py").read_text(encoding="utf-8"),
              "design": {"result_assertions": [{"path": "growth", "min": 0.0, "max": 1.0, "unit": "x"}]}}
     stub = SimpleNamespace(quest_root=quest, _protocol_block=lambda s: full["protocol"])
-    assert [v.kind for v in _assertion_violations(Engine._in_force(stub, state))] == ["clamped"]
+    checked = Engine._in_force(stub, state)
+    assert _assertion_violations(checked) == [] and [v.kind for v in _assertion_warnings(checked)] == ["clamped"]
 
 
 def test_a_cap_in_derive_py_does_not_pin_a_result_the_trials_return(tmp_path: Path) -> None:
@@ -1190,6 +1200,36 @@ def test_a_study_that_changes_the_frames_dicts_does_not_change_what_fis_analysis
         assert any("the references" in n and "FI used the plan's values" in n for n in said)
         assert sum("the references" in n for n in record["notes"]) == 1  # said once, in plain words
         assert not any("REFERENCES" in n for n in record["notes"])
+
+
+def test_a_main_block_in_derive_never_runs_when_fis_analysis_runs(tmp_path: Path) -> None:
+    """derive.py is imported by FI's experiment.py, never run as a script, so a study's ``if __name__ == "__main__":`` block
+    (which a repair may now keep) does not run: the analysis gives what it gives without the block."""
+    design = _design([_derived("peak")])
+    honest = _run(_quest(tmp_path / "honest", design, _PEAK.format(mutate="pass")))
+    blocked = _PEAK.format(mutate="pass") + '\nif __name__ == "__main__":\n    raise SystemExit("the main block ran")\n'
+    code, printed, record, err = _run(_quest(tmp_path / "main", design, blocked))
+    assert code == honest[0] == 0 and "the main block ran" not in err, err
+    assert printed == honest[1] and record["derived"] == honest[2]["derived"]
+
+
+def test_a_frame_change_through_another_name_is_seen_in_fis_record_and_changes_nothing(tmp_path: Path) -> None:
+    """The reading of the code sees only a frame's own names; a change made through another name for the same dict
+    (``plan = REFERENCES; plan[...] = ...``) or a method call on it is not read there. FI's own run reads the frame from the
+    text it wrote, so the change reaches nothing FI computes, and the record says the study's code changed it."""
+    design = _design([_derived("peak")])
+    honest = _run(_quest(tmp_path / "honest", design, _PEAK.format(mutate="pass")))
+    aliased = ("plan = REFERENCES\nplan['extra'] = {'when': \"mode == 'b'\", 'formula': 'base'}\n"
+               "kept = FIXED\nkept.update({'base': 99.0})\n" + _PEAK.format(mutate="pass"))
+    quest = _quest(tmp_path / "alias", design, aliased)
+    text = (quest / "code" / "derive.py").read_text(encoding="utf-8")
+    frame = af.derive_source(design)
+    assert af.derive_intact(frame, text) == ""  # the reading of the code does not see it
+    code, printed, record, err = _run(quest)
+    assert code == honest[0] == 0 and not record["fi_faults"], err
+    assert printed == honest[1] and record["derived"] == honest[2]["derived"]
+    said = [n for n in record["notes"] if "the study's code changed" in n and "FI used the plan's values" in n]
+    assert any("the references" in n for n in said) and any("the fixed numbers" in n for n in said), record["notes"]
 
 
 def test_a_study_that_leaves_the_frame_alone_says_nothing_about_it(tmp_path: Path) -> None:

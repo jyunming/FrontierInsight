@@ -230,7 +230,8 @@ def test_a_kept_answer_is_reused_only_when_it_was_made_the_same_way(tmp_path) ->
     root = _quest(engine)
     ran: list[bool] = []
 
-    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False) -> Verdict:
+    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False,
+                  timed_out: Any = None) -> Verdict:
         ran.append(strict)
         return Verdict("unchanged")
 
@@ -259,7 +260,8 @@ def test_a_kept_answer_follows_every_file_of_the_study_and_only_a_measured_one_i
     ran: list[str] = []
     status = ["unchanged"]
 
-    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False) -> Verdict:
+    async def one(issue: Any, record: Any, state: Any, done: Any, budget: Any = None, strict: bool = False,
+                  timed_out: Any = None) -> Verdict:
         ran.append(status[0])
         return Verdict(status[0])
 

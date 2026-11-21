@@ -12,8 +12,8 @@ that crashed a real analysis), in a scratch copy of the quest. No model is asked
 with a ``kind``:
 
 * ``fault``: the code is wrong whatever the data: a name that is not defined (including a definition placed after the
-  main guard), an import or syntax error, a function that raises ``NotImplementedError`` (it is not written yet), a run that
-  ended without its ``RESULT_JSON`` line; and a ``TypeError`` or
+  main guard, when the run raises its ``NameError``), an import or syntax error, a function that raises
+  ``NotImplementedError`` (it is not written yet), a run that ended without its ``RESULT_JSON`` line; and a ``TypeError`` or
   ``AttributeError`` that shows at the same place of the code on a larger copy of the record too (3 trials can cause
   one: a fit with more parameters than points, a helper that returns ``None`` for a small ``n``).
 * ``small_data``: the outcome 3 trials can explain (a ``ValueError`` in a fit, a missing setting, a figure that was not
@@ -22,7 +22,9 @@ with a ``kind``:
 * ``not_checked``: the gate could not run here (a Docker quest: the scratch folder is not visible to the container).
 
 The kind is decided by the exception's type, where it was raised and, for a ``TypeError`` or ``AttributeError``, a
-second run on more trials; never by words in its message.
+second run on more trials; never by words in its message. The reading of the code for a definition after the main guard
+(:func:`late_definitions`) never stops the gate: it reads every name the guard could reach, also on a branch that never
+runs, so the gate's own run decides, and the reading is only recorded (``late``) and said.
 :func:`gate_verdict` is the decision rule: a change is refused only when the code passed before it and has a new
 ``fault`` after it; ``small_data`` and ``time`` are shown, never a reason to refuse.
 """
@@ -94,7 +96,8 @@ class GateResult:
     detail: str = ""
     exception: str = ""  # the exception type that stopped the run, if one did
     unfilled: list[str] = field(default_factory=list)
-    #: ``file:name`` of each definition after the main guard that the guard reaches (the static stage).
+    #: ``file:name`` of each definition after the main guard that the reading of the code says the guard may reach
+    #: (:func:`late_definitions`): recorded and said, never a stop by itself (the run decides).
     late: list[str] = field(default_factory=list)
     seconds: dict[str, float] = field(default_factory=dict)
     #: Folders of the quest left out of the scratch copy because they were over the size cap.
@@ -110,7 +113,10 @@ class GateResult:
 
     def says(self) -> str:
         if self.ok:
-            return "the analysis ran from start to end on a small copy of the recorded results"
+            return "the analysis ran from start to end on a small copy of the recorded results" + (
+                "; FI's reading of the code finds " + ", ".join(f"`{x.partition(':')[2]}` ({x.partition(':')[0]})"
+                                                                for x in self.late[:4])
+                + " defined after the line that starts the script, which this run did not need" if self.late else "")
         what, stage = _KINDS.get(self.kind, "stopped"), _STAGES.get(self.stage, self.stage)
         return f"the analysis {what} ({stage}{', ' + self.where if self.where else ''}): {self.detail}"
 
@@ -471,18 +477,18 @@ async def analysis_gate(quest_root: Path | str, code_dir: Path | str, protocol: 
         return GateResult(False, "static", NOT_CHECKED, "", "the quest runs its code in Docker, which cannot see the "
                           "gate's scratch copy, so the analysis was not run before the change was kept", seconds=seconds)
     began = time.monotonic()
+    # Read, not run: said with the outcome, never a stop by itself (a name on a branch that never runs is read too). The run
+    # below raises the NameError when the guard really needs a later definition.
     late = late_definitions_in(code_dir)
     seconds["static"] = round(time.monotonic() - began, 2)
-    if late:
-        file, name, line = late[0]
-        return GateResult(False, "static", FAULT, f"code/{file} line {line}",
-                          (", ".join(f"`{n}`" for _f, n, _l in late[:4]) + (" is" if len(late) == 1 else " are")
-                           + " defined after the line that starts the script (`if __name__ == \"__main__\":`), "
-                             "which runs first and needs it"), "NameError",
-                          late=[f"{f}:{n}" for f, n, _ in late], seconds=seconds)
     py = str(python or _quest_python(quest_root))
     got = await _run_gate(quest_root, code_dir, protocol, py, trials, timeout_s, search, work_dir, keep, seconds, raw_dir,
                           planned)
+    got.late = [f"{f}:{n}" for f, n, _ in late]
+    named = [n for _f, n, _l in late if got.exception == "NameError" and re.search(rf"\b{re.escape(n)}\b", got.detail)]
+    if named:
+        got.detail = (f"{got.detail} (`{named[0]}` is defined after the line that starts the script, "
+                      "`if __name__ == \"__main__\":`, which runs first and needs it)")[:400]
     if not (got.stage == "derive" and got.kind == FAULT and got.exception in _MAYBE_FAULTS):
         return got
     bigger = min(CONFIRM_TRIALS, recorded_trials(quest_root, raw_dir))
@@ -670,13 +676,16 @@ def gate_verdict(before: GateResult | None, after: GateResult) -> Verdict:
     after it. A ``small_data`` or ``time`` outcome is disclosed, never a reason to refuse; a gate that did not pass
     before the change, or that was not run, refuses nothing (the fault is shown to the repair instead).
 
-    One reading of "passed before" for the static stage: it reads the code alone and runs first, so a definition after
-    the main guard that the guard reaches and the code before the change did not have is new even when the code before
-    stopped later, at a stage that needs data (a run stopped there never reached the place the new fault is in)."""
+    One reading of "passed before": a run that now raises the ``NameError`` of a definition after the main guard that the
+    code before the change did not have is a new fault even when the code before stopped later, at a stage that needs
+    data (a run stopped there never reached the place the new fault is in). The run's own exception decides it; the
+    reading of the code only names which definition it is."""
     if after.ok:
-        return Verdict(False)
+        return Verdict(False, disclose=after.says() if after.late else "")
     shown = after.says()
-    new_late = after.stage == "static" and before is not None and bool(set(after.late) - set(before.late))
+    new = sorted(set(after.late) - set(before.late)) if before is not None else []
+    new_late = (after.exception == "NameError" and after.kind == FAULT
+                and any(re.search(rf"\b{re.escape(x.partition(':')[2])}\b", after.detail) for x in new))
     if after.kind == FAULT and before is not None and (before.ok or new_late):
         return Verdict(True, why=shown)
     if after.kind == FAULT:

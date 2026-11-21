@@ -2100,8 +2100,25 @@ class ImproveStageMixin:
         # oracle marker or cases): `repair_breaks_contract`; its reason is logged.
         self._keep_repair_answer("oracle", text)
         new_code, split_why = self._script_from_reply("oracle", code, new_code, parsed, path.name)
+        trial = bool(getattr(self, "_trial_mode", False))
+        bound, import_why = None, ""
+        if not split_why and isinstance(new_code, str) and _trial_runner.needs_oracle(oracles, trial):
+            # Whether the repaired module binds oracle() is asked of the module itself, imported as FI imports it when it
+            # calls it (nothing of it is called); the old text is put back until the repair is judged.
+            path.write_text(new_code, encoding="utf-8")
+            try:
+                bound, import_why = await _trial_runner.binds_callable(
+                    self.executor, self.executor.python_path(self.quest_root), self.quest_root,
+                    path.relative_to(self.quest_root).as_posix(), "oracle",
+                    timeout_s=int(min(int(self.config.execution.timeout_s), 120)),
+                    env=dict(self.__dict__.get("_last_exec_env") or {}), log=self._log)
+            except Exception as exc:  # noqa: BLE001 - the reading of the code decides then, and says so
+                bound, import_why = None, f"{type(exc).__name__}: {exc}"[:300]
+            finally:
+                path.write_text(code, encoding="utf-8")
         broken = split_why or _trial_runner.repair_breaks_contract(code, new_code, path.name, oracles=oracles,
-                                                                   trial=bool(getattr(self, "_trial_mode", False)))
+                                                                   trial=trial, oracle_bound=bound,
+                                                                   import_why=import_why)
         if broken:
             self._log.warning("[oracle] the repair of %s is not usable (%s); keeping it as written", path.name, broken)
             await self._keep_refused_repair("oracle", path.name, new_code, broken)

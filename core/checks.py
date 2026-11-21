@@ -771,13 +771,12 @@ CHECKS: tuple[Check, ...] = (
           'NEEDS claim is put back and the agent sent back once.'),
     Check('plausibility_declared_bounds', 'core.plausibility', 'violations',
           'execute_reflect', 'model_code', 'repair',
-          'A value breaking a bound the design declared (result_assertions), a number the script caps at the '
-          'bound (clamped), a quantity on a bound in several settings (at_bound) or a bounded quantity no '
-          'longer reported sends the run back for repair.'),
+          'A value breaking a bound the design declared (result_assertions) or a bounded quantity no longer '
+          'reported sends the run back for repair.'),
     Check('plausibility_unproven_cap', 'core.plausibility', 'check_design',
           'execute_reflect', 'model_code', 'note',
-          "A value exactly on a constant the script caps that quantity at, with the cap's place in the result "
-          'unprovable, is a warning only.'),
+          'A value exactly on a constant the script caps at (read from call names and literals), or a quantity on a '
+          'bound in several settings, is a warning in run.log and the trace only.'),
     Check('phased_split_overlap', 'core.phased', 'decide_split',
           'execute', 'own_record', 'note',
           'A split of the supplied data that puts any unit in both parts is refused (zero-overlap manifest) and '
@@ -1099,8 +1098,8 @@ CHECKS: tuple[Check, ...] = (
           'failure note (engine.degenerate_run_guard)'),
     Check('result_assertions_bounds', 'core.engine', '_assertion_violations',
           'execute_reflect', 'own_record', 'repair',
-          'Values break the bounds the design declared or are capped by the script; sent back until repairs are '
-          'spent, then proceeds with the violation noted'),
+          'Values break the bounds the design declared; sent back until repairs are spent, then proceeds with the '
+          'violation noted (a value the script caps is a warning only)'),
     Check('figure_overlap_redraw', 'core.engine', 'Engine._figure_overlaps_to_repair',
           'execute_reflect', 'measured', 'repair',
           'A legend or title measured on the saved canvas overlapping data; one redraw request, never stops the '
@@ -1329,7 +1328,8 @@ CHECKS: tuple[Check, ...] = (
           'survey quests); others are not embedded'),
     Check('abstract_missing', 'core.paper_sections', 'missing_abstract',
           'write', 'model_text', 'repair',
-          'scientific paper without a bodied ## Abstract; an Abstract is asked for from the draft once'),
+          'scientific paper without a bodied ## Abstract (a comment is not a body; an Abstract heading with none is '
+          'taken out); an Abstract is asked for from the draft once'),
     Check('paper_citation_names_no_source', 'core.engine', '_finalize_paper_sources',
           'write', 'own_record', 'strip',
           'citation numbers that name no source in the prior-work block are removed; engine writes '

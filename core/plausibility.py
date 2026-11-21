@@ -31,7 +31,7 @@ real quest showed exactly that: an integrator diverged, the gate rejected the
 huge error, and the regenerated script read ``rmse = 10.0  # Cap at
 assertion max`` -- divergence laundered into a number the gate cannot tell
 from a genuine RMSE of 10. So a value sitting exactly on a non-zero bound is
-rejected when the script also caps values at that constant, unless every such
+reported when the script also caps values at that constant, unless every such
 cap is proven to be another value's (one written at ``train.rmse`` does not
 count for ``test.rmse``). A cap pins a value only from its own side: a floor
 (``max(R, 1)`` under a denominator) never pins a value to an upper bound, nor a
@@ -42,6 +42,12 @@ required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
 inside a softmax is real code; only the two together are a capped number.
 Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
 everywhere.
+
+Such a finding (``clamped`` and ``clamped_unproven``) is said, never acted on: the engine logs it in run.log and the
+trace (``core.engine_base._WARNING_KINDS``) and does not send the run back for it. Which call is a cap is read from call
+names and literals without the flow of the code, so a study's own function named ``minimum`` or a ``min(other, 1)`` that
+has nothing to do with the result reads as a cap, and a cap written another way (a helper of the study's, a literal in
+both branches) is not seen. A value outside its declared range is still a violation.
 
 Why several values on a bound fail
 ==================================
@@ -214,6 +220,8 @@ class Assertion:
     #: The design says this quantity can honestly be exactly on its bound (no failures, a proportion that is 0 or 1 because
     #: the event never happened or always did). Then sitting on the bound is its answer, not a sign of a trivial result.
     may_equal_bound: bool = False
+    #: The same said of one side only (``("max",)``: a probability may be 1, the plan's own lower bound may not be reached).
+    may_equal: tuple[str, ...] = ()
 
     def describe(self) -> str:
         if self.min is not None and self.max is not None:
@@ -953,6 +961,8 @@ def parse_assertions(design: Any) -> list[Assertion]:
                 unit=str(item.get("unit") or "").strip(),
                 reason=str(item.get("reason") or "").strip(),
                 may_equal_bound=item.get("may_equal_bound") is True,
+                may_equal=tuple(s for s in ("min", "max") if s in (item.get("may_equal") or ())
+                                if isinstance(item.get("may_equal"), (list, tuple))),
             )
         )
     return out
@@ -1433,7 +1443,8 @@ def violations(
             if len(every) >= AT_BOUND_MIN_SETTINGS and on_edge >= every:
                 out.append(Violation(a.path, matched[0][2], a, kind="edge_everywhere"))
         for bound, entries in on_bound.items():
-            if a.may_equal_bound or a.path in edge_ok:
+            if a.may_equal_bound or a.path in edge_ok or ("min" in a.may_equal and bound == a.min) \
+                    or ("max" in a.may_equal and bound == a.max):
                 continue  # the design says this quantity can honestly sit on its bound, or its role is physical_bound
             if bound == 0 and a.path in zero_expected:
                 continue  # 0 is this quantity's answer: see "Why a count of failures may sit at 0"

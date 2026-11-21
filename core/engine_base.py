@@ -4755,7 +4755,7 @@ def _replicate_assertions(state: QuestState) -> list[Any]:
         from core import plausibility
 
         design = state.get("design")
-        declared = list(design.get("result_assertions") or []) if isinstance(design, dict) else []
+        declared = _contract.held_assertions(design) if isinstance(design, dict) else []
         return plausibility.parse_assertions(
             {"result_assertions": declared + list(state.get("_skill_assertions") or [])},
         )
@@ -8495,10 +8495,12 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
     return out
 
 
-# Findings of the plausibility check that are said, never acted on: a cap whose place in the result cannot be shown, a
-# physical_bound result on its edge everywhere, and a result on a bound the plan did not declare honest (a guess about
-# the computation, so it is disclosed in the paper and does not send the code back).
-_WARNING_KINDS = ("clamped_unproven", "edge_everywhere", "at_bound")
+# Findings of the plausibility check that are said, never acted on: a value exactly on a constant the script caps at
+# (``clamped``, proven or not: which call is a cap is read from call names and literals, without the flow of the code, so a
+# function of the study's named ``minimum`` reads as one and a cap written another way is not seen), a physical_bound
+# result on its edge everywhere, and a result on a bound the plan did not declare honest (a guess about the computation, so
+# it is disclosed and does not send the code back). A value outside its declared range still sends the run back.
+_WARNING_KINDS = ("clamped", "clamped_unproven", "edge_everywhere", "at_bound")
 
 
 def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
@@ -8520,17 +8522,17 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
         # bound is caught too; ``seen`` so a bounded quantity an earlier run
         # reported cannot quietly disappear. See core/plausibility.py for both.
         found = _checked(state, memo)
-        # A cap whose place in the result cannot be shown, and a physical_bound result on its edge in every setting, are
-        # warnings (_assertion_warnings), not violations.
+        # A value on a constant the script caps at, and a result on its edge or bound, are warnings
+        # (_assertion_warnings), not violations.
         return [v for v in found if getattr(v, "kind", "") not in _WARNING_KINDS]
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
 
 
 def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
-    """The findings of the same check that are warnings, not violations: a value exactly on a constant the script
-    caps a quantity of that name at, where that cap's place in the result cannot be shown
-    (``plausibility.direct_caps(..., proven=False)``). Logged and recorded in the trace; they never send a run back."""
+    """The findings of the same check that are warnings, not violations (:data:`_WARNING_KINDS`): a value exactly on a
+    constant the script caps at, a result on its edge or bound. Logged and recorded in the trace; they never send a run
+    back."""
     try:
         from core import plausibility
 
@@ -8585,15 +8587,18 @@ def _physical_bound_paths(state: "QuestState") -> set[str]:
 
 
 def _asserting_design(state: "QuestState") -> dict[str, Any]:
-    """The design with a called skill's own range assertions added.
+    """The design with a called skill's own range assertions added, and the ranges on the plan's declared results
+    (:func:`core.contract.held_assertions`: one bound per result).
 
     A skill knows its own valid domain, so a design that calls one need not
     restate its bounds. Design assertions come first: a design that
     deliberately narrows a skill's range keeps its say."""
     design = dict(state.get("design") or {})
-    extra = state.get("_skill_assertions") or []
-    if extra:
-        design["result_assertions"] = list(design.get("result_assertions") or []) + list(extra)
+    # A range on a declared result of the plan (a physical bound FI asked after the plan) is held like the plan's own bounds.
+    held = _contract.held_assertions(design)
+    extra = list(state.get("_skill_assertions") or [])
+    if held or extra:
+        design["result_assertions"] = held + extra
     return design
 
 

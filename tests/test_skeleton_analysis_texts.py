@@ -398,10 +398,11 @@ def test_with_no_analysis_by_fi_the_methods_and_the_unpinned_texts_are_what_they
     assert pins == MORE_PINS_AT_DF4FF1AD, json.dumps(pins, indent=1)
 
 
+#: reflect_prompt since says a capped value is recorded as one, not rejected (a cap is a warning, never a send-back).
 MORE_PINS_AT_DF4FF1AD = {
     "protocols_search_inside": "224963aed9fe2a67", "template_implement": "a70893e8a2235784",
     "template_implement_body": "d02bdddb32e99d50", "outline_template": "fa01183231dce8c8",
-    "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "b1aebf41e9bdf9a8"}
+    "repair_fi_frame": "2aca732a1c3b9c74", "reflect_prompt": "301b6b3d7babd4e9"}
 
 
 # ---- what the request says of the table is what the table does ---------------------------------------------------------------------
