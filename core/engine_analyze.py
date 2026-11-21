@@ -20,6 +20,13 @@ from .engine_base import (  # noqa: F401
 )
 
 
+
+def _absent_how(names: list[str]) -> str:
+    """How a finding whose test looks for names the code never gave it is judged: what the record and the logs say."""
+    return (f"its test looks for {', '.join(names)[:160]}, which nothing the study's code gave the test holds and FI's own "
+            "records of the run hold no value for: a part not done, not a wrong number")
+
+
 class AnalyzeStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -1191,7 +1198,8 @@ class AnalyzeStageMixin:
         record = _code_review.load(self.quest_root)
         # What an earlier pass of the gate decided about an issue is decided again on this run's code and results.
         stale = [i for i in _code_findings.issues_of(record).values()
-                 if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None)])]
+                 if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None),
+                                                 i.pop("held_at_failure", None)])]
         if stale:
             _code_review.save(self.quest_root, record)
         names = _code_review.headline_names(state.get("design"), self._protocol_block(state))
@@ -1273,7 +1281,14 @@ class AnalyzeStageMixin:
                 continue
             runs = [await self._rerun_finding_test(rel)]
             if runs[0] is None or runs[0].status != "pass":
-                runs.append(await self._rerun_finding_test(rel))  # a test that does not pass is run once more
+                # a test that does not pass is run once more, this time recording what the study's code gave it (a record of
+                # names FI can compare with the names the test looks for); a run that then gives no answer leaves the first one
+                runs.append(await self._rerun_finding_test(rel, capture=True))
+            held = getattr(runs[-1], "held", None) if len(runs) > 1 and runs[-1] is not None and runs[-1].status == "fail" else None
+            for target in {id(x): x for x in (issue, saved) if isinstance(x, dict)}.values():
+                target.pop("held_at_failure", None)
+                if isinstance(held, dict):
+                    target["held_at_failure"] = held
             # a pass in either run clears it (a flaky test stops nothing); else a failing assertion in either run stands
             # (an error in the other run does not hide it); else an error; else no answer at all
             given = [r for r in runs if r is not None]
@@ -1327,6 +1342,7 @@ class AnalyzeStageMixin:
                                             at_once=self._rerun_at_once(_frozen.protocol_of(self.quest_root)))
         # all the reruns of the whole study in one check together (a rerun of the analysis alone is not counted)
         budget = [_rerun_check.total_allowed(allowed, self.config.execution.timeout_s)]
+        timed_out: dict[str, Any] = {}  # the first rerun of the whole study in this check that did not finish in all its time
         runs = 0
         fields = _rerun_check.Verdict.__dataclass_fields__
         from . import reuse_key as _reuse_key
@@ -1360,7 +1376,7 @@ class AnalyzeStageMixin:
             else:
                 runs += 1
                 try:
-                    out[fid] = await self._rerun_one(issue, record, state, done, budget, strict)
+                    out[fid] = await self._rerun_one(issue, record, state, done, budget, strict, timed_out)
                 except Exception as exc:  # noqa: BLE001 - a rerun that fails is "could not rerun", never a stop by itself
                     self._log.warning("[evidence_gate] the study could not be run again for %s (%s: %s)", fid,
                                       type(exc).__name__, exc)
@@ -1434,14 +1450,18 @@ class AnalyzeStageMixin:
             ": " + _one_line(run.detail or "", 160) if run is not None and run.detail else "")
 
     async def _rerun_one(self, issue: dict[str, Any], record: dict[str, Any], state: Any, done: dict[str, Any],
-                         budget: list[float] | None = None, strict: bool = False) -> Any:
+                         budget: list[float] | None = None, strict: bool = False,
+                         timed_out: dict[str, Any] | None = None) -> Any:
         """Run the study on a copy of the code with a repair of one shown fault, as :func:`core.rerun_check.judge`. The repair is
         the last one FI tried for the finding that makes its own test pass, even one its own rules refused (kept in ``code/``'s
         history); a finding with none that fits the code as it is is asked for one repair, with the same prompt as the
         code-review loop (counted in the record as ``rerun_calls``). A repair that does not make the finding's test pass is
         never run: the answer is "could not rerun". ``strict``: the finding is a reader's claim about the quantities in
         ``issue["disputed"]``: the answer is "unchanged" only when those numbers were compared, and a repair that leaves a
-        delivered number unwritten is "could not rerun"."""
+        delivered number unwritten is "could not rerun". ``timed_out`` (shared by the findings of one check): once a rerun of the
+        whole study did not finish in all the time a rerun is allowed, the whole study is not run again for another finding in
+        that check, since a repair of another line would not make it shorter; that finding's answer is "could not rerun", which
+        says so, and it is judged as a finding no rerun answered."""
         code = self.quest_root / "code"
         if str(getattr(self.config.execution, "sandbox", "venv")) == "docker":
             # the copy would run in a container that has none of the quest's data: no rerun, and no request spent on one
@@ -1523,6 +1543,11 @@ class AnalyzeStageMixin:
                                    + ". The repair may use only the results the plan declares.")
                         copy_dir = None
                         continue
+                    if (budget is not None and timed_out is not None and not timed_out and verdict.timed_out
+                            and not verdict.crashed and verdict.mode == "whole study"):
+                        # the kept answer is a whole-study rerun that ran out of all its time (a resumed check reads it here,
+                        # not from a new run): no other finding's whole study is run again in this check either
+                        timed_out.update(finding=fid, seconds=verdict.seconds or allowed)
                     done[key] = verdict
                     return verdict
                 # A repair of the analysis alone is run again on the recorded trials in seconds: it is not counted against the
@@ -1539,6 +1564,12 @@ class AnalyzeStageMixin:
                 if late:
                     return _rerun_check.Verdict("could_not", late, mode="whole study", source=source, files=sorted(
                         await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
+                if counts and timed_out:
+                    return _rerun_check.Verdict(
+                        "could_not", f"the study run again with a repair of {timed_out['finding']} did not finish within "
+                        f"{timed_out['seconds']:.0f} s, so FI does not run it again for another finding in this check",
+                        mode="whole study", source=source,
+                        files=sorted(await asyncio.to_thread(_rerun_check.changed_files, self.quest_root, copy_dir)))
                 began = time.monotonic()
                 # The run contract is held to before the long run: FI's small run of the repaired simulation (seconds) refuses
                 # a form the study's own run would refuse, and its reason goes back to the model as a crash's does.
@@ -1560,6 +1591,9 @@ class AnalyzeStageMixin:
                                                        finding=str(issue.get("id") or ""), at_once=at_once)
                 if counts:
                     budget[0] -= time.monotonic() - began
+                if (counts and timed_out is not None and not timed_out and verdict.status == "could_not" and verdict.timed_out
+                        and left >= allowed):
+                    timed_out.update(finding=fid, seconds=left)
                 if lasting and verdict.status == "could_not" and (verdict.crashed or (verdict.timed_out and left >= allowed)):
                     # what the same repaired code would get again: kept by that code, so a later check does not run it again
                     kept_all = record.get("rerun_could_not") if isinstance(record.get("rerun_could_not"), dict) else {}
@@ -2069,7 +2103,7 @@ class AnalyzeStageMixin:
             if _code_review.about_headline(record, issue, result, headline or []):
                 stops.append((issue, how))
             elif _code_review.missing_quantities(record, issue):
-                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach, moved)
             elif not (reach is not None and reach.ids) and (keys := _code_review.keys_of_issue(record, issue, result)):
                 # Only a quest with no frozen plan (no records of FI's to place a finding by): the finding's own quantity names the
                 # keys. A key that holds no number has nothing another key could hold too: leaving it out removes all of it.
@@ -2079,7 +2113,9 @@ class AnalyzeStageMixin:
                     stops.append((issue, how + "; the results hold its values under other names too, so FI cannot leave "
                                                "them out"))
             elif _code_review.not_obtained(record, issue, result, declared):
-                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach)
+                self._part_not_done_or_stop(stops, not_done, issue, how, record, result, declared, reach, moved)
+            elif not moved and (absent := self._absent_at_failure(issue, result, reach)):
+                not_done.append((issue, how + "; " + _absent_how(absent), absent))
             else:
                 # The records of FI's (the plan's frozen protocol, the trials, the call graph) do not place the finding, and the
                 # reader's words are not a record: nothing is left out or kept on them.
@@ -2199,15 +2235,31 @@ class AnalyzeStageMixin:
 
     @staticmethod
     def _part_not_done_or_stop(stops: list, not_done: list, issue: dict[str, Any], how: str, record: dict[str, Any], result: Any,
-                               declared: list[str] | None, reach: "_shown_reach.Reach | None") -> None:
+                               declared: list[str] | None, reach: "_shown_reach.Reach | None", moved: bool = False) -> None:
         """A finding that a plan quantity is not computed: a part not done only when FI's own record of the run shows no value
         was worked out for it AND the failing test reads no reported key that holds a value (the test would place the finding on
-        that key). Otherwise the test may stand for a value reported under another name, and the quest stops."""
+        that key), or when what FI recorded as the test ran shows the names it looks for were never given to it
+        (:meth:`_absent_at_failure`) and no rerun moved a number. Otherwise the test may stand for a value reported under
+        another name, and the quest stops."""
         absent = _code_review.not_obtained(record, issue, result, declared)
         if absent and not (reach is not None and reach.reads_held_key(issue, result)):
             not_done.append((issue, how, absent))
+        elif not moved and (gone := AnalyzeStageMixin._absent_at_failure(issue, result, reach)):
+            not_done.append((issue, how + "; " + _absent_how(gone), gone))
         else:
             stops.append((issue, how + "; " + _UNPLACED_FINDING))
+
+    @staticmethod
+    def _absent_at_failure(issue: dict[str, Any], result: Any, reach: "_shown_reach.Reach | None") -> list[str]:
+        """The names a finding's failing test looks for that FI saw the study's code never give it, read from what FI recorded
+        when it ran the test again (``held_at_failure``) and from FI's own records of the run (:meth:`core.shown_reach.Reach.
+        absent_names`); ``[]`` when that is not shown."""
+        if reach is None:
+            return []
+        try:
+            return reach.absent_names(issue, result, issue.get("held_at_failure"))
+        except Exception:  # noqa: BLE001 - what cannot be read shows nothing absent: the finding is judged as before
+            return []
 
     @staticmethod
     def _in_results(names: list[str], result: Any) -> bool:
@@ -2261,11 +2313,12 @@ class AnalyzeStageMixin:
             return False
         return True
 
-    async def _rerun_finding_test(self, rel: str) -> Any:
+    async def _rerun_finding_test(self, rel: str, capture: bool = False) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process
-        printed no answer (it ran past its time, or ended the process)."""
+        printed no answer (it ran past its time, or ended the process). ``capture``: a failure also records what the study's
+        code returned to the test and the records it held (``TestRun.held``)."""
         try:
-            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel])],
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [rel], capture=capture)],
                                                      timeout_s=_code_findings.SHOWN_TEST_TIMEOUT_S,
                                                      env=self._finding_test_env(stand_ins=False))
         except Exception as exc:  # noqa: BLE001 - a run past its time limit raises from the executor

@@ -74,7 +74,7 @@ def _gate_on(root: Path, result: Any, monkeypatch: Any) -> tuple[Path, Any, Any]
         test.write_text("def test_x():\n    assert False\n", encoding="utf-8")
     eng = _engine(root)
 
-    async def still_fails(rel: str) -> Any:
+    async def still_fails(rel: str, capture: bool = False) -> Any:
         return finding_repair.TestRun("fail", "test_x: the assertion failed")
 
     monkeypatch.setattr(eng, "_rerun_finding_test", still_fails)

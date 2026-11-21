@@ -1566,7 +1566,7 @@ def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "
 
 
 def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[str, Any]] | None = None,
-                           trial: bool = False) -> str:
+                           trial: bool = False, oracle_bound: bool | None = None, import_why: str = "") -> str:
     """Why a repaired script ``new`` cannot replace ``old`` (``name`` is the file), or ``""`` when it can. Read, not run.
 
     The contract comes from FI's own records of the file it replaces, not from a list of names: the new text must parse,
@@ -1575,8 +1575,11 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     script (a bare word such as a placeholder parses as Python and defines nothing) is refused here.
 
     ``oracles`` is given by a repair made for the oracle checks and adds what those need: in a trial-mode quest
-    (``trial``) the text must define ``oracle()`` or every check must have a case FI runs; otherwise the script must
-    carry the ``FI_ORACLE`` marker. This is the one place that rule is written; every repair path asks it.
+    (``trial``) the module must bind a callable ``oracle`` at its top level (FI takes it from the module when it calls it)
+    or every check must have a case FI runs; otherwise the script must carry the ``FI_ORACLE`` marker. Whether it binds one
+    is what the module said when FI imported it (``oracle_bound``, from :func:`binds_callable`); only when that import
+    failed (``import_why``) or was not made is it read from the code's top level, and the reason says it was read. This is
+    the one place that rule is written; every repair path asks it.
     """
     try:
         tree = ast.parse(new or "")
@@ -1593,8 +1596,13 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
         if framed:
             return framed
     if oracles is not None:
-        if trial and not ("def oracle" in new or all(_oracle.case_of(o) for o in oracles)):
-            return "it defines no oracle() and some check has no case FI can run"
+        # what the module binds, as FI imported it; read from the code only when that import failed or was not made
+        if trial and not all(_oracle.case_of(o) for o in oracles):
+            bound = oracle_bound if oracle_bound is not None else "oracle" in _top_level_names(tree)
+            if not bound:
+                return NO_ORACLE_WHY + ("" if oracle_bound is not None else
+                                        " (read from the code: " + (f"FI's import of it failed, {import_why}"
+                                                                    if import_why else "it was not imported") + ")")
         if not trial and "FI_ORACLE" not in new:
             return "it does not honour FI_ORACLE"
     undefined = _called_but_dropped(old, new)
@@ -1607,6 +1615,32 @@ def repair_breaks_contract(old: str, new: str, name: str, *, oracles: list[dict[
     elif "RESULT_JSON" in (old or "") and "RESULT_JSON" not in new:
         return "it no longer prints the RESULT_JSON line the script printed"
     return ""
+
+
+NO_ORACLE_WHY = "it defines no oracle() and some check has no case FI can run"
+
+
+def needs_oracle(oracles: list[dict[str, Any]] | None, trial: bool) -> bool:
+    """Whether a repair for the oracle checks must leave the module with its own ``oracle()``: a trial-mode quest with a
+    check that has no case FI runs."""
+    return bool(trial and oracles is not None and not all(_oracle.case_of(o) for o in oracles))
+
+
+async def binds_callable(executor: Any, python: Path | str, quest_root: Path, module: Path | str, name: str, *,
+                         timeout_s: int, env: dict[str, str] | None = None, log: Any = None) -> tuple[bool | None, str]:
+    """Whether ``module``, imported as FI imports a study when it calls it (its trial harness, in the quest's environment,
+    from a copy of code/ outside the quest), binds a callable ``name`` at its top level. Nothing of it is called: the
+    harness is given no trial. ``(True | False, "")``, or ``(None, why)`` when the import itself failed or did not end."""
+    rows, result = await _run_batch(executor, python, Path(quest_root), module, entry=name, cell={}, trials=[],
+                                    timeout_s=timeout_s, env=env, thresholds=None, log=log)
+    errors = [str(r["load_error"]) for r in rows if r.get("load_error")]
+    # FI's harness says this in its own words when the module has no such function (HARNESS_BODY)
+    missing = f"AttributeError: {str(module).replace(chr(92), '/')} has no function {name}()"
+    if errors:
+        return (False, "") if errors[0].startswith(missing) else (None, errors[0][:300])
+    if getattr(result, "timed_out", False) or getattr(result, "returncode", 0) not in (0, None):
+        return None, f"the import did not end (exit code {getattr(result, 'returncode', None)})"
+    return True, ""
 
 
 def _called_but_dropped(old: str, new: str) -> list[str]:
