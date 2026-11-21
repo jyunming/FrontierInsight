@@ -305,6 +305,8 @@ def test_a_single_panel_with_a_hold_and_its_band_and_bars_name_the_hold() -> Non
     "The shape matches Fig. 3 in Smith and Lee [12].",
     "The shape matches the curve [4, Fig. 3].",
     "The shape matches the page [W2, Figure 3].",
+    "THE SHAPE MATCHES FIG. 3 OF [4].",
+    "The shape matches Fig. 3 In Smith ET AL. [4].",
 ])
 def test_a_figure_of_a_cited_work_is_neither_read_nor_renumbered(sentence: str) -> None:
     from generation._figure_captions import numbers_named, renumber_references

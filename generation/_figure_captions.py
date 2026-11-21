@@ -54,8 +54,9 @@ _REFERENCE_RE = re.compile(
 # (at most three name words and "et al."), and "[4, Fig. 3]". Only these forms; a reference beside a citation in any
 # other way ("Figure 3 agrees with [4]") stays the paper's.
 _CITED_AFTER_RE = re.compile(
-    r"\s+(?:of|in)\s+(?:[A-Z][\w'’-]*(?:\s+(?:and|&)\s+[A-Z][\w'’-]*|\s+[A-Z][\w'’-]*){0,2}"
-    r"(?:\s+et\s+al\.?)?,?\s+)?\[W?\d")
+    # The joining words in any case, as the reference itself is read ("FIG. 3 OF [4]"); a name word starts with a capital.
+    r"\s+(?i:of|in)\s+(?:[A-Z][\w'’-]*(?:\s+(?i:and|&)\s+[A-Z][\w'’-]*|\s+[A-Z][\w'’-]*){0,2}"
+    r"(?:\s+(?i:et\s+al)\.?)?,?\s+)?\[W?\d")
 _CITED_BEFORE_RE = re.compile(r"\[W?\d+(?:\s*[,–-]\s*W?\d+)*,\s*$")
 _CITED_CLOSE_RE = re.compile(r"\s*\]")
 
