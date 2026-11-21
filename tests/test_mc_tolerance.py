@@ -188,9 +188,9 @@ def test_the_wrong_tail_of_the_p_value_is_invisible_to_the_bound_and_caught_by_t
     _c, _p, right, _f = _measure(_quest(tmp_path / "right"), [power], most_trials=SAME_TRIALS)
     _c, _p, wrong, found = _measure(_quest(tmp_path / "wrong", model=planted), [power], most_trials=SAME_TRIALS)
     assert right[0]["passed_by_engine"] is True and right[0]["mc"]["trials"] <= SAME_TRIALS
-    # No real effect is ever rejected: the power is 0 in every trial (FI runs more, as for a rare outcome) and fails.
+    # No real effect is ever rejected: the power is 0 in every trial. The plan declares it a mean, not a proportion, so
+    # it is a constant that disagrees with its expected value: a fail at once.
     assert wrong[0]["passed_by_engine"] is False and found and wrong[0]["value"] == 0.0
-    assert wrong[0]["mc"]["verdict"] == "fail"
 
 
 EQUALS_PI0_Q = {"name": "bh_fdr_equals_pi0_q", "kind": "special_case",
@@ -293,7 +293,8 @@ def test_a_rare_event_that_did_not_happen_in_the_first_batch_is_not_judged_on_tr
     root = tmp_path / "quest"
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(f"P = {p}\n" + RARE, encoding="utf-8")
-    checks, problems, judged, found = _measure(root, [RARE_CHECK], mean_names=frozenset(), in_each_run=None)
+    checks, problems, judged, found = _measure(root, [RARE_CHECK], mean_names=frozenset(), in_each_run=None,
+                                               proportion_names=frozenset({"event"}))
     (j,) = judged
     assert j["mc"]["trials"] > 1000 and j["passed_by_engine"] is passes, j
     assert bool(found) is not passes and j["mc"]["verdict"] == ("pass" if passes else "fail")
@@ -377,7 +378,7 @@ def test_a_0_1_outcome_is_judged_on_its_binomial_interval_at_every_number_of_tri
     about 0.47); 2000 zeros fail; 400 in 8000 pass. 200 in 4000 is not decided: at three standard errors the interval
     is ±0.0104, wider than the tolerance."""
     def verdict(ones: int, n: int) -> str | None:
-        stat = mc.statistic(_outcomes(ones, n), "hit", means, 0.05)
+        stat = mc.statistic(_outcomes(ones, n), "hit", means, 0.05, None, {"hit"})
         assert stat is not None and stat["binary"], stat
         return mc.mean_verdict(stat, 0.05, 0.01)
 
@@ -398,9 +399,11 @@ def test_a_0_1_number_of_a_simulation_that_never_varies_is_judged_at_once() -> N
     assert mc.mean_verdict(stat, 1.0, 0.0) == "pass"
     zero = mc.statistic([{"gap": 0.0, "wall": float(i)} for i in range(10)], "gap", (), 0.0)
     assert zero is not None and not zero.get("binary") and mc.mean_verdict(zero, 0.0, 1e-9) == "pass"
-    # Both values seen: an outcome, whatever is expected.
-    seen = mc.statistic(_outcomes(1, 10), "hit", (), 0.0)
+    # Both values seen: an outcome when the plan declares a proportion, whatever is expected; else a number like any other.
+    seen = mc.statistic(_outcomes(1, 10), "hit", (), 0.0, None, {"hit"})
     assert seen is not None and seen["binary"] and mc.mean_verdict(seen, 0.0, 0.01) is None
+    undeclared = mc.statistic(_outcomes(1, 10), "hit", (), 0.0)
+    assert undeclared is not None and not undeclared.get("binary") and "interval" not in undeclared
 
 
 def test_a_declared_proportion_is_judged_on_its_binomial_interval_even_when_every_trial_gave_its_expected_value() -> None:
@@ -1238,7 +1241,8 @@ def test_a_fail_of_the_first_trials_counts_only_when_fresh_trials_show_it_again(
     (root / "code").mkdir(parents=True)
     (root / "code" / "simulate.py").write_text(f"P = {p}\nUNLUCKY_FIRST = {first}\n" + UNLUCKY, encoding="utf-8")
     check = {**RARE_CHECK, "name": "error_rate_bound", "expected": 0.05, "tolerance": 0.05}
-    _c, _p, judged, found = _measure(root, [check], mean_names=frozenset(), in_each_run=None)
+    _c, _p, judged, found = _measure(root, [check], mean_names=frozenset(), in_each_run=None,
+                                     proportion_names=frozenset({"event"}))
     (j,) = judged
     assert j["mc"]["verdict"] == ("pass" if passes else "fail") and j["passed_by_engine"] is passes, j
     assert bool(found) is not passes
@@ -1305,7 +1309,7 @@ def test_a_coverage_written_with_mean_passes_a_correct_simulation_and_the_per_tr
         r["covered"] = r["hit"]
     alias = mc.statistic(rows, "abs(covered - 0.95)", (), 0.0, 0.03, (), repeated=True)
     assert alias["value"] == pytest.approx(0.0955, abs=0.01) and mc.mean_verdict(alias, 0.0, 0.03) == "fail"
-    stat = mc.statistic(rows, "abs(mean(covered) - 0.95)", (), 0.0, 0.03, (), repeated=True)
+    stat = mc.statistic(rows, "abs(mean(covered) - 0.95)", (), 0.0, 0.03, {"covered"}, repeated=True)
     assert stat["value"] < 0.01 and stat["across"] is True and stat["binary"] is True, "a 0/1 rate keeps its Wilson interval"
     assert mc.mean_verdict(stat, 0.0, 0.03) == "pass"
     low = mc.statistic(_trials(4000, cover=0.88), "abs(mean(hit) - 0.95)", (), 0.0, 0.03, (), repeated=True)
@@ -1315,9 +1319,9 @@ def test_a_coverage_written_with_mean_passes_a_correct_simulation_and_the_per_tr
 @pytest.mark.parametrize("limit", [0.02, 0.06])
 def test_twenty_hits_in_twenty_trials_do_not_decide_a_coverage(limit: float) -> None:
     rows = [{"hit": 1.0, "est": float(i)} for i in range(20)]  # random study, every trial a hit
-    stat = mc.statistic(rows, "abs(mean(hit) - 0.95)", (), 0.0, limit, (), repeated=True)
+    stat = mc.statistic(rows, "abs(mean(hit) - 0.95)", (), 0.0, limit, {"hit"}, repeated=True)
     assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, limit) is None
-    big = mc.statistic(rows * 25, "abs(mean(hit) - 0.95)", (), 0.0, 0.06, (), repeated=True)
+    big = mc.statistic(rows * 25, "abs(mean(hit) - 0.95)", (), 0.0, 0.06, {"hit"}, repeated=True)
     assert mc.mean_verdict(big, 0.0, 0.06) == "pass", "enough hits do show it"
 
 
@@ -1356,7 +1360,7 @@ def test_measures_without_mean_or_sd_give_exactly_what_they_gave_before() -> Non
     cases = [("abs(est - 100)", (), 0.0, 5.0, (), True), ("est", (), 100.0, 5.0, (), True),
              ("est", ("est",), 100.0, 5.0, (), True), ("max(0, est - 100)", ("est",), 0.0, 5.0, (), True),
              ("abs(est / sd_ref - 10)", (), 0.0, 0.5, (), True), ("est * k", ("est", "k"), 400.0, 10.0, (), None),
-             ("hit", (), 0.95, 0.05, (), True), ("abs(hit - 0.95)", (), 0.0, 0.05, ("hit",), True),
+             ("hit", (), 0.95, 0.05, ("hit",), True), ("abs(hit - 0.95)", (), 0.0, 0.05, ("hit",), True),
              ("hit", (), 0.95, 0.05, ("hit",), False), ("zero", (), 0.0, 1e-6, (), True),
              ("abs(zero)", (), 0.0, 0.0, (), True), ("abs(zero)", (), 0.0, 1e-6, ("zero",), True),
              ("sd_ref", (), 10.0, 0.1, (), None)]
@@ -1437,7 +1441,7 @@ def test_a_measure_with_mean_names_what_the_simulation_must_return_and_is_not_as
     assert mc.unsaid_reading({"runs_per_setting": 500, "oracles": cases}) == ["rule"], "a mean over trials is not asked"
     # a constant beside the rate does not take the 0/1 rate off its interval
     rows = [{"hit": 1.0, "target": 0.95, "est": float(i)} for i in range(20)]
-    stat = mc.statistic(rows, "abs(mean(hit) - target)", (), 0.0, 0.02, (), repeated=True)
+    stat = mc.statistic(rows, "abs(mean(hit) - target)", (), 0.0, 0.02, {"hit"}, repeated=True)
     assert stat["binary"] is True and mc.mean_verdict(stat, 0.0, 0.02) is None
 
 
@@ -1450,7 +1454,7 @@ def test_a_slightly_moving_bare_name_beside_a_correct_rate_does_not_false_fail()
     fails = 0
     for _ in range(60):
         rows = [{"hit": 1.0 if rng.random() < 0.95 else 0.0, "ref": 0.95 + rng.gauss(0, 0.002)} for _ in range(20)]
-        stat = mc.statistic(rows, "abs(mean(hit) - ref)", (), 0.0, 0.03, (), repeated=True)
+        stat = mc.statistic(rows, "abs(mean(hit) - ref)", (), 0.0, 0.03, {"hit"}, repeated=True)
         assert stat["binary"] is True
         fails += mc.mean_verdict(stat, 0.0, 0.03) == "fail"
     assert fails == 0
@@ -1496,3 +1500,22 @@ def test_ten_trials_with_one_number_do_not_get_the_needs_run_trial_message(tmp_p
         SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", [oracle],
         timeout_s=60, repeated=True))
     assert not any("run_trial" in p and "needs the simulation" in p for p in problems), problems
+
+
+def test_a_0_1_result_the_plan_does_not_declare_a_proportion_gets_the_ordinary_interval() -> None:
+    """Ten trials of a result that gave only 0 and 1, which the plan calls a mean (here a count that happened to be 0 or
+    1): its error is its sample spread, not a binomial interval, whatever the check expects, per trial or pooled over the
+    trials. Declared a proportion, the same trials keep the Wilson interval (the known positive)."""
+    values = [0, 1, 1, 0, 1, 1, 1, 0, 1, 1]
+    rows = [{"hits": float(v), "wall": float(i)} for i, v in enumerate(values)]
+    for measure in ("hits", "mean(hits)"):
+        for expected in (0.5, 2.0):
+            plain = mc.statistic(rows, measure, ("hits",), expected, 0.1, (), repeated=True)
+            assert plain is not None and not plain.get("binary") and "interval" not in plain, (measure, expected, plain)
+            assert plain["se"] > 0.1, "a spread of the values, not 0 and not a binomial one"
+        kept = mc.statistic(rows, measure, ("hits",), 0.5, 0.1, {"hits"}, repeated=True)
+        assert kept is not None and kept["binary"] is True and kept["successes"] == 7
+        assert kept["interval"] == list(mc.wilson(7, 10))
+    per_trial = mc.statistic(rows, "hits", ("hits",), 0.5, 0.1, (), repeated=True)
+    assert per_trial["se"] == pytest.approx((7 * 3 / (10 * 9)) ** 0.5 / 10 ** 0.5, rel=1e-6)
+    assert mc.mean_verdict(mc.statistic(rows, "hits", ("hits",), 2.0, 0.1, (), repeated=True), 2.0, 0.1) == "fail"

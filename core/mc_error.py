@@ -37,9 +37,8 @@ judges with them. The first rule is that a check the trials cannot decide is nev
   0's number, as a deterministic check is, so a constant quantity never runs to the time limit (fewer trials that
   agree show no constant, and leave it not decided).
 * **A 0/1 outcome of a random simulation** (every trial gives 0 or 1; the plan runs more than one trial per setting,
-  :func:`repeats_trials`, or, when the plan does not say, some number the simulation returns varies; and
-  both values occurred, the check expects a rate strictly between 0 and 1, or the protocol declares the number a
-  proportion and the tolerance is not exactly 0) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
+  :func:`repeats_trials`, or, when the plan does not say, some number the simulation returns varies; and the
+  protocol declares the number a proportion, never guessed from its values, and the tolerance is not exactly 0) is judged on its binomial interval, never on its sample spread (:func:`wilson`, :func:`binomial_verdict`), at every
   number of trials: ten zeros are not a rate of 0 (their interval at three standard errors reaches 0.47), so they do
   not decide a check that expects 0.05 within 0.01; 2000 zeros fail it.
 """
@@ -331,8 +330,8 @@ def pooled_summary(rows: list[dict[str, Any]], measure: str, expected: Any = Non
     (:func:`core.oracle_forms.across_form`), such as ``abs(mean(hit) - 0.95)`` (a coverage) or ``abs(sd(est) / sd_ref - 1)``
     (a spread). The measure is worked out once on all the trials together: each ``mean(x)`` and ``sd(x)`` is taken over the
     trials of the value ``x`` gives in each (``sd`` with n - 1) and any other name is its mean over the trials. Fields as
-    :func:`summarise`, plus ``across: True``. The error is, for the mean of a 0/1 outcome of a random simulation that varies
-    (or that the protocol declares a proportion), its Wilson interval mapped through the formula (:func:`statistic`'s rule for
+    :func:`summarise`, plus ``across: True``. The error is, for the mean of a 0/1 outcome of a random simulation that the
+    protocol declares a proportion, its Wilson interval mapped through the formula (:func:`statistic`'s rule for
     a 0/1 outcome); else a bootstrap over the trials with a fixed seed, never 0 for a random study: when every trial gives the
     same value the check is a constant (an exact invariant such as ``abs(mean(d))`` with ``d`` always 0, decided on that
     value), except that an ``sd()`` of one is not decided. ``sd_small`` marks fewer than :data:`SD_MIN_TRIALS` trials with an
@@ -396,31 +395,26 @@ def pooled_summary(rows: list[dict[str, Any]], measure: str, expected: Any = Non
     out["inner_mean"] = centre
     if n < 2 or centre is None:
         return out
-    # A rate of 0/1 outcomes of a random simulation is judged on its binomial interval, not on a spread of the outcomes.
+    # A rate of 0/1 outcomes of a random simulation is judged on its binomial interval, not on a spread of the outcomes,
+    # but only for a result the plan declares a proportion: a count or a mean that happens to be 0/1 is not one.
     random_study = not flat or (repeated if repeated is not None else returned_varies(rows))
     only = next(iter(form.aliases)) if len(form.aliases) == 1 else ""
     if (only and form.aliases[only][0] == "mean" and _forms.is_name(form.aliases[only][1])
+            and form.aliases[only][1] in {str(x) for x in proportions or ()}
             and all(v in (0.0, 1.0) for v in columns[only]) and random_study
             and not (_number(limit) and float(limit) == 0.0)):
-        gap = None
-        if _number(expected):
-            shown, shape_now = _centre(out, float(expected))
-            if shown is not None:
-                gap = shown if shape_now == "bound" else abs(shown) if shape_now else abs(shown - float(expected))
-        declared = form.aliases[only][1] in {str(x) for x in proportions or ()}
-        if not flat or declared or gap is None or gap > 0:
-            lo, hi = wilson(int(sum(columns[only])), n)
+        lo, hi = wilson(int(sum(columns[only])), n)
 
-            def reach(text: str) -> tuple[float, float] | None:
-                found = [v for v in (_forms.evaluate(text, {**everyone, only: lo + (hi - lo) * i / 100}).value
-                                     for i in range(101)) if v is not None]
-                return (min(found), max(found)) if found else None
+        def reach(text: str) -> tuple[float, float] | None:
+            found = [v for v in (_forms.evaluate(text, {**everyone, only: lo + (hi - lo) * i / 100}).value
+                                 for i in range(101)) if v is not None]
+            return (min(found), max(found)) if found else None
 
-            whole, inside = reach(form.text), reach(inner_form)
-            if whole is not None and inside is not None:
-                out.update(binary=True, successes=int(sum(columns[only])), interval=list(whole),
-                           se=(inside[1] - inside[0]) / (2 * BAND_SE))
-                return out
+        whole, inside = reach(form.text), reach(inner_form)
+        if whole is not None and inside is not None:
+            out.update(binary=True, successes=int(sum(columns[only])), interval=list(whole),
+                       se=(inside[1] - inside[0]) / (2 * BAND_SE))
+            return out
     if flat:
         # Every trial gives the same value: a constant, decided on that value, as a check that does not move is. Only a
         # spread of it says nothing in a random study.
@@ -442,7 +436,8 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
               proportions: Any = (), *, repeated: bool | None = None) -> dict[str, Any] | None:
     """The mean check's number and its error (see the module docstring): the formula on the names' means when every name
     it uses is a declared mean or proportion (``means``), else the mean of the formula trial by trial. A 0/1 outcome
-    (``binary``; ``expected`` and ``limit`` are the check's) carries its Wilson ``interval`` and the standard error
+    (``binary``, only for a name the protocol declares a proportion; ``expected`` and ``limit`` are the check's) carries
+    its Wilson ``interval`` and the standard error
     that interval stands for. ``proportions``: the names the protocol declares proportions (:func:`proportion_names`)."""
     measure = str(measure or "").strip()
     first = next((r for r in rows if isinstance(r, dict)), None)
@@ -455,22 +450,20 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
     stat = summarise(rows, measure) if used and set(used) <= set(means or ()) else per_trial_summary(rows, measure)
     if stat is None:
         return None
-    # A 0/1 outcome of a random simulation: its uncertainty is its binomial interval, never its sample spread (ten
-    # zeros have a spread of 0, which says nothing about a rate of 0.05). One rule at every number of trials. A 0/1
-    # number is an outcome when both values occurred, when the check expects a rate strictly between 0 and 1, or when
-    # the protocol declares it a proportion (then all zeros expected 0 within 0.01 are not a rate of 0, unless the
-    # tolerance is exactly 0: an exact claim, read as a constant). One that is the same in every trial, expected to be
-    # exactly that and not declared a proportion (a distance that is exactly 0) is a constant.
+    # A 0/1 outcome the plan declares a proportion, in a random simulation: its uncertainty is its binomial interval,
+    # never its sample spread (ten zeros have a spread of 0, which says nothing about a rate of 0.05). One rule at
+    # every number of trials. The kind is the plan's to say, not the values': a count or a mean that happens to be 0 or 1
+    # in every trial is judged on its sample spread like any other number. A declared proportion with a tolerance of
+    # exactly 0 is an exact claim, read as a constant.
     # Whether the trials are random is the plan's to say (``repeated``: it runs more than one trial per setting,
     # :func:`repeats_trials`), not the returned numbers': a trial that returns only its 0/1 outcome, zero every time,
     # varies in nothing. Only when the plan does not say are the returned numbers read.
     values = _outcome_values(rows, stat)
-    rate = expected is not None and _number(expected) and 0.0 < float(expected) < 1.0
     exact = _number(limit) and float(limit) == 0.0
     declared = str(stat.get("inner") or "") in {str(p) for p in proportions or ()} and not exact
     both = len(set(values)) > 1
     random = both or (repeated if repeated is not None else returned_varies(rows))
-    if values and all(v in (0.0, 1.0) for v in values) and random and (rate or declared or both):
+    if values and all(v in (0.0, 1.0) for v in values) and random and declared:
         lo, hi = wilson(int(sum(values)), len(values))
         stat.update(binary=True, successes=int(sum(values)), interval=[lo, hi], se=(hi - lo) / (2 * BAND_SE))
     return stat
