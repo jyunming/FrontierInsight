@@ -284,7 +284,8 @@ def test_a_helper_only_a_derived_result_reaches_leaves_that_result_out(tmp_path:
 
 def test_a_helper_no_result_reaches_changes_no_result(tmp_path: Path) -> None:
     src = "from model import helper_unused\n\n\ndef test_x():\n    assert helper_unused(1) == 2, 'wrong'\n"
-    out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_unused", quantity="est_a")
+    # `cover` is a declared result the run prints no value for: nothing printed is left out for it
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_unused", quantity="cover")
     assert out is None
     assert "at_gate" not in record["issues"]["F-1"]
 
