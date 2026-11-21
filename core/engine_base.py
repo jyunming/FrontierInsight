@@ -8395,10 +8395,12 @@ def _checked(state: "QuestState", memo: Any = None) -> list:
     return out
 
 
-# Findings of the plausibility check that are said, never acted on: a cap whose place in the result cannot be shown, a
-# physical_bound result on its edge everywhere, and a result on a bound the plan did not declare honest (a guess about
-# the computation, so it is disclosed in the paper and does not send the code back).
-_WARNING_KINDS = ("clamped_unproven", "edge_everywhere", "at_bound")
+# Findings of the plausibility check that are said, never acted on: a value exactly on a constant the script caps at
+# (``clamped``, proven or not: which call is a cap is read from call names and literals, without the flow of the code, so a
+# function of the study's named ``minimum`` reads as one and a cap written another way is not seen), a physical_bound
+# result on its edge everywhere, and a result on a bound the plan did not declare honest (a guess about the computation, so
+# it is disclosed and does not send the code back). A value outside its declared range still sends the run back.
+_WARNING_KINDS = ("clamped", "clamped_unproven", "edge_everywhere", "at_bound")
 
 
 def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
@@ -8420,17 +8422,17 @@ def _assertion_violations(state: "QuestState", memo: Any = None) -> list:
         # bound is caught too; ``seen`` so a bounded quantity an earlier run
         # reported cannot quietly disappear. See core/plausibility.py for both.
         found = _checked(state, memo)
-        # A cap whose place in the result cannot be shown, and a physical_bound result on its edge in every setting, are
-        # warnings (_assertion_warnings), not violations.
+        # A value on a constant the script caps at, and a result on its edge or bound, are warnings
+        # (_assertion_warnings), not violations.
         return [v for v in found if getattr(v, "kind", "") not in _WARNING_KINDS]
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
         return []
 
 
 def _assertion_warnings(state: "QuestState", memo: Any = None) -> list:
-    """The findings of the same check that are warnings, not violations: a value exactly on a constant the script
-    caps a quantity of that name at, where that cap's place in the result cannot be shown
-    (``plausibility.direct_caps(..., proven=False)``). Logged and recorded in the trace; they never send a run back."""
+    """The findings of the same check that are warnings, not violations (:data:`_WARNING_KINDS`): a value exactly on a
+    constant the script caps at, a result on its edge or bound. Logged and recorded in the trace; they never send a run
+    back."""
     try:
         from core import plausibility
 

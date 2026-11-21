@@ -46,7 +46,7 @@ def _engine(tmp_path: Path) -> Engine:
                  output=OutputConfig(output_dir=tmp_path / "outputs"))
     engine = Engine(cfg)
 
-    async def fails(rel: str) -> Any:  # the test is run again by the gate: here it still fails by its assertion
+    async def fails(rel: str, capture: bool = False) -> Any:  # the test is run again by the gate: here it still fails by its assertion
         return types.SimpleNamespace(status="fail", crash_in_program=False, kind="assertion", detail="", place="", at="")
 
     async def no_reruns(verdicts: Any, record: Any, state: Any) -> dict[str, Any]:  # what these tests judge is the placement alone

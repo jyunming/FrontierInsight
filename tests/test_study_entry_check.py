@@ -184,6 +184,38 @@ async def test_an_oracle_repair_with_no_study_result_is_put_back(tmp_path: Path,
     assert "no longer returns the study's results" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
 
+@pytest.mark.asyncio
+async def test_an_oracle_repair_is_judged_by_what_the_imported_module_binds(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check with no case is answered by the module's own oracle(): whether the repair binds one is asked of the module,
+    imported as FI imports it (an oracle defined in a branch is one), and a repair with none is still refused."""
+    engine = _engine(tmp_path)
+    engine._trial_mode = True
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    _gave(engine, "yield_rate")
+    oracle = {"name": "zero", "kind": "special_case", "check": "c", "expected": 0.0, "tolerance": 0.1}
+    in_a_branch = DELEGATING + "\nif True:\n    def oracle():\n        return {'zero': 0.0}\n"
+    replies = iter([in_a_branch, DELEGATING])
+
+    async def answer(prompt: str, **kw: Any) -> str:
+        return json.dumps({"code": next(replies), "patch_summary": "the check's own function"})
+
+    monkeypatch.setattr(engine, "_chat", answer)
+    (code / "simulate.py").write_text(DELEGATING, encoding="utf-8")
+    new, failed, outcome = await engine._repair_script_for_oracle(
+        {"design": {"protocol": PROTOCOL}}, code / "simulate.py", [oracle], ["zero is off"], passing=[])
+    assert outcome == "applied" and new == in_a_branch, outcome
+    # known positive: no oracle() in the module, as the import shows it, is refused, and not as a reading of the code
+    new, failed, outcome = await engine._repair_script_for_oracle(
+        {"design": {"protocol": PROTOCOL}}, code / "simulate.py", [oracle], ["zero is off"], passing=[])
+    assert new is None and outcome == "not_usable"
+    assert (code / "simulate.py").read_text(encoding="utf-8") == in_a_branch
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "defines no oracle()" in log and "read from the code" not in log
+
+
 SLOW_DELEGATING = '''
 import time
 

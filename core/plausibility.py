@@ -31,7 +31,7 @@ real quest showed exactly that: an integrator diverged, the gate rejected the
 huge error, and the regenerated script read ``rmse = 10.0  # Cap at
 assertion max`` -- divergence laundered into a number the gate cannot tell
 from a genuine RMSE of 10. So a value sitting exactly on a non-zero bound is
-rejected when the script also caps values at that constant, unless every such
+reported when the script also caps values at that constant, unless every such
 cap is proven to be another value's (one written at ``train.rmse`` does not
 count for ``test.rmse``). A cap pins a value only from its own side: a floor
 (``max(R, 1)`` under a denominator) never pins a value to an upper bound, nor a
@@ -42,6 +42,12 @@ required: a perfect score of 1.0 is a real result, and ``np.clip(p, 0, 1)``
 inside a softmax is real code; only the two together are a capped number.
 Zero bounds are exempt, because real zeros and ``max(0, x)`` are both
 everywhere.
+
+Such a finding (``clamped`` and ``clamped_unproven``) is said, never acted on: the engine logs it in run.log and the
+trace (``core.engine_base._WARNING_KINDS``) and does not send the run back for it. Which call is a cap is read from call
+names and literals without the flow of the code, so a study's own function named ``minimum`` or a ``min(other, 1)`` that
+has nothing to do with the result reads as a cap, and a cap written another way (a helper of the study's, a literal in
+both branches) is not seen. A value outside its declared range is still a violation.
 
 Why several values on a bound fail
 ==================================

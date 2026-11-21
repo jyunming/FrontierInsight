@@ -84,6 +84,7 @@ class TestShape:
     exact: set[str]
     prefix: set[str]
     frame: set[str] = field(default_factory=set)  # constants of FI's analysis frame it reads (``derive.ROLES``)
+    defaulted: set[str] = field(default_factory=set)  # keys read by ``.get``/``.pop`` with a default (the default may be compared)
 
 
 def _call_name(node: ast.Call) -> str:
@@ -100,6 +101,7 @@ def read_test(src: str) -> TestShape | None:
     calls: set[str] = set()
     exact: set[str] = set()
     prefix: set[str] = set()
+    defaulted: set[str] = set()
 
     def key(node: ast.AST) -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -121,6 +123,9 @@ def read_test(src: str) -> TestShape | None:
                 calls.add(name)
             if isinstance(n.func, ast.Attribute) and n.func.attr in ("get", "pop") and n.args:
                 key(n.args[0])
+                given = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "default"), None)
+                if given is not None and not (isinstance(given, ast.Constant) and given.value is None):
+                    defaulted.add(str(n.args[0].value) if isinstance(n.args[0], ast.Constant) else "")
         elif isinstance(n, ast.Subscript):
             key(n.slice)
         elif isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
@@ -132,7 +137,112 @@ def read_test(src: str) -> TestShape | None:
     frame |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names if a.name in constants}
     # a body named without being called (`derive.figure_fig1.__code__`) is still the body the test is about
     calls |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr.startswith(("derive_", "figure_"))}
-    return TestShape(calls, exact, prefix, frame)
+    return TestShape(calls, exact, prefix, frame, defaulted)
+
+
+#: Calls an assertion may make on what it tests without comparing a value: whether something is there, how many there are.
+_LOOK_CALLS = frozenset({"any", "all", "bool", "len"})
+
+
+def _failed_asserts_only_look(src: str, failures: Any, looked: set[str]) -> bool:
+    """Whether every assertion that failed (``failures``: its line and the names that held nothing there, recorded by FI as the
+    test ran, :data:`core.finding_repair.CAPTURE`) only looks for the names in ``looked``: each comparison in it is a lookup of
+    one of them (``"x" in r``, ``r.get("x") is None``, ``r["x"] == v``) or compares only names that held nothing; what it tests
+    for truth is such a comparison, a name that held nothing, a lookup, or ``any``/``all``/``bool``/``len`` of them. A name that
+    held nothing counts only when every value the test gives it is made by looking for one of the names (a lookup, or a
+    comprehension one of whose conditions has a lookup of the name as a conjunct): a list emptied by a value filter may be
+    empty because a value differs. These are accepted shapes of the test's syntax; any other shape keeps the stop. A failed
+    assertion that compares any other value (``r == {...}``, ``v == 2``, ``check(r)``) may be about a value that differs.
+    Read from the test's syntax at the line FI recorded, never from its message."""
+    if not isinstance(failures, list) or not failures:
+        return False
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return False
+    names = {_norm(n) for n in looked}
+    asserts = [n for n in ast.walk(tree) if isinstance(n, ast.Assert)]
+
+    def name_of(node: ast.AST) -> str:
+        return _norm(node.value) if isinstance(node, ast.Constant) and isinstance(node.value, str) else ""
+
+    def lookup(node: ast.AST) -> bool:
+        if isinstance(node, ast.Subscript):
+            return name_of(node.slice) in names
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("get", "pop")
+                and bool(node.args) and name_of(node.args[0]) in names)
+
+    def member(c: ast.AST) -> bool:
+        return (isinstance(c, ast.Compare) and len(c.ops) == 1 and isinstance(c.ops[0], (ast.In, ast.NotIn))
+                and name_of(c.left) in names)
+
+    def filters_by_name(value: ast.AST) -> bool:
+        # what a name that held nothing was made from: a lookup of a looked-for name, or a comprehension that keeps only what
+        # one of those names is found in (a conjunct of one of its conditions); anything else may be empty for a value
+        if lookup(value):
+            return True
+        if not isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return False
+        for gen in value.generators:
+            for cond in gen.ifs:
+                parts = cond.values if isinstance(cond, ast.BoolOp) and isinstance(cond.op, ast.And) else [cond]
+                if any(member(x) or lookup(x) for x in parts):
+                    return True
+        return False
+
+    made: dict[str, list[ast.AST]] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                for leaf in ast.walk(t):
+                    if isinstance(leaf, ast.Name):
+                        made.setdefault(leaf.id, []).append(n.value if isinstance(t, ast.Name) else t)
+        elif isinstance(n, ast.arg):
+            made.setdefault(n.arg, []).append(n)
+        else:
+            # any other way a name is bound (augmented, annotated, a loop, a with, a walrus) is not a filter on the names
+            bound = ([n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign, ast.For, ast.NamedExpr, ast.comprehension))
+                     else [i.optional_vars for i in n.items if i.optional_vars is not None] if isinstance(n, ast.With)
+                     else [])
+            for target in bound:
+                for leaf in ast.walk(target):
+                    if isinstance(leaf, ast.Name):
+                        made.setdefault(leaf.id, []).append(n)
+    #: the names whose every value in the test is made by looking for a looked-for name
+    kept_by_name = {k for k, values in made.items() if values and all(filters_by_name(v) for v in values)}
+
+    for failure in failures:
+        line = failure.get("line") if isinstance(failure, dict) else None
+        empty = {str(x) for x in (failure.get("empty") or [])} if isinstance(failure, dict) else set()
+        node = next((a for a in asserts if isinstance(line, int) and a.lineno <= line <= (a.end_lineno or a.lineno)), None)
+        if node is None:
+            return False
+
+        def nothing(x: ast.AST) -> bool:
+            if isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id in _LOOK_CALLS:
+                return bool(x.args) and all(nothing(a) or lookup(a) for a in x.args)
+            return isinstance(x, ast.Constant) or (isinstance(x, ast.Name) and x.id in empty and x.id in kept_by_name)
+
+        for c in (n for n in ast.walk(node.test) if isinstance(n, ast.Compare)):
+            operands = [c.left, *c.comparators]
+            if not (member(c) or any(lookup(o) for o in operands) or all(nothing(o) for o in operands)):
+                return False
+
+        def truth(x: ast.AST) -> bool:
+            if isinstance(x, ast.BoolOp):
+                return all(truth(v) for v in x.values)
+            if isinstance(x, ast.UnaryOp) and isinstance(x.op, ast.Not):
+                return truth(x.operand)
+            if isinstance(x, ast.Compare) or lookup(x) or nothing(x):
+                return True
+            if isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id in _LOOK_CALLS:
+                return bool(x.args) and all(truth(a.elt) if isinstance(a, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
+                                            else truth(a) for a in x.args)
+            return False
+
+        if not truth(node.test):
+            return False
+    return True
 
 
 # ---- the records ------------------------------------------------------------------------------------------------------------
@@ -265,6 +375,8 @@ class Reach:
                                             if isinstance(v, dict)}
         self.raw_inputs = {k: {_norm(x) for x in v} for k, v in self.inputs.items()}  # as the analysis record lists them
         self.derived_ok = {str(k) for k, v in items.items() if isinstance(v, dict) and (v.get("status") == "ok" or v.get("by_setting"))}
+        #: The declared results FI's record of the analysis lists as not worked out (``not_computed``), whatever their status.
+        self.not_computed = {str(x.get("id")) for x in derived.get("not_computed") or [] if isinstance(x, dict) and x.get("id")}
         self.headline_raw = list(headline)
         #: Whether a fault reaching the main result stops the paper. Off for a fault no rerun could place: leaving the result
         #: out is all FI may do then, and only an empty paper stops (:meth:`effect_of_changes` is judged by a rerun).
@@ -370,6 +482,11 @@ class Reach:
         return (i in self.derived_ok or _norm(i) in self.returned
                 or (self.result is not None and bool(_code_review.named_in_results(i, self.result))))
 
+    def _valued(self, i: str) -> bool:
+        """Whether the run holds a value for the declared result ``i`` that FI's record of the analysis does not list as not
+        worked out."""
+        return self._holds(i) and i not in self.not_computed
+
     # -- the question -----------------------------------------------------------------------------------------------------
     def effect(self, record: dict[str, Any], issue: dict[str, Any], result: Any = None) -> Effect | None:
         """The effect of the fault a finding's failing test showed; ``None`` when the records cannot place the finding.
@@ -448,6 +565,72 @@ class Reach:
             return False
         return (any(self._holds(i) for i in self._test_ids(shape))
                 or any(bool(_code_review.named_in_results(n, result)) for n in shape.exact if _norm(n)))
+
+    def absent_names(self, issue: dict[str, Any], result: Any, held: Any) -> list[str]:
+        """The names a finding's failing test looks for that FI saw the code never give it, when that is all the failure can
+        be about and FI's own records hold no value under them: the plan items not done (each the name the test itself reads),
+        else ``[]``. ``held`` is what FI recorded when it ran the test again (``TestRun.held``,
+        :data:`core.finding_repair.CAPTURE`): the names of every record the study's code returned to the test and of the
+        records the test held when its assertion failed.
+
+        Every one of these must hold, from FI's records alone (never the finding's words): FI listed all of it; the code
+        returned something to the test, and each value was a record of names (a bare number a test compares may be a wrong
+        value); the test reads at least one name literally and none with a default; it reads no key the run holds a value for;
+        each assertion that failed only looks for those names (:func:`_failed_asserts_only_look`); no name the code gave the
+        test, no name a trial returned and no printed key holds the name the test looks for (a name
+        that contains it counts as holding it); no derived result FI holds a value for reads it; it is not the main result,
+        and the run holds every main result."""
+        if not self.ids or not isinstance(held, dict) or held.get("complete") is not True:
+            return []
+        returned = [r for r in held.get("returned") or [] if isinstance(r, dict)]
+        if not returned or not all(r.get("record") is True for r in returned):
+            return []
+        rel = str(issue.get("test") or "")
+        try:
+            src = (self.root / rel).read_text(encoding="utf-8") if rel else ""
+        except OSError:
+            return []
+        shape = read_test(src) if src else None
+        if shape is None or shape.defaulted:
+            return []
+        looked = sorted({(n, False) for n in shape.exact if _norm(n)} | {(n, True) for n in shape.prefix if _norm(n)})
+        if not looked or self.reads_held_key(issue, result):
+            return []
+        if not _failed_asserts_only_look(src, held.get("failures"), {n for n, prefix in looked if not prefix}):
+            return []
+        printed: set[str] = set()  # the printed keys that hold a number (a key printed as null with its reason holds none)
+
+        def walk(x: Any) -> bool:
+            if isinstance(x, bool):
+                return False
+            if isinstance(x, (int, float)):
+                return True
+            found = False
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    if walk(v):
+                        printed.add(_norm(k))
+                        found = True
+            elif isinstance(x, (list, tuple)):
+                for v in x:
+                    found = walk(v) or found
+            return found
+
+        walk(result)
+        seen = {_norm(n) for n in held.get("names") or []} | self.returned | printed
+        seen.discard("")
+        main = {_norm(h) for h in self.headline}
+        if any(not self._valued(h) for h in self.headline):
+            return []
+        for name, prefix in looked:
+            n = _norm(name)
+            if any(n in s for s in seen) or n in main:
+                return []
+            if any(self._valued(i) for i in self.ids if _norm(i) == n):
+                return []
+            if any(self._valued(i) for i in self._reading(name, prefix)):
+                return []
+        return [name + ("*" if prefix else "") for name, prefix in looked]
 
     def effect_of_changes(self, names: list[str]) -> Effect:
         """The effect of a repair a rerun of the study showed to change numbers: ``names`` are the results whose reported

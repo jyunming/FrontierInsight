@@ -63,15 +63,47 @@ def test_the_path_can_be_given_as_tokens_or_a_string() -> None:
     assert direct_caps('out = {"rmse": r}\n', "rmse") == set(), "no cap at all"
 
 
-def test_the_engine_sends_back_only_a_proven_cap() -> None:
+def test_a_cap_is_said_and_never_sends_the_engine_back() -> None:
+    """Which call is a cap is read from call names and literals, without the flow of the code: a finding of it, proven or
+    not, is a warning (run.log and the trace), never a reason to send the run back. A value outside its range still is."""
     from core.engine import _assertion_violations, _assertion_warnings
 
     design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 100}]}
     unproven = {"result_json": {"test": {"rmse": 10.0}}, "design": design,
                 "code": 'out = to_native({"test": {"rmse": min(r, 10.0)}})\nprint(json.dumps(out))\n'}
-    assert _assertion_violations(unproven) == [] and len(_assertion_warnings(unproven)) == 1
+    assert _assertion_violations(unproven) == [] and [w.kind for w in _assertion_warnings(unproven)] == ["clamped_unproven"]
     proven = {**unproven, "code": 'out = {"test": {"rmse": min(r, 10.0)}}\nprint(json.dumps(out))\n'}
-    assert len(_assertion_violations(proven)) == 1 and _assertion_warnings(proven) == []
+    assert _assertion_violations(proven) == [] and [w.kind for w in _assertion_warnings(proven)] == ["clamped"]
+    # a study's own function named `minimum`, unrelated to the result, reads as a cap: said, not a stop
+    own = {"result_json": {"rmse": 1.0}, "design": {"result_assertions": [{"path": "rmse", "min": 0, "max": 1}]},
+           "code": 'def minimum(a, b):\n    return a\nw = minimum(q, 1)\nout = {"rmse": r}\n'}
+    assert _assertion_violations(own) == [] and [w.kind for w in _assertion_warnings(own)] == ["clamped"]
+    # known positive: a value outside its declared range still sends the run back
+    outside = {**proven, "result_json": {"test": {"rmse": 150.0}}}
+    assert [v.kind for v in _assertion_violations(outside)] == ["out_of_range"]
+
+
+def test_a_capped_value_on_its_bound_in_every_setting_is_said_and_never_sends_the_run_back() -> None:
+    """The same capped value on the declared bound in two settings: FI's record says it sits on a constant the script caps
+    at, whatever else the bound finds. The cap is a warning, the value on its bound in many settings a warning too, and
+    nothing sends the run back; a value past the bound still does."""
+    from core.engine import _assertion_violations, _assertion_warnings
+
+    design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 10}]}
+    both = {"by_setting": {"n=10": {"rmse": 10.0}, "n=20": {"rmse": 10.0}}}
+    for code in ('out = {"by_setting": {}}\nfor s in S:\n    out["by_setting"][s] = {"rmse": min(raw, 10)}\n'
+                 'print(json.dumps(out))\n',
+                 'x = min(raw, 10)\nprint(json.dumps({"by_setting": {"n=10": {"rmse": x}, "n=20": {"rmse": x}}}))\n'):
+        state = {"result_json": both, "design": design, "code": code}
+        assert _assertion_violations(state) == []
+        assert [w.kind for w in _assertion_warnings(state)] == ["clamped", "clamped"]
+    # no cap in the code: on the bound in both settings is said, not a stop
+    plain = {"result_json": both, "design": design, "code": "print(json.dumps(out))\n"}
+    assert _assertion_violations(plain) == [] and [w.kind for w in _assertion_warnings(plain)] == ["at_bound"]
+    # known positive: past the bound still sends the run back
+    past = {"result_json": {"by_setting": {"n=10": {"rmse": 12.0}, "n=20": {"rmse": 10.0}}}, "design": design,
+            "code": 'x = min(raw, 10)\nprint(json.dumps(out))\n'}
+    assert [v.kind for v in _assertion_violations(past)] == ["out_of_range"]
 
 
 def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -> None:

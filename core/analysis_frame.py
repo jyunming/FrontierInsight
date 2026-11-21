@@ -371,16 +371,11 @@ def _pinned(tree: ast.Module) -> Counter:
     return out
 
 
-def _guard(tree: ast.Module) -> bool:
-    return any(isinstance(n, ast.If) and any(isinstance(x, ast.Name) and x.id == "__name__" for x in ast.walk(n.test))
-               for n in tree.body)
-
-
 def derive_intact(old: str, new: str) -> str:
     """``""`` when ``new`` is ``old`` with only the study's own parts changed: the marked frame equal (read as syntax, so spacing
     does not count), every body ``old`` has still there with the same parameters, nothing outside the frame that binds a name of
-    the frame, and no block that runs when the file is imported (``if __name__ == ...``). Else a plain sentence saying what
-    changed."""
+    the frame. Else a plain sentence saying what changed. An ``if __name__ == "__main__":`` block is the study's own: FI's
+    experiment.py imports derive.py and never runs it as a script, so such a block never runs under FI."""
     old, new = (old or "").lstrip("﻿"), (new or "").lstrip("﻿")
     before = _frame_span(old)
     if before is None:
@@ -407,8 +402,6 @@ def derive_intact(old: str, new: str) -> str:
         more, less = sorted((_pinned(now) - _pinned(was)).keys()), sorted((_pinned(was) - _pinned(now)).keys())
         return ("the frame FI wrote was changed: derive.py adds " + ", ".join(more) if more
                 else "the frame FI wrote was changed: derive.py removes " + ", ".join(less)) + " outside the marked part"
-    if _guard(now) and not _guard(was):
-        return "derive.py must run nothing when it is imported: remove the `if __name__ == ...` block (FI's experiment.py runs the analysis)"
     return ""
 
 
