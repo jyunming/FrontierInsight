@@ -38,7 +38,7 @@ def _kinds(paper: str, **records: Any) -> list[str]:
 
 def test_a_paper_that_calls_a_design_optimised_against_a_record_that_says_it_was_not_is_listed() -> None:
     found = rc.unchecked(OVERCLAIM, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
-    assert [e["kind"] for e in found] == [rc.SEARCH, rc.FIGURE]
+    assert [e["kind"] for e in found] == [rc.SEARCH, rc.FIGURE]  # a sentence is listed once
     assert "The optimised design lowers the peak temperature" in found[0]["sentence"]
     assert "improvement not shown" in found[0]["says"] and "no optimised design was computed" in found[1]["says"]
     # The image's own caption is FI's, written from the figure's record: it is not read as the writer's claim.
@@ -90,7 +90,7 @@ def test_no_feasible_design_means_there_is_no_best_design_to_call_best() -> None
 def test_validated_is_listed_only_against_unconfirmed_or_failed_checks() -> None:
     paper = "# T\n\nThe simulation was validated against known analytic solutions.\n\nKnown-answer checks passed.\n"
     for status in ("went_on_failing", "stopped"):
-        assert _kinds(paper, oracle={"status": status}) == [rc.KNOWN_ANSWER]
+        assert _kinds(paper, oracle={"status": status}) == [rc.KNOWN_ANSWER] * 2
     for oracle in ({"status": "ok"}, {"status": "warned"}, None, {}):
         assert rc.unchecked(paper, oracle=oracle) == []
     hedged = "# T\n\nThe simulation could not be validated against known analytic solutions.\n"
@@ -226,3 +226,32 @@ def test_the_outcome_line_follows_the_reported_design_and_the_check_s_own_words(
     replaced = {"verdict": "verified", "best": {"design": {"fin": 2.5}}, "improvement": {"value": -0.5}}
     assert "no better than it" in bdr.search_outcome(BETTER, replaced)
     assert bdr.search_outcome(None, None) == "" and "no design that meets every limit" in bdr.search_outcome(NO_FEASIBLE, None)
+
+
+def test_every_sentence_of_each_kind_is_listed_and_the_paper_is_unchanged() -> None:
+    paper = ("# A heat sink study\n\n## Results\n\nThe optimised design lowers the peak temperature of the heat sink.\n\n"
+             "The optimised design also lowers the mass of the heat sink.\n\n"
+             "![The optimised design of the heat sink.](figures/a.png)\n\n"
+             "Figure 2 shows the optimised design of the cooling cup.\n\n"
+             "The results are validated against known answers.\n\n"
+             "The code is verified against known answers.\n")
+    before = paper
+    found = rc.unchecked(paper, best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN,
+                         oracle={"status": "went_on_failing"})
+    kinds = [e["kind"] for e in found]
+    assert kinds.count(rc.SEARCH) == 2 and kinds.count(rc.FIGURE) == 1 and kinds.count(rc.KNOWN_ANSWER) == 2, found
+    sentences = " ".join(e["sentence"] for e in found)
+    for part in ("lowers the peak temperature", "also lowers the mass", "validated against known answers",
+                 "verified against known answers"):
+        assert part in sentences, part
+    assert paper == before
+
+
+def test_the_outcome_line_opens_the_section_once_when_no_design_meets_every_limit(tmp_path: Path) -> None:
+    _write_records(tmp_path, {**NO_FEASIBLE, **OBJECTIVE}, None, None)
+    section = bdr.section(tmp_path)
+    line = "**What the search found.**"
+    assert section.count(line) == 1, section
+    head = [x for x in section.splitlines() if x.strip()]
+    assert head[2].startswith(line), head[:4]
+    assert "no design that meets every limit" in head[2]

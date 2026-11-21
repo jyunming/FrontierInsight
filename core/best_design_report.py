@@ -332,7 +332,7 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     sign = _sign(best)
     hashes = "#" * max(1, min(6, heading_level))
     lines = [f"{hashes} {HEADING}", "", _OPENING, ""]
-    if best.get("best") is not None and (said := search_outcome(best, check)):
+    if said := search_outcome(best, check):
         lines += [f"**What the search found.** {said}", ""]
     what = f"**What was optimised.** {quantity}"
     if objective.get("meaning"):

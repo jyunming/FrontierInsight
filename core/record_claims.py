@@ -96,25 +96,26 @@ _ABOUT = {SEARCH: "whether the search beat the baseline",
 def unchecked(paper_md: str, *, best_design: Any = None, optimum_check: Any = None,
               oracle: Any = None) -> list[dict[str, str]]:
     """The sentences of ``paper_md`` that word one of the two facts FI states itself in a way its record says is not so,
-    one entry each: ``kind`` (:data:`SEARCH`, :data:`FIGURE`, :data:`KNOWN_ANSWER`), ``sentence`` and ``says`` (what FI's
+    one entry for every such sentence: ``kind`` (:data:`SEARCH`, :data:`FIGURE`, :data:`KNOWN_ANSWER`), ``sentence`` and ``says`` (what FI's
     record says, in plain words). Nothing here changes the paper."""
     out: list[dict[str, str]] = []
     sentences = _sentences(paper_md)
     why_not = not_better_why(best_design, optimum_check)
     if why_not:
-        first = next((s for s in sentences if _asserted(s, _OPTIMISED) and not _SAME_AS_BASELINE.search(s)), None)
-        if first:
-            out.append({"kind": SEARCH, "sentence": first, "says": why_not})
         # An image's own caption is FI's (written from the figure's record), so only a sentence of the writer's is read.
-        caption = next((s for s in sentences if _CAPTION.match(s) and _asserted(s, _CAPTION_OPTIMISED)), None)
-        if caption:
-            out.append({"kind": FIGURE, "sentence": caption, "says": f"{why_not}, so no optimised design was computed to draw"})
+        captions = [x for x in sentences if _CAPTION.match(x) and _asserted(x, _CAPTION_OPTIMISED)]
+        for sentence in sentences:
+            if sentence in captions:
+                out.append({"kind": FIGURE, "sentence": sentence,
+                            "says": f"{why_not}, so no optimised design was computed to draw"})
+            elif _asserted(sentence, _OPTIMISED) and not _SAME_AS_BASELINE.search(sentence):
+                out.append({"kind": SEARCH, "sentence": sentence, "says": why_not})
     status = str((oracle or {}).get("status") or "") if isinstance(oracle, dict) else ""
     if status in _UNCONFIRMED_ORACLE:
-        first = next((s for s in sentences if _asserted(s, _VALIDATED)), None)
-        if first:
-            out.append({"kind": KNOWN_ANSWER, "sentence": first,
-                        "says": "the known-answer checks were unconfirmed or failed"})
+        for sentence in sentences:
+            if _asserted(sentence, _VALIDATED):
+                out.append({"kind": KNOWN_ANSWER, "sentence": sentence,
+                            "says": "the known-answer checks were unconfirmed or failed"})
     return out
 
 
