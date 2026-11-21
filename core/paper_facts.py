@@ -92,6 +92,8 @@ NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_compu
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
 SETTING_LEFT_OUT, CALIBRATION, TRIALS_UNCHECKED = "setting_left_out", "calibration", "trials_unchecked"
 UNDEFINED = "undefined"
+#: A quantity kept although its values are outside the range the plan expected (core/result_checks.py ``kept_bound_breaks``).
+OUT_OF_RANGE = "out_of_range"
 FEWER_RUNS = "fewer_runs"
 CUT_SHORT = "cut_short"
 RUN_DIFFERENCE = "run_difference"
@@ -131,7 +133,7 @@ _ID_PREFIX = {NOT_DONE: "topic", LEFT_OUT: "left-out", NOT_COMPUTED: "not-comput
               UNSUPPORTED_CLAIMS: "unsupported", UNRESOLVED_REVIEW: "review", LAST_REVIEW: "last-review",
               FIGURE_LEFT_OUT: "figure-left-out", FIGURE_PASS_FAULT: "figure-pass-fault",
               FIGURE_REFERENCE: "figure-reference", METHOD_DIFFERS: "method-differs",
-              KNOWN_ANSWER: "known-answer"}
+              KNOWN_ANSWER: "known-answer", OUT_OF_RANGE: "out-of-range"}
 #: More settings left out than this are placed as one item.
 _MAX_SETTING_ITEMS = 6
 
@@ -424,12 +426,30 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a second model that read the code found it computed "
                                            "differently from the plan" + what_fi_knows + (f" ({note})" if note else "")))
                 continue
+            if c.get("kind") == _result_checks.PHYSICAL_KIND:  # a value beyond the bound the plan flags as physical
+                bound = _one(c.get("bound"))
+                add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a value of it is outside the physical bound the "
+                                           "plan gives it" + (f" ({bound})" if bound else "") + ", and the repairs did not "
+                                           "change it"))
+                continue
             if c.get("kind") == "shown_fault":  # a failing test of the code; with no repair's rerun on record, nothing more is known
                 add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a test of the code failed, and FI did not establish "
                                            "whether the value is wrong or missing"))
                 continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
+    # A quantity kept although its values break a range the plan only expected: reported, marked where it is printed
+    # (core/paper_values.py), and said here with the range and the furthest value, from FI's record.
+    for q, r in _result_checks.kept_bound_breaks(root).items():
+        try:
+            count, furthest = int(r.get("count") or 1), f"{float(r['value']):g}"
+        except (KeyError, TypeError, ValueError):
+            continue
+        many = f"{count} of its values are" if count > 1 else "a value of it is"
+        add(OUT_OF_RANGE, q, _sentence(
+            f"For {_said(root, q)}, {many} outside the range the plan expected for it ({_one(r.get('bound'))}); the furthest is "
+            f"{furthest}. FI did not establish whether the value or the plan's expected range is wrong, so the value is "
+            f"reported and marked {_result_checks.BOUND_MARK} where it is printed"))
     # A name the plan appears to define two ways (a comparison of the plan's text: core/code_review.py::plan_defines_twice), said as
     # that. Which definition the reported value follows is said only when FI holds a check it measured, that passed and that reads
     # the quantity; a name that is left out already has its one sentence (above), and is not given a second one.

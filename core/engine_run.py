@@ -24,6 +24,28 @@ from .engine_base import (  # noqa: F401
 )
 
 
+def _said_on_bounds(warned: list[Any]) -> list[Any]:
+    """What the run record (``.fi/edge_everywhere.json``, read for QUALITY.md and the claim check) says of the range check's
+    warnings: a result on its bound in every setting, one on its bound in several settings, and a value exactly on a
+    constant the script caps it at, once per quantity. Each stays in the results (in the stored studies most such values
+    were the answer); the reader of the record is told."""
+    said: list[Any] = []
+    capped: dict[str, list[Any]] = {}
+    for w in warned:
+        kind = getattr(w, "kind", "")
+        if kind == "edge_everywhere":
+            said.append(w.describe())
+        elif kind == "at_bound":
+            said.append({"text": w.disclosure(), "short": w.disclosure_short()})
+        elif kind == "clamped":
+            capped.setdefault(str(w.assertion.path), []).append(w)
+    for path, found in capped.items():
+        more = f" ({len(found)} values of `{path}` in all)" if len(found) > 1 else ""
+        said.append({"text": found[0].describe() + more,
+                     "short": f"{found[0].path} = {found[0].value:g} is on a cap of the script" + more})
+    return said
+
+
 class RunStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -1038,15 +1060,13 @@ class RunStageMixin:
             patch["selected_skills"] = [n for n in state.get("selected_skills") or [] if n not in gone]
             patch["skill_selection"] = selection
         patch["numeric_warnings_accepted"] = False
-        said_edges = []
-        for w in _assertion_warnings(self._in_force({**state, **patch}), self._walk_memo()):
+        warned = _assertion_warnings(self._in_force({**state, **patch}), self._walk_memo())
+        for w in warned:
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
-            if getattr(w, "kind", "") in ("edge_everywhere", "at_bound"):
-                said_edges.append(w.describe() if w.kind == "edge_everywhere"
-                                  else {"text": w.disclosure(), "short": w.disclosure_short()})
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
-        try:  # what the run record says of this run's results that sit on their bound everywhere
+        said_edges = _said_on_bounds(warned)
+        try:  # what the run record says of this run's results that sit on their bound everywhere, on a bound, or on a cap
             edge_path = self.fi_dir / "edge_everywhere.json"
             if said_edges:
                 edge_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1713,6 +1733,42 @@ class RunStageMixin:
             patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
         return patch
 
+    def _bounds_after_repairs(self, state: QuestState, implausible: list[Any]) -> QuestState:
+        """The repairs have run out (or gave up) and the run goes on to the analysis with values still beyond a declared
+        bound (``implausible``): what FI does with each quantity is decided from the plan alone
+        (:func:`core.result_checks.bound_breaks`) and recorded (``_record_bound_breaks``). A quantity left out for breaking
+        its physical bound leaves the results the analysis reads too (``result_json``, each seed's results and the run's
+        output it is shown), with the figures that draw it; a kept one changes nothing here. The patch for the state; ``{}`` when nothing changes."""
+        from . import result_checks as _result_checks
+        from . import typed_results as _typed_results
+
+        exec_result = state.get("exec_result") or {}
+        if exec_result.get("returncode", 0) != 0 or not state.get("result_json") or not implausible:
+            return {}
+        try:
+            breaks = _result_checks.bound_breaks(implausible, self._in_force(state).get("design") or {})
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made changes nothing; the values stay as they are
+            self._log.warning("[execute_reflect] could not decide what to do with the values beyond their bound (%r)", exc)
+            return {}
+        gone = sorted({b.quantity for b in breaks if b.leave_out} - set(_result_checks.left_out_by_record(self.quest_root)))
+        figures: list[str] = []
+        if gone:
+            # the figures that draw it: by FI's record of the analysis, and by its record of each drawing call (an axis too)
+            reach = self._shown_fault_reach([], state)
+            figures = sorted({*(reach.figures_drawing(gone, gone) if reach is not None else []),
+                              *_result_checks.figures_on_axis(self.quest_root, gone)})
+        self._record_bound_breaks(breaks, state.get("result_json"), figures)
+        if not gone:
+            return {}
+        patch: QuestState = {
+            "result_json": _typed_results.strip_keys(state.get("result_json"), set(gone)),
+            "exec_result": {**exec_result, "stdout_tail": self._stdout_for_models(str(exec_result.get("stdout_tail") or ""))},
+        }
+        if state.get("result_json_replicates"):  # each seed's results, which the analysis is shown too
+            patch["result_json_replicates"] = _typed_results.strip_keys(list(state["result_json_replicates"]), set(gone))
+        patch.update(self._figures_after_taken_out({**state, **patch}))  # type: ignore[arg-type]
+        return patch
+
     def _removed_by_fi(self, violation: Any) -> bool:
         """Whether ``violation`` is a bounded quantity FI's own record took out of the results (``needs/RESULT_CHECK.json``,
         the typed-number record): it is gone on purpose, so a repair asking for it again would undo FI's check."""
@@ -1936,7 +1992,9 @@ class RunStageMixin:
                 else "iterations exhausted",
                 iters,
             )
-            return {}
+            # Values still beyond a declared bound go on with it: left out when they break a physical bound, else kept
+            # and marked (never a stop).
+            return self._bounds_after_repairs(state, implausible)
 
         await self._shadow("repair", state, taken="repaired the script")
         history = list(state.get("exec_reflect_history") or [])
@@ -2152,7 +2210,8 @@ class RunStageMixin:
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + bump,
                 "exec_reflect_history": history,
-                **await self._figures_after_give_up(state),
+                **(drawn := await self._figures_after_give_up(state)),
+                **self._bounds_after_repairs({**state, **drawn}, implausible),  # type: ignore[arg-type]
             }
 
         new_code = parsed.get("code") or ""
@@ -2178,7 +2237,8 @@ class RunStageMixin:
             return self._manifest_repair_gave_up(state) or await self._result_check_gave_up_with_figures(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + bump,
-                **await self._figures_after_give_up(state),
+                **(drawn := await self._figures_after_give_up(state)),
+                **self._bounds_after_repairs({**state, **drawn}, implausible),  # type: ignore[arg-type]
             }
         if overlaps:
             try:
