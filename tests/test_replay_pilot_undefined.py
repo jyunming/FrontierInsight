@@ -79,6 +79,12 @@ class Answers:
         self.calls += 1
         spec_path, out_path = Path(cwd) / cmd[2], Path(cwd) / cmd[3]
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        if spec.get("members"):  # FI's call of run_trial on several settings to see what it reaches: nothing is entered
+            rows = [{"nonce": m["nonce"], "trial": 0, "seed": m["trials"][0].get("seed"), "status": "ok", "duration_s": 0.01,
+                     "values": next(iter(self.by_cell.values()))[0], "warnings": [],
+                     "call_record": {"entered": 0, "spawned": 0}} for m in spec["members"]]
+            out_path.write_text(chr(10).join(json.dumps(r, allow_nan=True) for r in rows) + chr(10), encoding="utf-8")
+            return SimpleNamespace(returncode=0, timed_out=False, stdout="", stderr="")
         trials = self.by_cell[_key(spec["cell"])]
         rows = [{"nonce": spec["nonce"], "trial": t["trial"], "seed": t.get("seed"), "status": "ok", "duration_s": 0.01,
                  "values": trials[t["trial"] % len(trials)], "warnings": []} for t in spec["trials"]]

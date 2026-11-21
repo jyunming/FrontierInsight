@@ -127,7 +127,7 @@ async def test_a_run_trial_that_delegates_to_a_run_cell_without_randomness_is_na
     assert not tr.trial_needs_call_record(source, root)
     assert tr.trial_needs_call_record(source + "# changed\n", root), "another text of the file is called again"
     record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
-    assert record["aggregates"] is True and record["run_cell_entered"] == 1
+    assert record["aggregates"] is True and record["run_cell_entered"] == [1]
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_a_run_trial_that_returns_a_random_mean_is_still_named(tmp_path: P
     assert not await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL), timeout_s=60)
     assert "run_trial must run ONE trial" in tr.trial_aggregates(source, root)
     record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
-    assert record["aggregates"] is True and record["run_cell_entered"] == 1
+    assert record["aggregates"] is True and record["run_cell_entered"] == [1]
 
 
 def _gave(engine: Engine, *names: str) -> None:
@@ -657,11 +657,12 @@ async def test_one_draw_per_call_is_not_named_and_costs_one_call(tmp_path: Path)
     assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
                                      timeout_s=60) is True
     record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
-    assert record["aggregates"] is False and record["run_cell_entered"] == 0
+    assert record["aggregates"] is False and record["run_cell_entered"] == [0]
     assert not tr.trial_needs_call_record(ONE_DRAW, root)
-    # a run_trial that never names run_cell needs no call at all
+    # a file with no run_trial has nothing to call; any run_trial is called, whatever the file names (the call sees run_cell)
+    assert not tr.trial_needs_call_record("def run_cell(cell):\n    return {}\n", root)
     lone = "def run_trial(cell, trial_id=0, seed=0):\n    return {'yield_rate': 1.0}\n"
-    assert not tr.trial_needs_call_record(lone, root)
+    assert tr.trial_needs_call_record(lone, root)
 
 
 @pytest.mark.asyncio
@@ -711,7 +712,7 @@ async def test_a_mean_over_a_random_source_of_the_studys_own_writing_is_named_to
     assert await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(CELL),
                                      timeout_s=60) is False
     record = json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
-    assert record["aggregates"] is True and record["run_cell_entered"] == 1
+    assert record["aggregates"] is True and record["run_cell_entered"] == [1]
 
 
 @pytest.mark.asyncio
@@ -754,3 +755,244 @@ async def test_with_no_first_setting_the_reading_of_the_code_does_not_refuse(
     assert await engine._simulation_repair_fault(state, DELEGATING) == ""
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "could not measure whether run_trial runs one trial" in log
+
+
+# ---- what the call sees, without changing the study's functions (review of backlog -432, G13) ----------------------------
+
+import hashlib  # noqa: E402
+
+BRANCH_BY_MODE = '''
+def run_cell(cell):
+    return {"yield_rate": sum(range(10)) / 10}
+
+def run_trial(cell, trial_id=0, seed=0):
+    if cell["mode"] == "aggregate":
+        return run_cell(cell)
+    return {"yield_rate": float(seed % 2)}
+'''
+
+IMPORTED_ALIAS = '''
+from model import run_cell as rc
+
+def run_trial(cell, trial_id=0, seed=0):
+    return rc(cell)
+'''
+
+PRE_BOUND_DECORATED = '''
+def decorate(fn):
+    def wrapped(*a, **k):
+        return fn(*a, **k)
+    return wrapped
+
+@decorate
+def run_cell(cell):
+    return {"yield_rate": 1.0}
+
+rc = run_cell
+
+def run_trial(cell, trial_id=0, seed=0):
+    return rc(cell)
+'''
+
+PARTIAL_AND_STATIC = '''
+import functools
+
+class Sim:
+    @staticmethod
+    def run_cell(cell):
+        return {"yield_rate": 1.0}
+
+_bound = functools.partial(Sim.run_cell)
+
+def run_trial(cell, trial_id=0, seed=0):
+    return _bound(cell)
+'''
+
+CLASS_METHOD = '''
+class Sim:
+    @classmethod
+    def run_cell(cls, cell):
+        return {"yield_rate": 1.0}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return Sim.run_cell(cell)
+'''
+
+SPAWNS = '''
+import multiprocessing as mp
+
+def run_cell(cell):
+    return {"yield_rate": 1.0}
+
+def run_trial(cell, trial_id=0, seed=0):
+    with mp.Pool(1) as pool:
+        return pool.apply(run_cell, (cell,))
+'''
+
+PYTHON_CHILD = '''
+import subprocess, sys
+
+def run_cell(cell):
+    return {"yield_rate": 1.0}
+
+def run_trial(cell, trial_id=0, seed=0):
+    subprocess.run([sys.executable, "-c", "pass"], check=True)
+    return {"yield_rate": 1.0}
+'''
+
+HELPER_PROGRAM = '''
+import platform, subprocess
+
+def run_cell(cell):
+    return {"yield_rate": 1.0}
+
+def run_trial(cell, trial_id=0, seed=0):
+    platform.uname()
+    subprocess.run("echo hi", shell=True, capture_output=True)
+    return {"yield_rate": 2.0}
+'''
+
+READS_OWN_DEFAULTS = '''
+def run_cell(cell, multiplier=2):
+    return {"yield_rate": run_cell.__defaults__[0] * cell["width"]}
+
+def run_trial(cell, trial_id=0, seed=0):
+    return run_cell(cell)
+'''
+
+# A run_cell of another module that is not in the quest's code (a library's) is not this study's.
+LIBRARY_RUN_CELL = '''
+import json
+
+def run_trial(cell, trial_id=0, seed=0):
+    return {"yield_rate": float(len(json.dumps(cell)))}
+'''
+
+
+async def _probe(root: Path, *, more: list[dict[str, Any]] | None = None, cell: dict[str, Any] | None = None) -> bool | None:
+    return await tr.settle_aggregate(VenvExecutor(), sys.executable, root, "code/simulate.py", cell=dict(cell or CELL),
+                                     more=more, timeout_s=60)
+
+
+def _record(root: Path) -> dict[str, Any]:
+    return json.loads((root / tr.ONE_TRIAL_RECORD).read_text(encoding="utf-8"))
+
+
+def test_the_probe_settings_cover_every_value_of_every_axis() -> None:
+    cells = tr.probe_cells({"a": 1, "b": "x"}, {"a": [1, 2, 3], "b": ["x", "y"], "fixed": 7})
+    assert cells[0] == {"a": 1, "b": "x"}
+    assert {c["a"] for c in cells} == {1, 2, 3} and {c["b"] for c in cells} == {"x", "y"}
+    assert len(cells) <= 3 and all(c["a"] in (1, 2, 3) for c in cells)
+    assert tr.probe_cells({"a": 1}, {}) == [{"a": 1}]
+
+
+def test_the_probe_settings_of_a_grid_with_sub_studies_are_settings_the_study_runs() -> None:
+    from core import optimise_search as search
+
+    grid = search.StudyGrid({"a": [1, 2, 3], "b": ["x", "y"], "c": [0, 1]},
+                            [{"name": "p", "vary": ["a"], "hold": {"b": "x", "c": 0}},
+                             {"name": "q", "vary": ["b", "c"], "hold": {"a": 2}}])
+    real = [dict(zip(grid.keys(), (grid[k][i] for k, i in zip(grid.keys(), picked))))
+            for picked in search.iter_grid_indexes(grid)]
+    cells = tr.probe_cells({"a": 2, "b": "x", "c": 0}, grid)
+    assert all(c in real for c in cells)
+    assert {c["a"] for c in cells} == {1, 2, 3} and {c["b"] for c in cells} == {"x", "y"} and {c["c"] for c in cells} == {0, 1}
+
+
+@pytest.mark.asyncio
+async def test_a_branch_that_only_another_setting_takes_is_seen_by_probing_every_value(tmp_path: Path) -> None:
+    cell = {"mode": "raw"}
+    root = _quest(tmp_path / "one", BRANCH_BY_MODE)
+    assert await _probe(root, cell=cell) is True, "one setting alone cannot see it"
+    root = _quest(tmp_path / "all", BRANCH_BY_MODE)
+    cells = tr.probe_cells(cell, {"mode": ["raw", "aggregate"]})
+    assert await _probe(root, cell=cells[0], more=cells[1:]) is False
+    assert _record(root)["run_cell_entered"] == [0, 1]
+    # the record belongs to the settings it was made on
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert not tr.trial_needs_call_record(source, root, tr.probe_key(cells, None))
+    assert tr.trial_needs_call_record(source, root, tr.probe_key(cells[:1], None))
+
+
+@pytest.mark.asyncio
+async def test_every_way_of_reaching_a_run_cell_of_the_quests_code_is_seen(tmp_path: Path) -> None:
+    sources = {"imported": IMPORTED_ALIAS, "pre_bound_decorated": PRE_BOUND_DECORATED, "partial_static": PARTIAL_AND_STATIC,
+               "class_method": CLASS_METHOD, "own_defaults": READS_OWN_DEFAULTS, "lookup": MEAN_THROUGH_GETATTR}
+    for name, source in sources.items():
+        root = _quest(tmp_path / name, source)
+        if name == "imported":
+            (root / "code" / "model.py").write_text("def run_cell(cell):\n    return {'yield_rate': 1.0}\n", encoding="utf-8")
+        assert await _probe(root) is False, name
+        assert _record(root)["aggregates"] is True, name
+
+
+@pytest.mark.asyncio
+async def test_a_run_cell_that_reads_its_own_defaults_still_runs_and_is_named(tmp_path: Path) -> None:
+    root = _quest(tmp_path, READS_OWN_DEFAULTS)
+    assert await _probe(root) is False
+    assert _record(root)["run_cell_entered"] == [1] and _record(root)["status"] == "recorded", "the call was not altered"
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_starts_a_child_process_cannot_be_told_and_counts_as_aggregating(tmp_path: Path) -> None:
+    root = _quest(tmp_path, SPAWNS)
+    assert await _probe(root) is False
+    record = _record(root)
+    assert record["aggregates"] is True and record["child_processes"] >= 1 and "child process" in record["why"]
+
+
+@pytest.mark.asyncio
+async def test_a_python_child_process_cannot_be_told_but_a_helper_program_is_not_one(tmp_path: Path) -> None:
+    root = _quest(tmp_path / "py", PYTHON_CHILD)
+    assert await _probe(root) is False
+    assert _record(root)["child_processes"] >= 1
+    root = _quest(tmp_path / "helper", HELPER_PROGRAM)
+    assert await _probe(root) is True  # run_cell never entered; a non-Python helper holds no copy of the trial
+    record = _record(root)
+    assert record["child_processes"] == 0 and record["aggregates"] is False
+
+
+def test_what_the_hook_counts_as_a_child_process_that_runs_python() -> None:
+    space: dict[str, Any] = {"sys": sys, "_fi_load_study": lambda path: None, "cell_reads": lambda cell: {}}
+    exec(compile(tr.AGGREGATE_SPY_SOURCE, "<spy>", "exec"), space)  # noqa: S102 -- FI's own harness text
+    runs = space["_fi_runs_python"]
+    assert runs("os.fork", ()) and runs("os.forkpty", ())
+    assert runs("subprocess.Popen", (sys.executable, [sys.executable, "-c", "pass"], None, None))
+    assert runs("subprocess.Popen", (None, r'C:\Program Files\Python312\python.exe -m tool', None, None))
+    assert runs("_winapi.CreateProcess", (None, r'"C:\venv\Scripts\pythonw.exe" -c "import x"'))
+    assert runs("os.system", ("python3 job.py",)) and runs("os.posix_spawn", ("/usr/bin/python3.12", ["x"], {}))
+    assert not runs("subprocess.Popen", (r"C:\Windows\system32\cmd.exe", "cmd.exe /c ver", None, None))
+    assert not runs("os.system", ("echo hi",)) and not runs("subprocess.Popen", (None, ["git", "status"], None, None))
+    assert not runs("subprocess.Popen", (None, ["tool", "python_notes.txt"], None, None))
+
+
+@pytest.mark.asyncio
+async def test_a_run_cell_outside_the_quests_code_is_not_counted(tmp_path: Path) -> None:
+    root = _quest(tmp_path, LIBRARY_RUN_CELL)
+    assert await _probe(root) is True
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_fails_is_not_kept_as_a_final_answer(tmp_path: Path) -> None:
+    root = _quest(tmp_path, "def run_trial(cell, trial_id=0, seed=0):\n    raise RuntimeError('boom')\n")
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert await _probe(root) is None
+    assert _record(root)["status"] == "unfinished"
+    assert tr.trial_needs_call_record(source, root), "tried again next time"
+    assert tr.trial_aggregates(source, root) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_record_of_another_harness_or_version_is_not_a_record(tmp_path: Path) -> None:
+    root = _quest(tmp_path, ONE_DRAW)
+    source = (root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert await _probe(root) is True
+    assert not tr.trial_needs_call_record(source, root)
+    good = _record(root)
+    path = root / tr.ONE_TRIAL_RECORD
+    path.write_text(json.dumps({**good, "harness": hashlib.sha256(b"an older harness").hexdigest()}), encoding="utf-8")
+    assert tr.trial_needs_call_record(source, root), "the harness changed: called again"
+    path.write_text(json.dumps({**good, "schema": 1}), encoding="utf-8")
+    assert tr.trial_needs_call_record(source, root), "another version of the record"
+    path.write_text(json.dumps({k: v for k, v in good.items() if k not in ("schema", "harness")}), encoding="utf-8")
+    assert tr.trial_needs_call_record(source, root), "a record with neither is unusable"

@@ -3326,6 +3326,17 @@ class CodeStageMixin:
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _probe_more_cells(self, protocol: dict[str, Any], cell: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+        """The settings besides the first that FI calls ``run_trial`` on to see what it reaches: enough for every value of every
+        axis of the plan's grid to be in one (:func:`core.trial_runner.probe_cells`). None for a search (its baseline design
+        is the one setting it calls)."""
+        if kind != "scan":
+            return []
+        try:
+            return _trial_runner.probe_cells(cell, _optimise_search.study_grid(protocol))[1:]
+        except (KeyError, TypeError, ValueError):
+            return []
+
     async def _simulation_repair_fault(self, state: QuestState, new_code: str) -> str:
         """After a repair of simulate.py is written to disk: why it cannot stay, or ``""``: the checks of
         :meth:`_simulation_entry_fault`, then the analysis gate (core/pipeline_gate.py; nothing with the switch off)."""
@@ -3375,13 +3386,15 @@ class CodeStageMixin:
         first = self._first_study_cell(protocol) if isinstance(protocol, dict) else None
         reading = _trial_runner.trial_aggregates(new_code)  # the code's shape: only said, never decides
         aggregate = _trial_runner.trial_aggregates(new_code, self.quest_root)  # FI's record of a call, when there is one
-        wanted = bool(aggregate) or _trial_runner.trial_needs_call_record(new_code, self.quest_root)
         if first is None:
             if reading and not aggregate:
                 self._log.warning("[execute] FI could not measure whether run_trial runs one trial (the plan gives no first "
                                   "setting to call it on); the reading of the code alone does not refuse it")
             return _trial_runner.TRIAL_AGGREGATE_WHY if aggregate else ""
         cell, inside, kind = first
+        more = self._probe_more_cells(protocol, cell, kind)
+        wanted = bool(aggregate) or _trial_runner.trial_needs_call_record(
+            new_code, self.quest_root, _trial_runner.probe_key([cell, *more], inside))
         py = self.executor.python_path(self.quest_root)
         env = dict(self.__dict__.get("_last_exec_env") or {})
         from . import run_estimate as _estimate
@@ -3401,10 +3414,10 @@ class CodeStageMixin:
             if wanted:
                 settled = await self._await_with_heartbeat(
                     _trial_runner.settle_aggregate(
-                        self.executor, py, self.quest_root, module, cell=cell, inside=inside,
+                        self.executor, py, self.quest_root, module, cell=cell, more=more, inside=inside,
                         timeout_s=max(1, min(int(self.config.execution.timeout_s), left())), env=env,
                         thresholds=thresholds, log=self._log, kind=kind),
-                    label="calling the repaired trial function once to see what it reaches")
+                    label="calling the repaired trial function on the plan's settings to see what it reaches")
                 if settled is False:
                     return _trial_runner.TRIAL_AGGREGATE_WHY
                 if settled is None and reading:
