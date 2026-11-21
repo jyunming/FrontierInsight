@@ -118,10 +118,13 @@ def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> 
             if target.id in bound:
                 tainted.add(target.id)
         elif isinstance(target, (ast.Tuple, ast.List)):
-            matching = (isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts)
-                        and not any(isinstance(x, ast.Starred) for x in (*value.elts, *target.elts)))
-            for i, t in enumerate(target.elts):
-                bind(t, value.elts[i] if matching else None)  # a shape that does not match proves nothing
+            if isinstance(value, (ast.Tuple, ast.List)):  # a display: each target takes its own element, or nothing
+                matching = len(value.elts) == len(target.elts) and not any(isinstance(x, ast.Starred) for x in (*value.elts, *target.elts))
+                for i, t in enumerate(target.elts):
+                    bind(t, value.elts[i] if matching else None)
+            else:  # every part of a proven value is proven: each target takes the value itself
+                for t in target.elts:
+                    bind(t, value)
         elif isinstance(target, ast.Starred):
             bind(target.value, None)
         else:  # an attribute or an item: it binds no name, but it changes what the root name holds

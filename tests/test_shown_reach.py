@@ -327,6 +327,15 @@ def test_a_method_on_a_value_read_from_the_frame_is_plain_through_a_loop_variabl
     assert not _stops(out) and record["issues"]["F-1"].get("about_plan_text") is True
 
 
+def test_unpacking_a_proven_value_gives_proven_names(tmp_path: Path) -> None:
+    src = ("import derive\n\n\ndef test_x():\n    for name, spec in derive.DERIVED.items():\n        assert name.count('a') <= 5, 'wrong'\n"
+           "        assert spec.get('inputs') is not None\n")
+    shape = shown_reach.read_test(src)
+    assert shape is not None and shape.method_calls >= {"count", "get", "items"} and not shape.unproven_calls
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="count", quantity="est_a", files=_COUNT_FILES)
+    assert not _stops(out) and record["issues"]["F-1"].get("about_plan_text") is True
+
+
 def test_eval_is_not_a_plain_call(tmp_path: Path) -> None:
     src = "import derive\nfrom model import helper_for_trial\n\n\ndef test_x():\n    assert eval(derive.ROLES['cover']) == 2, 'wrong'\n"
     out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="est_a")
