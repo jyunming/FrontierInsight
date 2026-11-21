@@ -294,3 +294,30 @@ def test_a_single_panel_with_a_hold_and_its_band_and_bars_name_the_hold() -> Non
     del panel["hold"], panel["hold_label"]
     caption = _figure_caption_text("a.png", None, n_seeds=None, calls=_calls(panel))
     assert "It draws Method A." in caption and "Error bars show one standard deviation." in caption
+
+
+# ---- a figure of a cited work is not one of the paper's figures ------------------------------------------------------
+
+@pytest.mark.parametrize("sentence", [
+    "The shape matches Fig. 3 of [4].",
+    "The shape matches Figure 3 in [4].",
+    "The shape matches Fig. 3 of Smith et al. [4].",
+    "The shape matches Fig. 3 in Smith and Lee [12].",
+    "The shape matches the curve [4, Fig. 3].",
+    "The shape matches the page [W2, Figure 3].",
+])
+def test_a_figure_of_a_cited_work_is_neither_read_nor_renumbered(sentence: str) -> None:
+    from generation._figure_captions import numbers_named, renumber_references
+
+    assert numbers_named(sentence) == set()
+    assert renumber_references(sentence, {3: 1, 1: 3}) == sentence
+    assert numbers_off_figure_captions(f"![**Figure 3.** a](figures/a.png)\n\n![**Figure 1.** b](figures/b.png)\n\n{sentence}"
+                                       ).endswith(sentence), "the PDF keeps the cited work's number too"
+
+
+def test_the_papers_own_figure_beside_a_citation_is_still_renumbered() -> None:
+    from generation._figure_captions import numbers_named, renumber_references
+
+    sentence = "Figure 3 agrees with [4], unlike Fig. 2 of [5]."
+    assert numbers_named(sentence) == {3}
+    assert renumber_references(sentence, {3: 1, 1: 3, 2: 2}) == "Figure 1 agrees with [4], unlike Fig. 2 of [5]."

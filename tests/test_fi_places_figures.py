@@ -245,6 +245,14 @@ def test_every_figure_a_range_or_a_list_of_numbers_names_goes_after_it() -> None
         assert named < at[0] < at[1] < at[2] < lines.index("The end of the results."), words
 
 
+def test_a_figure_of_a_cited_work_is_no_place_for_the_papers_figure() -> None:
+    draft = ("## Introduction\n\nThe classic result is Fig. 1 of [4].\n\n## Results\n\nFigure 1 shows the error.\n\n"
+             "## Discussion\n\nIt holds.\n\n## References\n\n1. A.\n")
+    out, _, _ = _place_figures(draft, STATE)  # type: ignore[arg-type]
+    lines = out.split("\n")
+    assert lines.index("Figure 1 shows the error.") < _embed_line(out, "error_vs_step.png") < lines.index("## Discussion")
+
+
 def test_placing_the_figures_of_a_marked_draft_again_gives_the_same_paper() -> None:
     once, _, _ = _place_figures(MARKED, STATE)  # type: ignore[arg-type]
     assert _place_figures(once, STATE)[0] == once  # type: ignore[arg-type]

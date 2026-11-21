@@ -49,6 +49,22 @@ _REFERENCE_RE = re.compile(
     r"(?P<nums>\d+[a-z]?(?:\s*(?:,|and|&|–|—|-|to)\s*\d+[a-z]?)*)(?![\w.]*\.[A-Za-z])",
     re.IGNORECASE,
 )
+# A figure of a cited work, in the paper's own citation form (a numbered source "[4]" or a web page "[W2]"), is not one of
+# the paper's figures: "Fig. 3 of [4]", "Figure 3 in [4]", "Fig. 3 of Smith et al. [4]" / "Fig. 3 in Smith and Lee [4]"
+# (at most three name words and "et al."), and "[4, Fig. 3]". Only these forms; a reference beside a citation in any
+# other way ("Figure 3 agrees with [4]") stays the paper's.
+_CITED_AFTER_RE = re.compile(
+    r"\s+(?:of|in)\s+(?:[A-Z][\w'’-]*(?:\s+(?:and|&)\s+[A-Z][\w'’-]*|\s+[A-Z][\w'’-]*){0,2}"
+    r"(?:\s+et\s+al\.?)?,?\s+)?\[W?\d")
+_CITED_BEFORE_RE = re.compile(r"\[W?\d+(?:\s*[,–-]\s*W?\d+)*,\s*$")
+_CITED_CLOSE_RE = re.compile(r"\s*\]")
+
+
+def _of_a_cited_work(m: re.Match[str]) -> bool:
+    """Whether the reference ``m`` (of :data:`_REFERENCE_RE`) names a figure of a cited work, in one of the forms above."""
+    text = m.string
+    return bool(_CITED_AFTER_RE.match(text, m.end())
+                or (_CITED_BEFORE_RE.search(text[:m.start()]) and _CITED_CLOSE_RE.match(text, m.end())))
 
 
 def figure_lines(lines: list[str]):
@@ -91,11 +107,14 @@ _NOT_REFERENCE_RE = re.compile(r"\{\{.*?\}\}|<!--.*?-->")
 
 def numbers_named(text: str) -> set[int]:
     """Every figure number the references in ``text`` name: each number of a list ("Figures 2 and 3") and every number
-    a range spans ("Figs. 2-4"), outside FI's marks and HTML comments. The one reading of a reference: FI places each
+    a range spans ("Figs. 2-4"), outside FI's marks and HTML comments, and never a figure of a cited work
+    (:func:`_of_a_cited_work`). The one reading of a reference: FI places each
     figure after the text that first names it (``core/engine.py:_figure_reference_end``) and numbers the figures by place
     with :func:`renumber_references`."""
     out: set[int] = set()
     for m in _REFERENCE_RE.finditer(_NOT_REFERENCE_RE.sub(" ", text)):
+        if _of_a_cited_work(m):
+            continue
         span = _SPAN_RE.fullmatch(m.group("nums"))
         if span and int(span.group(1)) < int(span.group(3)):
             out.update(range(int(span.group(1)), int(span.group(3)) + 1))
@@ -106,6 +125,8 @@ def numbers_named(text: str) -> set[int]:
 
 def _renumbered(text: str, order: dict[int, int]) -> str:
     def one(m: re.Match[str]) -> str:
+        if _of_a_cited_work(m):
+            return m.group(0)  # a figure of a cited work keeps its number
         span = _SPAN_RE.fullmatch(m.group("nums"))
         if span and int(span.group(1)) < int(span.group(3)):
             # A range names every figure in it: renumbered, those figures are a range again only when their new
