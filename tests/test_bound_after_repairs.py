@@ -220,3 +220,72 @@ def test_a_value_on_a_cap_of_the_script_is_said_once_per_quantity_in_the_run_rec
     warned = [pl.Violation(f"g={i}.share", 1.0, a, kind="clamped") for i in range(3)]
     said = _said_on_bounds(warned)
     assert len(said) == 1 and "the script caps values at 1" in said[0]["text"] and "3 values of `share`" in said[0]["text"]
+
+
+# --- what the review of the first version found -------------------------------------------------------------------
+
+
+def test_a_count_a_reference_or_a_setting_of_a_kept_quantity_is_not_marked(tmp_path: Path) -> None:
+    """Only a number computed from the quantity's values is unconfirmed: its trial count, the plan's reference for it and the
+    setting where it peaks are not."""
+    q = _paper_quest(tmp_path, kept=True)
+    rec = pv.records_of(q, None)
+    for key in ("{{v:drift_rate:n @ bed=1}}", "{{v:drift_rate @ bed=each | argmax}}"):
+        got = pv.resolve(key, rec)
+        assert got.filled and MARK not in got.text, key
+    assert MARK in pv.resolve("{{v:drift_rate:sd @ bed=1}}", rec).text  # a spread of its values is
+
+
+def test_a_figure_axis_fi_could_not_tie_to_the_quantity_does_not_drop_the_figure(tmp_path: Path) -> None:
+    (tmp_path / "figures").mkdir()
+    (tmp_path / ".fi" / "figure_records").mkdir(parents=True)
+    for stem, x in (("tied", {"id": "yield_frac", "kind": "result"}),
+                    ("untied", {"id": "yield_frac", "kind": "result", "label": "computed x", "neutral": True}),
+                    ("other", {"id": "load", "kind": "result"})):
+        (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
+        (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(json.dumps(
+            {"panels": [{"panel": 1, "x": x, "y": {"what": "drift_rate"}, "series": [{"id": "drift_rate"}]}]}), encoding="utf-8")
+    assert rc.figures_on_axis(tmp_path, {"yield_frac"}) == ["tied.png"]
+
+
+def test_each_left_out_quantity_is_given_the_note_of_its_own_check(tmp_path: Path) -> None:
+    (tmp_path / "needs").mkdir()
+    (tmp_path / "needs" / "RESULT_CHECK.json").write_text(json.dumps({
+        "removed_quantities": ["drift_rate", "load", "spare"],
+        "checks": [{"kind": "a", "note": "drift note", "quantity": "drift_rate", "keys": ["drift_rate"]},
+                   {"kind": "b", "note": "load note", "quantity": "load", "keys": ["load"]}],
+        "note": "drift note; load note"}), encoding="utf-8")
+    gone = rc.left_out_by_record(tmp_path)
+    assert gone == {"drift_rate": "drift note", "load": "load note", "spare": "drift note; load note"}
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_gives_up_leaves_out_a_physical_break_as_well(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, max_iter=3)
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value='{"give_up_reason": "cannot see the fault"}')})()
+    state = _state(_design(physical=True), RESULT, iters=0)
+    patch = await eng._node_execute_reflect(state)
+    assert patch["exec_give_up_reason"] == "cannot see the fault"
+    assert "yield_frac" in rc.left_out_by_record(eng.quest_root)
+    assert "yield_frac" not in json.dumps(patch["result_json"])
+
+
+@pytest.mark.asyncio
+async def test_each_seeds_results_lose_a_left_out_quantity_too(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    state = {**_state(_design(physical=True), RESULT),
+             "result_json_replicates": [{"_seed": 0, **RESULT}, {"_seed": 1, **RESULT}]}
+    patch = await eng._node_execute_reflect(state)
+    assert "yield_frac" not in json.dumps(patch["result_json_replicates"])
+    assert "drift_rate" in json.dumps(patch["result_json_replicates"])
+
+
+@pytest.mark.asyncio
+async def test_the_per_trial_lists_of_a_left_out_quantity_leave_the_results_too(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    result = {k: {**row, "yield_frac_values": [row["yield_frac"]] * 3, "yield_frac_pair_id": [0, 1, 2],
+                  "drift_rate_values": [row["drift_rate"]] * 3} for k, row in RESULT.items()}
+    patch = await eng._node_execute_reflect(_state(_design(physical=True), result))
+    shown = json.dumps(patch["result_json"])
+    assert "yield_frac" not in shown  # its trials and their ids are its values too
+    assert "drift_rate_values" in shown  # a kept quantity keeps its trials

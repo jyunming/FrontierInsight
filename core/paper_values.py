@@ -1735,9 +1735,11 @@ def with_bound_mark(text: str) -> str:
 
 
 def metrics_read(shown: str) -> set[str]:
-    """The quantities a key reads, by the key's own grammar: its metric, the metric it is compared with or correlated
-    with, and for a ``trend:`` or ``comparison:`` key the names before its ``@``. A ``calc:`` key reads only the plan's
-    numbers. Nothing is read from the paper's words."""
+    """The quantities whose values a key prints a number from, by the key's own grammar: its metric, the metric it is
+    compared with or correlated with, and for a ``trend:`` or ``comparison:`` key the names before its ``@``. A key that
+    prints a count of trials, the plan's reference or a setting (``n``, ``count``, ``failed``, ``ref``; ``argmin``,
+    ``argmax``, ``count_where``) prints no value of the quantity, and a ``calc:`` key reads only the plan's numbers.
+    Nothing is read from the paper's words."""
     shown = shown.strip()
     shown = shown[2:] if shown.startswith("v:") else shown
     if shown.startswith(CALC):
@@ -1746,6 +1748,8 @@ def metrics_read(shown: str) -> set[str]:
         return set(re.findall(r"[A-Za-z_]\w*", shown.partition(":")[2].partition("@")[0]))
     try:
         key = parse(shown)
+        if FORM_STATISTIC.get(key.form) in ("count", "reference") or key.reducer in ("argmin", "argmax", "count_where"):
+            return set()
         return {n for n in (key.metric, key.operand_metric, key.form_arg) if n}
     except Exception:  # noqa: BLE001 - a key FI cannot read names its first word (a quantity of one value: {{v:<name>}})
         head = re.match(r"\s*([A-Za-z_]\w*)", shown)

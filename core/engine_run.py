@@ -1760,12 +1760,15 @@ class RunStageMixin:
         self._record_bound_breaks(breaks, state.get("result_json"), figures)
         if not gone:
             return {}
+        plan_ids = {str(m.get("id")) for m in (self._protocol_block(state) or {}).get("metrics") or []
+                    if isinstance(m, dict) and m.get("id")}
+        strip = _typed_results.with_trial_keys(gone, plan_ids)  # its per-trial lists hold its values too
         patch: QuestState = {
-            "result_json": _typed_results.strip_keys(state.get("result_json"), set(gone)),
+            "result_json": _typed_results.strip_keys(state.get("result_json"), strip),
             "exec_result": {**exec_result, "stdout_tail": self._stdout_for_models(str(exec_result.get("stdout_tail") or ""))},
         }
         if state.get("result_json_replicates"):  # each seed's results, which the analysis is shown too
-            patch["result_json_replicates"] = _typed_results.strip_keys(list(state["result_json_replicates"]), set(gone))
+            patch["result_json_replicates"] = _typed_results.strip_keys(list(state["result_json_replicates"]), strip)
         patch.update(self._figures_after_taken_out({**state, **patch}))  # type: ignore[arg-type]
         return patch
 
