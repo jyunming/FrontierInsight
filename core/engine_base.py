@@ -7080,7 +7080,12 @@ def _figure_numbers(state: QuestState) -> dict[str, int]:
     planned, then the run's other figures in the order drawn, one per drawing (:func:`_figure_files_by_stem`). A figure
     whose own record says it draws nothing has none: it shows the reader nothing. FI's set-up figure, when its record
     says FI drew it for the plan as it stands (:func:`core.setup_flow.shown`), is Figure 1: it is drawn at the start of the
-    analysis, before any figure is given a number, so the analysis names the figures by these same numbers."""
+    analysis, before any figure is given a number, so the analysis names the figures by these same numbers.
+
+    Once FI has placed the figures in the paper it numbers them in the order they stand there
+    (:func:`_number_figures_by_place`) and keeps those numbers (``.fi/figure_numbers.json``): every reader after that (the
+    next draft's figure list, the pointer rule, the slides, the poster, the quality report) uses them, while the same
+    figures are numbered. A different set of figures is numbered as above again."""
     records = state.get("figure_records") or {}
     shown = _figure_files_by_stem(state)
     setup = _setup_flow.shown(state.get("quest_root"))
@@ -7088,7 +7093,61 @@ def _figure_numbers(state: QuestState) -> dict[str, int]:
     order += [shown[Path(str(f)).stem] for f in state.get("figures") or []]
     keep = ([setup] if setup else []) + [name for name in dict.fromkeys(order)
                                          if name != setup and not _figure_draws_nothing(records.get(name))]
-    return {name: i + 1 for i, name in enumerate(keep)}
+    planned = {name: i + 1 for i, name in enumerate(keep)}
+    placed = _placed_figure_numbers(state.get("quest_root"))
+    if placed and set(placed) == set(planned):
+        return dict(sorted(placed.items(), key=lambda kv: kv[1]))
+    return planned
+
+
+#: The numbers the placed paper gives its figures (:func:`_number_figures_by_place`), under the quest's ``.fi`` folder.
+FIGURE_NUMBERS_RECORD = "figure_numbers.json"
+
+
+def _placed_figure_numbers(root: Any) -> dict[str, int] | None:
+    """``{file: number}`` as FI numbered the figures in the order the paper places them, or ``None`` when there is no such
+    record (no paper placed yet) or it is not a numbering 1, 2, ... of distinct files."""
+    if not root:
+        return None
+    try:
+        data = json.loads((Path(str(root)) / ".fi" / FIGURE_NUMBERS_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data or not all(isinstance(k, str) and type(v) is int for k, v in data.items()):
+        return None
+    return data if sorted(data.values()) == list(range(1, len(data) + 1)) else None
+
+
+def _keep_figure_numbers(root: Any, numbers: dict[str, int]) -> None:
+    """Keep the numbers the placed paper gives its figures (:func:`_placed_figure_numbers` reads them)."""
+    if not root or not numbers:
+        return
+    path = Path(str(root)) / ".fi" / FIGURE_NUMBERS_RECORD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(sorted(numbers.items(), key=lambda kv: kv[1])), indent=1), encoding="utf-8")
+
+
+def _number_figures_by_place(markdown: str, state: QuestState, *, root: Any = None) -> tuple[str, dict[str, int]]:
+    """``(markdown, {file: number})``: the paper FI placed its figures in (:func:`_place_figures`), its figures numbered
+    in the order they stand, 1, 2, ..., the order the PDF numbers them in. Every figure number of the text and of each
+    caption is changed with them by the renderer's own reader (:func:`generation._figure_captions.renumber_references`),
+    so the paper, the PDF and every reader of :func:`_figure_numbers` give each figure one number. A paper whose
+    figures already stand in number order comes back as it is."""
+    from generation._figure_captions import figure_lines, renumber_references
+
+    state = _rooted(state, root)
+    numbers = _figure_numbers(state)
+    lines = (markdown or "").split("\n")
+    standing = []
+    for _index, fig in figure_lines(lines):
+        target = re.search(r"\((?:\./)?figures/([^)\s]+)\)", fig.group("rest"))
+        if target and target.group(1) in numbers:
+            standing.append(target.group(1))
+    standing = list(dict.fromkeys(standing))
+    if set(standing) != set(numbers):
+        return markdown, numbers  # not every numbered figure stands once in the paper: nothing is renumbered
+    by_place = {name: i + 1 for i, name in enumerate(standing)}
+    return renumber_references(markdown, {numbers[name]: k for name, k in by_place.items()}), by_place
 
 
 _RUN_FIGURE_IMAGE_RE = _figure_facts.RUN_FIGURE_RE
@@ -7131,9 +7190,10 @@ def _place_figures(markdown: str, state: QuestState, *,
     and all, so no caption in the paper is the writer's. Each figure goes beside the text that first refers to it
     (:func:`_figure_insertion_line`): after the paragraphs that name it by its number or hold one of FI's marks of it. One
     the prose never refers to goes at the end of the results, before the discussion (else the conclusions, the
-    limitations, the source lists); FI's set-up figure, when the prose never names it, just before the next figure.
-    Figures that go to the same place stand there in number order. Idempotent: placing the figures of a paper FI placed
-    them in gives the same paper."""
+    limitations, the source lists); FI's set-up figure, when the prose never names it, just before the first of the
+    others. Figures that go to the same place stand there in number order. The write node then numbers the figures in
+    the order they stand (:func:`_number_figures_by_place`). Idempotent: placing the figures of a paper FI placed them in
+    gives the same paper."""
     state = _rooted(state, root)
     numbers = _figure_numbers(state)
     text, written = _without_figure_embeds(markdown)
@@ -7155,11 +7215,13 @@ def _place_figures(markdown: str, state: QuestState, *,
                                         calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
                                                if state.get("quest_root") else None)))
         at = _figure_insertion_line(lines, number, stems[number])
-        if name == setup and _figure_reference_end(lines, number, stems[number]) is None and number + 1 in stems:
-            # FI's set-up figure the prose never names goes just before the next figure, not after every result
-            at = _figure_insertion_line(lines, number + 1, stems[number + 1])
         said = _figure_minimum_sentence(lines, number, name, state)
         plan.append((at, number, f"![**Figure {number}.** {caption}](figures/{name})", said))
+    if setup in numbers and len(plan) > 1 and _figure_reference_end(lines, numbers[setup], Path(setup).stem) is None:
+        # FI's set-up figure the prose never names goes just before the first of the other figures, not after every
+        # result: it stays Figure 1 once the figures are numbered in the order they stand
+        first = min(at for at, number, *_rest in plan if number != numbers[setup])
+        plan = [(first if number == numbers[setup] else at, number, *rest) for at, number, *rest in plan]
     if any(at >= len(lines) for at, *_rest in plan):
         if not lines or lines[-1].strip():
             lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper

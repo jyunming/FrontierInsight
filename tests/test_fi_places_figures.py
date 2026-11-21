@@ -104,16 +104,60 @@ def test_the_drafts_own_images_and_captions_are_replaced_by_fis() -> None:
     assert len(placed) == 3
 
 
+OUT_OF_ORDER = ("## Results\n\nFigure 2 shows the cost.\n\nFigure 1 shows the error.\n\n"
+                "{{figure:fig2_extra:drawn @ series=a, panel=1}}\n\n## Discussion\n\nAs Figures 1 and 2 show, it holds.\n\n"
+                "## References\n\n1. A.\n")
+
+
 def test_a_figure_the_prose_names_out_of_order_goes_beside_its_own_paragraph() -> None:
-    # Beside the text that names it wins over number order: the paper's renderer numbers the figures by place and
-    # renumbers every reference with them (generation/_figure_captions.py), so the PDF still reads 1, 2, 3.
-    draft = ("## Results\n\nFigure 2 shows the cost.\n\nFigure 1 shows the error.\n\n## Discussion\n\nIt holds.\n\n"
-             "## References\n\n1. A.\n")
-    out, _, _ = _place_figures(draft, STATE)  # type: ignore[arg-type]
+    # Beside the text that names it wins over number order; the write node then numbers the figures by place.
+    out, _, _ = _place_figures(OUT_OF_ORDER, STATE)  # type: ignore[arg-type]
     lines = out.split("\n")
     cost, error = _embed_line(out, "cost_by_size.png"), _embed_line(out, "error_vs_step.png")
     assert lines.index("Figure 2 shows the cost.") < cost < lines.index("Figure 1 shows the error.") < error
     assert error < _embed_line(out, "spread_map.png") < lines.index("## Discussion")
+
+
+def test_the_figures_are_numbered_in_the_order_they_stand_and_every_reference_with_them(tmp_path: Path) -> None:
+    from core.engine import _keep_figure_numbers, _number_figures_by_place
+
+    state = {**STATE, "quest_root": str(tmp_path)}
+    placed, _, _ = _place_figures(OUT_OF_ORDER, state)  # type: ignore[arg-type]
+    out, by_place = _number_figures_by_place(placed, state)  # type: ignore[arg-type]
+    assert by_place == {"cost_by_size.png": 1, "error_vs_step.png": 2, "spread_map.png": 3}
+    lines = out.split("\n")
+    assert lines[_embed_line(out, "cost_by_size.png")].startswith("![**Figure 1.** seconds.")
+    assert lines[_embed_line(out, "error_vs_step.png")].startswith("![**Figure 2.** error.")
+    assert "Figure 1 shows the cost." in lines and "Figure 2 shows the error." in lines
+    assert "As Figures 2 and 1 show, it holds." in lines  # a list names the same two figures
+    assert "{{figure:fig2_extra:drawn @ series=a, panel=1}}" in lines, "FI's marks name a file, never a number"
+    # the PDF's own renumbering by place now has nothing left to do
+    from generation._figure_captions import _figure_order
+    assert _figure_order(lines) is None
+    # with the numbers kept, placing and numbering the figures again gives the same paper
+    _keep_figure_numbers(tmp_path, by_place)
+    again, _, _ = _place_figures(out, state)  # type: ignore[arg-type]
+    assert again == out and _number_figures_by_place(again, state) == (out, by_place)  # type: ignore[arg-type]
+
+
+def test_a_paper_in_number_order_is_left_as_it_is() -> None:
+    from core.engine import _keep_figure_numbers, _number_figures_by_place
+
+    placed, _, _ = _place_figures(DRAFT, STATE)  # type: ignore[arg-type]
+    assert _number_figures_by_place(placed, STATE) == (placed, _figure_numbers(STATE))  # type: ignore[arg-type]
+
+
+def test_every_reader_uses_the_numbers_the_placed_paper_gave_while_the_figures_are_the_same(tmp_path: Path) -> None:
+    from core.engine import _keep_figure_numbers, _number_figures_by_place
+
+    state = {**STATE, "quest_root": str(tmp_path)}
+    _keep_figure_numbers(tmp_path, {"cost_by_size.png": 1, "error_vs_step.png": 2, "spread_map.png": 3})
+    assert _figure_numbers(state) == {"cost_by_size.png": 1, "error_vs_step.png": 2, "spread_map.png": 3}
+    assert "- Figure 1: figures/cost_by_size.png" in _figure_list_for_prompt(state)  # type: ignore[arg-type]
+    # another set of figures is numbered from the plan again
+    other = {**state, "figures": ["error_vs_step.png", "cost_by_size.png"]}
+    assert _figure_numbers(other) == {"error_vs_step.png": 1, "cost_by_size.png": 2}
+    assert _figure_numbers(STATE) == {"error_vs_step.png": 1, "cost_by_size.png": 2, "spread_map.png": 3}
 
 
 def test_placement_and_the_renderer_read_the_same_figure_numbers_from_a_reference() -> None:
@@ -327,6 +371,37 @@ def test_the_write_node_puts_a_figure_its_draft_refers_to_only_by_fis_mark_besid
     # the figures the draft never refers to close the results, before the discussion
     for name in ("cost_by_size.png", "spread_map.png"):
         assert next(i for i, ln in enumerate(lines) if f"](figures/{name})" in ln) < lines.index("## Discussion")
+
+
+def test_the_paper_the_slides_and_the_poster_give_each_figure_the_number_of_its_place(tmp_path: Path) -> None:
+    from generation._paper_figures import paper_figure_set
+
+    eng = _engine(tmp_path)
+    state = _quest(tmp_path, _record(_panel()))
+    (tmp_path / "paper").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "figures").mkdir(exist_ok=True)
+    for name in FIGURES:
+        (tmp_path / "figures" / name).write_bytes(b"png")
+    draft = ("# T\n\n## Abstract\n\nA study.\n\n## Results\n\n### Cost\n\nFigure 2 shows the time each size took.\n\n"
+             "### Accuracy\n\n{{figure:error_vs_step:drawn @ series=error, panel=1}}\n\n## Discussion\n\nIt holds.\n")
+
+    async def fake_chat(prompt, *, node=None, temperature=None):  # noqa: ANN001
+        return draft
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    eng._writing_skills_block = lambda state: ""  # type: ignore[assignment]
+    eng._resolve_write_persona = lambda state: ""  # type: ignore[assignment]
+    patch = asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0, **state}))  # type: ignore[arg-type]
+
+    paper = Path(patch["paper_md"]).read_text(encoding="utf-8")
+    import re as _re
+    captions = [(int(n), name) for n, name in _re.findall(r"!\[\*\*Figure (\d+)\.\*\*[^\n]*?\]\(figures/([^)\s]+)\)", paper)]
+    assert captions == [(1, "cost_by_size.png"), (2, "error_vs_step.png"), (3, "spread_map.png")]
+    assert "Figure 1 shows the time each size took." in paper
+    numbers = json.loads((tmp_path / ".fi" / "figure_numbers.json").read_text(encoding="utf-8"))
+    assert numbers == {name: n for n, name in captions}
+    _shown, slide_numbers = paper_figure_set(paper, FIGURES, {**state, "quest_root": str(tmp_path)}, tmp_path)
+    assert slide_numbers == {"error_vs_step.png": 2}, "the slides and the poster print the paper's number"
 
 
 # ---- after the first review -----------------------------------------------------------------------------------------
