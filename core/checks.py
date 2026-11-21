@@ -718,8 +718,8 @@ CHECKS: tuple[Check, ...] = (
           'changes the design (repeated ones not counted again).'),
     Check('run_trial_aggregates', 'core.run_estimate', 'pilot_problems',
           'execute', 'measured', 'repair',
-          "A run_trial in simulate.py that enters run_cell and draws random numbers there (FI's record of one call "
-          'of it) is sent back to the code step before timing.'),
+          "A run_trial in simulate.py that enters run_cell (FI's record of one call of it) is sent back to the "
+          'code step before timing.'),
     Check('pilot_metric_undefined', 'core.run_estimate', 'undefined_metrics',
           'execute', 'measured', 'stop',
           'A protocol metric that is not a number in any pilot trial is sent back for repair '
@@ -1055,7 +1055,7 @@ CHECKS: tuple[Check, ...] = (
           'unchanged-result judgements'),
     Check('run_trial_is_one_trial', 'core.trial_runner', 'trial_aggregates',
           'execute', 'measured', 'repair',
-          "run_trial that enters run_cell and draws random numbers there (a mean over trials), told from FI's own "
+          "run_trial that enters run_cell (the setting's number, a mean over trials), told from FI's own "
           'record of one call of it (not from the code, not from two seeds); sent back to the code step'),
     Check('trial_no_success', 'core.trial_runner', 'TrialsRunner.execute',
           'execute', 'own_record', 'repair',

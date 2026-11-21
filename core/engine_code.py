@@ -3333,9 +3333,8 @@ class CodeStageMixin:
 
     async def _simulation_entry_fault(self, state: QuestState, new_code: str) -> str:
         """The checks of the study's entry (without the analysis gate). Two facts, both from FI's own calls
-        of the code: a ``run_trial`` that FI called once on the plan's first setting and that entered ``run_cell`` and
-        drew random numbers there is a mean over trials, not one trial (the record of that call decides, never the shape
-        of the code); and the function FI
+        of the code: a ``run_trial`` that FI called once on the plan's first setting and that entered ``run_cell``
+        is the setting's number, not one trial (the record of that call decides, never the shape of the code); and the function FI
         calls for the study, called once on that setting within the small run's time, must return at least one of the
         study's headline results (FI's record of the plan), or a repair that routes every setting to a check branch
         leaves a study with no result."""

@@ -433,66 +433,9 @@ HARNESS_SOURCE = Path(_in_run.__file__).read_text(encoding="utf-8") + "\n" + LOA
 #: file of its own, used for that one call only, so the harness the study's trials run under (whose text is part of every
 #: key of a stored record) is not changed. Standard library only. After the study is loaded, ``run_cell`` is changed in place
 #: (its code is swapped for a call of the counter, so every way of reaching it, a name, an alias, a table, ``getattr``, an
-#: import, ends in the counter), and each random generator the study makes (``random.Random``, ``numpy.random.default_rng``,
-#: ``numpy.random.RandomState``) or shares (the global ones) is remembered. The row of the call then says how often
-#: ``run_cell`` was entered and how many generators were drawn from while it ran (a generator whose state moved on; the first
-#: 256 generators a run makes are watched). A random number made another way (a generator of the study's own writing, ``torch``) is not seen.
+#: import, ends in the counter). The row of the call then says how often ``run_cell`` was entered.
 AGGREGATE_SPY_SOURCE = r'''
-_fi_rec = {"entered": 0, "drew": 0, "patched": None}
-_fi_rngs = []
-
-def _fi_sig(g):
-    try:
-        import random as _r
-        if isinstance(g, _r.Random):
-            return repr(g.getstate())
-        if hasattr(g, "bit_generator"):
-            return repr(g.bit_generator.state)
-        if hasattr(g, "get_state"):
-            st = g.get_state()
-            return repr((st[0], st[1].tobytes(), st[2:]))
-    except Exception:
-        return None
-    return None
-
-def _fi_remember(g):
-    if len(_fi_rngs) < 256:  # a study that makes a generator per trial would otherwise keep them all
-        _fi_rngs.append([g, _fi_sig(g)])
-
-def _fi_install_rngs():
-    import random as _r
-    _init = _r.Random.__init__
-    def _random_init(self, *a, **k):
-        _init(self, *a, **k)
-        _fi_remember(self)
-    _r.Random.__init__ = _random_init
-    _fi_remember(_r._inst)
-    try:
-        import numpy.random as _npr
-    except Exception:
-        return
-    _make = _npr.default_rng
-    def _default_rng(*a, **k):
-        g = _make(*a, **k)
-        _fi_remember(g)
-        return g
-    _npr.default_rng = _default_rng
-    base = getattr(_npr, "RandomState", None)
-    try:
-        class _Meta(type):
-            def __instancecheck__(cls, obj):  # a RandomState made elsewhere (scipy, the global one) is still one
-                return isinstance(obj, base)
-
-        def _state_init(self, *a, **k):
-            base.__init__(self, *a, **k)
-            _fi_remember(self)
-        _npr.RandomState = _Meta("RandomState", (base,), {"__init__": _state_init})
-    except Exception:
-        pass
-    try:
-        _fi_remember(_npr.mtrand._rand)
-    except Exception:
-        pass
+_fi_rec = {"entered": 0, "patched": None}
 
 def _fi_patch_cell(mod):
     import types
@@ -505,20 +448,10 @@ def _fi_patch_cell(mod):
         return
     orig = types.FunctionType(f.__code__, f.__globals__, f.__name__, f.__defaults__, f.__closure__)
     orig.__kwdefaults__ = f.__kwdefaults__
-    depth = [0]
 
     def hook(*a, **k):
         _fi_rec["entered"] += 1
-        if depth[0]:
-            return orig(*a, **k)
-        depth[0] += 1
-        for item in _fi_rngs:
-            item[1] = _fi_sig(item[0])
-        try:
-            return orig(*a, **k)
-        finally:
-            depth[0] -= 1
-            _fi_rec["drew"] += sum(1 for g, before in _fi_rngs if before is not None and _fi_sig(g) != before)
+        return orig(*a, **k)
     try:
         f.__globals__["__fi_cell_hook__"] = hook
         scope = {}
@@ -534,10 +467,6 @@ def _fi_patch_cell(mod):
         except Exception:
             _fi_rec["patched"] = False
 
-try:
-    _fi_install_rngs()
-except Exception:
-    pass
 _fi_load_plain = _fi_load_study
 
 def _fi_load_study(path):
@@ -1925,13 +1854,13 @@ class _Module:
 
 def trial_aggregates(source: str, quest_root: Path | str | None = None) -> str:
     """A plain sentence when ``run_trial`` in ``source`` is not one trial because it runs ``run_cell``, the setting's own
-    number (the mean over many trials for a random study), and ``""`` otherwise. FI's harness calls ``run_trial`` once per
+    number (the mean over many trials for a random study, whatever random source it draws from), and ``""`` otherwise. FI's harness calls ``run_trial`` once per
     trial and keeps each result, so a ``run_trial`` that returns ``run_cell``'s number makes every trial as long as a whole
     cell (the study would not fit its time) and every kept "trial" a mean of many (understated standard errors). The
     converse, a ``run_cell`` that calls ``run_trial``, is how a cell is built and is not flagged.
 
     With ``quest_root`` what decides is FI's own record of a call of ``run_trial`` (:func:`settle_aggregate`, a checking run
-    for this text of the file): ``run_cell`` was entered and a random generator was drawn from inside it. With no record
+    for this text of the file): ``run_cell`` was entered. With no record
     (nothing was called yet) it names nothing, and :func:`trial_needs_call_record` says the call is still to be made.
     Without ``quest_root`` only the reading of the code, which is not run, answers (the disclosure of where to look, and
     what a test of the reading uses): ``run_trial`` reaches ``run_cell`` by a call or a name, directly or through the file's
@@ -1991,13 +1920,12 @@ async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, 
                            thresholds: dict[str, Any] | None = None, log: Any = None,
                            kind: str = "scan") -> bool | None:
     """Whether ``run_trial`` runs one trial. FI calls it once on ``cell`` in a checking run, in a new process whose harness
-    records what the call reaches (:data:`AGGREGATE_SPY_SOURCE`): how often ``run_cell`` was entered and how many random
-    generators were drawn from while it ran. ``False`` (it aggregates) when ``run_cell`` was entered and a generator was
-    drawn from inside it, that is, the number returned is a mean over trials FI cannot see one by one; ``True`` when
-    ``run_cell`` was not entered (one draw, or a call that only some inputs reach), or was entered without any random draw
-    seen (a setting without randomness, whose ``run_cell`` is its one trial). ``None`` when the call could not be finished
-    or ``run_cell`` could not be watched: a guess does not stand in for a record, so nothing is refused (and the log says
-    so). The answer is kept in :data:`ONE_TRIAL_RECORD` for this text of the file."""
+    records what the call reaches (:data:`AGGREGATE_SPY_SOURCE`): how often ``run_cell`` was entered. ``False`` (it
+    aggregates) when ``run_cell`` was entered, whatever random source it uses or none: the number returned is the setting's
+    own number, not one trial. ``True`` when ``run_cell`` was not entered (one draw, or a call that only some inputs reach).
+    ``None`` when the call could not be finished or ``run_cell`` could not be watched: a guess does not stand in for a
+    record, so nothing is refused (and the log says
+        so). The answer is kept in :data:`ONE_TRIAL_RECORD` for this text of the file."""
     path = Path(module) if Path(module).is_absolute() else Path(quest_root) / module
     module = _relative_module(quest_root, path)
     try:
@@ -2022,22 +1950,20 @@ async def settle_aggregate(executor: Any, python: Path | str, quest_root: Path, 
             log.warning("[execute] FI could not record whether run_trial runs one trial (calling it once on the plan's first "
                         "setting gave no usable record within %s s: it did not finish, raised an error, or run_cell could "
                         "not be watched); the reading of the code alone does not refuse it", timeout_s)
-        _write_one_trial(quest_root, source, None, 0, 0)
+        _write_one_trial(quest_root, source, None, 0)
         return None
-    entered, drew = int(seen.get("entered") or 0), int(seen.get("drew") or 0)
-    aggregates = entered > 0 and drew > 0
-    if entered > 0 and drew == 0 and log is not None:
-        log.info("[execute] run_trial entered run_cell without a random draw FI can see: taken as a setting without randomness")
-    _write_one_trial(quest_root, source, aggregates, entered, drew)
+    entered = int(seen.get("entered") or 0)
+    aggregates = entered > 0
+    _write_one_trial(quest_root, source, aggregates, entered)
     return not aggregates
 
 
-def _write_one_trial(quest_root: Path | str, source: str, aggregates: bool | None, entered: int, drew: int) -> None:
+def _write_one_trial(quest_root: Path | str, source: str, aggregates: bool | None, entered: int) -> None:
     try:
         record = Path(quest_root) / ONE_TRIAL_RECORD
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(json.dumps({"sha256": code_inputs_sha(quest_root, source), "aggregates": aggregates,
-                                      "run_cell_entered": entered, "generators_drawn": drew}), encoding="utf-8")
+                                      "run_cell_entered": entered}), encoding="utf-8")
     except OSError:
         pass
 
