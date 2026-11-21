@@ -64,7 +64,7 @@ def union(a: "Effect", b: "Effect") -> "Effect":
                   named=a.named or b.named, empty=a.empty or b.empty)
 
 
-_BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
+_BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint", "setattr", "delattr", "globals", "locals", "vars"}
 #: Methods of strings and mappings: a call to one is not a call into the study's own code.
 _PLAIN_METHODS = frozenset({"get", "items", "keys", "values", "join", "lower", "upper", "strip", "split", "format", "startswith",
                             "endswith", "count", "index", "append", "extend", "copy"})
@@ -110,15 +110,26 @@ def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> 
     unsafe."""
     values: dict[str, list[ast.AST | None]] = {}
 
+    tainted: set[str] = set()  # imported names the test assigns to, or assigns an attribute or item of (``derive.RESULTS = model``)
+
     def bind(target: ast.AST, value: ast.AST | None) -> None:
         if isinstance(target, ast.Name):
             values.setdefault(target.id, []).append(value)
+            if target.id in bound:
+                tainted.add(target.id)
         elif isinstance(target, (ast.Tuple, ast.List)):
-            for t in target.elts:
-                bind(t, value)
+            matching = (isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts)
+                        and not any(isinstance(x, ast.Starred) for x in (*value.elts, *target.elts)))
+            for i, t in enumerate(target.elts):
+                bind(t, value.elts[i] if matching else None)  # a shape that does not match proves nothing
         elif isinstance(target, ast.Starred):
             bind(target.value, None)
-        # an attribute or a subscript target binds no name
+        else:  # an attribute or an item: it binds no name, but it changes what the root name holds
+            root: ast.AST = target
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in bound:
+                tainted.add(root.id)
 
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign):
@@ -132,6 +143,9 @@ def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> 
             bind(n.target, n.iter)
         elif isinstance(n, ast.withitem) and n.optional_vars is not None:
             bind(n.optional_vars, None)
+        elif isinstance(n, ast.Delete):
+            for t in n.targets:
+                bind(t, None)
         elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             if not isinstance(n, ast.Lambda):
                 values.setdefault(n.name, []).append(None)
@@ -154,12 +168,19 @@ def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> 
     def plain(node: ast.AST | None) -> bool:
         if node is None:
             return False
-        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp, ast.SetComp,
-                             ast.DictComp, ast.GeneratorExp)):
+        if isinstance(node, (ast.Constant, ast.JoinedStr)):
             return True
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return all(plain(e) for e in node.elts)  # a container is a plain value only when every element is
+        if isinstance(node, ast.Dict):
+            return all(k is not None and plain(k) for k in node.keys) and all(plain(v) for v in node.values)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return plain(node.elt)
+        if isinstance(node, ast.DictComp):
+            return plain(node.key) and plain(node.value)
         if isinstance(node, ast.Name):
             if node.id in bound:
-                return node.id in constants  # a frame constant imported by name (``from derive import RESULTS``)
+                return node.id in constants and node.id not in tainted  # a frame constant imported by name (``from derive import RESULTS``)
             return node.id in values and node.id in safe
         if isinstance(node, ast.Attribute):
             chain: ast.AST = node
@@ -167,11 +188,11 @@ def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> 
             while isinstance(chain, ast.Attribute):
                 first = chain.attr
                 chain = chain.value
-            return isinstance(chain, ast.Name) and chain.id in bound and first in constants
+            return isinstance(chain, ast.Name) and chain.id in bound and chain.id not in tainted and first in constants
         if isinstance(node, ast.Subscript):
             return plain(node.value)
         if isinstance(node, ast.BinOp):
-            return plain(node.left)
+            return plain(node.left) and plain(node.right)
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Name):
@@ -232,7 +253,7 @@ def read_test(src: str) -> TestShape | None:
             first = base.attr
             base = base.value
         if isinstance(base, ast.Name) and base.id in bound:
-            if first in constants or (not first and base.id in constants):
+            if (first in constants or (not first and base.id in constants)) and is_value(f.value):
                 method_calls.add(f.attr)  # a method of a value FI wrote from the plan (``derive.RESULTS.get``)
             else:
                 module_calls.add((bound[base.id], f.attr))

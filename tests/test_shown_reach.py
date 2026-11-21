@@ -299,6 +299,11 @@ _NOT_PLAIN = {
     "fixture": ("import derive\nimport pytest\n\n\n@pytest.fixture\ndef study():\n    import model\n    return model\n\n\n"
                 "def test_x(study):\n    assert study.count(1) == %s\n"),
     "relative import": "import derive\nfrom . import model\n\n\ndef test_x():\n    assert model.count(1) == %s\n",
+    "tuple unpacking": "import derive\nimport model\n\n\ndef test_x():\n    _f, study = derive.RESULTS, model\n    assert study.count(1) == %s\n",
+    "loop over a sum with a module": ("import derive\nimport model\n\n\ndef test_x():\n    for study in derive.RESULTS + [model]:\n"
+                                      "        assert study.count(1) == %s\n"),
+    "item of a container with a module": "import derive\nimport model\n\n\ndef test_x():\n    assert [model][0].count(1) == %s\n",
+    "frame constant rebound": "import derive\nimport model\n\nderive.RESULTS = model\n\n\ndef test_x():\n    assert derive.RESULTS.count(1) == %s\n",
     "import alias of a function": "import derive\nfrom model import count as total\n\n\ndef test_x():\n    assert total(1) == %s\n",
 }
 
