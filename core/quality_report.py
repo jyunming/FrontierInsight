@@ -534,6 +534,14 @@ def _plan_problems(q: _Quest) -> list[dict[str, str]]:
                             ".fi/protocol_part_asked.json"))
     for part, rec in _dict(q.contract_parts.get("parts")).items():
         rec = _dict(rec)
+        for key, what in _dict(rec.get("left_out") if rec.get("valid") else None).items():
+            # an extra answer of the roles or figures question left out alone: the part itself, and the plan's form, stand
+            from . import contract_parts as _cparts
+
+            names = ", ".join(f"`{i}`" for i in _dict(what)) if isinstance(what, dict) else ""
+            out.append(_problem("plan", f"the plan was not given {_cparts.EXTRA_WORDS.get(key, key)}"
+                                + (f" for {names}" if names else "") + " in a form FI could use; left out",
+                                "FI's plan check", "disclosed", ".fi/contract_parts.json"))
         if rec and not rec.get("valid"):
             from . import contract_parts as _cparts
 
@@ -878,7 +886,13 @@ def _scale_problems(root: Any) -> list[dict[str, str]]:
 def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     from . import figure_text_check as _ftc
+    from . import setup_flow as _setup_flow
+
     out.extend(_scale_problems(q.root))
+    # FI's set-up figure was not drawn (records too thin, or a fault): the paper goes without it, said once.
+    no_setup = _setup_flow.quality_line(q.root)
+    if no_setup:
+        out.append(_problem("paper", no_setup, "FI's set-up figure", "disclosed", f".fi/{_setup_flow.RECORD}"))
 
     # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
     # finding here is FI's own fault, disclosed; it stops nothing).
@@ -1666,7 +1680,7 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
               ("code_findings", "Open points in the code that produced the results"),
-              ("page_limit", "Page limit"))
+              ("page_limit", "Page limit and supplement"))
     parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
     check = records.get("paper_check") or {}
     unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]

@@ -155,16 +155,21 @@ def paper_figure_set(
     For a quest with call records (FI's record of what a figure draws) the list is the figures the paper itself embeds,
     an empty list included: a figure the paper left out is not added back, and there is no "every file" fallback. The
     numbers returned are those of the figures with a call record: only those get the paper's number and caption. A quest
-    with no call record (an older one) gets :func:`figures_in_paper` and no numbers, as before."""
+    with no call record (an older one) gets :func:`figures_in_paper` and no numbers, as before. FI's set-up figure
+    (``core.setup_flow``) gets the paper's number and caption like a figure with a call record: FI drew it and wrote its
+    caption from its own records."""
+    from core import setup_flow as _setup_flow
+
     shown = figures_in_paper(paper_md, files)
     state = _paper_state(raw_state, quest_root)
-    if not state.get("figure_records"):
+    setup = _setup_flow.shown(quest_root)
+    if not state.get("figure_records") and not setup:
         return shown, {}
     from core import figure_claims as _figure_claims
     from core.engine import _figure_numbers
 
     numbers = _figure_numbers(state)
-    with_calls = {name for name in numbers if _figure_claims.load_calls(quest_root, Path(name).stem)}
+    with_calls = {name for name in numbers if name == setup or _figure_claims.load_calls(quest_root, Path(name).stem)}
     if with_calls:
         placed = {m.group(1) for m in _PLACED_FIGURE.finditer(paper_md)}
         shown = [name for name in files if name in placed and name in numbers]

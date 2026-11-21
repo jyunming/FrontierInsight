@@ -2222,8 +2222,9 @@ def without_marks(markdown: str) -> str:
 def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "",
                full: bool = False) -> str:
     """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
-    FI's records, :func:`run_facts_text`); ``""`` when there is none. A block a paper over its page limit sent to the
-    supplement (core/supplement.py) is its pointer there, unless ``full`` (what the supplement holds)."""
+    FI's records, :func:`run_facts_text`); ``""`` when there is none. A block FI sent to the supplement
+    (core/supplement.py: the tables always, the Limitations for a page limit) is its pointer there, unless ``full``
+    (what the supplement holds)."""
     if not full and name in (_supplement.TABLES, _supplement.LIMITATIONS) and name in _supplement.moved(quest_root):
         if not block_text(quest_root, name, full=True):
             return ""
@@ -2439,9 +2440,10 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
 
 
 def page_limit_text(quest_root: Path | str) -> str:
-    """The sentence for the quality report when the finished paper is longer than the topic's page limit, and the one
-    that says which of FI's own parts it moved to the supplement for that limit (core/supplement.py); ``""`` with
-    neither. The limit is a guideline: the paper does not carry this sentence (QUALITY.md and run.log do)."""
+    """The sentence for the quality report when the finished paper is longer than the topic's page limit, and the ones
+    that say which of FI's own parts are in the supplement (core/supplement.py): its tables of every setting and its
+    Further reading always, its Limitations for the page limit; ``""`` with neither. The limit is a guideline: the
+    paper does not carry these sentences (QUALITY.md and run.log do)."""
     pages = _read(Path(quest_root), str(PAGE_RECORD))
     over = ""
     if (isinstance(pages, dict) and pages.get("final") and isinstance(pages.get("pages"), int)
@@ -2452,10 +2454,19 @@ def page_limit_text(quest_root: Path | str) -> str:
         return over
     names = {_supplement.TABLES: "its tables of every setting", _supplement.LIMITATIONS: "its Limitations (one line "
              "stays in the paper)", _supplement.FURTHER_READING: "its Further reading"}
-    listed = [names[m] for m in moved]
-    said = listed[0] if len(listed) == 1 else ", ".join(listed[:-1]) + " and " + listed[-1]
-    return " ".join(s for s in (over, _sentence(f"For the page limit, FI moved {said} to the supplement, "
-                                                f"`{_supplement.SHOWN}`, unchanged")) if s)
+
+    def listed(parts: list[str]) -> str:
+        said = [names[m] for m in parts]
+        return said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1]
+
+    always = [m for m in moved if m in _supplement.ALWAYS]
+    for_limit = [m for m in moved if m not in _supplement.ALWAYS]
+    kept = _sentence(f"FI keeps {listed(always)} in the supplement, `{_supplement.SHOWN}`, unchanged, as it does "
+                     "for every paper") if always else ""
+    limit = (_sentence(f"For the page limit, FI moved {listed(for_limit)} there too") if always else
+             _sentence(f"For the page limit, FI moved {listed(for_limit)} to the supplement, `{_supplement.SHOWN}`, "
+                       "unchanged")) if for_limit else ""
+    return " ".join(s for s in (over, kept, limit) if s)
 
 
 def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: bool) -> None:

@@ -1,10 +1,12 @@
-"""A paper over its page limit moves FI's own parts to the supplement, in a fixed order, without a model call.
+"""FI's own parts go to the supplement, in a fixed order, without a model call.
 
-On 16 stored papers (limit 4) every paper was over it (5-9 pages, mean 6.9); moving FI's own tables of every setting,
-its Limitations with the writer's own paragraphs of that section, and its Further reading gave 4.75 (6 of 16 within). The review now moves them, in that order, to
-``paper/supplement.md`` until the paper fits: the tables leave a pointer, the Limitations keep one line (how many things
-FI recorded, each part of the topic the study did not do by name, and where they all are), the References stay. The
-decision is a record FI's blocks follow, so a later write of the blocks keeps it, and a new draft is decided again.
+Every paper, with or without a page limit, keeps FI's tables of every setting (a pointer stays) and its Further reading
+(the References keep one line saying how many pages it lists and where) in ``paper/supplement.md``. A paper over its
+page limit then moves its Limitations too (one line stays: how many things FI recorded, each part of the topic the study
+did not do by name, and where they all are), until it fits; the References stay. On 16 stored papers (limit 4) every
+paper was over it (5-9 pages, mean 6.9); moving FI's own parts with the writer's own Limitations paragraphs gave 4.75
+(6 of 16 within). The decision is a record FI's blocks follow, so a later write of the blocks keeps it; a new draft gets
+everything back and is decided again, the parts every paper keeps in the supplement going there at once.
 """
 
 from __future__ import annotations
@@ -73,68 +75,232 @@ def _model_calls(eng: Engine) -> list[str]:
     return calls
 
 
-def test_the_parts_move_in_order_and_stop_as_soon_as_the_paper_fits(tmp_path: Path, monkeypatch) -> None:
+def test_the_parts_every_paper_keeps_in_the_supplement_move_before_the_page_check(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
     calls = _model_calls(eng)
-    seen = _pages(monkeypatch, 2)  # 2 + 2 + 1 + 1 = 6; tables out 4: within the limit of 4
+    seen = _pages(monkeypatch, 3)  # 3 + 2 + 1 + 1 = 7 with everything in; tables and Further reading out: 4, the limit
     patch = _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4, "supplement": ["results_table"]}
-    assert sup.moved(tmp_path) == ["results_table"]
+    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}, "the page check moved nothing more"
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
     assert "| a = 1 |" not in text and sup.table_pointer() in text
+    assert "## Further reading" not in text and sup.further_pointer(2) in text
     assert "held the second factor fixed" in text, "the Limitations stay: the paper fits without moving them"
-    assert "## Further reading" in text and "## References" in text
-    assert "| a = 1 |" in (tmp_path / sup.FILE).read_text(encoding="utf-8")
-    assert len(seen) == 2
+    assert "## References\n\n1. Kermack, W. O. (1927). A contribution." in text
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "| a = 1 |" in shown and "- [W1] Page 1. https://example.org/1" in shown
+    assert len(seen) == 1, "measured once, with the two parts already out"
     assert [c for c in calls if c != "review"] == [], "no model call for the move"
 
 
 def test_limitations_keep_one_line_that_names_the_part_of_the_topic_not_done(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
-    _pages(monkeypatch, 3)  # 7; tables out 5; Limitations out 4
+    _pages(monkeypatch, 4)  # tables and Further reading out: 5; Limitations out 4
     patch = _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
-    assert patch["review"]["page_limit"]["supplement"] == ["results_table", "limitations"]
+    assert patch["review"]["page_limit"]["supplement"] == ["limitations"]
+    assert sup.moved(tmp_path) == ["results_table", "limitations", "further_reading"]
     assert "## Limitations" in text
     line = sup.limitations_pointer(1, [TOPIC_PART])
     assert line in text and TOPIC_PART in line and sup.SHOWN in line
-    assert "## Further reading" in text and "## References" in text
+    assert "## Further reading" not in text and "## References" in text
     supplement = (tmp_path / sup.FILE).read_text(encoding="utf-8")
     # A known disclosure is in the supplement word for word.
     assert "The study held the second factor fixed." in supplement
     assert supplement.index("## Results for every setting") < supplement.index("## Limitations")
-    # QUALITY.md says what moved.
-    assert "its tables of every setting and its Limitations" in pf.page_limit_text(tmp_path)
+    assert "within its page limit of 4 pages" in supplement
+    # QUALITY.md says what is there and why.
+    said = pf.page_limit_text(tmp_path)
+    assert "FI keeps its tables of every setting and its Further reading in the supplement" in said
+    assert "For the page limit, FI moved its Limitations" in said
 
 
 def test_a_paper_still_over_with_everything_moved_keeps_them_moved(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
-    _pages(monkeypatch, 6)  # 10; with all three out 6, still over
+    _pages(monkeypatch, 6)  # tables and Further reading out: 7; with the Limitations out 6, still over
     eng._trim_body_to_fit = lambda *a, **k: asyncio.sleep(0, None)  # type: ignore[method-assign]
     patch = _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
-    assert patch["review"]["page_limit"]["supplement"] == ["results_table", "limitations", "further_reading"]
+    assert patch["review"]["page_limit"]["supplement"] == ["limitations"]
+    assert sup.moved(tmp_path) == ["results_table", "limitations", "further_reading"]
     assert patch["review"]["page_limit"]["pages"] == 6
     assert "## Further reading" not in text and "## References" in text
     supplement = (tmp_path / sup.FILE).read_text(encoding="utf-8")
     assert "- [W1] Page 1. https://example.org/1" in supplement and "- [W2] Page 2." in supplement
     assert sup.further_labels(tmp_path) == ["W1", "W2"]
     said = pf.page_limit_text(tmp_path)
-    assert "over the 4-page limit" in said and "its Further reading to the supplement" in said
+    assert "over the 4-page limit" in said and "its Further reading in the supplement" in said
 
 
-def test_a_paper_within_the_limit_is_not_touched(tmp_path: Path, monkeypatch) -> None:
+def test_a_paper_within_the_limit_moves_only_what_every_paper_moves(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
-    before = paper.read_bytes()
-    seen = _pages(monkeypatch, 0)  # 4 pages as written
+    seen = _pages(monkeypatch, 0)  # 1 page with the two parts out
     patch = _review(eng, tmp_path)
-    assert paper.read_bytes() == before and len(seen) == 1
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}
-    assert not (tmp_path / sup.RECORD).exists() and not (tmp_path / sup.FILE).exists()
+    text = paper.read_text(encoding="utf-8")
+    assert len(seen) == 1 and patch["review"]["page_limit"] == {"pages": 1, "limit": 4}
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
+    assert "held the second factor fixed" in text and "| a = 1 |" not in text
+
+
+NO_LIMIT = "Outbreaks in a small population, written up as a paper."
+
+
+def test_without_a_page_limit_the_tables_and_further_reading_go_to_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    calls = _model_calls(eng)
+    seen = _pages(monkeypatch, 0)
+    patch = _review(eng, tmp_path)
+    text = paper.read_text(encoding="utf-8")
+    assert "page_limit" not in patch["review"] and seen == [], "no limit: nothing is rendered"
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
+    assert sup.read(tmp_path)["limit"] is None
+    assert "| a = 1 |" not in text and sup.table_pointer() in text
+    assert "## Further reading" not in text and "[W1]" not in text and sup.further_pointer(2) in text
+    assert "held the second factor fixed" in text, "the Limitations move only for a page limit"
+    assert "## References\n\n1. Kermack, W. O. (1927). A contribution." in text
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "| a = 1 |" in shown and "- [W1] Page 1." in shown and "- [W2] Page 2." in shown
+    assert "page limit" not in shown and "always keeps" in shown
+    assert "page limit" not in pf.page_limit_text(tmp_path)
+    assert "FI keeps its tables of every setting and its Further reading" in pf.page_limit_text(tmp_path)
+    assert [c for c in calls if c != "review"] == [], "no model call for the move"
+
+
+def test_without_a_page_limit_a_new_draft_after_a_reset_keeps_them_out(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
+    # the write step's reset gives the writer everything back...
+    eng._supplement_reset({}, paper)
+    text = paper.read_text(encoding="utf-8")
+    assert "| a = 1 |" in text and "- [W2] Page 2." in text and not sup.FURTHER_POINTER.search(text)
+    assert not (tmp_path / sup.RECORD).exists()
+    # ...and the new draft it writes goes through the review: both parts go out again
+    _put(eng, tmp_path, DRAFT.replace("What it means.", "What the new draft says it means."))
+    _review(eng, tmp_path)
+    text = paper.read_text(encoding="utf-8")
+    assert "What the new draft says it means." in text
+    assert "| a = 1 |" not in text and "## Further reading" not in text and sup.further_pointer(2) in text
+    assert text.count("Further reading: ") == 1
+
+
+def test_the_paper_as_delivered_keeps_them_out_without_a_page_limit(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    eng.config.engine.claim_grounding = False  # the citation reading itself is not what this checks
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    # a later step (the citation check's renumbering) rebuilt the References and started a new Further reading list
+    text = paper.read_text(encoding="utf-8")
+    text = sup.FURTHER_POINTER.sub("", text).rstrip() + "\n\n## Further reading\n\n- [W3] Page 3. https://example.org/3\n"
+    paper.write_text(text, encoding="utf-8")
+    asyncio.run(eng._node_citation_check({"topic": eng.config.topic, "paper_md": str(paper), "review": {}}))  # type: ignore[arg-type]
+    text = paper.read_text(encoding="utf-8")
+    assert "## Further reading" not in text and "| a = 1 |" not in text
+    assert text.count("Further reading: ") == 1 and sup.further_pointer(3) in text
+    assert sup.further_labels(tmp_path) == ["W1", "W2", "W3"]
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert all(f"- [W{n}] Page {n}." in shown for n in (1, 2, 3))
+
+
+def test_a_stop_between_the_move_and_the_supplement_write_still_delivers_the_file(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    # FI stopped after it moved the parts (the record and the pointers are there) and before it wrote the file
+    for part in sup.ALWAYS:
+        moved = [p for p in sup.ALWAYS if p == part or p in sup.moved(tmp_path)]
+        eng._supplement_move({}, paper, part, paper.read_text(encoding="utf-8"), moved, None)
+    (tmp_path / sup.FILE).unlink(missing_ok=True)
+    text = paper.read_text(encoding="utf-8")
+    assert sup.table_pointer() in text and sup.further_pointer(2) in text
+    # the resumed step finds nothing new to move, and still leaves the file the pointers name
+    assert eng._supplement_always({}, paper, None) == []
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "| a = 1 |" in shown and "- [W1] Page 1." in shown and "- [W2] Page 2." in shown
+    assert paper.read_text(encoding="utf-8") == text
+    # written as it should be, it is not written again
+    before = (tmp_path / sup.FILE).stat().st_mtime_ns
+    real = Path.write_text
+
+    def no_rewrite(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        assert self != tmp_path / sup.FILE, "the supplement was written again with the same text"
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", no_rewrite)
+    eng._supplement_always({}, paper, None)
+    assert (tmp_path / sup.FILE).stat().st_mtime_ns == before
+
+
+def test_a_supplement_page_the_text_comes_to_cite_leaves_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert sup.further_labels(tmp_path) == ["W1", "W2"]
+    # a fix of the citation check cites W2 instead of a source that did not say it; the References now list it
+    text = paper.read_text(encoding="utf-8").replace("Text [1].", "Text [W2].")
+    text = text.replace("1. Kermack, W. O. (1927). A contribution.", "- [W2] Page 2. https://example.org/2")
+    paper.write_text(text, encoding="utf-8")
+    eng._supplement_always({}, paper, None)
+    text = paper.read_text(encoding="utf-8")
+    assert sup.further_labels(tmp_path) == ["W1"] and sup.further_pointer(1) in text and text.count("Further reading: ") == 1
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "- [W1] Page 1." in shown and "[W2]" not in shown
+
+
+def test_the_citation_check_may_cite_a_page_that_is_in_the_supplement(tmp_path: Path, monkeypatch) -> None:
+    from core import citation_support as cs
+
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert "[W1]" not in paper.read_text(encoding="utf-8")
+    seen: dict[str, Any] = {}
+    real = cs.Source
+
+    def spy(*a, **k):  # noqa: ANN002, ANN003
+        src = real(*a, **k)
+        seen[src.label] = src.usable
+        return src
+
+    monkeypatch.setattr(cs, "Source", spy)
+    web = {"content": "Page 1 text.", "metadata": {"source": "web_search", "kind": "web_page", "title": "Page 1",
+                                                   "url": "https://example.org/1", "site": "example.org"}}
+    state = {"topic": eng.config.topic, "paper_md": str(paper), "review": {}, "literature": [web]}
+    asyncio.run(eng._check_citations(state))  # type: ignore[arg-type]
+    assert seen.get("W1") is True, "a page the paper lists in its supplement stays usable for a fix"
+
+
+def test_a_tables_block_without_a_table_stays_where_it_is(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path)
+    note = "Results for all 40 settings are in the supplementary table `paper/results_by_setting.csv`."
+    (tmp_path / ".fi" / "results_table.md").write_text(note + "\n", encoding="utf-8")
+    eng._restate_limitations({}, "test", path=paper)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    text = paper.read_text(encoding="utf-8")
+    assert sup.moved(tmp_path) == ["further_reading"]
+    assert note in text and sup.table_pointer() not in text, "the sentence already points to the files"
+
+
+def test_the_supplement_says_why_each_part_is_there() -> None:
+    both = sup.text(None, {sup.TABLES: "| a |", sup.FURTHER_READING: "- [W1] A page."})
+    assert "always keeps" in both and "page limit" not in both
+    limited = sup.text(4, {sup.TABLES: "| a |", sup.LIMITATIONS: "- One thing."})
+    assert "always keeps the paper's tables of every setting here" in limited
+    assert "The Limitations in full moved here to keep the paper within its page limit of 4 pages." in limited
+    assert sup.further_pointer(1) == ("Further reading: 1 web page the text does not cite is listed in the supplement "
+                                      "(`paper/supplement.md`).")
+    assert sup.FURTHER_POINTER.fullmatch(sup.further_pointer(12)) and sup.further_pointer(0) == ""
 
 
 def test_a_new_draft_is_decided_again_with_everything_back(tmp_path: Path, monkeypatch) -> None:
@@ -144,20 +310,20 @@ def test_a_new_draft_is_decided_again_with_everything_back(tmp_path: Path, monke
     _pages(monkeypatch, 6)
     _review(eng, tmp_path)
     assert sup.moved(tmp_path) == ["results_table", "limitations", "further_reading"]
-    # A shorter draft: it fits with all of FI's parts in it.
+    # A shorter draft: it fits with the Limitations in it; the parts every paper keeps in the supplement go there again.
     _pages(monkeypatch, 0)
     patch = _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
-    assert patch["review"]["page_limit"] == {"pages": 4, "limit": 4}
-    assert "| a = 1 |" in text and "held the second factor fixed" in text
-    assert "- [W1] Page 1. https://example.org/1\n- [W2] Page 2. https://example.org/2" in text
-    assert not (tmp_path / sup.RECORD).exists() and not (tmp_path / sup.FILE).exists()
+    assert patch["review"]["page_limit"] == {"pages": 1, "limit": 4}
+    assert "held the second factor fixed" in text
+    assert "| a = 1 |" not in text and "## Further reading" not in text and sup.further_pointer(2) in text
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
 
 
 def test_a_later_write_of_fis_blocks_keeps_the_move(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     # A record changes after the review (a new thing FI states) and the Limitations are written again.
     covered = json.loads((tmp_path / ".fi" / "topic_covered.json").read_text(encoding="utf-8"))
@@ -177,20 +343,35 @@ def test_further_reading_whose_page_the_text_cites_stays(tmp_path: Path, monkeyp
     eng._trim_body_to_fit = lambda *a, **k: asyncio.sleep(0, None)  # type: ignore[method-assign]
     _pages(monkeypatch, 6)
     patch = _review(eng, tmp_path)
-    assert patch["review"]["page_limit"]["supplement"] == ["results_table", "limitations"]
-    assert "## Further reading" in paper.read_text(encoding="utf-8")
+    assert patch["review"]["page_limit"]["supplement"] == ["limitations"]
+    assert sup.moved(tmp_path) == ["results_table", "limitations"]
+    text = paper.read_text(encoding="utf-8")
+    assert "## Further reading" in text and "- [W1] Page 1." in text and not sup.FURTHER_POINTER.search(text)
+
+
+def test_further_reading_whose_page_the_text_cites_stays_without_a_page_limit(tmp_path: Path, monkeypatch) -> None:
+    eng = _engine(tmp_path, topic=NO_LIMIT)
+    paper = _put(eng, tmp_path, DRAFT.replace("Text [1].", "Text [1, W2]."))
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert sup.moved(tmp_path) == ["results_table"]
+    text = paper.read_text(encoding="utf-8")
+    assert "## Further reading" in text and "- [W1] Page 1." in text and not sup.FURTHER_POINTER.search(text)
 
 
 def test_a_render_that_cannot_be_counted_leaves_everything_as_it_was(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path)
+    # what the page check starts from: the parts every paper keeps in the supplement already there
+    assert eng._supplement_always({}, paper, 4) == ["results_table", "further_reading"]
     before = paper.read_bytes()
+    record = sup.read(tmp_path)
     _quiet_log(eng)
-    _pages(monkeypatch, 3, fail_at=3)  # the render after the Limitations moved fails
+    _pages(monkeypatch, 4, fail_at=2)  # the render after the Limitations moved fails
     eng._trim_body_to_fit = lambda *a, **k: asyncio.sleep(0, None)  # type: ignore[method-assign]
     patch = _review(eng, tmp_path)
     assert paper.read_bytes() == before
-    assert not (tmp_path / sup.RECORD).exists() and not (tmp_path / sup.FILE).exists()
+    assert sup.read(tmp_path) == record and (tmp_path / sup.FILE).exists()
     assert "supplement" not in patch["review"]["page_limit"]
 
 
@@ -252,10 +433,10 @@ WRITER_DRAFT = DRAFT.replace("## Limitations\n\n{{limitations}}",
 def test_the_writers_own_limitations_paragraph_moves_with_fis(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path, WRITER_DRAFT)
-    _pages(monkeypatch, 3)  # 7; tables out 5; Limitations out 4
+    _pages(monkeypatch, 4)  # tables and Further reading out: 5; Limitations out 4
     _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
-    assert sup.moved(tmp_path) == ["results_table", "limitations"]
+    assert sup.moved(tmp_path) == ["results_table", "limitations", "further_reading"]
     assert WRITER not in text
     # a paragraph that cites a source and a figure stay where they were, with FI's one line
     assert CITED in text and FIGURE in text and "## Limitations" in text
@@ -269,16 +450,16 @@ def test_the_writers_own_limitations_paragraph_moves_with_fis(tmp_path: Path, mo
 def test_the_same_draft_gets_its_paragraph_back_once_and_a_new_one_keeps_its_own(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path, WRITER_DRAFT)
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     assert WRITER not in paper.read_text(encoding="utf-8")
-    _pages(monkeypatch, 0)  # fits with everything in it: the paragraph comes back, once, before FI's list
+    _pages(monkeypatch, 0)  # fits with the Limitations in it: the paragraph comes back, once, before FI's list
     _review(eng, tmp_path)
     text = paper.read_text(encoding="utf-8")
     assert text.count(WRITER) == 1 and text.index(WRITER) < text.index("held the second factor fixed")
-    assert not (tmp_path / sup.RECORD).exists()
+    assert sup.moved(tmp_path) == ["results_table", "further_reading"]
     # moved again, then a new draft writes its own paragraph there: the old one is not added
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     assert WRITER not in paper.read_text(encoding="utf-8")
     own = "A new caveat the second draft wrote."
@@ -342,13 +523,14 @@ def test_a_failed_render_puts_the_receipts_back_too(tmp_path: Path, monkeypatch)
     receipts.write(tmp_path, "claim_check", status="pass", producer="claim_check", started_at=receipts.now(),
                    inputs={"paper": paper.read_bytes()}, output="ok")
     assert receipts.read(tmp_path, "claim_check")[0] == "pass", "a receipt FI would carry over"
-    held = receipts.path(tmp_path, "claim_check").read_bytes()
     _quiet_log(eng)
-    _pages(monkeypatch, 3, fail_at=3)  # the render after the Limitations moved fails
+    _pages(monkeypatch, 4, fail_at=2)  # the render after the Limitations moved fails
     eng._trim_body_to_fit = lambda *a, **k: asyncio.sleep(0, None)  # type: ignore[method-assign]
     _review(eng, tmp_path)
+    text = paper.read_text(encoding="utf-8")
+    assert "held the second factor fixed" in text and sup.LIMITATIONS not in sup.moved(tmp_path)
+    assert receipts.read(tmp_path, "claim_check")[0] == "pass"
     assert receipts.read(tmp_path, "claim_check")[1]["input_hashes"]["paper"] == receipts.sha256(paper.read_bytes())
-    assert receipts.path(tmp_path, "claim_check").read_bytes() == held
 
 
 def test_a_further_reading_list_that_came_back_after_the_move_moves_too(tmp_path: Path, monkeypatch) -> None:
@@ -387,7 +569,7 @@ def test_a_limitations_section_with_sub_headings_loses_no_text() -> None:
 def test_only_the_draft_the_paragraphs_came_from_gets_them_back(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path, WRITER_DRAFT)
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     assert WRITER not in paper.read_text(encoding="utf-8")
     # a new draft whose Limitations hold only a cited paragraph of its own: the old paragraph is not added to it
@@ -402,7 +584,7 @@ def test_only_the_draft_the_paragraphs_came_from_gets_them_back(tmp_path: Path, 
 def test_a_reset_that_cannot_write_the_paper_keeps_the_record(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path, WRITER_DRAFT)
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     held = sup.read(tmp_path)
     assert held.get("limitations_writer") == WRITER
@@ -423,7 +605,7 @@ def test_a_reset_that_cannot_write_the_paper_keeps_the_record(tmp_path: Path, mo
 def test_the_write_step_gives_the_writer_its_paragraphs_back(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)
     paper = _put(eng, tmp_path, WRITER_DRAFT)
-    _pages(monkeypatch, 3)
+    _pages(monkeypatch, 4)
     _review(eng, tmp_path)
     assert WRITER not in paper.read_text(encoding="utf-8")
     seen: list[str] = []

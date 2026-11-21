@@ -98,16 +98,18 @@ gets a tighter layout (2 cm margins where its template had 1 in, figures at most
 a third of the text height, smaller References and Further reading lists), and
 the writer gets a word budget. After each draft the review renders it the way
 `paper.pdf` will be and counts its pages. The limit is a guideline: a draft over
-it is never sent back to be written again. FI first moves its own parts to a
-supplement, `paper/supplement.md`, without a model call: its tables of every
-setting, then its Limitations (one line stays, naming each part of the topic the
-study did not do), then its Further reading; the References stay. When the body
-is still a few sentences over (about 400 words or fewer), the model is asked
-which sentences of the background and discussion to take out, and the engine
-decides what may go. A paper still over is delivered as written, and QUALITY.md
-says so.
+it is never sent back to be written again. Every paper, with or without a
+limit, keeps FI's tables of every setting and its Further reading in a
+supplement, `paper/supplement.md` (one line in the paper points to each); a
+paper over its limit then moves its Limitations there too (one line stays,
+naming each part of the topic the study did not do), without a model call; the
+References stay. When the body is still a few sentences over (about 400 words or
+fewer), the model is asked which sentences of the background and discussion to
+take out, and the engine decides what may go. A paper still over is delivered as
+written, and QUALITY.md says so.
 Without a limit the paper keeps its usual layout and
-length.
+length (its tables of every setting and its Further reading still go to the
+supplement).
 
 ## One-time setup
 

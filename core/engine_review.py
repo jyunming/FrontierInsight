@@ -39,7 +39,7 @@ class ReviewStageMixin:
         except (OSError, UnicodeDecodeError):
             return ""
         return ("\n\n---\n\nThe supplement that ships with this paper (FI moved these parts out of the paper, "
-                "unchanged, for its page limit):\n\n" + text + "\n") if text else ""
+                "unchanged):\n\n" + text + "\n") if text else ""
 
     async def _node_review(self, state: QuestState) -> QuestState:
         """Single-reviewer (default) OR panel-mode review.
@@ -107,8 +107,8 @@ class ReviewStageMixin:
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
-            # FI's own parts a paper over its page limit moved to the supplement are shown after it, so a one-line
-            # Limitations is not read as a paper that hides its limits.
+            # FI's own parts moved to the supplement are shown after it, so a pointer or a one-line Limitations is not
+            # read as a paper that hides its tables or its limits.
             paper_md=_paper_for_prompt(review_marked + self._supplement_for_review(), "review", self._log),
         )
 
