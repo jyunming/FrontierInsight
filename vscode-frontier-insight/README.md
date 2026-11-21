@@ -778,7 +778,7 @@ epidemic model) on gemma4 through Ollama, with the engine settings of those runs
 - `knowledge.source_routing: auto` (the default) adds one routing request per literature pass and one per cross-check lookup; set `manual` when requests are metered.
 - A reviewer panel of N personas replaces the single review request with N + 1 per review round (the personas plus a moderator).
 - No-simulation quests are not in that sample, so their count is not measured here.
-- Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
+- Outputs add one request each for the slide deck, poster and talk script. A slides or poster redo after the visual check adds one more. With `output.visual_check_ai: true`, each checked output (paper, slides, pptx, poster) and each redo's new check add one more as well. With `output.system_schematic: true`, the schematic of the studied system adds at most three (one drawing, at most one redraw, one reading of the image). The quest's token log (`.fi/cost.jsonl`, charted on the web quest page) counts these calls too.
 
 On Copilot Pro (~300 premium requests/month) that is about 10–13 quests
 of this size a month. Those runs used the settings above; a quest answered

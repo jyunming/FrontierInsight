@@ -883,7 +883,8 @@ def _apply_role_extras(p: dict[str, Any], value: dict[str, Any], got: Any, bad: 
         out["labels"] = {**(p.get("labels") if isinstance(p.get("labels"), dict) else {}), **titles}
     system = got.get("system") if isinstance(got, dict) and not bad.get("system") else None
     if isinstance(system, dict) and system.get("parts"):
-        out["system"] = {"parts": [dict(x) for x in system["parts"]], "links": [dict(x) for x in system.get("links") or []]}
+        out["system"] = {"parts": [dict(x) for x in system["parts"]], "links": [dict(x) for x in system.get("links") or []],
+                         **({"direction": dict(system["direction"])} if isinstance(system.get("direction"), dict) else {})}
     return out
 
 

@@ -35,10 +35,12 @@ Then describe the system the study simulates, so that FI can draw its set-up: it
 - Each entry has an `id` (a short name in code), a plain `name` with no number in it, and a `kind`: "part" (a body, a region, a component), "boundary" (a wall, an edge or an interface where a condition is set) or "source" (what drives the system: an inflow, a heater, a load, an input signal).
 - `carries` lists the plan's names that belong to the entry: a setting, a constant or a number the study reports, each exactly as written here: $names_in_plan. FI writes every value from the plan by these names, so never write a number in a name.
 - `links` joins two entries that touch or feed each other, with `what` passes between them in a few words.
+- A "boundary" entry may say the condition set there in `boundary`, one word of: wall, periodic, open, symmetry, inflow, outflow, interface (a periodic side is not a wall).
+- When the set-up has one direction a reader must see (gravity, the direction of a flow), give it as `direction`: `what` in plain words and `points`, one of down, up, left, right, as the set-up is drawn. Leave `direction` out when there is none.
 Write `"system": null` when the study has no physical set-up to draw (for example a study of a statistical method alone).
 $titles$again
 Answer with one JSON object and nothing else:
 {"results": {"<number>": {"role": "<one word>", "depends_on": ["<setting>"], "returned": "<each_run | afterwards>", "shape": "number", "bound": null}},
- "system": {"parts": [{"id": "<id>", "name": "<plain name>", "kind": "part", "carries": ["<plan name>"]}], "links": [{"from": "<id>", "to": "<id>", "what": "<a few words>"}]}}
+ "system": {"parts": [{"id": "<id>", "name": "<plain name>", "kind": "part", "carries": ["<plan name>"]}, {"id": "<id>", "name": "<plain name>", "kind": "boundary", "boundary": "wall", "carries": []}], "links": [{"from": "<id>", "to": "<id>", "what": "<a few words>"}], "direction": {"what": "<plain words>", "points": "down"}}}
 For a curve: "shape": "curve", "along": ["<thing>"]. For a bound: "bound": {"min": 0, "max": null, "unit": "<unit>", "why": "<one sentence>"}.
 Give every number above, once.

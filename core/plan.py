@@ -1614,12 +1614,19 @@ def _system_lines(system: Any) -> list[str]:
     for x in system["parts"]:
         if isinstance(x, dict):
             carries = [str(c) for c in x.get("carries") or []]
-            lines.append(f"- {x.get('name')} (`{x.get('id')}`, {kinds.get(str(x.get('kind') or 'part'), 'a part')})"
+            kind = kinds.get(str(x.get("kind") or "part"), "a part")
+            if x.get("kind") == "boundary" and str(x.get("boundary") or "").strip():
+                word = str(x["boundary"])
+                kind = f"{'an' if word[:1] in 'aeiou' else 'a'} {word} boundary"
+            lines.append(f"- {x.get('name')} (`{x.get('id')}`, {kind})"
                          + (": " + ", ".join(f"`{c}`" for c in carries) if carries else ""))
     for link in system.get("links") or []:
         if isinstance(link, dict):
             lines.append(f"- {names.get(str(link.get('from')), link.get('from'))} to {names.get(str(link.get('to')), link.get('to'))}"
                          + (f": {link['what']}" if str(link.get("what") or "").strip() else ""))
+    direction = system.get("direction")
+    if isinstance(direction, dict) and str(direction.get("what") or "").strip():
+        lines.append(f"- {direction['what']} points {direction.get('points')}")
     return lines + [""]
 
 

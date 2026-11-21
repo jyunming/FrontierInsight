@@ -893,6 +893,13 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     no_setup = _setup_flow.quality_line(q.root)
     if no_setup:
         out.append(_problem("paper", no_setup, "FI's set-up figure", "disclosed", f".fi/{_setup_flow.RECORD}"))
+    from . import setup_schematic as _setup_schematic
+
+    # The schematic of the studied system was asked for (output.system_schematic) and is not in the paper: said once.
+    no_schematic = _setup_schematic.quality_line(q.root)
+    if no_schematic:
+        out.append(_problem("paper", no_schematic, "FI's schematic of the studied system", "disclosed",
+                            f".fi/{_setup_schematic.RECORD}"))
 
     # A figure whose legend or caption says something its record does not draw (FI writes both from the record, so a
     # finding here is FI's own fault, disclosed; it stops nothing).

@@ -242,6 +242,7 @@ class ProviderConfig(BaseModel):
             "implement_oracle": 600.0,
             "implement_protocol": 600.0,
             "implement_figures": 600.0,
+            "setup_schematic": 600.0,
             "plan": 600.0,
             "plan_revise": 600.0,
             "design_self_critique": 600.0,
@@ -297,6 +298,8 @@ class ProviderConfig(BaseModel):
             "implement_oracle": 900.0,
             "implement_protocol": 900.0,
             "implement_figures": 900.0,
+            # The set-up schematic's drawing code (a short script; one in the trial took about 7 minutes).
+            "setup_schematic": 900.0,
             "plan": 900.0,
             "plan_revise": 900.0,
             "design_self_critique": 900.0,
@@ -1752,6 +1755,11 @@ class OutputConfig(BaseModel):
     # the measurements find are found without it. A provider that cannot take
     # images leaves a measurements-only check.
     visual_check_ai: bool = False
+    # Also draw a schematic of the studied system (its parts, what touches what, its sources and boundaries) for the
+    # paper, the poster and the slides, before the figure of how the study is set up. A model places the shapes; FI
+    # writes every word on it from the plan and checks the drawing, and leaves it out (said in QUALITY.md) when the
+    # check fails twice. Off by default: at most 3 model calls a study, one of them reading the drawing as an image.
+    system_schematic: bool = False
     # How many times an output may be redone after its check finds problems
     # the redo can fix, before the findings are only reported.
     visual_check_max_redos: int = Field(2, ge=0, le=2)
