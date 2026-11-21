@@ -1456,6 +1456,15 @@ def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
     return out
 
 
+def _kept_outside_range(q: _Quest) -> list[dict[str, Any]]:
+    """The quantities kept in the results although their values are outside the range the plan expected
+    (``kept_bound_breaks`` of ``needs/RESULT_CHECK.json``): one entry per quantity, with the range and the furthest value."""
+    from . import result_checks as _result_checks
+
+    return [{"quantity": name, "bound": _one(r.get("bound"), 120), "note": _one(r.get("note"), 400)}
+            for name, r in _result_checks.kept_bound_breaks(q.root).items()]
+
+
 def _paper_records(q: _Quest) -> dict[str, Any]:
     """What FI recorded about the run that the paper itself does not carry (``core/paper_facts.py``): how the result was
     reached (design revisions, runs), the run record (seed, measured run time, trial counts, a reduced size, the topic's
@@ -1553,6 +1562,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
         "left_out_of_paper": _left_out_of_paper(q),
+        "kept_outside_range": _kept_outside_range(q),
         "paper_records": _paper_records(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
@@ -1837,6 +1847,11 @@ def render(report: dict[str, Any]) -> str:
         lines += ["", "## Left out of the paper", "",
                   "These quantities are not in the paper's results; FI checks that the paper says so:", ""]
         lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['why'])}" for x in report["left_out_of_paper"]]
+    if report.get("kept_outside_range"):
+        lines += ["", "## Kept outside the plan's expected range", "",
+                  "These values stayed beyond the range the plan expected after the repairs; FI did not establish whether the "
+                  "value or the range is wrong. They are reported and marked (unconfirmed) where the paper prints them:", ""]
+        lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['note'])}" for x in report["kept_outside_range"]]
     lines += _paper_record_lines(report.get("paper_records") or {})
     lines += ["", "## What to try", ""]
     if report["suggestions"]:
