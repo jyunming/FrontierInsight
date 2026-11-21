@@ -1434,6 +1434,10 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
             elif request["kind"] == "evaluate_stream":
                 # Designs the starts chose, answered as each one finishes: a place in the pool is refilled the moment
                 # another design ends, and the search goes on with the ones that finished.
+                if not request["requests"] and (pool is None or not pool.running):
+                    # An empty request is only a wait for designs already running; with none running there is nothing to
+                    # wait for, and answering [] at once would send the search round again without end.
+                    raise RuntimeError("internal error: the search asked the pool for nothing while no design is running")
                 if pool is None:
                     pool = EvaluationPool(executor, python, quest_root, module, entry, at_once=at_once, runs=runs,
                                           base_seed=int(base_seed), deadline=deadline, env=env, thresholds=thresholds,
