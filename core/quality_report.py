@@ -394,7 +394,7 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for item in _list(eq.get("failed")):
         item = _dict(item)
         eid = str(item.get("id") or "")
-        ok = _dict(eqs.get(eid)).get("state") == "ok"
+        ok = _dict(eqs.get(eid)).get("state") == "ok" and eid not in _dict(eq.get("unconfirmed"))
         n = _int(repairs.get(eid))
         out.append(_problem("checks", f"equation {eid}: its function {item.get('function') or ''} failed its test"
                             + (f", repaired {n} time{'s' if n != 1 else ''}" if n else ""),

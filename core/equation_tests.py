@@ -1078,3 +1078,49 @@ def write_note(protocol: dict[str, Any] | None) -> str:
             + " not tested at all: the plan says it has no closed form for its output and gave no limit, symmetry, "
               "conservation or second implementation to check it with. Say so plainly in the limitations, and do not "
               "present the quantities that depend on it as verified.")
+
+
+# --- an equation the test could not confirm -------------------------------------------------------------------------------
+
+#: The key of ``.fi/equation_tests.json`` that holds the equations the study went on with, not confirmed
+#: (``Engine._settle_unconfirmed``).
+UNCONFIRMED_KEY = "unconfirmed"
+
+
+def unconfirmed_note(eid: str, reason: str) -> str:
+    """The plain sentence for an equation whose test still failed after the code was repaired and the plan was asked about
+    its example (the record's ``not_tested`` and so QUALITY.md and the paper's Limitations). It does not say whether the
+    code or the example is wrong, because FI could not tell."""
+    return (f"equation {eid} is not confirmed before the run: its test still failed after the code was repaired and the plan "
+            f"was asked about the worked example ({reason}); FI could not tell whether the code or the example is wrong, so "
+            "the results it can reach are marked (unconfirmed)")
+
+
+def read_record(quest_root: Path | str) -> dict[str, Any]:
+    """``.fi/equation_tests.json`` (``{}`` when there is none or it cannot be read)."""
+    try:
+        record = json.loads((Path(quest_root) / ".fi" / "equation_tests.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def unconfirmed_marks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
+    """``{quantity: {"quantity", "note", "unconfirmed_by": [equation ids]}}`` for each quantity of the plan that an equation
+    the test could not confirm may reach (``unconfirmed`` of ``.fi/equation_tests.json``, written by the engine when it let
+    the study go on). The paper marks each number of such a quantity ``(unconfirmed)`` (core/paper_values.py) and its
+    table says why (core/results_by_setting.py). Never a quantity FI left out."""
+    from . import result_checks as _checks
+
+    out: dict[str, dict[str, Any]] = {}
+    held = read_record(quest_root).get(UNCONFIRMED_KEY)
+    for eid, entry in (held.items() if isinstance(held, dict) else []):
+        if not isinstance(entry, dict) or not entry.get("marked"):
+            continue
+        for q in entry.get("results") or []:
+            got = out.setdefault(str(q), {"quantity": str(q), "unconfirmed_by": [], "note": ""})
+            got["unconfirmed_by"].append(str(eid))
+            got["note"] = (got["note"] + "; " if got["note"] else "") + f"equation {eid} was not confirmed before the run"
+    for q in _checks.left_out_by_record(quest_root):
+        out.pop(q, None)
+    return out

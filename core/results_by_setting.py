@@ -967,7 +967,9 @@ def _mark_bound_breaks(built: Built | None, protocol: dict[str, Any] | None, que
     """The table of a quantity FI kept although its values break a bound the plan only expected
     (:func:`core.result_checks.kept_bound_breaks`) carries FI's mark in its title, as each number of it the paper prints does
     (core/paper_values.py), and its caption says which range they are outside. Changed in place; nothing else changes."""
-    kept = dict(_result_checks.kept_bound_breaks(quest_root))
+    from . import equation_tests as _equation_tests
+
+    kept = {**_equation_tests.unconfirmed_marks(quest_root), **_result_checks.kept_bound_breaks(quest_root)}
     for m in (protocol.get("metrics") if isinstance(protocol, dict) and kept else None) or []:
         if isinstance(m, dict) and str(m.get("id") or "").strip() in kept:
             kept.setdefault(_refs.value_name(m), kept[str(m["id"]).strip()])  # the name the trials return it under
@@ -977,6 +979,10 @@ def _mark_bound_breaks(built: Built | None, protocol: dict[str, Any] | None, que
             continue
         why = (f" Its values are outside the range the plan expected ({record.get('bound')}), so they are marked "
                f"{_result_checks.BOUND_MARK}." if record.get("bound") else "")
+        if not why and record.get("unconfirmed_by"):
+            ids = ", ".join(record["unconfirmed_by"])
+            why = (f" Equation{'s' if len(record['unconfirmed_by']) > 1 else ''} {ids} could not be confirmed before the run, "
+                   f"so the values it may reach are marked {_result_checks.BOUND_MARK}.")
         t.name = f"{t.name or t.value} {_result_checks.BOUND_MARK}"
         t.caption += why
         if t.paper_caption:

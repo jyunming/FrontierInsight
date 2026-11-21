@@ -170,7 +170,8 @@ CHECKS: tuple[Check, ...] = (
     Check('equation_test', 'core.engine', 'Engine._equation_gate',
           'execute', 'measured', 'repair',
           'One test per plan equation from its worked example, called in a separate process and judged by FI; '
-          'failures repaired alone then whole-script repair as a failed run (off when engine.oracle_check=off).'),
+          'failures repaired alone then whole-script repair as a failed run; a wrong number that survives the repairs and the '
+          "plan's answer lets the study go on with the equation marked not confirmed (off when engine.oracle_check=off)."),
     Check('equation_example_judged', 'core.equation_tests', 'example_rows',
           'plan', 'own_record', 'note',
           "FI computes the worked example's expected output with its calculator and flags examples that are "
