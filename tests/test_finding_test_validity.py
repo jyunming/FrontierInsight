@@ -409,3 +409,50 @@ def test_the_creation_keeps_the_plain_verdict_when_the_recording_gives_a_pass_or
         run.env.capture_tests = recorded
         assert asyncio.run(fr.demonstrate(run.env, run.record["issues"]["F-1"], "study.py")) is True, answer
         assert run.record["issues"]["F-1"]["capture_unavailable"] is True and run.record["issues"]["F-1"]["demonstrated"] is True
+
+
+# ---- a study run the recording cannot watch keeps the finding shown --------------------------------------------------------
+def _unwatched(tmp_path: Path, test: str, study: str = STUDY, name: str = "u.py") -> bool:
+    run, _src, _code = _held(tmp_path, test, study, name=name)
+    assert run.status == "fail" and run.kind == "assertion", run.detail
+    return run.held["study_ran"]
+
+
+def test_a_test_that_runs_the_study_in_a_child_process_keeps_its_finding_shown(tmp_path: Path) -> None:
+    test = ("import subprocess, sys\nimport study\n\n\ndef test_x():\n"
+            "    out = subprocess.run([sys.executable, '-c', 'print(1)'], capture_output=True, text=True).stdout\n"
+            "    assert out.strip() == '2', 'wrong'\n")
+    assert _unwatched(tmp_path, test) is True
+
+
+def test_a_test_that_reads_a_result_file_the_study_wrote_keeps_its_finding_shown(tmp_path: Path) -> None:
+    (tmp_path / "results.json").write_text('{"est_a": 1.0}', encoding="utf-8")
+    test = ("import json\nimport study\n\n\ndef test_x():\n    with open('results.json') as fh:\n        r = json.load(fh)\n"
+            "    assert r['est_a'] == 2.0, 'wrong'\n")
+    assert _unwatched(tmp_path, test) is True
+
+
+def test_a_study_module_that_only_re_exports_a_compiled_function_counts_as_study_code(tmp_path: Path) -> None:
+    test = "import study\n\n\ndef test_x():\n    assert study.sqrt(4.0) == 3.0, 'wrong'\n"
+    assert _unwatched(tmp_path, test, "from math import sqrt\n") is True
+
+
+def test_a_test_that_turns_the_profiler_off_keeps_its_finding_shown(tmp_path: Path) -> None:
+    test = "import sys\nimport study\n\n\ndef test_x():\n    sys.setprofile(None)\n    assert study.__name__ == 'x', 'wrong'\n"
+    assert _unwatched(tmp_path, test) is True
+
+
+def test_study_code_run_by_a_thread_started_while_the_test_file_loads_counts(tmp_path: Path) -> None:
+    test = ("import threading\nimport study\n\nt = threading.Thread(target=study.rate, args=(1.0,))\nt.start()\nt.join()\n\n\n"
+            "def test_x():\n    assert 1 == 2, 'own'\n")
+    assert _unwatched(tmp_path, test) is True
+
+
+def test_a_test_that_runs_no_study_code_and_reads_no_result_file_is_still_not_shown(tmp_path: Path) -> None:
+    test = "import study\n\n\ndef test_x():\n    assert study.__name__ == 'x', 'wrong'\n"
+    assert _unwatched(tmp_path, test) is False
+
+
+def test_opening_the_null_device_does_not_make_the_recording_unclear(tmp_path: Path) -> None:
+    test = "import os\nimport study\n\n\ndef test_x():\n    open(os.devnull).close()\n    assert study.__name__ == 'x', 'wrong'\n"
+    assert _unwatched(tmp_path, test) is False

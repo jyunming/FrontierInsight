@@ -336,8 +336,51 @@ def _empty(value):
         return dict.__len__(value) == 0
     return _one_of(t, _SEQS) and len(value) == 0
 
-STUDY = {"funcs": 0}
+STUDY = {"funcs": 0, "unclear": False, "on": False}
 _IN_STUDY = {}
+_ROOT = os.path.dirname(os.path.abspath(code_dir))
+_RESULT_DIRS = ("results", "raw", "data", "output", "outputs")
+_RESULT_EXT = (".json", ".csv", ".npy", ".npz", ".pkl", ".pickle", ".txt", ".parquet", ".h5", ".hdf5", ".dat")
+_CHILD = ("subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec", "os.fork", "os.forkpty", "_winapi.CreateProcess")
+
+def _audit(event, args):
+    # a hook cannot be removed, so it acts only while the test file is imported or a test runs. What it flags is something
+    # the recording cannot watch: a child process, or a stored result file read from the quest folder.
+    if not STUDY["on"]:
+        return
+    try:
+        if event in _CHILD or event.startswith("os.exec") or event.startswith("os.spawn"):
+            # the interpreter's own platform probe (`ver`, run by a library such as scipy at import) is not the study
+            f = sys._getframe(1)
+            while f is not None:
+                if os.path.basename(f.f_code.co_filename) == "platform.py":
+                    return
+                f = f.f_back
+            STUDY["unclear"] = True
+        elif event == "open" and args:
+            path, mode = args[0], (args[1] if len(args) > 1 else None)
+            if type(path) is bytes:
+                path = os.fsdecode(path)
+            if type(path) is not str:
+                return
+            if type(mode) is str and any(c in mode for c in "wax+"):
+                return
+            try:
+                rel = os.path.relpath(os.path.abspath(path), _ROOT)
+            except ValueError:
+                return  # another drive, or a device such as nul: not under the quest folder
+            if rel.startswith(".."):
+                return
+            parts = rel.replace(os.sep, "/").split("/")
+            if parts[0] in (".venv", ".fi", "code", "paper", "figures") or "__pycache__" in parts or "site-packages" in parts:
+                return
+            if rel.lower().endswith(_RESULT_EXT) or parts[0] in _RESULT_DIRS:
+                if not rel.lower().endswith((".py", ".pyc", ".pyd", ".so", ".dll")):
+                    STUDY["unclear"] = True
+    except Exception:
+        STUDY["unclear"] = True
+
+sys.addaudithook(_audit)
 
 def _in_study(filename):
     # whether a code object's file is under the quest's code/ (cached by file name)
@@ -362,7 +405,9 @@ def _import_watch(frame, event, arg):
 
 def IMPORTING(on):
     # study code that runs while the test file is imported (a module that calls functions as it loads) counts too
+    STUDY["on"] = bool(on)
     sys.setprofile(_import_watch if on else None)
+    threading.setprofile(_import_watch if on else None)
 
 def _defs_only(path):
     import ast as _ast
@@ -382,18 +427,50 @@ def _defs_only(path):
         return False
     return True
 
+def _compiled_origin(v):
+    # a builtin or compiled function, or a class from a compiled module (not the interpreter's own builtins)
+    t = type(v)
+    if t is _types.BuiltinFunctionType:
+        name = getattr(v, "__module__", None)
+    elif t is type or _is_type_instance(t):
+        name = type.__getattribute__(v, "__dict__").get("__module__")
+        if type(name) is not str:
+            return False
+        mod = sys.modules.get(name)
+        f = dict.get(mod.__dict__, "__file__") if type(mod) is _types.ModuleType else None
+        return type(f) is str and f.lower().endswith((".pyd", ".so"))
+    else:
+        return False
+    if type(name) is not str or name == "builtins":
+        return False
+    return True
+
+def _is_type_instance(t):
+    for base in type.__getattribute__(t, "__mro__"):
+        if base is type:
+            return True
+    return False
+
+def _reexports_compiled(m):
+    # code/study.py that is only `from native_backend import trial`: the study's work runs in compiled code the profiler cannot see
+    for v in list(dict.values(m.__dict__)):
+        if _compiled_origin(v):
+            return True
+    return False
+
 def _study_ran():
     # False only when no function of the study's code started and every study module that was loaded holds nothing but
     # imports and definitions; anything unclear is True (the finding then stays shown)
     try:
-        if STUDY["funcs"] > 0:
+        if STUDY["funcs"] > 0 or STUDY["unclear"]:
             return True
         for m in list(sys.modules.values()):
             if type(m) is not _types.ModuleType:
                 continue
             f = dict.get(m.__dict__, "__file__")
-            if type(f) is str and _in_study(f) and not _defs_only(f):
-                return True
+            if type(f) is str and _in_study(f):
+                if not _defs_only(f) or _reexports_compiled(m):
+                    return True
         return False
     except Exception:
         return True
@@ -441,9 +518,12 @@ def RUN(fn, path):
 
     sys.setprofile(watch)
     threading.setprofile(watch)
+    STUDY["on"] = True
     try:
         fn()
     except AssertionError as e:
+        if sys.getprofile() is not watch:
+            STUDY["unclear"] = True
         sys.setprofile(None)
         threading.setprofile(None)
         held, held_state = set(), {"seen": 0, "complete": True}
@@ -469,6 +549,7 @@ def RUN(fn, path):
                        "failures": [{"line": line, "empty": empty}]}
         raise
     finally:
+        STUDY["on"] = False
         sys.setprofile(None)
         threading.setprofile(None)
 '''
@@ -789,7 +870,8 @@ def failure_from_study(src: str, held: Any, modules: Iterable[str]) -> StudyFail
       capture, :data:`CAPTURE`): no function under ``code/`` started anywhere in the call tree (through the test's own
       helpers, a wrapper module or a fixture too, in any thread), at import time or later, and every study module the test
       loaded holds only imports and definitions. The test's own input or a literal failed. Anything unclear (no record of
-      it, a module whose top level does more than define) is ``StudyFailure()``.
+      it, a module whose top level does more than define, a child process, a stored result file read from the quest
+      folder, a compiled function the study re-exports, a replaced profiler) is ``StudyFailure()``.
     * ``NAME_NOT_GIVEN``: the assertion depends on the study (read from the test's text), FI listed everything the study returned (every value a record
       of names), the assertion is a membership test, a ``.get`` lookup or a check on a value that held nothing, and a name
       it looks for is held by no name the study returned. Only the names the study returned are compared, never the test's

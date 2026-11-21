@@ -1479,8 +1479,9 @@ CHECKS: tuple[Check, ...] = (
           'a finding test that calls code inside try/except is no proof; not run, asked once more'),
     Check('finding_test_from_study', 'core.finding_repair', 'failure_from_study',
           'implement', 'measured', 'note',
-          'a finding test that failed before any function of the study ran (seen by a recording run after plain runs '
-          'confirmed the failure) is not demonstrated; one that looks for a name no record the study returned holds goes '
+          'a finding test whose recording run saw no Python function of the study start, and nothing it cannot watch '
+          '(a child process, a stored result file, a compiled function the study re-exports, a replaced profiler), '
+          'after plain runs confirmed the failure, is not demonstrated; one that looks for a name no record the study returned holds goes '
           'to the absent-output check'),
     Check('finding_repair_regressions', 'core.finding_repair', 'regressions',
           'implement', 'measured', 'repair',
