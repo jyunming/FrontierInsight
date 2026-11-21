@@ -50,6 +50,7 @@ class Effect:
     cannot: bool = False  # FI cannot tell what the code reaches: the records place nothing
     empty: bool = False  # the stop is that leaving out what it changes leaves no result at all
     by_trial: bool = False  # a helper reached through the trial: the call graph ties it to every result of the trial, to none in particular
+    unreached: bool = False  # the helper is reached by no function of a result or a figure (:meth:`Reach._helper_effect`)
 
 
 def union(a: "Effect", b: "Effect") -> "Effect":
@@ -322,6 +323,38 @@ def _called_from(fns: dict[str, ast.AST], start: str) -> set[str]:
     return called
 
 
+def _printed_exactly(result: Any, wanted: set[str]) -> set[str]:
+    """The keys of the printed results, at any depth, that are one of the names ``wanted`` (normalised, the whole name: no
+    prefix, no longer or shorter form) and hold a finite number, or a list or mapping with one. NaN and infinity are no value."""
+    import math
+
+    def holds(v: Any) -> bool:
+        if isinstance(v, bool) or v is None:
+            return False
+        if isinstance(v, (int, float)):
+            return math.isfinite(v)
+        if isinstance(v, dict):
+            return any(holds(x) for x in v.values())
+        if isinstance(v, (list, tuple)):
+            return any(holds(x) for x in v)
+        return False
+
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if _norm(k) in wanted and holds(v):
+                    out.add(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
+
+
 class Reach:
     """The records of one quest, read once, and the question put to them: what does the fault a finding's test showed do to
     the results (:meth:`effect`)?"""
@@ -548,7 +581,25 @@ class Reach:
                 return None
             known = [self._judge(Effect(), held, "its test reads " + ", ".join(sorted(held)))]
         merged = self._merge(known)
-        return None if merged is None else self._settle(merged, record, issue)
+        return None if merged is None else self._printed_key(self._settle(merged, record, issue), record, issue, result)
+
+    def _printed_key(self, eff: Effect, record: dict[str, Any], issue: dict[str, Any], result: Any) -> Effect:
+        """A finding the call graph places on no result is not released when the run prints a value under the quantity it
+        names. "No function reaches it" is a guess from the call graph (a call it cannot follow, a key a helper builds); the
+        printed key is FI's own record. The key is left out of the results, with the note, as for any quantity no function
+        places; a quantity the run prints no number for is released as before."""
+        if not eff.unreached or eff.stop or eff.left_out or eff.figures or eff.not_done or eff.plan_text or eff.probes                 or eff.extra_keys or eff.cannot or result is None:
+            return eff
+        wanted = {_norm(n) for n in _code_review.quantity_names(record, issue)} - {""}
+        keys = sorted(_printed_exactly(result, wanted))
+        if keys:
+            eff.extra_keys = keys
+            eff.why += "; the run prints a value for " + ", ".join(keys[:4]) + ", so it is left out, not released"
+            main = {_norm(i) for i in self.headline} | {_norm(h) for h in self.headline_raw}
+            hit = [k for k in keys if _norm(k) in main]
+            if hit and self.headline_stops:  # the same main-result rule as for a result a function reaches (:meth:`_judge`)
+                eff.stop = f"the main result {', '.join(hit)} is among what it changes (the run prints a value for it)"
+        return eff
 
     def reads_held_key(self, issue: dict[str, Any], result: Any) -> bool:
         """Whether the finding's failing test reads, by a literal key, a result the run reports a value for (a declared result
@@ -724,6 +775,7 @@ class Reach:
             out.probes = list(dict.fromkeys([*out.probes, *p.probes]))
             out.named = out.named or p.named
             out.by_trial = out.by_trial or p.by_trial
+            out.unreached = out.unreached or p.unreached
         out.stop = "; ".join(dict.fromkeys(p.stop for p in parts if p.stop))
         out.why = "; ".join(dict.fromkeys(p.why for p in parts if p.why))
         if not out.stop and out.left_out and not (set(self.ids) - set(out.left_out)):
@@ -913,6 +965,7 @@ class Reach:
         out.by_trial = by_trial and not by_result  # the trial is the only link: the call graph names no result in particular
         if not reached_by:
             out.why = "no function of a result or a figure reaches it, so it changes no reported result"
+            out.unreached = True
             return out
         return self._judge(out, touched, "reached by " + ", ".join(sorted(set(reached_by))[:4]))
 
