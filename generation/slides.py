@@ -48,6 +48,7 @@ import string
 from pathlib import Path
 
 from core import paper_facts as _paper_facts
+from core import result_checks as _result_checks
 from generation._figure_captions import without_number
 from core.config import Config
 from core.proc_tree import AsyncProcessTree
@@ -205,6 +206,7 @@ class SlideGenerator:
             slides_md = await self._redo_flagged(art, out_dir, feedback, supervisor=supervisor)
         else:
             slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
+        _place_marks_note(slides_md, art)
         result: dict[str, Path] = {"slides_md": slides_md}
         diag_path = out_dir / "slides_skipped.md"
         # Will be set to a (reason_code, summary, how_to_fix) triple
@@ -488,17 +490,50 @@ def _with_author_line(content: str, output) -> str:
     under its headings. The deck is unchanged when no author field is set."""
     parts = (output.author, output.affiliation, output.contact_email, output.url)
     line = " · ".join(" ".join(str(p).split()) for p in parts if str(p or "").strip())
-    if not line:
-        return content
+    return _under_title(content, line) if line else content
+
+
+def _under_title(content: str, line: str, *, once: bool = False) -> str:
+    """``content`` with ``line`` as a paragraph at the end of the title slide (the first slide that holds text). With
+    ``once``, a title slide that already holds ``line`` is left as it is."""
     match = _FRONT_MATTER_RE.match(content)
     head = content[: match.end()] if match else ""
     body = content[len(head):]
     start = 0
     for brk in _SLIDE_BREAK_RE.finditer(body):
         if body[start:brk.start()].strip():
+            if once and line in body[:brk.start()]:
+                return content
             return head + body[:brk.start()].rstrip() + "\n\n" + line + "\n\n" + body[brk.start():]
         start = brk.end()
+    if once and line in body:
+        return content
     return head + body.rstrip() + "\n\n" + line + "\n"
+
+
+def _marks_note(art) -> str:
+    """FI's note that the paper carries a mark ``(unconfirmed)``, the same text the paper holds under its title
+    (:func:`core.result_checks.marked_note`); ``""`` when nothing is marked."""
+    try:
+        paper = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
+    except OSError:
+        paper = ""
+    return _result_checks.marked_note_of_deliverables(art.quest_root, paper) if art.quest_root else ""
+
+
+def _place_marks_note(slides_md: Path, art) -> None:
+    """Put FI's note on the title slide of the deck on disk, once and after everything the model wrote: a deck the model
+    wrote again or one slide of it still carries it, a deck that holds it already is not touched."""
+    note = _marks_note(art)
+    if not note:
+        return
+    try:
+        text = slides_md.read_text(encoding="utf-8")
+        placed = _under_title(text, note, once=True)
+        if placed != text:
+            slides_md.write_text(placed, encoding="utf-8")
+    except OSError as e:
+        _log.warning("slides: the note on unconfirmed results could not be placed on the title slide (%s)", e)
 
 
 # Markdown / Marp image reference: ``![alt](path ...)`` — captures the

@@ -5220,12 +5220,14 @@ _MARKS_BEGIN, _MARKS_END = "<!-- fi:marks-note -->", "<!-- /fi:marks-note -->"
 
 
 def _mark_unconfirmed_results(markdown: str, quest_root: Any) -> str:
-    """``markdown`` with FI's own note under the title when some quantity carries the ``(unconfirmed)`` mark
+    """``markdown`` with FI's own note under the title when some quantity or sentence carries the ``(unconfirmed)`` mark
     (:func:`core.result_checks.marked_note`), one, replacing an earlier one; an earlier one is taken out when no quantity
     is marked any more. FI's words, never the writer's: it is placed at every write, from FI's record."""
     from . import result_checks as _result_checks
 
-    note = _result_checks.marked_note(quest_root) if quest_root else ""
+    if "\r\n" in markdown and markdown.count("\r\n") == markdown.count("\n"):  # a paper kept with CRLF keeps it
+        return _mark_unconfirmed_results(markdown.replace("\r\n", "\n"), quest_root).replace("\n", "\r\n")
+    note = _result_checks.marked_note(quest_root, markdown) if quest_root else ""
     block = f"{_MARKS_BEGIN}\n> {note}\n{_MARKS_END}" if note else ""
     if _MARKS_BEGIN in markdown and _MARKS_END in markdown:
         head, rest = markdown.split(_MARKS_BEGIN, 1)

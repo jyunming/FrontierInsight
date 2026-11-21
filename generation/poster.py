@@ -47,6 +47,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from core import paper_facts as _paper_facts
+from core import result_checks as _result_checks
 from core.config import Config
 from core.engine import (
     QuestArtifacts,
@@ -1186,9 +1187,11 @@ class PosterGenerator:
             band_heading, entries = "", []  # the paper cites nothing, so the poster lists no source
 
         author_terms = tuple(t for t in (output.author, output.affiliation, output.contact_email) if t)
+        # FI's own note that the paper carries a mark (the one under the paper's title), after everything the model wrote.
+        marks_note = _result_checks.marked_note_of_deliverables(art.quest_root, raw_paper) if art.quest_root else ""
         engine = find_pdf_engine()
         latin_engine = engine  # what the poster was typeset with before the Unicode engine: the way back
-        content = "\n".join([headline, subtitle, *author_terms, *entries, *(t for b in blocks for t in b.texts())])
+        content = "\n".join([headline, subtitle, *author_terms, marks_note, *entries, *(t for b in blocks for t in b.texts())])
         cjk_font: str | None = None
         cjk_problem: str | None = None
         # As for the paper: a Unicode engine (XeLaTeX) whenever one is installed, so a glyph is set as itself or from
@@ -1215,7 +1218,7 @@ class PosterGenerator:
         values = self._template_values(
             sheet, headline=headline, subtitle=subtitle, author_terms=author_terms,
             url=output.url, band=_band_latex(entries, band_heading, sheet.columns, icon_ok),
-            icon_ok=icon_ok, cjk_font=cjk_font,
+            icon_ok=icon_ok, cjk_font=cjk_font, note=marks_note,
         )
         layout = _Layout(
             sheet, blocks,
@@ -1392,7 +1395,7 @@ class PosterGenerator:
     @staticmethod
     def _template_values(
         sheet: _Sheet, *, headline: str, subtitle: str, author_terms: tuple[str, ...],
-        url: str, band: str, icon_ok: bool, cjk_font: str | None,
+        url: str, band: str, icon_ok: bool, cjk_font: str | None, note: str = "",
     ) -> dict[str, str]:
         brand_pt = 0.8 * sheet.author_pt
         brandline = (
@@ -1412,6 +1415,11 @@ class PosterGenerator:
             + r"}\selectfont\color{fiink}" + r"~\textperiodcentered~".join(_escape_text(t) for t in author_terms)
             + r"\par}"
         ) if author_terms else ""
+        if note:  # FI's note that the paper carries a mark, under the author line
+            author_tex += (
+                r"\vspace{0.5cm}{\fontsize{" + f"{sheet.subtitle_pt:g}pt" + "}{" + f"{1.2 * sheet.subtitle_pt:g}pt"
+                + r"}\selectfont\color{fiink}" + _inline_latex(note.replace("`", "")) + r"\par}"
+            )
         return {
             "paperwidth": f"{sheet.width_cm:g}",
             "paperheight": f"{sheet.height_cm:g}",
