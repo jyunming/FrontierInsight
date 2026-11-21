@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -366,18 +367,46 @@ def marked_figures(quest_root: Path | str) -> list[str]:
     return sorted(out)
 
 
-def marked_note(quest_root: Path | str) -> str:
-    """The sentence FI itself puts under the paper's title when some quantity carries the mark, ``""`` when none does. A
-    number the writer typed instead of letting FI fill it cannot be placed on a result, so the note says the paper may hold
-    such a number that carries no mark."""
+_NOTE_BLOCK = re.compile(r"<!-- fi:marks-note -->.*?<!-- /fi:marks-note -->", re.S)
+#: FI's marker around the mark the claim check puts beside a sentence it could not confirm (core/paper_facts.py).
+_SENTENCE_MARKER = "<!-- fi:unconfirmed -->"
+
+
+def marks_stated(paper_text: str) -> bool:
+    """Whether ``paper_text`` carries FI's marker beside a sentence the claim check could not confirm (not the note FI put
+    under the title). Only the marker counts: the words alone also stand in a draft the writer typed them in, and in a
+    quantity's own mark."""
+    return _SENTENCE_MARKER in _NOTE_BLOCK.sub("", paper_text or "")
+
+
+def marked_note(quest_root: Path | str, paper_text: str | None = None) -> str:
+    """The sentence FI itself puts under the paper's title, on the title slide and in the poster header when the paper
+    carries the mark, ``""`` when nothing is marked. One text for all three. A number the writer typed instead of letting
+    FI fill it cannot be placed on a result, so the note says the paper may hold such a number that carries no mark.
+    ``paper_text``: the paper with FI's markers, which holds the marks of the claim check (sentences, no record of their
+    own); without it only the quantities FI's records name are covered."""
     names = sorted(marked_quantities(quest_root))
-    if not names:
+    sentences = paper_text is not None and marks_stated(paper_text)
+    if not names and not sentences:
         return ""
-    return ("**Not confirmed.** FI could not confirm everything behind some results of this study (the Limitations say what). "
-            "Each number of " + ", ".join(f"`{n}`" for n in names[:8]) + (" and others" if len(names) > 8 else "")
-            + " that FI fills in, each table of it and the caption of each figure that may draw it is marked "
-            + BOUND_MARK + "; a number written by hand in the text cannot be placed on a result and carries no mark, so read "
-            "it as unconfirmed too.")
+    if not names:
+        return ("**Not confirmed.** FI could not confirm some statements of this study (the paper's Limitations list them); "
+                "each is marked " + BOUND_MARK + " in the paper.")
+    text = ("**Not confirmed.** FI could not confirm everything behind some results (the paper's Limitations say what). "
+            "Numbers of " + ", ".join(f"`{n}`" for n in names[:4]) + (" and others" if len(names) > 4 else "")
+            + " are marked " + BOUND_MARK + "; a number written by hand carries no mark, so read it as unconfirmed too.")
+    return text + (" Statements FI could not confirm are marked too." if sentences else "")
+
+
+def marked_note_of_deliverables(quest_root: Path | str, delivered: str) -> str:
+    """:func:`marked_note` for the slides and the poster: the delivered ``paper.md`` has FI's markers taken out, while
+    ``paper/paper.md`` (when the quest has one) still holds them, so both are read; a quest with neither gets the note of its
+    quantities only."""
+    try:
+        own = (Path(quest_root) / "paper" / "paper.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        own = ""
+    return marked_note(quest_root, (delivered or "") + "\n" + own)
 
 
 def kept_bound_breaks(quest_root: Path | str) -> dict[str, dict[str, Any]]:

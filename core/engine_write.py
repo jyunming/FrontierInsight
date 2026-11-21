@@ -3526,7 +3526,7 @@ class WriteStageMixin:
         """Put FI's mark (core/paper_facts.py ``UNCONFIRMED_MARK``) beside each sentence of the paper that one of ``claims``
         (claims still standing, which the Limitations list as unconfirmed) names exactly, by its stored passage, as the
         take-out finds a sentence; every earlier mark is taken out first, so a sentence no longer listed loses its mark and
-        ``[]`` only takes the marks out. A sentence FI cannot place exactly gets none (it stays listed). The mark adds no
+        ``[]`` only takes the marks out; FI's note under the title follows the marks (it says a sentence is marked, or no longer). A sentence FI cannot place exactly gets none (it stays listed). The mark adds no
         claim, so the claim check's and the citation check's receipts move to the marked paper. Nothing is written when
         nothing changes; a paper that cannot be read or written is left as it is. Returns how many sentences are marked."""
         path = Path(paper_path)
@@ -3536,6 +3536,7 @@ class WriteStageMixin:
             clean = _paper_facts.without_unconfirmed(text)
             spans = _record_claims.placed_sentences(clean, claims, plain=self._reader_sentence, keyed=self._keyed_sentence)
             new = _paper_facts.mark_unconfirmed(clean, spans)
+            new = _mark_unconfirmed_results(new, self.quest_root)  # the note names the sentences too
             if new != text:
                 path.write_bytes(new.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
                 after = path.read_bytes()

@@ -7,6 +7,7 @@ the writer nor a check of the writer's text ever reads one. No model is called i
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from core import paper_facts
@@ -51,8 +52,13 @@ def _run(eng, path, claims=None, *, mark: bool = True) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _no_note(text: str) -> str:
+    """The paper without FI's note under its title (it says the paper holds marked sentences, in the same words)."""
+    return re.sub(r"<!-- fi:marks-note -->.*?<!-- /fi:marks-note -->(?:\r?\n)*", "", text, flags=re.S)
+
+
 def _body(text: str) -> str:
-    return paper_facts.without_marks(text).split("## Limitations")[0]
+    return paper_facts.without_marks(_no_note(text)).split("## Limitations")[0]
 
 
 def test_each_sentence_listed_as_unconfirmed_is_marked_where_it_stands(tmp_path: Path) -> None:
@@ -79,8 +85,9 @@ def test_the_mark_is_only_added_and_any_other_call_takes_it_out(tmp_path: Path) 
     plain_eng, plain_path = _engine(tmp_path / "other")
     unmarked = _run(plain_eng, plain_path, mark=False)
     marked = _run(eng, path)
-    assert paper_facts.without_unconfirmed(marked) == unmarked
-    assert _run(eng, path, mark=False) == unmarked
+    assert _no_note(paper_facts.without_unconfirmed(marked)) == unmarked
+    assert "fi:marks-note" in marked and "fi:marks-note" not in unmarked, "FI's note follows the marks"
+    assert _run(eng, path, mark=False) == unmarked  # the note goes with the marks, byte for byte (line endings too)
 
 
 def test_a_sentence_no_longer_listed_loses_its_mark(tmp_path: Path) -> None:
@@ -120,9 +127,12 @@ def test_the_same_sentence_twice_is_marked_twice(tmp_path: Path) -> None:
 def test_no_writer_and_no_check_of_the_writers_text_reads_the_mark(tmp_path: Path) -> None:
     eng, path = _engine(tmp_path)
     marked = _run(eng, path)
-    assert MARK.strip() not in paper_facts.to_placeholders(marked)  # the passage editor and every rewrite
-    assert MARK.strip() not in paper_facts.without_blocks(marked)  # the claim, statistics and record checks
-    assert MARK not in eng._kept_draft({"paper_md": str(path)})  # type: ignore[arg-type]
+    assert "fi:marks-note" in marked, "the delivered paper keeps FI's note under the title"
+    kept = eng._kept_draft({"paper_md": str(path)})  # type: ignore[arg-type]
+    for view in (paper_facts.to_placeholders(marked),  # the passage editor and every rewrite
+                 paper_facts.without_blocks(marked),  # the claim, statistics and record checks
+                 kept):  # the draft a write that keeps it hands on
+        assert MARK.strip() not in view and "fi:marks-note" not in view and "Not confirmed" not in view
 
 
 def test_a_rendered_paper_keeps_its_marks(tmp_path: Path) -> None:
