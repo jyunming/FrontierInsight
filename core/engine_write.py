@@ -523,7 +523,7 @@ class WriteStageMixin:
         once, with FI's record of the run and ``{{calc:...}}`` at hand, almost all of them come back as FI's values or in
         words; a typed number still there after the edit stays in the paper and is recorded as untraced, and only an
         unfilled result key is taken out (:meth:`_paper_record_hits`). One edit per whole-paper draft,
-        and those are capped (engine.max_iterations, the shortening and record rewrites), so this always ends."""
+        and those are capped (engine.max_iterations, the shortening rewrites), so this always ends."""
         if not state.get("paper_keys") or state.get("draft_edited"):
             return []
         if int(self.config.engine.max_iterations) - int(state.get("iteration", 0) or 0) - 1 > 0:
@@ -683,12 +683,10 @@ class WriteStageMixin:
         reported = bool(state.get("extend_missed") or state.get("layout_missed"))
         # No round is left and the review held back the record of numbers FI did not fill (_typed_pass_hits): only those
         # sentences are edited, and a draft that cannot be edited stays as it was (a whole new paper would type new ones).
-        # Not when the review sent the paper back for a contradiction of FI's records (that rewrite answers it, and the
-        # review after it asks for this edit again), nor for a request the run could not carry out, nor on a draft that
-        # was itself edited (a review's hits left in the state are not asked for twice).
+        # Not for a request the run could not carry out, nor on a draft that was itself edited (a review's hits left in
+        # the state are not asked for twice).
         review_now = state.get("review") or {}
-        typed_pass = [] if (refine_round or reported or state.get("draft_edited") or any(
-            _hit_name(h) == _record_claims.HIT for h in review_now.get("must_flag_hits") or [])) \
+        typed_pass = [] if (refine_round or reported or state.get("draft_edited")) \
             else list(review_now.get("typed_pass_hits") or [])
         if typed_pass:
             self._log.info("[write] editing the %d sentence(s) with numbers FI did not fill, once, before any is recorded as untraced",

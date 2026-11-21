@@ -192,7 +192,7 @@ class _Quest:
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
-        self.record_taken_out = _list(_dict(_json(root / ".fi" / "record_claims_taken_out.json")).get("taken_out"))
+        self.record_words = _record_words(root, self.oracle_check)
         self.citations_removed = _list(_dict(_json(root / ".fi" / "citations_removed.json")).get("removed"))
         self.unsupported_removed = _list(_dict(_json(root / ".fi" / "unsupported_claims.json")).get("removed"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
@@ -206,6 +206,27 @@ class _Quest:
 
     def decisions(self, node: str) -> list[dict[str, Any]]:
         return [e for e in self.audit if e.get("kind") == "route_decision" and e.get("node") == node]
+
+
+def _record_words(root: Path, oracle: dict[str, Any]) -> list[str]:
+    """The lines for the paper's own sentences that word what FI states itself (the search against the baseline, the
+    known-answer checks) in a way FI's record says is not so (core/record_claims.py). They are read here, from the
+    delivered paper, so the list is always the paper's: nothing is changed in the paper or kept in a file of its own."""
+    try:
+        from . import best_design_report as best_report
+        from . import paper_facts
+        from . import record_claims
+
+        paper = next((p for p in (root / "paper" / "paper.md", root / "paper.md") if p.is_file()), None)
+        if paper is None:
+            return []
+        rec = best_report.records(root)
+        text = paper_facts.without_blocks(best_report.without_block(_text(paper)))
+        found = record_claims.unchecked(text, best_design=rec["best_design"], optimum_check=rec["optimum_check"],
+                                        oracle=oracle)
+        return [record_claims.disclosure(e, 240) for e in found]
+    except Exception:  # noqa: BLE001 -- the report never fails over one record
+        return []
 
 
 def _text(path: Path) -> str:
@@ -1076,11 +1097,6 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"the value {_one(r.get('text'), 60)} ({_one(r.get('key'), 120)}) could not be worked out "
                             f"again from FI's records ({_one(r.get('why'), 160)}), so it is not checked",
                             "FI's check of the paper's values", "not fixed", ".fi/value_marks.json"))
-    for r in q.record_taken_out:
-        r = _dict(r)
-        out.append(_problem("paper", f"after the paper was written again, it still said what FI's records contradict, so "
-                            f"this was taken out: {_one(r.get('text'), 200)} (why: {_one(r.get('why'), 300)})",
-                            "FI's records", "left out", ".fi/record_claims_taken_out.json"))
     for label in q.citations_removed:
         out.append(_problem("paper", f"the writer cited [{_one(label, 40)}], which is no source of the prior-work block, "
                             "so the citation was taken out of the paper (no number is invented for it)",
@@ -1596,7 +1612,8 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
     root = q.root
     engine = _dict(q.config.get("engine"))
     topic = str(q.config.get("topic") or "")
-    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "page_limit": "", "paper_check": {}}
+    out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "page_limit": "", "paper_check": {},
+                           "unchecked_words": list(q.record_words)}
     # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
     # not say so): the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
@@ -1823,7 +1840,9 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     removed = [r for r in check.get("removed") or [] if isinstance(r, dict)]
     taken_out = [r for r in check.get("taken_out") or [] if isinstance(r, dict)]
     not_filled = str(check.get("not_filled") or "")
-    if not parts and not unmet and not hits and not unfilled and not untraced and not removed and not taken_out and not not_filled:
+    unchecked = [str(x) for x in records.get("unchecked_words") or [] if x]
+    if (not parts and not unmet and not hits and not unfilled and not untraced and not removed and not taken_out
+            and not not_filled and not unchecked):
         return []
     lines = ["", "## What FI recorded that the paper does not carry", "",
              "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
@@ -1860,6 +1879,13 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
                   "is removed, and anywhere else the value is replaced by \"[number removed]\":", ""]
         lines += [f"- {_cell(str(r.get('how')))}: {_cell(_one(r.get('sentence'), 240))} (`{_cell(str(r.get('key')))}`)"
                   for r in taken_out]
+        lines.append("")
+    if unchecked:
+        lines += ["### The paper's own words FI did not check", "",
+                  "FI states what the search found against the baseline and which known-answer checks did not pass itself, "
+                  "from its records. These sentences of the writer's word the same facts, and FI's records say otherwise; "
+                  "FI does not read free text to decide, so they stay in the paper as written:", ""]
+        lines += [f"- {_cell(x)}" for x in unchecked]
         lines.append("")
     if not_filled:
         lines += ["### Result numbers in this paper", "",

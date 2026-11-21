@@ -73,6 +73,54 @@ _STOPPED = {
 }
 
 
+_NOT_BETTER_VERDICTS = frozenset({"improvement_not_shown", "infeasible", "not_local_optimum"})
+
+
+def not_better_why(best_design: Any, optimum_check: Any) -> str:
+    """Why FI's record says the search did not find a better design than the baseline, in plain words; ``""`` when it
+    says nothing of the kind (no search, a better design, or a check that could not decide)."""
+    if not isinstance(best_design, dict):
+        return ""
+    improvement = best_design.get("improvement")
+    verdict = str((optimum_check or {}).get("verdict") or (best_design.get("check") or {}).get("verdict") or "")
+    if verdict in _NOT_BETTER_VERDICTS:
+        says = str((optimum_check or {}).get("says") or (best_design.get("check") or {}).get("says") or "").strip()
+        return f"FI's check of the best design at finer settings ended '{verdict.replace('_', ' ')}'" + (
+            f" ({says[:160]})" if says else "")
+    if best_design.get("best") is None and "best" in best_design:
+        return "the search found no design that meets every limit, so there is no best design"
+    if isinstance(improvement, dict) and improvement.get("better") is False:
+        return "the search found no design better than the baseline"
+    return ""
+
+
+def search_outcome(best_design: Any, optimum_check: Any) -> str:
+    """The first line of the section: what the search found against the baseline, said once by FI from its own record,
+    in the words a scientist reads at a glance (no number: the table under it has them). ``""`` without a search.
+    The design and the improvement are the ones the section reports (the check's, when it replaced the search's best:
+    as :func:`summary_line`), and a verified improvement is worded as the check words it (:func:`core.optimum_check.verdict_phrase`)."""
+    if not isinstance(best_design, dict):
+        return ""
+    if best_design.get("best") is None and "best" in best_design:
+        return "The search found no design that meets every limit, so there is no best design."
+    check = optimum_check if isinstance(optimum_check, dict) else (
+        best_design.get("check") if isinstance(best_design.get("check"), dict) else {})
+    verdict = str(check.get("verdict") or "")
+    if verdict in _NOT_BETTER_VERDICTS:
+        return ("The search did not find a design shown to be better than the baseline"
+                f" ({_VERDICT_SHORT.get(verdict, verdict)}).")
+    chosen = check.get("best") if isinstance(check.get("best"), dict) else None
+    imp = check.get("improvement") if chosen else best_design.get("improvement")
+    value = imp.get("value") if isinstance(imp, dict) else None
+    better = (value > 0 if _num(value) else imp.get("better") if isinstance(imp, dict) else None)
+    if better is False:
+        return "The search did not find a design better than the baseline; the best design found is no better than it."
+    if better is True:
+        phrase = _check.verdict_phrase(verdict, check.get("improvement")) if verdict in _check.VERDICTS else ""
+        return "The best design the search found is better than the baseline" + (f" ({phrase})." if phrase else ".")
+    return ""
+
+
 def flat_went_on(ev: dict[str, Any]) -> str:
     """The search's objective did not move, and the search went on (``flat_objective`` recorded, not stopped: the plan
     was already revised for it, or no revision was left): one plain clause, or empty."""
@@ -284,6 +332,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     sign = _sign(best)
     hashes = "#" * max(1, min(6, heading_level))
     lines = [f"{hashes} {HEADING}", "", _OPENING, ""]
+    if said := search_outcome(best, check):
+        lines += [f"**What the search found.** {said}", ""]
     what = f"**What was optimised.** {quantity}"
     if objective.get("meaning"):
         what += f" ({objective['meaning']})"
@@ -299,7 +349,11 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     if chosen or baseline_design:
         lines += [*_variables_table(block, baseline_design, chosen), ""]
     if best.get("best") is None:
-        lines += [f"No design that meets every limit was found: {best.get('says')}", ""]
+        says = str(best.get("says") or "").strip()
+        if not said:
+            lines += [f"No design that meets every limit was found: {says}", ""]
+        elif says and says not in said:  # the outcome line already says no design met every limit
+            lines += [says, ""]
     else:
         lines += [*_objective_rows(best, check, quantity, unit), ""]
         limit_rows = _limit_rows(check, best)
@@ -608,7 +662,10 @@ def write_note(quest_root: Path) -> str:
             "best design at each numerical setting, the improvement and its numerical error, how the search ran, the "
             "check at finer settings, any target asked for, and the limits. That heading is FI's: do not give a section "
             "of your own that heading, write that table or restate its numbers; refer to the section and discuss what it "
-            "means. Every number you do "
+            "means. FI also states, in the section's first lines, what the search found against the baseline (a better design "
+            "or not): do not state that yourself in your own sentence (not in the abstract, the results or the "
+            "conclusions), and do not call any design optimal, optimised or the best, in words or in a figure caption, "
+            "beyond what that line says; refer to the section. Every number you do "
             "write about the best design, the baseline or the improvement must be one of FI's (the results' "
             "`fi_search`).")
     if verdict != "verified" or not passed:

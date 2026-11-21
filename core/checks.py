@@ -1250,22 +1250,11 @@ CHECKS: tuple[Check, ...] = (
     Check('improve_only_noise', 'core.improve', 'only_noise',
           'improve', 'own_record', 'note',
           'Loop is skipped when every unmet criterion is one a second model flagged (nothing an edit could fix)'),
-    Check('record_claim_optimised_vs_search', 'core.record_claims', 'found',
-          'review', 'own_record', 'strip',
-          'paper calls a design optimised/best while the search record (best_design, OPTIMUM_CHECK) says no '
-          'better design; rewrites capped, then the sentence is taken out'),
-    Check('record_claim_caption_optimised', 'core.record_claims', 'found',
-          'review', 'own_record', 'strip',
-          'a sentence names a figure as the optimised design when the record has no optimised design; rewritten, '
-          'then taken out'),
-    Check('record_claim_validated_vs_oracle', 'core.record_claims', 'found',
-          'review', 'own_record', 'strip',
-          'paper says validated/confirmed against known answers while ORACLE_CHECK is unconfirmed or failed; '
-          'rewritten, then taken out'),
-    Check('record_claims_rewrite_cap', 'core.engine', 'Engine._route_after_review',
-          'review', 'own_record', 'repair',
-          'record contradiction sends the paper back to write up to _RECORD_REWRITES (2) times outside '
-          'max_iterations; then listed in QUALITY.md, never ends the quest (stop_power READ)'),
+    Check('record_claims_unchecked', 'core.record_claims', 'unchecked',
+          'several', 'model_text', 'note',
+          "paper's own words about whether the search beat the baseline, which design a figure shows, or whether the "
+          'results were checked against a known answer, while FI states those facts itself; listed in QUALITY.md, '
+          'never a rewrite, a take-out or a stop'),
     Check('stat_interval_method_mismatch', 'core.stat_claims', '_check_interval_method',
           'review', 'own_record', 'repair',
           'an interval labelled with an estimator (e.g. exact binomial) that is really the seed t-interval; '

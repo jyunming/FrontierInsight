@@ -45,7 +45,7 @@ from .engine_base import (  # noqa: F401
     _PERSONA_NAME_RE, _PERSON_QUERIES, _PIP_FREEZE_TIMEOUT_S, _PLAN_DIRECTIVE, _PROPORTION_NAME_RE, _PROSE_NUMBER,
     _PROXY_WARN_SHOWN, _PY_FENCE_RE, _PartsRefused, _PlanEditedMeanwhile, _ProgressOnly, _ProviderName,
     _QUERY_SET_HASHED, _QUEST_MEMORY_KINDS, _QUOTE_MIN_CHARS, _QuerySetsUnreadable, _RANDOM_SOURCE_PATTERN,
-    _RECORD_REWRITES, _REDERIVE_BECAUSE, _REDESIGN_OWNED_PARTS, _REFERENCES_HEADING_LINE_RE, _REFERENCES_HEADING_RE,
+    _REDERIVE_BECAUSE, _REDESIGN_OWNED_PARTS, _REFERENCES_HEADING_LINE_RE, _REFERENCES_HEADING_RE,
     _REFERENCE_FORMS, _REFINE_POINT_RE, _REFINE_WHY_RE, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS, _REPAIR_REPLY_KEYS,
     _REPAIR_TEXT_KEYS, _REPLOT_STYLE_KEYS, _RESULT_LINE_RE, _RESULT_MARKER_RE, _RUN_FIGURE_IMAGE_RE,
     _SAME_STATEMENT_SHARE, _SAME_STATEMENT_WORDS, _SCHEMA_RETRY_ASKS, _SEARCH_ASKED, _SEARCH_ASKS, _SEARCH_CALLS,
@@ -55,7 +55,7 @@ from .engine_base import (  # noqa: F401
     _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, _SOURCE_VERDICT_HASHED,
     _SPACED_HYPHEN_BREAK_RE, _SPLIT_PROTOCOL, _SPLIT_REFLECT_ANALYSIS, _SPLIT_REFLECT_SIMULATE, _SPLIT_REPLY_REMINDER,
     _SPLIT_RERUN_NOTE, _SPREAD, _SPREAD_IN_PARENS_RE, _SPREAD_RE, _STATE_TEXT_CHARS, _STOPPED_BEFORE_THE_STUDY,
-    _STUDY_TYPE_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE, _SURVEY_WRITE_NOTE, _TAKE_OUT_PASSES, _TEXT_ONLY_HITS,
+    _STUDY_TYPE_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE, _SURVEY_WRITE_NOTE, _TEXT_ONLY_HITS,
     _THIN_MARKS, _THIN_TEXT_CHARS, _TITLE_ONLY_UNEXPLAINED_STEMS, _TOC_LINE, _TOPIC_ASKED, _TOPIC_DESIGN_ASKED,
     _TRIAL_ORACLE_NOTE, _TRIM_ROUNDS, _UNANSWERED_NOTE_HIT, _UNPLACED_FINDING, _UNSANCTIONED_PROXY_PROVIDERS,
     _UNSEEDED_RNG_FACTORIES, _USER_DATA_SUFFIXES, _UnseededRngFinder, _VALUES_POOL_CAP, _WARNING_KINDS,
@@ -115,7 +115,7 @@ from .engine_base import (  # noqa: F401
     _query_set_key, _query_set_standing, _quest_logger, _quote_in_source, _raise_if_required_skills_unusable,
     _random_source_found, _rank_papers_by_relevance, _read_a_search_block, _read_figure_records, _read_hit_places,
     _read_json_or_none_path, _read_key_set, _read_latex_object, _read_object_keys, _read_primary_figures,
-    _read_query_sets, _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor, _record_claims,
+    _read_query_sets, _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor,
     _record_numbers, _record_query_set, _redrawn_band_text, _ref_citation_text, _reference_entry, _reference_values,
     _refine, _refine_count, _refine_round, _rejudges_oracles_after, _rename_code_names, _render_auto_collected_md,
     _render_data_readme, _renumber_citations, _reorder_literature, _repair_reply_json, _repair_template_values,
@@ -2218,8 +2218,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 # retrieved text of its source last, after the review, the rewrites and the page-limit fit.
                 "done": "citation_check",
                 "human_feedback": "citation_check",
-                # The paper still claims what FI's own records contradict after its rewrites: no paper (needs/STUCK.json).
-                "stuck": "stuck_no_findings",
             },
         )
         g.add_conditional_edges(
@@ -3054,21 +3052,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # not raised again: a rewrite cannot answer it, and the design is not changed for it.
         repeated = set(review.get("objections_repeated") or [])
         must_flag = [h for h in review.get("must_flag_hits") or [] if _objection_key(h) not in repeated]
-        # The paper claims what FI's own records contradict: it is written again, with the contradiction named, up to
-        # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). What is still
-        # flagged after them is taken out of the paper (:meth:`_record_contradiction_hits`); what could not be taken out
-        # is listed in QUALITY.md. The check reads the paper's words, so it never ends the quest (core/stop_power.py).
-        if any(_hit_name(h) == _record_claims.HIT for h in must_flag):
-            if int(state.get("record_rewrites") or 0) <= _RECORD_REWRITES:
-                self._log.info(
-                    "[route] the paper claims what FI's own records contradict — writing it again "
-                    "(rewrite %d of %d, outside engine.max_iterations)",
-                    int(state.get("record_rewrites") or 0), _RECORD_REWRITES)
-                return "rewrite"
-            self._log.warning(
-                "[route] after %d rewrites the paper still has sentences FI's check of its records flags; they are listed "
-                "in QUALITY.md, and the check reads the paper's words, so the quest goes on", _RECORD_REWRITES)
-            must_flag = [h for h in must_flag if _hit_name(h) != _record_claims.HIT]
         if must_flag and state.get("iteration", 0) < self.config.engine.max_iterations:
             # Before the text routes: a flag about a computed value is not a
             # writing problem, and sending it to ``write`` is what let a paper

@@ -113,8 +113,7 @@ def test_the_edit_goes_before_every_route_that_would_deliver_the_draft(tmp_path:
     assert eng._route_after_review(state) in ("done", "human_feedback")  # type: ignore[arg-type]
 
 
-def test_a_route_that_runs_the_experiment_again_or_answers_a_record_contradiction_comes_first(
-        tmp_path: Path, monkeypatch: Any) -> None:
+def test_a_route_that_runs_the_experiment_again_comes_first(tmp_path: Path, monkeypatch: Any) -> None:
     from core import engine as engine_mod
 
     root = _quest(tmp_path)
@@ -123,30 +122,18 @@ def test_a_route_that_runs_the_experiment_again_or_answers_a_record_contradictio
     monkeypatch.setattr(engine_mod, "_review_sends_the_experiment_back", lambda review, state: "k_hat")
     state = {"iteration": 1, "review": {"verdict": "accept", "must_flag_hits": [hit], "typed_pass_hits": [hit]}}
     assert eng._route_after_review(state) == "re_execute"  # type: ignore[arg-type]
-    monkeypatch.setattr(engine_mod, "_review_sends_the_experiment_back", lambda review, state: "")
-    record = "record_contradiction: the paper says the run met the limit; FI's record says it did not. — “y”"
-    state = {"iteration": 9, "record_rewrites": 1,
-             "review": {"verdict": "accept", "must_flag_hits": [record, hit], "typed_pass_hits": [hit]}}
-    assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
 
 
-def test_the_write_after_a_record_contradiction_or_on_an_edited_draft_is_not_the_edit(tmp_path: Path) -> None:
+def test_the_write_for_a_request_the_run_could_not_carry_out_or_on_an_edited_draft_is_not_the_edit(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     eng = _engine(root, max_iterations=1)
     calls, state = _run(eng, json.dumps([{"find": "in the main grid", "replace": "in the grid"}]))
     state.update(asyncio.run(eng._node_write(state)))  # type: ignore[arg-type]
     state.update(asyncio.run(eng._node_review(state)))  # type: ignore[arg-type]
-    passes = state["review"]["typed_pass_hits"]
-    record = "record_contradiction: the paper says the run met the limit; FI's record says it did not. — “y”"
     logged: list[str] = []
     info = eng._log.info
     eng._log.info = lambda msg, *a, **k: (logged.append(msg % a if a else msg), info(msg, *a, **k))  # type: ignore[assignment]
-    before = len(calls)
-    out = asyncio.run(eng._node_write({**state, "review": {**state["review"], "must_flag_hits": [record, *passes]}}))
-    assert "write" in [n for n, _p in calls[before:]]  # the whole paper, as the contradiction's rewrite asks for
-    assert out["draft_edited"] is False
-    assert not [m for m in logged if "numbers FI did not fill, once" in m]
-    # Nor when a request the run could not carry out is to be told to the whole-paper writer.
+    # Not when a request the run could not carry out is to be told to the whole-paper writer.
     before = len(calls)
     out = asyncio.run(eng._node_write({**state, "layout_missed": ["a panel per noise level"]}))  # type: ignore[arg-type]
     assert "write" in [n for n, _p in calls[before:]] and out["draft_edited"] is False

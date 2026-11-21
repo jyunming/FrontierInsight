@@ -190,9 +190,6 @@ class ReviewStageMixin:
             # paper mislabels is caught by recomputing it, so the finding can
             # name the contradiction instead of guessing at one.
             review["must_flag_hits"] += self._statistics_claim_hits(paper_md, state)
-            # Forced: a claim FI's own records contradict (core/record_claims.py).
-            record_hits = self._record_contradiction_hits(paper_md, state)
-            review["must_flag_hits"] += record_hits
             # Forced, and text-only: what the paper states about the run against FI's records (core/paper_facts.py).
             review["must_flag_hits"] += self._paper_record_hits(paper_md, state)
             typed_pass = self._typed_pass_hits(paper_md, state)
@@ -205,8 +202,6 @@ class ReviewStageMixin:
             update: QuestState = {"review": review}
             if pruned is not None:
                 update["claim_grounding"] = pruned
-            # Counted here so the router can cap the rewrites for it, and end the quest honestly after them.
-            update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
             # Counted here, like the shortening rewrites above, so the router
             # can cap it: a must-flag about something the run computed sends
             # the experiment back, at most ``_CODE_REEXECUTES`` times.
@@ -383,9 +378,6 @@ class ReviewStageMixin:
         stat_hits = self._statistics_claim_hits(paper_md, state)
         if stat_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stat_hits]
-        record_hits = self._record_contradiction_hits(paper_md, state)
-        if record_hits:
-            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *record_hits]
         stated_hits = self._paper_record_hits(paper_md, state)
         if stated_hits:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *stated_hits]
@@ -401,7 +393,6 @@ class ReviewStageMixin:
         update: QuestState = {"review": review, "review_panel": panel_results}
         if pruned is not None:
             update["claim_grounding"] = pruned
-        update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
         # As on the single-reviewer path: count a review that sends the
         # experiment back, so the router can cap those re-executes.
         if _review_sends_the_experiment_back(review, state):

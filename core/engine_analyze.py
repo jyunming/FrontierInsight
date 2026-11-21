@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
     Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, _FRESH_SCRIPT, _ModelAnswerProblem,
-    _RECORD_REWRITES, _STOPPED_BEFORE_THE_STUDY, _UNPLACED_FINDING, _aggregate_result_json_replicates,
+    _STOPPED_BEFORE_THE_STUDY, _UNPLACED_FINDING, _aggregate_result_json_replicates,
     _analysis_frame, _code_findings, _code_project, _code_reach, _code_review, _compact_result_json_block,
     _cross_check_items, _elide_value_lists, _evidence_gate_rule, _figure_list_for_prompt, _finding_repair,
     _fit_request, _fit_scope, _flat_fact_sentence, _flat_moved, _flat_request, _format_clarify, _format_lit, _frozen,
-    _function_steps, _gate_inputs, _hit_name, _is_degenerate_result, _is_preliminary_memory, _load_persona_prefix,
+    _function_steps, _gate_inputs, _is_degenerate_result, _is_preliminary_memory, _load_persona_prefix,
     _numeric, _one_line, _oracle, _pairs, _parse_json_lenient, _pick_up_user_dropped_datasets, _plan, _receipts,
-    _record_claims, _replicate_assertions, _replicate_metric_kinds, _rerun_check, _rerun_from, _run_manifest,
+    _replicate_assertions, _replicate_metric_kinds, _rerun_check, _rerun_from, _run_manifest,
     _shown_reach, _split_figure_readings, _stop_power, _topic_req, _write_personas, asyncio, copy, derive_protocol,
     functools, json, scrub_secrets, shutil, tempfile, time,
 )
@@ -986,8 +986,6 @@ class AnalyzeStageMixin:
         no_numbers = reason == "no_numbers"
         crashed = reason == "crashed"
         headline_missing = reason == "headline_missing"
-        claims = [str(h) for h in (state.get("review") or {}).get("must_flag_hits") or []
-                  if _hit_name(h) == _record_claims.HIT]
         repairs = _numeric.repairs_made(state)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
@@ -1027,15 +1025,6 @@ class AnalyzeStageMixin:
         ended = (("the run gave no result with a number for the study's quantities" if bare else
                   "the run gave no result with a number in it") + again if no_numbers else
                  f"the script {not_done}" + again if crashed else "the analysis could not be read twice")
-        if claims and reason not in ("flat", "no_numbers", "crashed"):
-            # The paper claimed what FI's own records contradict, even after it was written again (core/record_claims.py).
-            problem = (f"the paper still claims what FI's own records contradict, even after it was written again "
-                       f"{_RECORD_REWRITES} times, so FI will not hand it over as a finished paper")
-            tried = ["compared the paper with FI's records of the search, the known-answer checks and the figures the run drew",
-                     *[_one_line(c, 400) for c in claims[:3]],
-                     f"asked for the paper to be written again with the contradiction named ({_RECORD_REWRITES} times); "
-                     "the claim was still there"]
-            ended = "the paper still claimed what FI's records contradict"
         if headline_missing:
             # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
             missing = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
@@ -1159,7 +1148,6 @@ class AnalyzeStageMixin:
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
                "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason == "no_search" else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
-               "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`).")))
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
