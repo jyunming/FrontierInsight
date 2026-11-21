@@ -248,6 +248,23 @@ def test_a_figure_axis_fi_could_not_tie_to_the_quantity_does_not_drop_the_figure
     assert rc.figures_on_axis(tmp_path, {"yield_frac"}) == ["tied.png"]
 
 
+def test_a_figure_whose_shared_y_axis_draws_the_quantity_is_dropped(tmp_path: Path) -> None:
+    (tmp_path / "figures").mkdir()
+    (tmp_path / ".fi" / "figure_records").mkdir(parents=True)
+    x = {"id": "bed", "kind": "setting"}
+    panels = {  # FI joins the ids of two results drawn on one y axis with " / "
+        "shared": {"y": {"what": "load / yield_frac"}, "series": [{"id": "load", "what": "load"}]},
+        "by_series": {"y": {"what": "load"}, "series": [{"id": "curve_b", "what": "yield_frac"}]},
+        "untied": {"y": {"what": "other / load"}, "series": [{"id": "curve_c", "what": "yield_frac", "neutral": True}]},
+        "apart": {"y": {"what": "load / drift_rate"}, "series": [{"id": "load", "what": "load"}]},
+    }
+    for stem, p in panels.items():
+        (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
+        (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(json.dumps(
+            {"panels": [{"panel": 1, "x": x, **p}]}), encoding="utf-8")
+    assert rc.figures_on_axis(tmp_path, {"yield_frac"}) == ["by_series.png", "shared.png"]
+
+
 def test_each_left_out_quantity_is_given_the_note_of_its_own_check(tmp_path: Path) -> None:
     (tmp_path / "needs").mkdir()
     (tmp_path / "needs" / "RESULT_CHECK.json").write_text(json.dumps({

@@ -298,7 +298,8 @@ def bound_breaks(violations: Any, design: Any) -> list[BoundBreak]:
 def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) -> list[str]:
     """The saved figures (file names in ``figures/``) that draw one of ``quantities`` on an axis or as a series, by FI's
     record of each drawing call (``.fi/figure_records/<stem>.calls.json``: a panel's ``x.id``, ``y.what`` and series
-    ids). Only what FI tied to the quantity counts: an axis or a series the record calls ``neutral`` (FI could not check
+    ids). A y axis several results share counts for each of them, and so does the result each series records it draws
+    (``what``). Only what FI tied to the quantity counts: an axis or a series the record calls ``neutral`` (FI could not check
     that it draws that quantity, core/frame_figure.py) does not. A figure with no such record is not listed."""
     root, wanted = Path(quest_root), {str(q) for q in quantities}
     folder, records = root / "figures", root / ".fi" / "figure_records"
@@ -311,9 +312,12 @@ def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) ->
             if not isinstance(p, dict):
                 continue
             x, y = p.get("x") if isinstance(p.get("x"), dict) else {}, p.get("y") if isinstance(p.get("y"), dict) else {}
+            series = [s for s in p.get("series") or [] if isinstance(s, dict) and not s.get("neutral")]
+            # A y axis two results share is recorded as their ids joined by " / " (core/frame_figure.py _set_y), split the
+            # same way; each series also keeps the result it draws (`what`). "other" is FI's word for a y it could not tie.
             named = {str(x.get("id") or "") if not x.get("neutral") else "",
-                     str(y.get("what") or "") if not y.get("neutral") else "",
-                     *(str(s.get("id") or "") for s in p.get("series") or [] if isinstance(s, dict) and not s.get("neutral"))}
+                     *(str(y.get("what") or "").split(" / ") if not y.get("neutral") else ()),
+                     *(str(s.get("id") or "") for s in series), *(str(s.get("what") or "") for s in series)} - {"", "other"}
             if named & wanted:
                 stems.add(path.name[: -len(".calls.json")])
     return sorted(f.name for f in folder.iterdir() if f.is_file() and f.stem in stems and f.suffix.lower() != ".json")
