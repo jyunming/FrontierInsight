@@ -275,6 +275,18 @@ def test_a_shown_issue_the_last_repair_failed_on_is_counted_as_not_repaired_in_t
     assert "is not repaired |" in text and "0 shown" not in text
 
 
+def test_a_shown_issue_later_found_a_plan_problem_still_says_not_repaired_in_the_table() -> None:
+    from core import quality_report as qr
+
+    record = _record_with_failed_repair()
+    record["issues"]["F-b"].update(outcome=cf.PLAN_PROBLEM, plan_conflict=True)
+    assert "1 shown result-changing issue(s) are not repaired" in cf.convergence_line(record)
+    rows = {r["id"]: r for r in qr._issue_rows(record)}
+    text = "\n".join(qr._issue_lines({"issues": list(rows.values()), "issue_summary": qr._issue_summary(record)}))
+    row = next(line for line in text.splitlines() if line.startswith("| F-b "))
+    assert "plan problem" in row and "shown by a failing test and is not repaired" in row
+
+
 def test_the_sentence_says_zero_when_every_shown_issue_was_repaired() -> None:
     record = _record_with_failed_repair()
     record["issues"]["F-b"]["outcome"] = cf.FIXED

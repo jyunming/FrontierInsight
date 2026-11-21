@@ -1725,6 +1725,8 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             still = "no: it is about FI's own lines, so it is kept here for FI to fix; it was not repaired and changes nothing"
         elif row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
+            if row.get("not_repaired_shown"):
+                still += "; it was shown by a failing test and is not repaired"
         elif row["open"] and row.get("never_run"):
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
