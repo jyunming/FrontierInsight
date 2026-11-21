@@ -799,10 +799,12 @@ def _record_allowance(printed: float, from_record: float = 0.0) -> float:
     the digits the analysis chose to print. A mean printed as ``0.05`` stands for 0.05, not for anything from 0.045 to
     0.055 (a nominal level printed beside a setting is not the mean of its trials); a whole number (a count) is exact.
     ``from_record``: how far the statistic computed from FI's record can be from the one computed from the trial values
-    themselves (:func:`_record_error`), allowed twice over for the arithmetic of the two computations. It matters when
-    large values cancel (1e11 + 0.1 and -1e11 are kept as 1e11 and -1e11, so their mean 0.05 is recomputed as 0)."""
+    themselves (:func:`_record_error`), allowed once: it is already the most any values that FI's record keeps can be
+    off, so a printed number beyond it (with the printed arithmetic's own round-off) is no set of those values' statistic.
+    It matters when large values cancel (1e11 + 0.1 and -1e11 are kept as 1e11 and -1e11, so their mean 0.05 is
+    recomputed as 0; any values kept so have a mean within 0.5 of 0)."""
     own = 0.0 if isinstance(printed, int) else RECORD_PRECISION * abs(float(printed))
-    return own + 2.0 * from_record
+    return own + from_record
 
 
 def _record_error(values: list[tuple[float, int]]) -> dict[str, float]:

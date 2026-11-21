@@ -200,6 +200,10 @@ def test_an_honest_mean_of_large_cancelling_values_is_within_the_precision_of_th
     assert rm._summary_verdict({"mean": honest, "sd": sd, "se": sd / math.sqrt(2), "n": 2}, counts) == ""
     # Known positive: a summary beyond what the record's precision can explain is still a disagreement.
     assert "not the mean" in rm._summary_verdict({"mean": 5.0}, counts)
+    # Second review: values kept as 1e11 and -1e11 have a mean within 0.5 of 0, whatever they were; the bound is allowed
+    # once, so 0.75 is no mean of such values (a doubled bound accepted it).
+    assert "not the mean" in rm._summary_verdict({"mean": 0.75}, counts)
+    assert rm._summary_verdict({"mean": 0.5}, counts) == "" and "not the mean" in rm._summary_verdict({"mean": 0.51}, counts)
     assert "not the standard deviation" in rm._summary_verdict({"mean": honest, "sd": sd * 1.001}, counts)
     assert "number of trials" in rm._summary_verdict({"mean": honest, "n": 3}, counts)
 
