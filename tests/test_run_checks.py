@@ -1229,19 +1229,20 @@ async def test_a_search_whose_simulation_fails_when_timed_goes_to_the_repair_not
     assert "FI estimates" not in _log(eng)
 
 
-#: A search's simulation that wastes most of its time: the same sum worked out many times over.
+#: A search's simulation that wastes most of its time: the same wait taken many times over. The cost is a sleep, not CPU work,
+#: so it is the same on a fast or a slow machine (a CPU burn timed under the limit on a fast runner and recorded no cut).
 _SLOW_SEARCH = (
+    "import time\n\n"
     "def run_cell(cell):\n"
     "    x = float(cell['x'])\n"
-    "    total = 0.0\n"
-    "    for _ in range(120):\n"
-    "        total = sum(i * 1e-9 for i in range(100000))\n"
-    "    return {'f': x ** 2 + total}\n"
+    "    for _ in range(40):\n"
+    "        time.sleep(0.02)\n"
+    "    return {'f': x ** 2}\n"
 )
-_WASTE = "    for _ in range(120):\n        total = sum(i * 1e-9 for i in range(100000))\n"
-_ONCE = "    total = sum(i * 1e-9 for i in range(100000))\n"
+_WASTE = "    for _ in range(40):\n        time.sleep(0.02)\n"
+_ONCE = "    time.sleep(0.02)\n"
 #: Faster, and the same at the scan's one design (x = 0), but not at designs the search tries elsewhere.
-_ONLY_AT_THE_BASE = "    total = sum(i * 1e-9 for i in range(100000))\n    if abs(x) > 1:\n        return {'f': x}\n"
+_ONLY_AT_THE_BASE = "    time.sleep(0.02)\n    if abs(x) > 1:\n        return {'f': x}\n"
 
 
 def _speed_reply(find: str, replace: str) -> str:
@@ -1261,7 +1262,7 @@ async def _slow_search(tmp_path: Path, replies: list[str], monkeypatch: pytest.M
     block["grid"] = {"axis0": [0, 1, 2]}
     block["evaluation_budget"] = {"starts": 2, "per_start": 50}
     eng, runner = await _search_engine(tmp_path, block)
-    eng.config.execution.timeout_s = 25  # about 3x below the measured study on any machine; one evaluation's own start-up is counted too (about 0.3 s)
+    eng.config.execution.timeout_s = 25  # far below what the sleeping simulation costs at the search's size, on any machine
     eng.config.engine.improve_rounds = 2
     (eng.quest_root / "code" / "simulate.py").write_text(_SLOW_SEARCH, encoding="utf-8")
     chat = AsyncMock(side_effect=list(replies))
