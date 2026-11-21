@@ -490,13 +490,14 @@ def _with_author_line(content: str, output) -> str:
     under its headings. The deck is unchanged when no author field is set."""
     parts = (output.author, output.affiliation, output.contact_email, output.url)
     line = " · ".join(" ".join(str(p).split()) for p in parts if str(p or "").strip())
-    return _under_title(content, line) if line else content
+    return _under_title(content, line, by_heading=False) if line else content
 
 
-def _under_title(content: str, line: str) -> str:
+def _under_title(content: str, line: str, *, by_heading: bool = True) -> str:
     """``content`` with ``line`` as a paragraph at the end of the title slide: the first slide that holds a ``# `` heading.
     A deck with no such slide takes the first slide that holds any text (and says so in the log), so a cover or agenda
-    slide before the title is never taken for it."""
+    slide before the title is never taken for it. ``by_heading=False``: always the first slide that holds text (the author
+    line's selector)."""
     match = _FRONT_MATTER_RE.match(content)
     head = content[: match.end()] if match else ""
     body = content[len(head):]
@@ -507,8 +508,8 @@ def _under_title(content: str, line: str) -> str:
         start = brk.end()
     spans.append((start, len(body)))
     texts = [(a, z) for a, z in spans if body[a:z].strip()]
-    titled = [(a, z) for a, z in texts if _TITLE_HEADING_RE.search(body[a:z])]
-    if not titled and texts:
+    titled = [(a, z) for a, z in texts if _TITLE_HEADING_RE.search(body[a:z])] if by_heading else []
+    if by_heading and not titled and texts:
         _log.info("slides: no slide holds a '# ' title heading; the line goes on the first slide that holds text")
     at = (titled or texts or [(0, len(body))])[0][1]
     if at >= len(body):

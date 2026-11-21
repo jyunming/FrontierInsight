@@ -177,3 +177,10 @@ def test_the_paper_note_is_not_read_by_the_writer_views(tmp_path: Path) -> None:
     for view in (paper_facts.to_placeholders(paper), paper_facts.without_blocks(paper)):
         assert "fi:marks-note" not in view and "Not confirmed" not in view and "## Abstract" in view
     assert "fi:marks-note" in paper_facts.without_marks(paper), "the delivered paper keeps it"
+
+
+def test_the_author_line_stays_on_the_first_slide_with_text_even_when_a_later_slide_has_the_h1(tmp_path: Path) -> None:
+    deck = "---\nmarp: true\n---\n\n## A study\n\n---\n\n# A later content slide\n"
+    out = types.SimpleNamespace(author="A. Author", affiliation="", contact_email="", url="")
+    slides = slides_mod._with_author_line(deck, out).split("\n---\n")
+    assert "A. Author" in slides[1] and "A. Author" not in slides[2]
