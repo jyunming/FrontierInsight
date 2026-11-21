@@ -311,7 +311,7 @@ async def test_an_error_inside_the_check_with_a_flagged_fault_stops_the_quest(
     engine = _engine(tmp_path)
     _record(engine, _issue())
 
-    async def boom(self, rel):  # noqa: ANN001
+    async def boom(self, rel, capture=False):  # noqa: ANN001
         raise OSError("disk")
 
     monkeypatch.setattr(Engine, "_rerun_finding_test", boom)
