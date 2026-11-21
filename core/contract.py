@@ -172,6 +172,11 @@ class Figure(_Strict):
 SYSTEM_KINDS = ("part", "boundary", "source")
 #: The most entries a description of the studied system may have (a set-up drawing with more is not readable).
 MAX_SYSTEM_PARTS = 16
+#: What a ``boundary`` entry is, when the plan says: the condition set there, in the words a reader of the set-up drawing
+#: knows (a periodic side is drawn as such, not as a wall).
+BOUNDARY_KINDS = ("wall", "periodic", "open", "symmetry", "inflow", "outflow", "interface")
+#: Which way the system's one stated direction points in the set-up drawing (gravity down, a flow to the right).
+DIRECTIONS = ("down", "up", "left", "right")
 
 
 class SystemPart(_Strict):
@@ -182,6 +187,8 @@ class SystemPart(_Strict):
     name: str
     kind: Literal["part", "boundary", "source"] = "part"
     carries: tuple[str, ...] = ()
+    #: For a ``boundary`` entry: the condition set there (:data:`BOUNDARY_KINDS`); ``None`` when the plan does not say.
+    boundary: Literal["wall", "periodic", "open", "symmetry", "inflow", "outflow", "interface"] | None = None
 
 
 class SystemLink(_Strict):
@@ -194,11 +201,20 @@ class SystemLink(_Strict):
     what: str = ""
 
 
+class SystemDirection(_Strict):
+    """The one direction the studied system has (``what`` in plain words, ``points`` one of :data:`DIRECTIONS`)."""
+
+    what: str
+    points: Literal["down", "up", "left", "right"]
+
+
 class System(_Strict):
     """The studied system as the plan states it (``protocol.system``), the structure a set-up drawing is made from."""
 
     parts: tuple[SystemPart, ...] = ()
     links: tuple[SystemLink, ...] = ()
+    #: The one direction the set-up has, when the plan states one (gravity, the direction of a flow).
+    direction: SystemDirection | None = None
 
 
 def figure_file(planned: Any) -> str:
@@ -949,15 +965,17 @@ def _plain_name(text: Any) -> str | None:
 def check_system(value: Any, protocol: Any) -> list[str]:
     """Why ``value``, the studied system an answer or the plan states, cannot be used; empty when it can, or when it states
     there is none (``None``, or no parts). ``parts``: each an ``id`` (a name in code, once), a plain ``name`` with no number
-    in it, a ``kind`` of :data:`SYSTEM_KINDS` and ``carries``, ids of the plan (:func:`system_names`). ``links``: each
-    ``from`` and ``to``, two different entries, and ``what`` passes between them in plain words."""
+    in it, a ``kind`` of :data:`SYSTEM_KINDS` and ``carries``, ids of the plan (:func:`system_names`); a ``boundary`` entry
+    may say its condition (``boundary``, one of :data:`BOUNDARY_KINDS`). ``links``: each ``from`` and ``to``, two different
+    entries, and ``what`` passes between them in plain words. ``direction`` (optional): ``what`` in plain words and ``points``,
+    one of :data:`DIRECTIONS`."""
     if value is None:
         return []
     if not isinstance(value, dict):
         return ["`system` must be a mapping with `parts` and `links`, or null when the study has no set-up to draw"]
     parts, links = value.get("parts"), value.get("links", [])
-    unknown_keys = [k for k in value if k not in ("parts", "links")]
-    out = [f"`system` has `{k}`, which is not `parts` or `links`" for k in unknown_keys]
+    unknown_keys = [k for k in value if k not in ("parts", "links", "direction")]
+    out = [f"`system` has `{k}`, which is not `parts`, `links` or `direction`" for k in unknown_keys]
     if parts in (None, []):
         return out
     if not isinstance(parts, list) or not all(isinstance(x, dict) for x in parts):
@@ -987,10 +1005,16 @@ def check_system(value: Any, protocol: Any) -> list[str]:
             if bad:
                 out.append(f"part `{pid}` carries {', '.join('`' + c + '`' for c in bad)}, which the plan does not declare "
                            f"(it declares {', '.join(names[:40]) or 'nothing'})")
-        extra = [k for k in part if k not in ("id", "name", "kind", "carries")]
+        condition = part.get("boundary")
+        if condition is not None:
+            if part.get("kind", "part") != "boundary":
+                out.append(f"part `{pid}` has a `boundary` condition but is not of kind boundary")
+            elif condition not in BOUNDARY_KINDS:
+                out.append(f"part `{pid}`: `boundary` must be one of {', '.join(BOUNDARY_KINDS)}")
+        extra = [k for k in part if k not in ("id", "name", "kind", "carries", "boundary")]
         if extra:
-            out.append(f"part `{pid}` has {', '.join('`' + k + '`' for k in extra)}; an entry has only `id`, `name`, `kind` and "
-                       "`carries` (a number goes in by its plan id in `carries`)")
+            out.append(f"part `{pid}` has {', '.join('`' + k + '`' for k in extra)}; an entry has only `id`, `name`, `kind`, "
+                       "`carries` and, for a boundary, `boundary` (a number goes in by its plan id in `carries`)")
     if not isinstance(links, list) or not all(isinstance(x, dict) for x in links):
         return out + ["`system.links` must be a list of entries, each with `from`, `to` and `what`"]
     for i, link in enumerate(links, 1):
@@ -1005,6 +1029,20 @@ def check_system(value: Any, protocol: Any) -> list[str]:
         extra = [k for k in link if k not in ("from", "to", "what")]
         if extra:
             out.append(f"link {i} has {', '.join('`' + k + '`' for k in extra)}; a link has only `from`, `to` and `what`")
+    direction = value.get("direction")
+    if direction is not None:
+        if not isinstance(direction, dict):
+            out.append("`system.direction` must be a mapping with `what` and `points`, or null")
+        else:
+            why = _plain_name(direction.get("what"))
+            if why:
+                out.append(f"`system.direction` {why}")
+            if direction.get("points") not in DIRECTIONS:
+                out.append(f"`system.direction.points` must be one of {', '.join(DIRECTIONS)}")
+            extra = [k for k in direction if k not in ("what", "points")]
+            if extra:
+                out.append(f"`system.direction` has {', '.join('`' + k + '`' for k in extra)}; it has only `what` and "
+                           "`points`")
     return out
 
 

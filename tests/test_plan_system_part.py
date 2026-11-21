@@ -520,3 +520,38 @@ def test_a_kept_physical_bound_the_redrafted_plan_no_longer_holds_is_dropped_and
     d["protocol"]["oracles"].pop()
     kept = run(Fake(roles=[copy.deepcopy(PLAIN)], comparisons=[NO_COMPARE]), d)
     assert metric(kept, "level_trace")["range"]["max"] == 1 and "left_out" not in kept.parts["roles"]
+
+
+# --- the direction and the boundary conditions a set-up drawing needs ----------------------------------------------------
+
+
+def test_a_direction_and_a_boundary_condition_are_held_kept_and_said_in_plan_md() -> None:
+    from core import plan
+
+    with_more = copy.deepcopy(SYSTEM)
+    with_more["parts"][1]["boundary"] = "outflow"
+    with_more["direction"] = {"what": "gravity", "points": "down"}
+    p = DESIGN["protocol"]
+    assert contract.check_system(with_more, p) == []
+    answer = full()
+    answer["system"] = with_more
+    out = run(Fake(roles=[answer], comparisons=[NO_COMPARE]))
+    assert out.design["protocol"]["system"] == with_more, "the direction is kept, not dropped with the other keys"
+    c = contract.from_design(out.design)
+    assert c.system is not None and c.system.direction is not None and c.system.direction.points == "down"
+    assert c.system.parts[1].boundary == "outflow"
+    text = "\n".join(plan._returns_lines(out.design["protocol"]))
+    assert "- drain valve (`valve_out`, an outflow boundary): `valve`" in text and "- gravity points down" in text
+
+
+def test_a_direction_or_a_condition_outside_the_closed_words_is_refused() -> None:
+    p = DESIGN["protocol"]
+    bad = copy.deepcopy(SYSTEM)
+    bad["parts"][0]["boundary"] = "wall"  # a part, not a boundary
+    bad["parts"][1]["boundary"] = "sticky"
+    bad["direction"] = {"what": "flow 2", "points": "sideways", "speed": 3}
+    found = contract.check_system(bad, p)
+    assert any("not of kind boundary" in x for x in found) and any("`boundary` must be one of" in x for x in found)
+    assert any("has a number in its words" in x for x in found) and any("direction.points` must be one of" in x for x in found)
+    assert any("`speed`" in x for x in found)
+    assert contract.check_system({**SYSTEM, "arrows": []}, p), "an unknown key of the system is still refused"

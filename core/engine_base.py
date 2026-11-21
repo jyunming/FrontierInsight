@@ -99,6 +99,7 @@ from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import figure_claims as _figure_claims
 from . import setup_flow as _setup_flow
+from . import setup_schematic as _setup_schematic
 from . import paper_facts as _paper_facts
 from . import paper_values as _paper_values
 from . import run_facts as _run_facts
@@ -918,6 +919,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_figures",                     # ... and a figure the plan names only by file name, when FI writes the analysis
         "plan_answers",                     # ... and which result answers each quantity the topic asks for
         "plan_dependents",                  # ... and what a dependent variable that is no declared result is (adds checks only)
+        "setup_schematic", "setup_schematic_redraw", "setup_schematic_score",  # the studied system's schematic (opt-in)
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "json_reanswer_part",               # ... when part of it could be read: only the unreadable keys are asked again
         "oracle_review",                    # a second model reads the plan's checks against known answers
@@ -6383,9 +6385,9 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
     the writer credits them and does NOT present them as the quest's own
     results."""
     state = _rooted(state, root)
-    setup = _setup_flow.shown(state.get("quest_root"))
-    figs = [f for f in state.get("figures") or [] if Path(str(f)).name != setup]
-    if not figs and not setup:
+    setups = _setup_flow.figures(state.get("quest_root"))
+    figs = [f for f in state.get("figures") or [] if Path(str(f)).name not in setups]
+    if not figs and not setups:
         return "(none)"
     credits = {c.get("file"): c for c in (state.get("figure_credits") or [])}
     records = state.get("figure_records") or {}
@@ -6394,11 +6396,21 @@ def _figure_list_for_prompt(state: QuestState, *, root: Any = None) -> str:
     shown = _figure_files_by_stem(state)
     settings = _run_settings(state)
     lines: list[str] = []
-    if setup in numbers:
-        # FI's set-up figure (core/setup_flow.py): drawn from the plan, not from the run's numbers
-        lines.append(f"- Figure {numbers[setup]}: figures/{setup} — the study's set-up, drawn by FI from the frozen plan "
-                     "(the settings it varies and holds, the steps of its computation, the results it reports). It is "
-                     "not a result: it draws no number of the run. Point to it where the paper describes the method.")
+    for setup in setups:
+        if setup not in numbers:
+            continue
+        if setup == _setup_schematic.FILE:
+            # the studied system's schematic (core/setup_schematic.py): FI's words from the plan, not the run's numbers
+            lines.append(f"- Figure {numbers[setup]}: figures/{setup} — a schematic of the studied system, drawn from the "
+                         "plan's description of it (its parts, what touches or feeds what, the values the plan sets). It is "
+                         "not a result: it draws no number of the run. Point to it where the paper introduces the system "
+                         "studied.")
+        else:
+            # FI's set-up figure (core/setup_flow.py): drawn from the plan, not from the run's numbers
+            lines.append(f"- Figure {numbers[setup]}: figures/{setup} — the study's set-up, drawn by FI from the frozen "
+                         "plan (the settings it varies and holds, the steps of its computation, the results it reports). "
+                         "It is not a result: it draws no number of the run. Point to it where the paper describes the "
+                         "method.")
     for f in figs:
         c = credits.get(f)
         number = numbers.get(Path(str(f)).name)
@@ -7078,16 +7090,17 @@ def _figure_numbers(state: QuestState) -> dict[str, int]:
     """The number of each figure FI puts in the paper, fixed before the paper is written so the prose refers to the
     figures by FI's numbers (the writer is given them with the figure list): the figures the design planned, in the order
     planned, then the run's other figures in the order drawn, one per drawing (:func:`_figure_files_by_stem`). A figure
-    whose own record says it draws nothing has none: it shows the reader nothing. FI's set-up figure, when its record
-    says FI drew it for the plan as it stands (:func:`core.setup_flow.shown`), is Figure 1: it is drawn at the start of the
-    analysis, before any figure is given a number, so the analysis names the figures by these same numbers."""
+    whose own record says it draws nothing has none: it shows the reader nothing. FI's set-up figures, when their records
+    say FI drew them for the plan as it stands (:func:`core.setup_flow.figures`: the studied system's schematic, then the
+    flow of how the study is set up), come first, from Figure 1: they are drawn at the start of the analysis, before any
+    figure is given a number, so the analysis names the figures by these same numbers."""
     records = state.get("figure_records") or {}
     shown = _figure_files_by_stem(state)
-    setup = _setup_flow.shown(state.get("quest_root"))
+    setups = _setup_flow.figures(state.get("quest_root"))
     order = [shown[Path(name).stem] for name in _planned_figure_order(state)]
     order += [shown[Path(str(f)).stem] for f in state.get("figures") or []]
-    keep = ([setup] if setup else []) + [name for name in dict.fromkeys(order)
-                                         if name != setup and not _figure_draws_nothing(records.get(name))]
+    keep = list(setups) + [name for name in dict.fromkeys(order)
+                           if name not in setups and not _figure_draws_nothing(records.get(name))]
     return {name: i + 1 for i, name in enumerate(keep)}
 
 
@@ -7143,18 +7156,19 @@ def _place_figures(markdown: str, state: QuestState, *,
     lines = text.split("\n")
     placed: list[str] = []
     last = -1
-    setup = _setup_flow.shown(state.get("quest_root"))
+    setups = _setup_flow.figures(state.get("quest_root"))
+    first_result = len([n for n in setups if n in numbers]) + 1
     for name, number in sorted(numbers.items(), key=lambda kv: kv[1]):
-        caption = (_caption_safe(_setup_flow.caption(state.get("quest_root"))) if name == setup else
+        caption = (_caption_safe(_setup_flow.caption_for(state.get("quest_root"), name)) if name in setups else
                    _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
                                         calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
                                                if state.get("quest_root") else None)))
         embed = f"![**Figure {number}.** {caption}](figures/{name})"
         said = _figure_minimum_sentence(lines, number, name, state)
         at = max(_figure_insertion_line(lines, number), last + 1)
-        if name == setup and _figure_reference_end(lines, number) is None and len(numbers) > 1:
-            # FI's set-up figure the prose never names goes just before the next figure, not after every result
-            at = max(_figure_insertion_line(lines, number + 1), last + 1)
+        if name in setups and _figure_reference_end(lines, number) is None and len(numbers) >= first_result:
+            # FI's set-up figure the prose never names goes just before the run's first figure, not after every result
+            at = max(_figure_insertion_line(lines, first_result), last + 1)
         if at >= len(lines):
             if not lines or lines[-1].strip():
                 lines.append("")  # the paper ends in a line break, so placing its figures again gives the same paper

@@ -23,6 +23,33 @@ from .engine_base import (  # noqa: F401
 class AnalyzeStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
+    async def _draw_setup_schematic(self, state: QuestState) -> None:
+        """The studied system's schematic (``core/setup_schematic.py``), drawn before the analysis is shown any figure
+        number when ``output.system_schematic`` is on: a model lays it out through the step ``setup_schematic`` (and reads
+        it as an image through ``setup_schematic.score``), so the person's provider settings for those steps choose the
+        model; the drawing script runs in the quest's own interpreter. Off: nothing is drawn and no model is called.
+        Never raises."""
+        from core.provider import image_part
+
+        from . import setup_schematic as _setup_schematic
+
+        async def chat(prompt: str) -> str:
+            return await self._chat(prompt, node=_setup_schematic.NODE)
+
+        async def chat_image(prompt: str, png: bytes) -> str:
+            return await self._chat_messages(
+                [{"role": "user", "content": [{"type": "text", "text": prompt}, image_part(png)]}],  # type: ignore[list-item]
+                node=_setup_schematic.SCORE_NODE, temperature=0.0)
+
+        async def run(argv: list[str]) -> tuple[int, str, str]:
+            # FI's host, not the study's code: no house style, no figure recorder, no secrets
+            return await self._run_in_env(argv, timeout_s=_setup_schematic.RUN_TIMEOUT_S, env=dict(scrub_secrets()))
+
+        await _setup_schematic.draw_quietly(
+            self.quest_root, on=bool(getattr(self.config.output, "system_schematic", False)),
+            run_figures=state.get("figures"), chat=chat, chat_image=chat_image, run=run, prompts=self._prompts,
+            log=self._log)
+
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
         from . import setup_flow as _setup_flow
@@ -31,6 +58,7 @@ class AnalyzeStageMixin:
         # in a worker thread, so the other quests of a fleet go on while matplotlib loads and draws
         import asyncio as _asyncio
 
+        await self._draw_setup_schematic(state)  # the studied system's schematic, when the config asks for it: Figure 1
         await _asyncio.to_thread(_setup_flow.draw_quietly, self.quest_root, state.get("figures"), self._log)
         await self._refresh_code_project(
             state, list(state.get("deps") or []),

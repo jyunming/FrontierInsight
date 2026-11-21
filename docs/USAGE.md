@@ -788,6 +788,7 @@ sees; PowerPoint shows them as native equations.
 output:
   visual_check: true          # false turns the check off
   visual_check_ai: false      # true also asks your provider to look at the screenshots
+  system_schematic: false     # true also draws a schematic of the studied system as Figure 1 (at most 3 model calls)
   visual_check_max_redos: 2   # 0 to 2 new versions of the slides or poster
 ```
 
@@ -847,7 +848,7 @@ paper.pdf                             ← if pandoc + a LaTeX engine
 slides.md / slides.pptx / slides.pdf  ← if `slides` is in output.kinds
 poster.tex / poster.pdf               ← if `poster`
 talk.md                               ← if `speech`
-figures/*.png                         ← every plot the experiment produced, and setup_flow.png: the study's set-up (inputs → computation → results), drawn by FI from the plan and shown in the paper, poster and slides
+figures/*.png                         ← every plot the experiment produced, and setup_flow.png: the study's set-up (inputs → computation → results), drawn by FI from the plan and shown in the paper, poster and slides (with output.system_schematic: true, setup_schematic.png too: the studied system's parts and what touches what, every word on it FI's)
 data/results/                         ← a copy of the data tables an accepted run wrote (and, with two scripts, raw/); a file, or raw/ as a whole, over 200 MB stays where it is
 code/                                 ← the code that ran, runnable on its own: experiment.py (+ simulate.py), run.py, requirements.txt, README.md, CHANGELOG.md (each change marked Added / Changed / Fixed / Tidied, with a line saying whether the results changed) (+ its own git history)
 run_output/                           ← only if you run `python code/run.py`: its own results, apart from the quest's
