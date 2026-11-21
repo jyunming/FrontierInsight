@@ -291,6 +291,37 @@ def test_a_study_function_called_by_import_or_as_a_module_attribute_is_still_a_c
         assert _stops(out)
 
 
+_ROLES = "derive.ROLES['cover']"
+_NOT_PLAIN = {
+    "alias of a module": "import derive\nimport model as simulate\n\nm = simulate\n\n\ndef test_x():\n    assert m.count(1) == %s\n",
+    "getattr of a module": "import derive\nimport model\n\n\ndef test_x():\n    assert getattr(model, 'count')(1) == %s\n",
+    "sys.modules": "import derive\nimport sys\nimport model\n\n\ndef test_x():\n    assert sys.modules['model'].count(1) == %s\n",
+    "fixture": ("import derive\nimport pytest\n\n\n@pytest.fixture\ndef study():\n    import model\n    return model\n\n\n"
+                "def test_x(study):\n    assert study.count(1) == %s\n"),
+    "relative import": "import derive\nfrom . import model\n\n\ndef test_x():\n    assert model.count(1) == %s\n",
+    "import alias of a function": "import derive\nfrom model import count as total\n\n\ndef test_x():\n    assert total(1) == %s\n",
+}
+
+
+@pytest.mark.parametrize("how", sorted(_NOT_PLAIN))
+def test_a_receiver_the_test_does_not_prove_to_be_a_value_is_not_plain(tmp_path: Path, how: str) -> None:
+    src = _NOT_PLAIN[how] % _ROLES
+    shape = shown_reach.read_test(src)
+    assert shape is not None and not shape.method_calls
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="count", quantity="est_a", files=_COUNT_FILES)
+    assert _stops(out)
+    assert not record["issues"]["F-1"].get("about_plan_text")
+
+
+def test_a_method_on_a_value_read_from_the_frame_is_plain_through_a_loop_variable_or_a_local(tmp_path: Path) -> None:
+    src = ("import derive\n\n\ndef test_x():\n    names = [n.lower() for n in derive.RESULTS]\n    hit = [n for n in names if n.count('a')]\n"
+           "    text = ','.join(names)\n    assert text.count('a') >= 2, 'wrong'\n")
+    shape = shown_reach.read_test(src)
+    assert shape is not None and shape.method_calls >= {"count", "join"} and not shape.unproven_calls
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="count", quantity="est_a", files=_COUNT_FILES)
+    assert not _stops(out) and record["issues"]["F-1"].get("about_plan_text") is True
+
+
 def test_eval_is_not_a_plain_call(tmp_path: Path) -> None:
     src = "import derive\nfrom model import helper_for_trial\n\n\ndef test_x():\n    assert eval(derive.ROLES['cover']) == 2, 'wrong'\n"
     out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="est_a")
