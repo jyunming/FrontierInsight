@@ -60,6 +60,7 @@ pytestmark = pytest.mark.usefixtures("this_python")
 #: A test a fake code model writes: it fails on the code as it is and passes once the file it was asked about has changed.
 #: (The first run notes the file's hash beside the test and fails; later runs fail while the file is unchanged.)
 CHANGED_TEST = '''import hashlib, pathlib
+{imp}
 FILE = pathlib.Path(__file__).resolve().parents[2] / "code" / "{rel}"
 NOTE = pathlib.Path(__file__).with_suffix(".orig")
 
@@ -68,8 +69,16 @@ def test_the_file_was_changed():
     now = hashlib.sha256(FILE.read_bytes()).hexdigest()
     if not NOTE.exists():
         NOTE.write_text(now)
-    assert now != NOTE.read_text(), "{rel} is as it was when the problem was found"
+    assert now != NOTE.read_text() and _STUDY.__name__, "{rel} is as it was when the problem was found"
 '''
+
+
+def changed_test(rel: str) -> str:
+    """:data:`CHANGED_TEST` for the file ``rel``; it imports that file's module, so what it asserts on is read from the study
+    (a test that fails on nothing of the study's is no proof of a fault: core/finding_repair.py ``failure_from_study``)."""
+    parts = rel[:-3].split("/")
+    imp = f"import {parts[0]} as _STUDY" if len(parts) == 1 else f"from {'.'.join(parts[:-1])} import {parts[-1]} as _STUDY"
+    return CHANGED_TEST.format(rel=rel, imp=imp)
 PASSING_TEST = "def test_nothing_is_wrong():\n    assert True\n"
 
 
@@ -84,7 +93,7 @@ def code_model_answer(owner: Any, prompt: str) -> str | None:
     scoped = "(the function `" in prompt.split("### ", 1)[1].splitlines()[0]
     if head.startswith(TEST_HEAD):
         owner.test_prompts.append(prompt)
-        body = PASSING_TEST if rel in getattr(owner, "undemonstrated", ()) else CHANGED_TEST.format(rel=rel)
+        body = PASSING_TEST if rel in getattr(owner, "undemonstrated", ()) else changed_test(rel)
         return f"```python\n{body}```"
     owner.repair_prompts.append(prompt)
     count = len(owner.repair_prompts)

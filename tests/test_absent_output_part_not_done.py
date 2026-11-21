@@ -97,7 +97,8 @@ def test_the_harness_records_the_names_of_what_the_code_returned_to_a_failing_te
     code = {"m.py": "def rec(x):\n    return {'a': x, 'b': {'c': 2}}\n\n\ndef num(x):\n    return 3.0\n"}
     run = _harness(tmp_path, code, "import m\n\n\ndef test_x():\n    r = m.rec(1)\n    assert 'z' in r\n", capture=True)
     assert run.status == "fail" and run.held["complete"] is True
-    assert run.held["returned"] == [{"function": "rec", "record": True, "names": ["a", "b", "c"]}]
+    assert [{k: v for k, v in r.items() if k != "line"} for r in run.held["returned"]] == [
+        {"function": "rec", "record": True, "names": ["a", "b", "c"]}]
     run = _harness(tmp_path, code, "import m\n\n\ndef test_x():\n    assert m.num(1) == 2\n", capture=True)
     assert run.held["returned"][0]["record"] is False  # a bare number is no record of names
 
@@ -273,7 +274,9 @@ def test_a_returned_object_whose_items_changes_a_value_does_not_turn_a_failing_t
     plain = _harness(tmp_path / "a", code, test, capture=False)
     recorded = _harness(tmp_path / "b", code, test, capture=True)
     assert plain.status == "fail" and recorded.status == "fail"
-    assert recorded.held["returned"][0]["record"] is False  # an object of the study's own class is not a record of names
+    # a dict subclass of the study's own is a record of names, read by the built-in ``dict.items`` and never by its own hook:
+    # the value the test checks is the one the plain run saw
+    assert recorded.held["returned"][0]["record"] is True and recorded.held["returned"][0]["names"] == ["mean"]
 
 
 def test_the_recording_never_calls_a_method_of_a_value_the_code_returned_or_the_test_held(tmp_path: Path) -> None:

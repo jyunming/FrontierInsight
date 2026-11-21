@@ -2706,13 +2706,16 @@ class CodeStageMixin:
             node = (review_node + ".repair") if who == "other" else f"implement.finding_{'test' if kind == 'test' else 'repair'}"
             return await self._chat(prompt, node=node)
 
-        async def run_tests(paths: list[str]) -> dict[str, Any]:
+        async def run_tests(paths: list[str], capture: bool = False) -> dict[str, Any]:
             out: dict[str, Any] = {}
             for path in paths:  # each test in its own process: one test cannot change what another sees
-                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path])],
+                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path], capture=capture)],
                                                          timeout_s=180, env=self._finding_test_env())
                 out.update(_finding_repair.parse_runs(text, [path]))
             return out
+
+        async def capture_tests(paths: list[str]) -> dict[str, Any]:
+            return await run_tests(paths, True)
 
         async def snapshot() -> dict[str, str]:
             return await self._finding_snapshot(state, protocol, record)
@@ -2734,7 +2737,7 @@ class CodeStageMixin:
         notes: list[str] = []  # what went wrong in the measures of a try (core/finding_repair.py: ``Env.notes``)
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
-            ask=ask, run_tests=run_tests, snapshot=snapshot, static=static,
+            ask=ask, run_tests=run_tests, capture_tests=capture_tests, snapshot=snapshot, static=static,
             keeps=lambda old, new, rel: (
                 _code_review.repair_problem(old, new, rel, equations=ids, package=package)
                 or _grid_keys.rejects({rel: old}, {rel: new}, *self._static_inputs(state))),

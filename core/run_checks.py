@@ -3272,12 +3272,15 @@ class RunChecksMixin:
                                   issue.get("id"), _one(str(exc)))
                 return ""
 
-        async def run_tests(paths: list[str]) -> dict[str, Any]:
+        async def run_tests(paths: list[str], capture: bool = False) -> dict[str, Any]:
             out: dict[str, Any] = {}
             for path in paths:
-                if (run := await self._rerun_finding_test(path)) is not None:  # type: ignore[attr-defined]
+                if (run := await self._rerun_finding_test(path, capture=capture)) is not None:  # type: ignore[attr-defined]
                     out[path] = run
             return out
+
+        async def capture_tests(paths: list[str]) -> dict[str, Any]:
+            return await run_tests(paths, True)
 
         async def snapshot() -> dict[str, str]:
             return {}
@@ -3286,7 +3289,7 @@ class RunChecksMixin:
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record,  # type: ignore[attr-defined]
             save=lambda: _code_review.save(self.quest_root, record),  # type: ignore[attr-defined]
-            ask=ask, run_tests=run_tests, snapshot=snapshot, static=dict, keeps=lambda *a: "",
+            ask=ask, run_tests=run_tests, capture_tests=capture_tests, snapshot=snapshot, static=dict, keeps=lambda *a: "",
             prompts=self._prompts,  # type: ignore[attr-defined]
             topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",  # type: ignore[attr-defined]
             equations=_code_review.equations_view(protocol, values), scrub=lambda text: _pairs.scrub(text, values),

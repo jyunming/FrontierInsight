@@ -143,7 +143,7 @@ async def test_the_repair_of_a_readers_finding_may_not_overwrite_the_plans_const
     same rule: the plan's constant is never replaced by the swept setting."""
     from core import code_review as cr
     from core import finding_repair as fr
-    from tests.test_code_review import CHANGED_TEST
+    from tests.test_code_review import changed_test
 
     eng = _engine(tmp_path, monkeypatch, BEFORE, "")
     line = next(n for n, text in enumerate(BEFORE.splitlines(), 1) if READ_TEXT in text)
@@ -161,7 +161,7 @@ async def test_the_repair_of_a_readers_finding_may_not_overwrite_the_plans_const
             prompt = messages[-1]["content"]
             self.asked.append(prompt)
             if prompt.lstrip().startswith(fr.TEST_HEAD):
-                return "```python\n" + CHANGED_TEST.format(rel="simulate.py") + "```"
+                return "```python\n" + changed_test("simulate.py") + "```"
             return "```python\n" + swapped + "```"
 
     eng._client = Swapping("")  # type: ignore[assignment]
