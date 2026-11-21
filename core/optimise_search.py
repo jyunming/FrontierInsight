@@ -1585,12 +1585,17 @@ class _Search:
                     # to give up if all of them fail; the others wait until those are answered.
                     held = {n["id"] for n in asked_now}
                     running = len(inflight - held)
-                    out = running + sum(1 for k in answers if k not in self.cache)
+                    unjudged = sum(1 for k, a in answers.items()
+                                   if k not in self.cache and not (isinstance(a, dict) and a.get("stop")))
+                    out = running + unjudged
+                    if not running and self.failures_in_a_row + unjudged >= _FAILURES_BEFORE_GIVING_UP:
+                        # Nothing runs and no answer has worked: the answers in hand, not judged yet (the first designs of
+                        # a step whose others are held back), already make as many failures as the search allows. Asking
+                        # the pool for nothing would spin, and sending the held designs would run the whole step: the
+                        # search ends as a judged run of failures ends it.
+                        self.stopped = "failures"
+                        raise _Stop()
                     room = _FAILURES_BEFORE_GIVING_UP - self.failures_in_a_row - out
-                    # With nothing running the driver has no answer to wait for: a request for nothing would be answered
-                    # at once, again and again. So at least one design goes out then, even when the answers in hand,
-                    # not judged yet (the first designs of a step whose other designs are held back), already use up the
-                    # failures the search allows.
                     room = max(room, 1 if not running else 0)
                     asked_now, new = asked_now[:room], asked_now[room:]
                 replies = yield {"kind": "evaluate_stream", "requests": asked_now}
