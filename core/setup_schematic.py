@@ -17,8 +17,9 @@ says; no label over another, crossed by another part's line or outline, off the 
 3.5 in wide. A drawing that fails is drawn once more with a prompt that names what failed; one that fails again is left out,
 and ``QUALITY.md`` says why in one line. One model call then reads the drawing as an image and scores it from 0 to 10; the
 score is recorded in ``.fi/setup_schematic.json`` with the checks and does not decide anything yet (no threshold has been
-measured). At most :data:`MAX_CALLS` model calls are made for one description of the system: the outcome, a failure
-included, is kept by a digest of FI's texts, and an analysis that runs again reuses it.
+measured). At most :data:`MAX_CALLS` model calls are made for one description of the system, each counted on disk
+before it is made: a finished outcome, a failure included, is kept by a digest of FI's texts, its host, this module and
+the prompts, and an analysis that runs again reuses it; a study stopped mid-call goes on with the calls it has left.
 
 It is a set-up figure like the flow of ``core/setup_flow.py`` and follows its rules (``setup_flow.figures``): drawn at the
 start of the analysis into ``.fi/``, copied into ``figures/`` by the write stage, numbered before the run's figures (this
@@ -490,7 +491,7 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
     record.update(key=key, done=False, calls_made=spent, model_calls=earlier, attempts=[], left_out_values=sum(
         v["left_out"] for v in f["parts"].values()))
     prompt = prompts["setup_schematic"].substitute(**prompt_fields(f))
-    _write(root / ".fi" / RECORD, record)  # the key first: a fault after a call never lets an analysis call again
+    _write(root / ".fi" / RECORD, record)  # the key first, so the calls counted below belong to this system
     findings: list[str] = ["no call was left for this system"]
     passed: Path | None = None
     body = ""
