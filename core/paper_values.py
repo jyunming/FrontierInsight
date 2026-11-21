@@ -1959,7 +1959,9 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
-    rec.bound_breaks = bound_break_names(protocol, _checks.kept_bound_breaks(root))
+    # A quantity that breaks a range the plan expected, and one an equation FI could not confirm may reach, carry the same
+    # mark beside each of their printed numbers (the Limitations and QUALITY.md say which of the two it is).
+    rec.bound_breaks = bound_break_names(protocol, _checks.marked_quantities(root))
     from . import paper_facts as _facts
 
     rec.drew = _facts._drew_record(root)

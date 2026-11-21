@@ -20,7 +20,7 @@ from .engine_base import (  # noqa: F401
     _finalize_paper_sources, _finalize_with_numbering, _format_clarify, _format_cross_check, _format_evidence_note,
     _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, _foundational_sources,
     _foundational_write_block, _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
-    _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
+    _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _mark_unconfirmed_results, _metric_spec,
     _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
     _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders, _figure_numbers, _keep_figure_numbers,
@@ -805,6 +805,7 @@ class WriteStageMixin:
                                      if before.get(name) != k))
         markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
+        markdown = _mark_unconfirmed_results(markdown, self.quest_root)
         if _phased.enabled(self.config):
             markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
         # The design history, the run record and the code's open findings are not in the paper: the writer places what the

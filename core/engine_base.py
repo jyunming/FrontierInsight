@@ -5216,6 +5216,40 @@ def _mark_preliminary(markdown: str) -> str:
     return "\n".join([*lines[:at], "", PRELIMINARY_NOTE, "", *lines[at:]])
 
 
+_MARKS_BEGIN, _MARKS_END = "<!-- fi:marks-note -->", "<!-- /fi:marks-note -->"
+
+
+def _mark_unconfirmed_results(markdown: str, quest_root: Any) -> str:
+    """``markdown`` with FI's own note under the title when some quantity carries the ``(unconfirmed)`` mark
+    (:func:`core.result_checks.marked_note`), one, replacing an earlier one; an earlier one is taken out when no quantity
+    is marked any more. FI's words, never the writer's: it is placed at every write, from FI's record."""
+    from . import result_checks as _result_checks
+
+    note = _result_checks.marked_note(quest_root) if quest_root else ""
+    block = f"{_MARKS_BEGIN}\n> {note}\n{_MARKS_END}" if note else ""
+    if _MARKS_BEGIN in markdown and _MARKS_END in markdown:
+        head, rest = markdown.split(_MARKS_BEGIN, 1)
+        tail = rest.split(_MARKS_END, 1)[1]
+        return head + block + tail if block else head.rstrip("\n") + "\n\n" + tail.lstrip("\n")
+    if not block:
+        return markdown
+    lines = markdown.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+        if end is not None:
+            start = end + 1
+    at, fenced = None, False
+    for i in range(start, len(lines)):
+        if lines[i].lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and lines[i].startswith("# "):
+            at = i + 1
+            break
+    at = start if at is None else at
+    return "\n".join([*lines[:at], "", block, "", *lines[at:]])
+
+
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
     max_depth: int = 6, assertions: list[Any] | None = None, metric_ids: set[str] | None = None,
@@ -7195,6 +7229,12 @@ def _without_figure_embeds(markdown: str) -> tuple[str, int]:
     return "\n".join(out), taken
 
 
+def _result_checks_mark() -> str:
+    from .result_checks import BOUND_MARK
+
+    return BOUND_MARK
+
+
 def _place_figures(markdown: str, state: QuestState, *,
                    facts: dict[str, str] | None = None, root: Any = None) -> tuple[str, list[str], int]:
     """``markdown`` with the run's figures in it, put there by FI: ``(markdown, names placed, images the draft wrote)``.
@@ -7217,6 +7257,10 @@ def _place_figures(markdown: str, state: QuestState, *,
     credits = {Path(str(c.get("file") or "")).name: c for c in state.get("figure_credits") or [] if isinstance(c, dict)}
     n_seeds = _replicate_seed_count(state)
     lines = text.split("\n")
+    from . import result_checks as _result_checks
+
+    # The figures that may draw a quantity carrying FI's mark (by FI's record of each drawing), and those it cannot tell.
+    marked = set(_result_checks.marked_figures(state["quest_root"])) if state.get("quest_root") else set()
     setups = [name for name in _setup_flow.figures(state.get("quest_root")) if name in numbers]
     by_number = sorted(numbers.items(), key=lambda kv: kv[1])
     stems = {number: Path(name).stem for name, number in by_number}
@@ -7228,6 +7272,9 @@ def _place_figures(markdown: str, state: QuestState, *,
                    _figure_caption_text(name, records.get(name), n_seeds=n_seeds, facts=facts, credit=credits.get(name),
                                         calls=(_figure_claims.load_calls(state["quest_root"], Path(name).stem)
                                                if state.get("quest_root") else None)))
+        if name in marked:
+            caption = (caption.rstrip() + " " + _result_checks_mark() + " It may draw a result that FI could not confirm "
+                       "(see the note under the title).")
         at = _figure_insertion_line(lines, number, stems[number])
         said = _figure_minimum_sentence(lines, number, name, state)
         plan.append((at, number, f"![**Figure {number}.** {caption}](figures/{name})", said))

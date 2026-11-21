@@ -327,6 +327,59 @@ def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) ->
     return sorted(f.name for f in folder.iterdir() if f.is_file() and f.stem in stems and f.suffix.lower() != ".json")
 
 
+def marked_quantities(quest_root: Path | str) -> dict[str, dict[str, Any]]:
+    """Every quantity whose printed numbers carry :data:`BOUND_MARK`: the ones kept although they break a range the plan
+    expected (:func:`kept_bound_breaks`) and the ones an equation FI could not confirm may reach
+    (:func:`core.equation_tests.unconfirmed_marks`). The one place the paper's values, its tables, its figure captions and
+    its note under the title read."""
+    from . import equation_tests as _equation_tests
+
+    return {**_equation_tests.unconfirmed_marks(quest_root), **kept_bound_breaks(quest_root)}
+
+
+def marked_figures(quest_root: Path | str) -> list[str]:
+    """The saved figures (file names in ``figures/``) whose caption carries :data:`BOUND_MARK`: those that draw a marked
+    quantity by FI's record of the drawing (:func:`figures_on_axis`), and, so that nothing is presented unmarked when FI
+    cannot tell, every figure of the results with no such record, or with a part the record calls ``neutral``. FI's
+    set-up figures (the schematic and the flow) draw no result and are never marked."""
+    root = Path(quest_root)
+    quantities = set(marked_quantities(root))
+    folder = root / "figures"
+    if not quantities or not folder.is_dir():
+        return []
+    from . import setup_flow as _setup
+
+    out = set(figures_on_axis(root, quantities))
+    records = root / ".fi" / "figure_records"
+    setups = set(_setup.figures(str(root)))
+    for f in folder.iterdir():
+        if not f.is_file() or f.suffix.lower() not in (".png", ".pdf", ".svg", ".jpg", ".jpeg") or f.name in setups:
+            continue
+        record = _read_json(records / f"{f.stem}.calls.json") if records.is_dir() else {}
+        panels = record.get("panels") if isinstance(record, dict) else None
+        unknown = not isinstance(panels, list) or any(
+            isinstance(p, dict) and (any(isinstance(s, dict) and s.get("neutral") for s in p.get("series") or [])
+                                     or (isinstance(p.get("y"), dict) and p["y"].get("neutral")))
+            for p in panels)
+        if unknown:
+            out.add(f.name)
+    return sorted(out)
+
+
+def marked_note(quest_root: Path | str) -> str:
+    """The sentence FI itself puts under the paper's title when some quantity carries the mark, ``""`` when none does. A
+    number the writer typed instead of letting FI fill it cannot be placed on a result, so the note says the paper may hold
+    such a number that carries no mark."""
+    names = sorted(marked_quantities(quest_root))
+    if not names:
+        return ""
+    return ("**Not confirmed.** FI could not confirm everything behind some results of this study (the Limitations say what). "
+            "Each number of " + ", ".join(f"`{n}`" for n in names[:8]) + (" and others" if len(names) > 8 else "")
+            + " that FI fills in, each table of it and the caption of each figure that may draw it is marked "
+            + BOUND_MARK + "; a number written by hand in the text cannot be placed on a result and carries no mark, so read "
+            "it as unconfirmed too.")
+
+
 def kept_bound_breaks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
     """The quantities whose values break a bound the plan only expected and that FI kept (``kept_bound_breaks`` of
     ``needs/RESULT_CHECK.json``, :meth:`ResultChecksMixin._record_bound_breaks`), each with its record; never one FI left

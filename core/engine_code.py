@@ -3615,6 +3615,12 @@ class CodeStageMixin:
         rows = _equation_tests.example_rows(protocol)
         record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows},
                                   "untested_core": [r["id"] for r in rows if r["state"] == "unprotected"]}
+        # What an earlier run of this gate settled (``_settle_unconfirmed``): an equation the study already went on with
+        # (its formula unchanged) is neither repaired again nor put to the plan again.
+        before = _equation_tests.read_record(self.quest_root)
+        held = {eid: e for eid, e in (before.get(_equation_tests.UNCONFIRMED_KEY) or {}).items()
+                if isinstance(e, dict) and any(r["id"] == eid and r["formula"] == e.get("formula") for r in rows)}
+        located: dict[str, Any] = {}
         env = {**(exec_env or scrub_secrets())}
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -3655,6 +3661,8 @@ class CodeStageMixin:
             failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
                          "module": by_id.get(str(r.get("id")), {}).get("module", "")}
                         for r in results if r.get("status") not in (_equation_tests.OK, _equation_tests.OUTPUTS)]
+            if failures and all(str(f.get("id")) in held and f.get("status") == _equation_tests.MISMATCH for f in failures):
+                break  # the study already goes on with these; nothing is repaired or asked about them again
             # The test could not judge it (one value for outputs returned by name): not tested before the run, said so in the
             # record and the limitations; never a failure that stops the study (FI's tool, not the code, fell short).
             shape = [str(r.get("id")) for r in results if r.get("status") == _equation_tests.OUTPUTS]
@@ -3675,7 +3683,8 @@ class CodeStageMixin:
                 # unchanged. Nothing about the code or the number it gave goes into the request.
                 if rederived or attempt > _function_steps.REPAIRS:
                     break
-                rederived = await self._rederive_failed_examples(state, protocol, failures)
+                rederived = await self._rederive_failed_examples(
+                    state, protocol, [f for f in failures if str(f.get("id")) not in held])
                 if not rederived:
                     break
                 protocol = self._protocol_block(state)
@@ -3685,7 +3694,7 @@ class CodeStageMixin:
                 continue
             for f in failures:
                 eid = str(f.get("id"))
-                if spent.get(eid, 0) >= _function_steps.REPAIRS:
+                if spent.get(eid, 0) >= _function_steps.REPAIRS or eid in held:
                     continue
                 if not _function_steps.spend(self.quest_root, _function_steps.MAX_CALLS):
                     self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "
@@ -3699,6 +3708,7 @@ class CodeStageMixin:
         record["repairs"] = spent
         if rederived:
             record["example_rederived"] = rederived
+        failures = self._settle_unconfirmed(protocol, rows, failures, before, held, record, located)
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / "equation_tests.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
@@ -3725,6 +3735,76 @@ class CodeStageMixin:
             "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
             "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
+
+    def _settle_unconfirmed(self, protocol: dict[str, Any] | None, rows: list[dict[str, Any]],
+                            failures: list[dict[str, Any]], before: dict[str, Any], held: dict[str, Any],
+                            record: dict[str, Any], located: dict[str, Any]) -> list[dict[str, Any]]:
+        """The failures that stop the study, of the equations that still fail their worked example after their function was
+        repaired alone (the same list as before when nothing changes).
+
+        A number the example disagrees with can be the code's fault or the example's, and FI cannot always tell which (it
+        reads an equation's text only when it defines one name). The code is repaired as before (the whole script, up to
+        ``engine.exec_reflect_max_iterations`` times, each repair after one failed run of this gate). Only when those repairs
+        are spent and the plan, asked about the example, gave no new one, the study goes on with the equation **not
+        confirmed**: the record says so (``unconfirmed``, and a ``not_tested`` sentence that QUALITY.md and the paper's
+        Limitations repeat) and every number of the plan's quantities that the equation's function may reach is marked
+        (unconfirmed) in the paper (:func:`core.equation_tests.unconfirmed_marks`). Never so for an example that FI computed
+        from the equation as written and found equal to the example (the code is wrong), an example the plan reworked (two
+        derivations of the plan disagree with the code), or a failure that is not a wrong number (the function cannot be
+        called, or raises). Written to ``record``; a run that passes writes none, so the mark clears."""
+        key = _equation_tests.UNCONFIRMED_KEY
+        failing = {str(f.get("id")): f for f in failures}
+        by_formula = {r["id"]: r["formula"] for r in rows}
+        agrees = {r["id"] for r in rows if r.get("equation_agrees") is True}
+        reworked = set((self._examples_rederived().get("examples") or {}))
+        limit = self.config.engine.exec_reflect_max_iterations
+        passes = {eid: int(n) for eid, n in (before.get("passes") or {}).items() if eid in failing}
+        unconfirmed: dict[str, Any] = {}
+        stops: list[dict[str, Any]] = []
+        notes = list(record.get("not_tested") or [])
+        for eid, f in failing.items():
+            eligible_ = (f.get("status") == _equation_tests.MISMATCH and eid not in agrees and eid not in reworked
+                         and _equation_tests.repairable_by_example(f))
+            if not eligible_:
+                stops.append(f)
+                continue
+            passes[eid] = passes.get(eid, 0) + 1
+            if eid not in held and passes[eid] <= limit:
+                stops.append(f)  # the whole script is repaired next, as before
+                continue
+            reason = _equation_tests.failure_reason(f)
+            entry = held.get(eid) or self._unconfirmed_entry(protocol, by_formula.get(eid, ""), reason, located.get(eid))
+            unconfirmed[eid] = entry
+            notes.append(_equation_tests.unconfirmed_note(eid, reason))
+            if eid not in held:
+                self._log.warning("[equations] %s still fails its worked example after the code was repaired %d time(s) and the "
+                                  "plan was asked about the example; FI cannot tell whether the code or the example is wrong, so "
+                                  "the study goes on with %s not confirmed and %s (unconfirmed) in the paper",
+                                  eid, limit, eid,
+                                  "its results marked" if entry.get("marked") else "no result marked (its function is never run)")
+        record["passes"] = {eid: n for eid, n in passes.items() if eid not in unconfirmed}
+        record[key] = unconfirmed
+        record["not_tested"] = notes
+        record["tested"] = [t for t in record.get("tested") or [] if t not in unconfirmed]
+        return stops
+
+    def _unconfirmed_entry(self, protocol: dict[str, Any] | None, formula: str, reason: str,
+                           where: dict[str, Any] | None) -> dict[str, Any]:
+        """The record of one equation the study goes on with, not confirmed: which of the plan's quantities its function may
+        reach. FI does not place a function on single results here (no trial has run): every quantity of the plan is marked
+        unless the function is plainly never run (:func:`core.code_reach.never_run_in`), and also when FI cannot tell, so
+        a wrong function never reaches a paper unmarked."""
+        ids = list(dict.fromkeys(
+            str(m["id"]).strip() for key in ("metrics", "derived")
+            for m in (protocol.get(key) if isinstance(protocol, dict) else None) or [] if isinstance(m, dict) and m.get("id")))
+        from . import code_reach as _code_reach
+
+        try:
+            never = bool(where) and _code_reach.never_run_in(self.quest_root)(where.get("file"), where.get("function"))
+        except Exception:  # noqa: BLE001 -- FI could not read the code: the function counts as reached
+            never = False
+        return {"formula": formula, "function": (where or {}).get("function"), "reason": reason,
+                "marked": not never, "results": [] if never else ids}
 
     def _examples_rederived_path(self) -> Path:
         return self.fi_dir / "examples_rederived.json"

@@ -42,7 +42,7 @@ _FI_V = re.compile(r"<!-- fi:v \{\{v:.*?\}\} -->.*?<!-- /fi:v -->|<!-- fi:v-span
 # FI's own blocks (a fact it filled in, the best-design section, the phase note) are its text, not the writer's. The engine's
 # paragraphs (attempts, run record, code findings) are taken out of the paper before this check, and a pair that is none of
 # FI's names hides nothing from it.
-_FI_PAIR = re.compile(r"<!-- fi:((?:fact-[\w-]+|best-design|phased))(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
+_FI_PAIR = re.compile(r"<!-- fi:((?:fact-[\w-]+|best-design|phased|marks-note))(?::[0-9a-f]+)? -->.*?<!-- /fi:\1 -->", re.S)
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
 _PLACEHOLDER = re.compile(r"\{\{[^{}\n]{1,320}\}\}")
 # A closed fenced block is a code listing and is left out. An unclosed fence hides only its own paragraph (up to the next blank
