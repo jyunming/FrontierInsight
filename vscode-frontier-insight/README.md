@@ -99,7 +99,8 @@ a third of the text height, smaller References and Further reading lists), and
 the writer gets a word budget. After each draft the review renders it the way
 `paper.pdf` will be and counts its pages. The limit is a guideline: a draft over
 it is never sent back to be written again. Every paper, with or without a
-limit, keeps FI's tables of every setting and its Further reading in a
+limit, keeps FI's tables of every setting, its answers to the questions asked
+in full (one short line per question stays) and its Further reading in a
 supplement, `paper/supplement.md` (one line in the paper points to each); a
 paper over its limit then moves its Limitations there too (one line stays,
 naming each part of the topic the study did not do), without a model call; the
@@ -108,8 +109,8 @@ fewer), the model is asked which sentences of the background and discussion to
 take out, and the engine decides what may go. A paper still over is delivered as
 written, and QUALITY.md says so.
 Without a limit the paper keeps its usual layout and
-length (its tables of every setting and its Further reading still go to the
-supplement).
+length (its tables of every setting, its answers in full and its Further
+reading still go to the supplement).
 
 ## One-time setup
 

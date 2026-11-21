@@ -23,7 +23,8 @@ from .engine_base import (  # noqa: F401
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
     _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
-    _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders,
+    _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders, _figure_numbers, _keep_figure_numbers,
+    _number_figures_by_place,
     _plan_settings,
     _quote_in_source, _raise_if_required_skills_unusable, _read_json_or_none_path, _receipts, _record_claims, _refine,
     _refine_count, _refine_round, _reorder_literature, _replicate_result_intervals, _rerun_from,
@@ -791,6 +792,15 @@ class WriteStageMixin:
         if placed or written:
             self._log.info("[write] FI placed %d figure(s) with captions from its records (%s); the draft's own images "
                            "taken out: %d", len(placed), ", ".join(placed) or "-", written)
+        # FI numbers the figures in the order they now stand, the text's references and the captions with them, and keeps
+        # the numbers: the PDF, the slides, the poster, the quality report and the next draft all give a figure this one.
+        before = _figure_numbers({**state, "quest_root": str(self.quest_root)})
+        markdown, by_place = _number_figures_by_place(markdown, state, root=self.quest_root)
+        _keep_figure_numbers(self.quest_root, by_place)
+        if by_place != before:
+            self._log.info("[write] FI numbered the figures in the order the paper places them: %s",
+                           ", ".join(f"{name} {before.get(name)} -> {k}" for name, k in by_place.items()
+                                     if before.get(name) != k))
         markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         if _phased.enabled(self.config):
@@ -2968,7 +2978,9 @@ class WriteStageMixin:
         tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
         text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
         holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
-        is already its pointer (the supplement would hold nothing more)."""
+        is already its pointer (the supplement would hold nothing more). The answers move only when the paper is shorter
+        for it: their full lines, filled, are longer than the short ones with the line that points to the supplement
+        (a study whose full lines add only a few words keeps them in the paper)."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
@@ -2976,18 +2988,32 @@ class WriteStageMixin:
             return False
         if part == _supplement.LIMITATIONS:
             return bool(_paper_facts.limitations_text(self.quest_root))
+        if part == _supplement.ANSWERS:
+            full, short = _paper_facts.answers_forms(self.quest_root)
+            if not full or short == full:
+                return False
+            rec = self._paper_records({})  # type: ignore[arg-type]
+
+            def words(block: str) -> int:
+                return len(_paper_values.without_marks(_paper_values.fill(block, rec)[0]).split())
+            return words(full) > words(short) + len(_supplement.answers_pointer().split())
         block = _paper_facts.block_text(self.quest_root, part, full=True)
         return any(line.lstrip().startswith("|") for line in block.splitlines())
 
     def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
         """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
-        tables and the Limitations as FI would have put them in the paper, the Further reading as it was listed. No model
-        call. Returns ``False`` only when the file could not be written."""
+        tables, the answers in full and the Limitations as FI would have put them in the paper (the answers' result
+        numbers filled from the same records as the paper's, without changing the paper's record of them), the Further
+        reading as it was listed. No model call. Returns ``False`` only when the file could not be written."""
         root = self.quest_root
         moved = _supplement.moved(root)
         parts: dict[str, str] = {}
         if _supplement.TABLES in moved:
             parts[_supplement.TABLES] = _paper_facts.block_text(root, _supplement.TABLES, full=True)
+        if _supplement.ANSWERS in moved:
+            # the lines under the supplement's own heading (the block's bold title is that heading)
+            lines = _paper_facts.block_text(root, _supplement.ANSWERS, full=True).split(chr(10) * 2, 1)[-1]
+            parts[_supplement.ANSWERS] = _paper_values.fill(lines, self._paper_records(state))[0] if lines.strip() else ""
         if _supplement.LIMITATIONS in moved:
             # the paper's own paragraphs of its Limitations section first, as they stood there, then FI's list
             parts[_supplement.LIMITATIONS] = (_supplement.writer_text(root) + "\n\n"

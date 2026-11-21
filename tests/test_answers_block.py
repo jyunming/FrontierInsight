@@ -4,6 +4,7 @@ nothing. No model is called."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -506,3 +507,119 @@ def test_a_derived_result_that_failed_is_not_answered_and_says_why(tmp_path, mon
     text = pf.answers_text(root)
     assert '- settling limit: not answered (FI could not work out "Limit of the settling time (hours)": no trial reached the limit)' in text
     assert "{{v:settling_limit" not in text
+
+
+# --- the paper's body keeps one short line for each question; the lines in full go to the supplement ------------------
+
+
+def _quest_with_a_gap(tmp_path, monkeypatch) -> Path:
+    """The neutral study, with the decay rate's trials at dose 3 giving no number."""
+    root = _quest(tmp_path, monkeypatch)
+    trials = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    for c in trials["cells"]:
+        if c["cell"]["dose"] == 3:
+            c["metrics"]["decay_rate"].update(values=[], trials=[], count=0, non_finite=2)
+    (root / "raw" / "trials.json").write_text(json.dumps(trials), encoding="utf-8")
+    return root
+
+
+def _filled(text: str, root: Path) -> str:
+    return pv.without_marks(pv.fill(text, pv.records_of(root, pf.plan_protocol(root)))[0])
+
+
+def test_the_brief_answers_count_the_settings_with_no_number_and_the_full_ones_name_them(tmp_path, monkeypatch) -> None:
+    """Before: the body's line named every setting that gave no number (in a stored paper, hundreds of words a line)."""
+    root = _quest_with_a_gap(tmp_path, monkeypatch)
+    full, brief = pf.answers_text(root), pf.answers_text(root, brief=True)
+    line = next(ln for ln in brief.splitlines() if ln.startswith("- decay rate"))
+    assert line == ("- decay rate (measured as: Decay rate): {{v:decay_rate @ dose=each | range:brief}} "
+                    "(mean of each setting, lowest to highest; it differs with dose)")
+    assert "{{v:decay_rate @ dose=each | range}}" in full and "the tables give every setting" in full
+    said, said_full = _filled(brief, root), _filled(full, root)
+    assert "(no number at 1 of 3 settings)" in said and "dose = 3" not in said
+    assert "(no number at dose = 3)" in said_full
+    # the same numbers: the range the two lines give is the one range
+    number = r"0\.1050 to 0\.2050"
+    assert re.search(number, said) and re.search(number, said_full)
+
+
+def test_a_question_not_answered_says_one_phrase_in_the_body_and_the_reason_in_full(tmp_path, monkeypatch) -> None:
+    root = _quest(tmp_path, monkeypatch)
+    (root / "needs").mkdir()
+    (root / "needs" / "RESULT_CHECK.json").write_text(json.dumps(
+        {"removed_quantities": ["settling_limit"], "note": "the code computes it differently from the plan"}), encoding="utf-8")
+    brief = pf.answers_text(root, brief=True)
+    assert '- settling limit: not answered (FI left "Limit of the settling time (hours)" out of the results)' in brief
+    assert "differently from the plan" not in brief
+    assert "the code computes it differently from the plan" in pf.answers_text(root)
+
+
+def test_every_question_has_one_line_in_each_form(tmp_path, monkeypatch) -> None:
+    root = _quest_with_a_gap(tmp_path, monkeypatch)
+    full = [ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- ")]
+    brief = [ln for ln in pf.answers_text(root, brief=True).splitlines() if ln.startswith("- ")]
+    assert len(full) == len(brief) == 4
+    for a, b in zip(full, brief):
+        assert a.split(" (")[0].split(":")[0] == b.split(" (")[0].split(":")[0]  # the same question, in the same place
+        keys_a = {pv.parse(k).metric for k in re.findall(r"\{\{v:[^{}]*\}\}", a) if "@" in k}
+        keys_b = {pv.parse(k).metric for k in re.findall(r"\{\{v:[^{}]*\}\}", b) if "@" in k}
+        assert keys_a == keys_b  # the body still places every result the question is answered by
+
+
+def test_the_body_holds_the_brief_block_and_a_pointer_only_once_the_answers_moved(tmp_path, monkeypatch) -> None:
+    from core import supplement as sup
+
+    root = _quest_with_a_gap(tmp_path, monkeypatch)
+    assert pf.block_text(root, "answers") == pf.answers_text(root)  # nothing moved: the block in full
+    sup.save(root, [sup.ANSWERS], limit=None)
+    body = pf.block_text(root, "answers")
+    assert body == pf.answers_text(root, brief=True) + "\n\n" + sup.answers_pointer()
+    assert pf.block_text(root, "answers", full=True) == pf.answers_text(root)
+    rec = pv.records_of(root, PROTOCOL)
+    out = pf.render(pf.place_blocks("## Results\n\nText.\n\n## Discussion\n\nMore.\n", root), root, records=rec).text
+    assert "range:brief" in out and "paper/supplement.md" in out and "dose = 3" not in pv.without_marks(out)
+    # the asked results still count as placed in the paper
+    assert pv.placed_metrics(out) >= {"decay_rate", "settling_limit"}
+
+
+def test_a_line_over_the_cap_gives_its_values_without_their_intervals(tmp_path, monkeypatch) -> None:
+    """An answer for each of many values of a compared setting, each with its interval, is far over the cap; its brief line
+    gives the values alone (the intervals stay in the supplement), and never one range across the compared values."""
+    def met(vs):
+        return {"values": vs, "trials": list(range(len(vs))), "count": len(vs), "total": 0.0, "non_finite": 0}
+
+    levels = [10, 20, 40, 80, 160, 320, 640, 1280]
+    cells = [{"cell": {"n": n}, "key": f"n={n}", "planned": 3, "ok": 3, "failed": 0,
+              "metrics": {"gap": met([1.0 / n, 1.1 / n, 1.2 / n])}} for n in levels]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir()
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(
+        json.dumps({"quantities": [{"name": "gap", "main": True}]}), encoding="utf-8")
+    protocol = {"metrics": [{"id": "gap", "label": "Gap", "kind": "mean"}],
+                "comparisons": [{"id": "c1", "result": "gap", "across": "n", "how": "ratio"}],
+                "topic_map": [{"item": "Q1", "by": "metric:gap"}]}
+    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
+    full = next(ln for ln in pf.answers_text(tmp_path).splitlines() if ln.startswith("- gap"))
+    brief = next(ln for ln in pf.answers_text(tmp_path, brief=True).splitlines() if ln.startswith("- gap"))
+    rec = pv.records_of(tmp_path, protocol)
+    assert pf._brief_words(full, ["gap"], rec) > pf.BRIEF_WORDS >= pf._brief_words(brief, ["gap"], rec)
+    assert full.count(":mean_ci @") == len(levels) and ":mean_ci" not in brief
+    assert brief.count("{{v:gap @ n=") == len(levels) and "| range" not in brief
+    assert brief.endswith("(interval in the supplement)")
+    assert all(f"{n}: " in brief for n in levels)
+
+
+def test_a_settings_short_name_takes_no_letter_out_of_the_words_counted() -> None:
+    """Before: names were taken out of a line as text, so a setting called ``t`` took the letter out of every word."""
+    def rec_of(axis: str):
+        cells = [{"cell": {axis: v}, "key": f"{axis}={v}", "planned": 2, "ok": 2, "failed": 0,
+                  "metrics": {"decay_rate": {"values": [0.1 * v, 0.2 * v], "trials": [0, 1], "count": 2, "total": 0.0,
+                                             "non_finite": 0}}} for v in (1, 2, 3)]
+        return pv.from_cells(cells, PROTOCOL)
+
+    def line(axis: str) -> str:
+        return (f"- decay rate (measured as: Decay rate): {{{{v:decay_rate @ {axis}=each | range:brief}}}} "
+                f"(mean of each setting, lowest to highest; it differs with {axis})")
+    counts = {axis: pf._brief_words(line(axis), ["decay rate"], rec_of(axis)) for axis in ("t", "dose")}
+    assert counts["t"] == counts["dose"] == 17
