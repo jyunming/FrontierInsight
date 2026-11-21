@@ -717,9 +717,9 @@ CHECKS: tuple[Check, ...] = (
           'A reviewer objection to the design that no check of FI confirms is kept in QUALITY.md and never '
           'changes the design (repeated ones not counted again).'),
     Check('run_trial_aggregates', 'core.run_estimate', 'pilot_problems',
-          'execute', 'model_code', 'repair',
-          'A run_trial in simulate.py that reaches run_cell (read in the code, confirmed by two seeds giving '
-          'the same numbers) is sent back to the code step before timing.'),
+          'execute', 'measured', 'repair',
+          "A run_trial in simulate.py that enters run_cell (FI's record of one call of it) is sent back to the "
+          'code step before timing.'),
     Check('pilot_metric_undefined', 'core.run_estimate', 'undefined_metrics',
           'execute', 'measured', 'stop',
           'A protocol metric that is not a number in any pilot trial is sent back for repair '
@@ -1054,9 +1054,9 @@ CHECKS: tuple[Check, ...] = (
           'FI calls the cheapest setting again; numbers that differ (timings) are excluded from the flat and '
           'unchanged-result judgements'),
     Check('run_trial_is_one_trial', 'core.trial_runner', 'trial_aggregates',
-          'execute', 'model_code', 'repair',
-          'run_trial that reaches run_cell (a mean over trials) is read from code, settled by calling it with '
-          'two seeds; sent back to the code step'),
+          'execute', 'measured', 'repair',
+          "run_trial that enters run_cell (the setting's number, a mean over trials), told from FI's own "
+          'record of one call of it (not from the code, not from two seeds); sent back to the code step'),
     Check('trial_no_success', 'core.trial_runner', 'TrialsRunner.execute',
           'execute', 'own_record', 'repair',
           'Every trial failed or no trial ran successfully, or the code reads cell[...] with no grid in the '

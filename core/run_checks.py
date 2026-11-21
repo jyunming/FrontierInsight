@@ -1661,12 +1661,20 @@ class RunChecksMixin:
         if isinstance(runner, _trial_runner.TrialsRunner):
             try:
                 text = runner.simulate.read_text(encoding="utf-8")
+                # FI's own record of a call of run_trial decides (settle_aggregate); the reading of the code decides nothing
                 aggregate = _trial_runner.trial_aggregates(text, self.quest_root)  # type: ignore[attr-defined]
-                first = self._first_study_cell(self._protocol_block(state) or {}) if aggregate else None  # type: ignore[attr-defined]
-                if aggregate and first is not None and await _trial_runner.settle_aggregate(
-                        self.executor, python, self.quest_root, runner.simulate, cell=first[0], inside=first[1],  # type: ignore[attr-defined]
-                        timeout_s=int(self.config.execution.timeout_s), env=env, log=self._log, kind=first[2]) is not False:  # type: ignore[attr-defined]
-                    aggregate = ""  # two seeds gave the same numbers, or the call could not be measured (said in the log)
+                block = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+                first = self._first_study_cell(block)  # type: ignore[attr-defined]
+                more = self._probe_more_cells(block, first[0], first[2]) if first is not None else []  # type: ignore[attr-defined]
+                wanted = first is not None and (bool(aggregate) or _trial_runner.trial_needs_call_record(
+                    text, self.quest_root, _trial_runner.probe_key([first[0], *more], first[1])))  # type: ignore[attr-defined]
+                if wanted and first is not None:
+                    settled = await _trial_runner.settle_aggregate(
+                        self.executor, python, self.quest_root, runner.simulate, cell=first[0], more=more, inside=first[1],  # type: ignore[attr-defined]
+                        timeout_s=int(self.config.execution.timeout_s), env=env, log=self._log, kind=first[2],  # type: ignore[attr-defined]
+                        thresholds=block.get("thresholds") if isinstance(block.get("thresholds"), dict) else None)
+                    # False: run_cell was entered and drawn from. True, or None (not recorded, said in the log): not refused.
+                    aggregate = _trial_runner.TRIAL_AGGREGATE_WHY if settled is False else ""
             except (OSError, ValueError):
                 aggregate = ""
             if aggregate:
