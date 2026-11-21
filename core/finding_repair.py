@@ -107,6 +107,9 @@ def judged(name, e, path):
 
 HELD = {{}}
 
+def IMPORTING(on):
+    pass
+
 def RUN(fn, path):
     fn()
 {capture}
@@ -117,7 +120,11 @@ for given in {paths!r}:
     try:
         spec = importlib.util.spec_from_file_location("finding_test_" + str(len(out)), path)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        IMPORTING(True)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            IMPORTING(False)
     except BaseException as e:
         results.append(judged("(import)", e, path))
     else:
@@ -218,7 +225,7 @@ def runs_nothing_on_import(path: Path) -> bool:
 #: ``failures``: per failing test function, the line its assertion failed on and the names of that frame that held nothing
 #: (``None`` or an empty container) at that moment.
 CAPTURE = '''
-import collections as _coll, types as _types, abc as _abcmeta
+import collections as _coll, types as _types, abc as _abcmeta, threading
 try:  # FI's own import, made before any test runs: a NumPy array is read only when it is exactly this type
     import numpy as _np
     _NDARRAY = _np.ndarray
@@ -329,15 +336,84 @@ def _empty(value):
         return dict.__len__(value) == 0
     return _one_of(t, _SEQS) and len(value) == 0
 
+STUDY = {"funcs": 0}
+_IN_STUDY = {}
+
+def _in_study(filename):
+    # whether a code object's file is under the quest's code/ (cached by file name)
+    hit = _IN_STUDY.get(filename)
+    if hit is None:
+        try:
+            hit = os.path.abspath(filename).startswith(code_dir + os.sep)
+        except Exception:
+            hit = True
+        _IN_STUDY[filename] = hit
+    return hit
+
+def _count_call(frame):
+    # a function of the study's code (a def, a lambda or a comprehension; not a module or class body) started: study code ran
+    code = frame.f_code
+    if code.co_flags & 1 and _in_study(code.co_filename):
+        STUDY["funcs"] += 1
+
+def _import_watch(frame, event, arg):
+    if event == "call":
+        _count_call(frame)
+
+def IMPORTING(on):
+    # study code that runs while the test file is imported (a module that calls functions as it loads) counts too
+    sys.setprofile(_import_watch if on else None)
+
+def _defs_only(path):
+    import ast as _ast
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = _ast.parse(fh.read())
+    except Exception:
+        return False
+    for stmt in tree.body:
+        if isinstance(stmt, (_ast.Import, _ast.ImportFrom, _ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            continue
+        if isinstance(stmt, _ast.Expr) and isinstance(stmt.value, _ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if (isinstance(stmt, _ast.If) and not stmt.orelse and isinstance(stmt.test, _ast.Compare)
+                and isinstance(stmt.test.left, _ast.Name) and stmt.test.left.id == "__name__"):
+            continue
+        return False
+    return True
+
+def _study_ran():
+    # False only when no function of the study's code started and every study module that was loaded holds nothing but
+    # imports and definitions; anything unclear is True (the finding then stays shown)
+    try:
+        if STUDY["funcs"] > 0:
+            return True
+        for m in list(sys.modules.values()):
+            if type(m) is not _types.ModuleType:
+                continue
+            f = dict.get(m.__dict__, "__file__")
+            if type(f) is str and _in_study(f) and not _defs_only(f):
+                return True
+        return False
+    except Exception:
+        return True
+
 def RUN(fn, path):
     # ``state`` is what FI listed of the values the study returned; ``held_state`` what it listed of the test's own locals
     # (a generator the test holds there must not decide whether the study's values were listed completely)
     returned, state = [], {"seen": 0, "complete": True}
-    seen_names, call_lines, counts = set(), set(), {"calls": 0, "inits": 0}
+    seen_names, call_lines, counts = set(), set(), {"calls": 0, "inits": 0, "indirect": 0}
     test_file = os.path.abspath(path)
     inside = code_dir + os.sep
 
     def watch(frame, event, arg):
+        if event == "call":
+            _count_call(frame)
+            code, back = frame.f_code, frame.f_back
+            if code.co_flags & 1 and _in_study(code.co_filename) and (
+                    back is None or not (os.path.abspath(back.f_code.co_filename) == test_file or _in_study(back.f_code.co_filename))):
+                counts["indirect"] += 1  # study code called by something that is neither the test nor the study (a wrapper)
+            return
         if event != "return" or frame.f_back is None:
             return
         if os.path.abspath(frame.f_back.f_code.co_filename) != test_file:
@@ -364,10 +440,12 @@ def RUN(fn, path):
                          "line": frame.f_back.f_lineno})
 
     sys.setprofile(watch)
+    threading.setprofile(watch)
     try:
         fn()
     except AssertionError as e:
         sys.setprofile(None)
+        threading.setprofile(None)
         held, held_state = set(), {"seen": 0, "complete": True}
         for r in returned:
             held.update(r["names"])
@@ -387,11 +465,12 @@ def RUN(fn, path):
             state["complete"] = False
         HELD[id(e)] = {"returned": returned, "names": sorted(held)[:5000],
                        "complete": state["complete"] and held_state["complete"], "returned_complete": state["complete"],
-                       "calls": counts["calls"], "inits": counts["inits"], "call_lines": sorted(call_lines)[:500],
+                       "study_ran": _study_ran(), "calls": counts["calls"], "inits": counts["inits"], "indirect": counts["indirect"], "call_lines": sorted(call_lines)[:500],
                        "failures": [{"line": line, "empty": empty}]}
         raise
     finally:
         sys.setprofile(None)
+        threading.setprofile(None)
 '''
 
 
@@ -463,7 +542,8 @@ def _held_of(fails: list[dict[str, Any]]) -> dict[str, Any] | None:
             "names": sorted({str(n) for h in helds for n in (h.get("names") or [])}),
             "complete": all(h.get("complete") is True for h in helds),
             "returned_complete": all(h.get("returned_complete") is True for h in helds),
-            "calls": sum(int(h.get("calls") or 0) for h in helds), "inits": sum(int(h.get("inits") or 0) for h in helds),
+            "study_ran": any(h["study_ran"] for h in helds) if all(isinstance(h.get("study_ran"), bool) for h in helds) else None,
+            "calls": sum(int(h.get("calls") or 0) for h in helds), "inits": sum(int(h.get("inits") or 0) for h in helds), "indirect": sum(int(h.get("indirect") or 0) for h in helds),
             "call_lines": sorted({int(n) for h in helds for n in (h.get("call_lines") or []) if isinstance(n, int)}),
             "failures": [x for h in helds for x in (h.get("failures") or [])]}
 
@@ -705,10 +785,12 @@ def failure_from_study(src: str, held: Any, modules: Iterable[str]) -> StudyFail
     what FI recorded when it ran it (``held``: :data:`CAPTURE`; ``modules``: :func:`study_modules`). A failure that does
     not is no proof of a fault in the study:
 
-    * ``NO_STUDY_CALL``: the test failed before any call into the study's code returned to it, and the assertion reads
-      nothing of the study (no attribute of a study module, no name imported from one, nothing worked out from them): its
-      own input or a literal failed. Nothing the study did can be in the assertion.
-    * ``NAME_NOT_GIVEN``: the assertion depends on the study, FI listed everything the study returned (every value a record
+    * ``NO_STUDY_CALL``: no code of the study ran before the assertion failed. FI saw it while the test ran (the
+      capture, :data:`CAPTURE`): no function under ``code/`` started anywhere in the call tree (through the test's own
+      helpers, a wrapper module or a fixture too, in any thread), at import time or later, and every study module the test
+      loaded holds only imports and definitions. The test's own input or a literal failed. Anything unclear (no record of
+      it, a module whose top level does more than define) is ``StudyFailure()``.
+    * ``NAME_NOT_GIVEN``: the assertion depends on the study (read from the test's text), FI listed everything the study returned (every value a record
       of names), the assertion is a membership test, a ``.get`` lookup or a check on a value that held nothing, and a name
       it looks for is held by no name the study returned. Only the names the study returned are compared, never the test's
       own locals. The test reads an output the study does not give, which is a part of the plan not done, not a wrong value.
@@ -724,16 +806,16 @@ def failure_from_study(src: str, held: Any, modules: Iterable[str]) -> StudyFail
         tree = ast.parse(src)
         mods = set(modules)
         lines = {int(n) for n in held.get("call_lines") or [] if isinstance(n, int)}
-        reads = _assertion_reads_study(tree, mods, lines)
         nodes = [_failing_assert(tree, int(f["line"])) for f in failures]
         if any(n is None for n in nodes):
             return StudyFailure()
         asserts: list[ast.Assert] = [n for n in nodes if n is not None]
-        if held.get("calls") == 0 and not any(reads.get(n.lineno) for n in asserts):
-            return StudyFailure(NO_STUDY_CALL, [], "its assertion failed before any call into the study returned, and it "
-                                                   "reads nothing the study gives: the test's own input failed")
+        if held.get("study_ran") is False:
+            return StudyFailure(NO_STUDY_CALL, [], "no code of the study ran before its assertion failed: the test's own "
+                                                   "input failed")
+        reads = _assertion_reads_study(tree, mods, lines)
         returned = [r for r in held.get("returned") or [] if isinstance(r, dict)]
-        if (held.get("returned_complete") is not True or held.get("inits") != 0 or not returned
+        if (held.get("returned_complete") is not True or held.get("inits") != 0 or held.get("indirect") != 0 or not returned
                 or not all(r.get("record") is True for r in returned)):
             return StudyFailure()
         have = {str(n) for r in returned for n in r.get("names") or []}
@@ -2136,8 +2218,9 @@ class Env:
     equations: str
     scrub: Callable[[str], str]
     log: Any
-    #: Like ``run_tests``, a failing test also records what the study's code returned to it (``TestRun.held``,
-    #: :data:`CAPTURE`); ``None`` when the caller cannot: the test is then judged by its failure alone.
+    #: Like ``run_tests``, a failing test also records what the study's code did (``TestRun.held``, :data:`CAPTURE`). Run once,
+    #: after plain runs confirmed the failure, and used only to classify it; never to decide pass, fail or flakiness. ``None``
+    #: when the caller cannot: the test is then judged by its failure alone.
     capture_tests: Callable[[list[str]], Awaitable[dict[str, TestRun]]] | None = None
     package: str = ""
     other: str = ""  # the name of the other model; empty when there is none
@@ -2355,19 +2438,22 @@ def _error_problem(detail: str) -> str:
             "computes, on the current code; an exception in the test itself shows nothing.")
 
 
-async def _second_run(env: Env, path: str) -> TestRun:
-    """The second run of a test that failed once: the one that records what the study returned to it when the caller can
-    (:attr:`Env.capture_tests`). A recording run that does not fail (it ran past its time, or the test is not stable) is
-    followed by a plain one, which decides, so a failed recording never reads as an unstable test."""
+async def _study_failure(env: Env, issue: dict[str, Any], path: str, text: str) -> StudyFailure:
+    """What a failing test is, once its failure is confirmed by plain runs (the only runs that decide pass, fail and
+    flakiness): one more run that records what the study did (:attr:`Env.capture_tests`), used only for
+    :func:`failure_from_study`. A recording that cannot be had (no way to record, it ran past its time, it errored or it did
+    not fail) leaves the plain verdict as it is, is noted as ``capture_unavailable`` in the issue, and B1/B3 do not fire."""
+    run = None
     if env.capture_tests is not None:
-        run = (await env.capture_tests([path])).get(path) or TestRun("error", "not run")
-        if run.status == "fail":
-            return run
-    return (await env.run_tests([path])).get(path) or TestRun("error", "not run")
-
-
-def _study_failure(env: Env, text: str, run: TestRun) -> StudyFailure:
-    """:func:`failure_from_study` for a test that just failed in ``run`` (nothing when it did not record what it was given)."""
+        try:
+            run = (await env.capture_tests([path])).get(path)
+        except Exception:  # noqa: BLE001 - a recording that cannot be made decides nothing
+            run = None
+    if run is None or run.status != "fail" or not isinstance(run.held, dict):
+        if env.capture_tests is not None:
+            issue["capture_unavailable"] = True
+        return StudyFailure()
+    issue.pop("capture_unavailable", None)
     return failure_from_study(text, run.held, study_modules(env.code))
 
 
@@ -2417,12 +2503,11 @@ async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -
     first = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
     run = first
     if first.status == "fail":
-        second = await _second_run(env, path)
-        if second.status != "fail":
+        second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
+        run = second if second.status != "fail" else first
+        if second.status == "fail":
             run = second
-        else:
-            run = second
-            if (why := _study_failure(env, text, second)).kind == NO_STUDY_CALL:
+            if (why := await _study_failure(env, issue["asked_again"], path, text)).kind == NO_STUDY_CALL:
                 # its assertion failed on the test's own input: it shows nothing about the study
                 issue["asked_again"].update(test=path, outcome="refused: " + why.why, detail=run.detail[:300], at=run.at or error.at)
                 env.save()
@@ -2483,9 +2568,9 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
             return False
         if first.status == "fail":
             ran = True
-            second = await _second_run(env, path)
+            second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
             if second.status == "fail":
-                why = _study_failure(env, text, second)
+                why = await _study_failure(env, issue, path, text)
                 if why.kind == NO_STUDY_CALL:
                     # the assertion failed on the test's own input, before the study returned anything: no proof. Asked for
                     # once more with the reason, and a second such test ends the tries

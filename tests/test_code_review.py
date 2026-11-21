@@ -30,7 +30,7 @@ STATE: dict[str, Any] = {"design": DESIGN, "exec_result": {"returncode": 0}}
 WITH_PLAN: dict[str, Any] = {**STATE, "design": {**DESIGN, "protocol": PROTOCOL}}
 SIM_FULL = "# E1\ndef run_cell(cell):\n    return {'quality': 1.0}\n"
 SIM_OTHER = "# E1\ndef run_cell(cell):\n    return {'quality': 2.0}\n"
-ANALYSIS = "print('RESULT_JSON: {}')\n"
+ANALYSIS = "def result():\n    return {}\n\n\nprint('RESULT_JSON: {}')\n"
 
 
 def _engine(tmp_path: Path, *, other: bool = True) -> Engine:
@@ -60,7 +60,6 @@ pytestmark = pytest.mark.usefixtures("this_python")
 #: A test a fake code model writes: it fails on the code as it is and passes once the file it was asked about has changed.
 #: (The first run notes the file's hash beside the test and fails; later runs fail while the file is unchanged.)
 CHANGED_TEST = '''import hashlib, pathlib
-{imp}
 FILE = pathlib.Path(__file__).resolve().parents[2] / "code" / "{rel}"
 NOTE = pathlib.Path(__file__).with_suffix(".orig")
 
@@ -69,17 +68,26 @@ def test_the_file_was_changed():
     now = hashlib.sha256(FILE.read_bytes()).hexdigest()
     if not NOTE.exists():
         NOTE.write_text(now)
-    assert now != NOTE.read_text() and _STUDY.__name__, "{rel} is as it was when the problem was found"
+    assert now != NOTE.read_text(), "{rel} is as it was when the problem was found"
 '''
 
 
+#: The functions the files of these tests define (the first one a file has is called with its arguments), so the fake model's test
+#: genuinely runs the study's code before it fails (a test that fails before any code of the study ran shows nothing about it:
+#: core/finding_repair.py ``failure_from_study``).
+_STUDY_CALLS = (("run_cell", "{}"), ("run_trial", "{'exposure_dose': 1.0, 'resist_type': 'a', 'chemistry': 'b'}"), ("result", ""), ("quality", "1.0, 1.0, 1.0"))
+
+
 def changed_test(rel: str) -> str:
-    """:data:`CHANGED_TEST` for the file ``rel``; it imports that file's module, so what it asserts on is read from the study
-    (a test that fails on nothing of the study's is no proof of a fault: core/finding_repair.py ``failure_from_study``)."""
+    """:data:`CHANGED_TEST` for the file ``rel``, which first calls a function of that file (:data:`_STUDY_CALLS`), as a real
+    test of the study does. :data:`CHANGED_TEST` alone is the test that never runs the study: it is not demonstrating
+    (tests/test_finding_test_validity.py)."""
     parts = rel[:-3].split("/")
     imp = f"import {parts[0]} as _STUDY" if len(parts) == 1 else f"from {'.'.join(parts[:-1])} import {parts[-1]} as _STUDY"
-    return CHANGED_TEST.format(rel=rel, imp=imp)
-PASSING_TEST = "def test_nothing_is_wrong():\n    assert True\n"
+    run = ("    for _name, _args in " + repr(tuple((n, a) for n, a in _STUDY_CALLS)) + ":\n"
+           "        if hasattr(_STUDY, _name):\n            eval('_STUDY.' + _name + '(' + _args + ')')\n            break\n")
+    return CHANGED_TEST.format(rel=rel).replace("import hashlib, pathlib\n", f"import hashlib, pathlib\n{imp}\n", 1).replace(
+        "    now = hashlib", run + "    now = hashlib", 1)
 
 
 def code_model_answer(owner: Any, prompt: str) -> str | None:

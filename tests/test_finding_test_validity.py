@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from core import finding_repair as fr
 from tests.test_finding_repair import Run, _block
 
@@ -227,12 +229,15 @@ def test_a_recording_run_that_gives_no_answer_is_not_an_unstable_test(tmp_path: 
 
 
 # ---- the gate ------------------------------------------------------------------------------------------------------------------
-def _gate_run(tmp_path: Path, test: str) -> tuple[Any, dict[str, Any], Any]:
+def _gate_run(tmp_path: Path, test: str, wrapper: str = "") -> tuple[Any, dict[str, Any], Any]:
     from tests.test_absent_output_part_not_done import _real_test_runs
     from tests.test_shown_reach import _engine, _run
 
     engine = _engine(tmp_path)
     _real_test_runs(engine)
+    if wrapper:  # a module outside code/ that calls the study
+        engine.quest_root.mkdir(parents=True, exist_ok=True)
+        (engine.quest_root / "installed_wrapper.py").write_text(wrapper, encoding="utf-8")
     files = {"model.py": ("class Rec(dict):\n    pass\n\n\ndef helper_record(x):\n    r = Rec()\n    r['est_a'] = 2.0 * x\n"
                           "    r['est_b'] = 5.0\n    return r\n"),
              "simulate.py": ("import model\n\n\ndef trial(cell, ctx):\n    r = model.helper_record(1)\n"
@@ -268,3 +273,139 @@ def test_the_gate_places_a_name_the_study_does_not_give_as_a_part_not_done(tmp_p
 
 def test_the_harness_source_stays_valid_python() -> None:
     compile(fr.harness_source("code", ["a.py"], capture=True), "harness", "exec")
+
+
+# ---- review round 1: B1 is a fact about what ran, and a recording never decides a verdict ---------------------------------
+SELF_HASH = ("import hashlib, pathlib\n"
+             "FILE = pathlib.Path.cwd() / 'code' / 'study.py'\n"
+             "NOTE = pathlib.Path(__file__).with_suffix('.orig')\n\n\n"
+             "def test_the_file_was_changed():\n"
+             "    now = hashlib.sha256(FILE.read_bytes()).hexdigest()\n"
+             "    if not NOTE.exists():\n        NOTE.write_text(now)\n"
+             "    assert now != NOTE.read_text(), 'study.py is as it was'\n")
+#: the same test with a read of a study name that looks like a dependence on the study but runs none of its code
+SELF_HASH_SPOOFED = ("import study as _STUDY\n" + SELF_HASH.replace("assert now != NOTE.read_text()",
+                                                                    "assert now != NOTE.read_text() and _STUDY.__name__"))
+WRAPPER = "import study\n\n\ndef value():\n    return study.trial({'x': 1})\n"
+VIA_WRAPPER = ("from installed_wrapper import value\n\n\ndef test_estimate():\n    assert value()['est_a'] == 9.0, 'wrong'\n")
+
+
+def _wrapped(tmp_path: Path, test: str, study: str = STUDY) -> tuple[Any, str, Path]:
+    (tmp_path / "installed_wrapper.py").write_text(WRAPPER, encoding="utf-8")  # outside code/
+    return _held(tmp_path, test, study)
+
+
+def test_a_test_that_reads_a_study_name_but_ran_no_study_code_shows_nothing(tmp_path: Path) -> None:
+    for text in (SELF_HASH, SELF_HASH_SPOOFED):
+        run, src, code = _held(tmp_path, text, name=f"t{len(text)}.py")
+        assert run.status == "fail" and run.held["study_ran"] is False
+        assert fr.failure_from_study(src, run.held, fr.study_modules(code)).kind == fr.NO_STUDY_CALL
+
+
+def test_a_study_module_that_runs_code_when_it_loads_counts_as_study_code_that_ran(tmp_path: Path) -> None:
+    for extra in ("\nLIMIT = 4\n", "\nTABLE = dict(a=1)\n", "\n_x = rate(2.0)\n"):
+        run, src, code = _held(tmp_path, "import study\n\ndef test_x():\n    assert 1 == 2, 'own'\n", STUDY + extra,
+                               name=f"m{len(extra)}.py")
+        assert run.held["study_ran"] is True, extra
+        assert not fr.failure_from_study(src, run.held, fr.study_modules(code))
+
+
+def test_a_wrong_value_returned_through_a_wrapper_outside_code_stays_shown(tmp_path: Path) -> None:
+    run, src, code = _wrapped(tmp_path, VIA_WRAPPER)
+    assert run.status == "fail" and run.kind == "assertion", run.detail
+    assert run.held["study_ran"] is True and run.held["calls"] == 0 and run.held["indirect"] >= 1
+    assert not fr.failure_from_study(src, run.held, fr.study_modules(code))
+
+
+def test_a_name_guess_after_a_wrapper_called_the_study_is_not_called_absent(tmp_path: Path) -> None:
+    test = ("from installed_wrapper import value\nimport study\n\n\ndef test_x():\n    value()\n    r = study.trial({})\n"
+            "    assert 'zz_spread' in r, 'none'\n")
+    run, src, code = _wrapped(tmp_path, test)
+    assert run.held["indirect"] >= 1 and not fr.failure_from_study(src, run.held, fr.study_modules(code))
+
+
+def test_study_code_that_runs_in_a_thread_counts(tmp_path: Path) -> None:
+    test = ("import threading\nimport study\n\n\ndef test_x():\n    t = threading.Thread(target=study.rate, args=(1.0,))\n"
+            "    t.start()\n    t.join()\n    assert 1 == 2, 'own'\n")
+    run, _src, _code = _held(tmp_path, test)
+    assert run.held["study_ran"] is True
+
+
+def test_the_creation_keeps_the_wrapper_test_and_refuses_the_self_hash_one(tmp_path: Path) -> None:
+    (tmp_path / "installed_wrapper.py").write_text(WRAPPER, encoding="utf-8")
+    run = CaptureRun(tmp_path, [{"id": "F-1", "file": "study.py", "function": "trial"}], {"code:test": [_block(VIA_WRAPPER)]})
+    assert asyncio.run(fr.demonstrate(run.env, run.record["issues"]["F-1"], "study.py")) is True
+    assert "no_study_call" not in run.record["issues"]["F-1"]
+    run = CaptureRun(tmp_path / "b", [{"id": "F-1", "file": "study.py", "function": "trial"}],
+                     {"code:test": [_block(SELF_HASH_SPOOFED), _block(SELF_HASH)]})
+    assert asyncio.run(fr.demonstrate(run.env, run.record["issues"]["F-1"], "study.py")) is False
+    assert run.record["issues"]["F-1"]["outcome"] == "not demonstrated" and run.record["issues"]["F-1"]["no_study_call"] is True
+
+
+def test_the_gate_clears_the_self_hash_test_and_keeps_the_wrapper_test(tmp_path: Path) -> None:
+    gate_test = ("import hashlib, pathlib\nFILE = pathlib.Path(__file__).resolve().parents[2] / 'code' / 'model.py'\n"
+                 "NOTE = pathlib.Path(__file__).with_suffix('.orig')\n\n\ndef test_x():\n    now = hashlib.sha256(FILE.read_bytes()).hexdigest()\n"
+                 "    if not NOTE.exists():\n        NOTE.write_text(now)\n    assert now != NOTE.read_text(), 'as it was'\n")
+    out, record, _engine = _gate_run(tmp_path / "a", gate_test)
+    assert out is None and record["issues"]["F-1"]["demonstrated"] is False
+    via = ("from installed_wrapper import value\n\n\ndef test_x():\n    assert value()['est_a'] == 9.0, 'wrong'\n")
+    out, record, engine = _gate_run(tmp_path / "b", via, wrapper="import model\n\n\ndef value():\n    return model.helper_record(1)\n")
+    assert out is not None and out.get("stuck") is True and record["issues"]["F-1"].get("demonstrated") is True
+
+
+class _Doubles:
+    """A harness double: the plain run says ``plain`` and the recording run says whatever it is told, in order."""
+
+    def __init__(self, plain: str, recorded: list[Any]) -> None:
+        self.plain, self.recorded, self.calls = plain, list(recorded), []
+
+    async def __call__(self, rel: str, capture: bool = False) -> Any:
+        self.calls.append(capture)
+        if not capture:
+            return types_ns(self.plain)
+        return self.recorded.pop(0) if self.recorded else None
+
+
+def types_ns(status: str) -> Any:
+    import types
+
+    return types.SimpleNamespace(status=status, crash_in_program=False, kind="assertion", detail="", place="", at="", held=None)
+
+
+@pytest.mark.parametrize("recorded", [None, "pass", "error", "timeout"])
+def test_the_recording_run_never_changes_the_verdict_of_the_plain_runs(tmp_path: Path, recorded: str | None) -> None:
+    from tests.test_shown_reach import _engine, _run
+
+    engine = _engine(tmp_path)
+    shown = {"pass": types_ns("pass"), "error": types_ns("error"), "timeout": None, None: None}[recorded]
+    double = _Doubles("fail", [shown])
+    engine._rerun_finding_test = double  # type: ignore[method-assign,assignment]
+    test = "import model\n\ndef test_x():\n    r = model.helper_record(1)\n    assert r['est_a'] == 9.0, 'wrong'\n"
+    out, record = _run(engine, test, file="model.py", function="helper_record")
+    assert out is not None and out.get("stuck") is True, "a recording that passes, errors or gives no answer clears nothing"
+    assert double.calls == [False, False, True], "two plain runs decide, then one recording run, used only to classify"
+    assert record["issues"]["F-1"].get("capture_unavailable") is True and record["issues"]["F-1"]["demonstrated"] is True
+
+
+def test_the_recording_run_is_not_made_when_a_plain_run_passes(tmp_path: Path) -> None:
+    from tests.test_shown_reach import _engine, _run
+
+    engine = _engine(tmp_path)
+    double = _Doubles("pass", [])
+    engine._rerun_finding_test = double  # type: ignore[method-assign,assignment]
+    out, _record = _run(engine, "import model\n\ndef test_x():\n    assert True\n", file="model.py", function="helper_record")
+    assert out is None and double.calls == [False]
+
+
+def test_the_creation_keeps_the_plain_verdict_when_the_recording_gives_a_pass_or_fails_to_run(tmp_path: Path) -> None:
+    for answer in ("pass", "error", "raise"):
+        run = CaptureRun(tmp_path / answer, [{"id": "F-1", "file": "study.py", "function": "trial"}], {"code:test": [_block(OWN_INPUT)]})
+
+        async def recorded(paths: list[str], answer: str = answer) -> dict[str, fr.TestRun]:
+            if answer == "raise":
+                raise RuntimeError("the recording ran past its time")
+            return {p: fr.TestRun(answer) for p in paths}
+
+        run.env.capture_tests = recorded
+        assert asyncio.run(fr.demonstrate(run.env, run.record["issues"]["F-1"], "study.py")) is True, answer
+        assert run.record["issues"]["F-1"]["capture_unavailable"] is True and run.record["issues"]["F-1"]["demonstrated"] is True
