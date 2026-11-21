@@ -681,3 +681,88 @@ def test_a_reset_that_cannot_write_fis_blocks_keeps_what_they_point_to(tmp_path:
     monkeypatch.setattr(Path, "write_text", real)
     assert sup.table_pointer() in paper.read_text(encoding="utf-8")
     assert sup.read(tmp_path) == held and (tmp_path / sup.FILE).is_file(), "the pointer still has its supplement"
+
+
+#: The note of a check that took a result out, as long as a real one (FI's full line carries it, the short one does not).
+LONG_NOTE = ("a test FI ran on the code that produced the results failed on this result, and a repair that passes the "
+             "test changes the reported number; the study run again with a repair of it reports other numbers for it, "
+             "so FI does not state the value the run printed")
+
+
+def _answers_quest(tmp_path: Path, monkeypatch, note: str = LONG_NOTE) -> Engine:  # noqa: ANN001
+    """The answers block's neutral study (tests/test_answers_block.py): its decay rate gave no number at one dose, and a
+    check took its settling limit out of the results with ``note``."""
+    from tests import test_answers_block as tab
+
+    tab._quest_with_a_gap(tmp_path, monkeypatch)
+    (tmp_path / "needs").mkdir(exist_ok=True)
+    (tmp_path / "needs" / "RESULT_CHECK.json").write_text(json.dumps(
+        {"removed_quantities": ["settling_limit"], "note": note}), encoding="utf-8")
+    monkeypatch.setattr(Engine, "_protocol_block", lambda self, state, **k: tab.PROTOCOL)
+    return _engine(tmp_path, topic=NO_LIMIT)
+
+
+def test_every_paper_keeps_a_short_line_per_question_and_the_answers_in_full_in_the_supplement(
+        tmp_path: Path, monkeypatch) -> None:
+    """Before: the body's answers named every setting that gave no number (most of a 1,697-word subsection of a stored
+    paper). Now the body keeps one short line per question and a pointer; the lines in full are in the supplement,
+    filled from FI's records, and a new draft gets them back before it is decided again."""
+    eng = _answers_quest(tmp_path, monkeypatch)
+    paper = _put(eng, tmp_path)
+    assert "(no number at dose = 3)" in pf.without_marks(paper.read_text(encoding="utf-8")), "the full block first"
+    calls = _model_calls(eng)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    text = pf.without_marks(paper.read_text(encoding="utf-8"))
+    assert sup.ANSWERS in sup.moved(tmp_path)
+    assert "(no number at 1 of 3 settings)" in text and "dose = 3" not in text
+    assert "it differs with dose)" in text and "the tables give every setting" not in text
+    assert "out of the results)" in text and LONG_NOTE not in text and LONG_NOTE in shown_text(tmp_path)
+    assert sup.answers_pointer() in text and text.count("**Answers to the questions asked.**") == 1
+    shown = (tmp_path / sup.FILE).read_text(encoding="utf-8")
+    assert "## Answers to the questions asked, in full" in shown and "(no number at dose = 3)" in shown
+    assert "{{" not in shown and "**Answers to the questions asked.**" not in shown
+    assert "answers to the questions asked in full" in shown.split("\n\n")[1]
+    # the paper's record of its numbers is the body's, not the supplement's
+    record = (tmp_path / ".fi" / "paper_values.json").read_text(encoding="utf-8")
+    assert "range:brief" in record and "dose=each | range}}" not in record
+    assert "its answers to the questions asked in full" in pf.page_limit_text(tmp_path)
+    assert [c for c in calls if c != "review"] == [], "no model call for the move"
+    # a new draft gets the full lines back, and is decided again
+    eng._supplement_reset({}, paper)
+    assert "(no number at dose = 3)" in pf.without_marks(paper.read_text(encoding="utf-8"))
+    assert sup.answers_pointer() not in paper.read_text(encoding="utf-8")
+
+
+def shown_text(root: Path) -> str:
+    return (root / sup.FILE).read_text(encoding="utf-8")
+
+
+def test_answers_whose_full_lines_add_only_a_few_words_stay_in_the_paper(tmp_path: Path, monkeypatch) -> None:
+    """The move is for a shorter paper: full lines a few words longer than the short ones and the pointer stay."""
+    eng = _answers_quest(tmp_path, monkeypatch, note="a check removed it")
+    paper = _put(eng, tmp_path)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    text = pf.without_marks(paper.read_text(encoding="utf-8"))
+    assert sup.ANSWERS not in sup.moved(tmp_path)
+    assert "(no number at dose = 3)" in text and sup.answers_pointer() not in text
+
+
+def test_the_answers_move_with_the_receipts_of_the_paper_they_leave(tmp_path: Path, monkeypatch) -> None:
+    from core import receipts
+
+    eng = _answers_quest(tmp_path, monkeypatch)
+    paper = _put(eng, tmp_path)
+    carried: list[tuple[str, str]] = []
+    real = receipts.carry_over
+
+    def spy(root, check, kind, before, after, why):  # noqa: ANN001
+        carried.append((check, why))
+        return real(root, check, kind, before, after, why)
+
+    monkeypatch.setattr(receipts, "carry_over", spy)
+    _pages(monkeypatch, 0)
+    _review(eng, tmp_path)
+    assert {c for c, _ in carried} >= {"claim_check", "citation_check"}
+    assert any("moved one of its own blocks to the supplement" in why for _, why in carried)

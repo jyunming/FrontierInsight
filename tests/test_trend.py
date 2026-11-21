@@ -474,3 +474,18 @@ def test_an_order_does_not_pair_the_values_on_the_two_sides_of_a_setting_with_no
     full = [_cell({"size": 1}, score=[1.0, 1.1]), _cell({"size": 2}, score=[0.5, 0.6]), _cell({"size": 3}, score=[0.25, 0.26])]
     text, _n, _i = tr.trend_text(pv.from_cells(full), "score over size @ | order")
     assert "size = 1 to 2" in text and "size = 2 to 3" in text and "not neighbouring" not in text
+
+
+def test_a_brief_range_counts_the_settings_without_a_number_instead_of_naming_them() -> None:
+    """``| range:brief`` (FI's answers in the paper's body): the same range, the settings that gave no number counted; the
+    full ``| range`` still names each (its line is in the supplement)."""
+    rec = pv.from_cells(_empty_cells(lambda s, g, k: g == "a" and s in (10, 20)))
+    brief = pv.resolve("{{v:score @ size=each, group=each, kind=each | range:brief}}", rec)
+    whole = pv.resolve("{{v:score @ size=each, group=each, kind=each | range}}", rec)
+    assert brief.filled and whole.filled, (brief.hit, whole.hit)
+    assert brief.text == "1.500 to 1.500 (no number at 4 of 12 settings)"
+    assert whole.text.startswith("1.500 to 1.500 (no number where size = 10 or 20, group = a")
+    assert brief.numbers == whole.numbers
+    assert pv.parse("{{v:score @ size=each | range:brief}}").reducer == "range"
+    for bad in ("{{v:score @ size=each | min:brief}}", "{{v:score @ size=each | range:other}}"):
+        assert not pv.resolve(bad, rec).filled

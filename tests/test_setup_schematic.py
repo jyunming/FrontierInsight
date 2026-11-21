@@ -427,6 +427,45 @@ def test_set_up_figures_the_prose_never_names_go_before_the_runs_first_figure(tm
     assert lines.index("## Results") < at[0] < at[1] < at[2] < lines.index("## References")
 
 
+@pytest.mark.parametrize("method", [
+    "Figure 1 shows the studied system and Figure 2 how the study is set up.",
+    "Figure 2 shows how the study is set up and Figure 1 the studied system.",
+])
+def test_set_up_figures_named_after_a_run_figure_still_stand_first_and_numbering_by_place_agrees(
+        tmp_path: Path, method: str) -> None:
+    # The prose names the run's figure before either set-up figure: numbering by place (each figure beside its first
+    # reference, numbered in the order it stands) meets the rule that the set-up figures open the paper's figures. The
+    # set-up figures win the place (they stand before the run's first figure, the schematic before the flow), so the
+    # numbers by place are the planned ones and every reader gives each figure the same number.
+    from core.engine_base import FIGURE_NUMBERS_RECORD, _keep_figure_numbers, _number_figures_by_place
+    from generation._paper_figures import paper_figure_set
+
+    root = _quest(tmp_path)
+    _draw(root, Model(GOOD))
+    setup_flow.draw(root, [RESULT])
+    S.place_quietly(root)
+    setup_flow.place_quietly(root)
+    draft = ("# T\n\n## Introduction\n\nFigure 3 shows the block warming in a sentence.\n\n## Method\n\n" + method +
+             "\n\n## Results\n\nThe block warms.\n\n## References\n\n1. A cited paper.\n")
+    paper, placed, _ = _place_figures(draft, STATE, root=root)
+    lines = paper.split("\n")
+    at = [next(i for i, ln in enumerate(lines) if f"figures/{n}" in ln) for n in (S.FILE, setup_flow.FILE, RESULT)]
+    assert at[0] < at[1] < at[2] < lines.index("## Method"), "the set-up figures stand before the run's first figure"
+    numbered, by_place = _number_figures_by_place(paper, STATE, root=root)
+    assert by_place == {S.FILE: 1, setup_flow.FILE: 2, RESULT: 3}
+    assert numbered == paper, "already standing in number order: nothing renumbered"
+    assert "Figure 3 shows the block warming" in numbered and method in numbered
+    _keep_figure_numbers(root, by_place)
+    kept = json.loads((root / ".fi" / FIGURE_NUMBERS_RECORD).read_text(encoding="utf-8"))
+    assert kept == by_place == _figure_numbers({**STATE, "quest_root": str(root)})
+    listing = _figure_list_for_prompt(STATE, root=root).splitlines()
+    assert [ln.split(" — ")[0] for ln in listing[:3]] == [
+        f"- Figure 1: figures/{S.FILE}", f"- Figure 2: figures/{setup_flow.FILE}", f"- Figure 3: figures/{RESULT}"]
+    files = sorted(p.name for p in (root / "figures").iterdir())
+    assert paper_figure_set(numbered, files, dict(STATE), root)[1] == {S.FILE: 1, setup_flow.FILE: 2}
+    assert _place_figures(numbered, STATE, root=root)[0] == numbered, "placing again gives the same paper"
+
+
 def test_with_the_key_off_the_numbers_are_todays(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     _draw(root, Model(), on=False)

@@ -236,10 +236,10 @@ def test_a_reserved_word_symbol_is_the_input_with_a_trailing_underscore() -> Non
     equation = {"id": "E1", "formula": "d = 0.61*lambda/(sigma*NA)", "role": "generates",
                 "example": {"inputs": inputs, "expected_formula": "3.8317059702*lambda_/(2*pi*sigma*NA)"}}
     row = _rows(equation)["E1"]
-    # The example (0.6098) and the equation (0.61) are one number rounded two ways (0.61 carries about 0.8% of
-    # rounding): FI computes both, accepts the example, and the test bar grows to cover both.
-    assert row["state"] == "ok" and row["equation_agrees"] is True and row["rounded_form"] is True
-    # An example beyond what the rounding explains is two different numbers: refused, with both values stated.
+    # The example (0.6098) and the equation (0.61) are two numbers, whatever the written digits could explain: FI
+    # computes both with the reserved-word input read as the plan's symbol, and refuses the example.
+    assert row["state"] == "unusable" and row["equation_agrees"] is False and "rounded_form" not in row
+    # A larger gap is refused the same way, with both values stated.
     wrong = {**equation, "example": {"inputs": inputs, "expected_formula": "0.8*lambda_/(sigma*NA)"}}
     assert _rows(wrong)["E1"]["state"] == "unusable" and "the equation as written gives" in _rows(wrong)["E1"]["why"]
     good = {**equation, "example": {"inputs": inputs, "expected_formula": "0.61*lambda_/(sigma*NA)"}}

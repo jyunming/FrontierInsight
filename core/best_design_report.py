@@ -532,11 +532,27 @@ def _before_rule(lines: list[str], at: int) -> int:
 
 def insert_before_discussion(markdown: str, block: list[str]) -> str:
     """``markdown`` with the lines ``block`` as a paragraph of their own before the discussion that follows the results
-    (else the conclusions, the limitations, the references), else at the end. Also where FI's table of every setting
-    goes (core/paper_facts.py ``place_blocks``)."""
+    (else the conclusions, the limitations, the references), else at the end (:func:`before_discussion_line`). Also where
+    FI's table of every setting goes (core/paper_facts.py ``place_blocks``)."""
     lines = markdown.split("\n")
+    at = before_discussion_line(lines)
+    head = lines[:at]
+    while head and not head[-1].strip():
+        head.pop()
+    tail = lines[at:]
+    while tail and not tail[0].strip():
+        tail.pop(0)
+    return "\n".join([*head, *([""] if head else []), *block, *([""] if tail else []), *tail]) + (
+        "" if tail else "\n")
+
+
+def before_discussion_line(lines: list[str]) -> int:
+    """Where in ``lines`` (a paper) a block that closes the results goes: the index of the first blank line (or of the
+    rule line) before the heading of the discussion that follows the results, else of the conclusions, the limitations
+    or the references; ``len(lines)`` when the paper has none of them. Where FI puts its best-design section and its
+    tables (:func:`insert_before_discussion`) and a figure the prose never names (``core/engine.py:_place_figures``)."""
     headings = _headings(lines)
-    level = heading_level(markdown)
+    level = heading_level("\n".join(lines))
     title = next((i for i, lv, _t in headings if lv == 1), None) if level == 1 else None
     sections = [(i, t) for i, lv, t in headings if lv <= level and i != title]
     after = next((i for i, t in sections if _RESULTS.match(t)), -1)
@@ -547,7 +563,7 @@ def insert_before_discussion(markdown: str, block: list[str]) -> str:
             # The engine's references follow a rule line: the section goes before it.
             at = _before_rule(lines, hit)
             break
-    return _insert_at(lines, at, block)
+    return at
 
 
 def _insert_at(lines: list[str], at: int, block: list[str]) -> str:

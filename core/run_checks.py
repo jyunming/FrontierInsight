@@ -2730,8 +2730,11 @@ class RunChecksMixin:
                             if search and isinstance(block.get("baseline"), dict) else None)
         record = _small.read_record(self.quest_root)  # type: ignore[attr-defined]
         module = simulate.relative_to(self.quest_root).as_posix()  # type: ignore[attr-defined]
+        from . import review_pairs as _pairs
+
+        hidden = _pairs.plan_values(protocol)  # hidden on the numbers FI recorded, before they are printed
         if record.get("key") == key:
-            self._small_run_note = str(record.get("for_reader") or "")
+            self._small_run_note = _small.reader_text(record, hidden=hidden)
             if search and baseline and not record.get("crashed") and "baseline" not in record:
                 found = await _small.baseline_answer(
                     self.executor, py, self.quest_root, module, block,  # type: ignore[attr-defined]
@@ -2754,7 +2757,7 @@ class RunChecksMixin:
                 timeout_s=_small.budget(self.config.execution.timeout_s), env=dict(exec_env or {}),  # type: ignore[attr-defined]
                 thresholds=thresholds)
         _small.write_record(self.quest_root, key, got)  # type: ignore[attr-defined]
-        self._small_run_note = got.for_reader()
+        self._small_run_note = _small.reader_text(got.record(), hidden=hidden)
         self._log.info("[execute] FI's small run before the code is read: %s", got.says())  # type: ignore[attr-defined]
         return _small.read_record(self.quest_root)  # type: ignore[attr-defined]
 

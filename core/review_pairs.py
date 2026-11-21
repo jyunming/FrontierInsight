@@ -19,7 +19,6 @@ once more, and then recorded as not reviewed.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any, Callable
 
@@ -197,23 +196,17 @@ def plan_values(protocol: dict[str, Any] | None) -> list[float]:
     return out
 
 
-#: A number printed with at least this many significant digits is read as any value it rounds (``printed=True``).
-PRINTED_DIGITS = 3
+def equals_one_of(number: float, values: list[float] | None) -> bool:
+    """Whether ``number`` is one of ``values`` (to a small relative tolerance): the one equality the scrub uses, on a
+    number FI holds (:func:`core.small_run.reader_text`) as on a number written in a text."""
+    return any(abs(number - v) <= _REL * max(abs(number), abs(v)) for v in values or [])
 
 
-def _significant(raw: str) -> int:
-    """How many significant digits a printed number shows (``0.1036`` -> 4, ``1.20e-3`` -> 3, ``350`` -> 2)."""
-    mantissa = raw.rstrip("%").lstrip("+-").lower().split("e")[0]
-    digits = mantissa.replace(".", "").lstrip("0")
-    return len(digits if "." in mantissa else digits.rstrip("0"))
-
-
-def scrub(text: str, values: list[float] | None, printed: bool = False) -> str:
+def scrub(text: str, values: list[float] | None) -> str:
     """``text`` with every number equal (to a small relative tolerance, in plain, scientific or percent form) to one of
-    ``values`` replaced by :data:`PLACEHOLDER`. Equation ids, line numbers and every other number stay. With ``printed``
-    (text a program printed at its own precision, such as FI's small run), a number with at least
-    :data:`PRINTED_DIGITS` significant digits is also replaced when a value rounds to it (``0.1036`` for
-    0.10355606...)."""
+    ``values`` replaced by :data:`PLACEHOLDER`. Equation ids, line numbers and every other number stay. A number is never
+    matched by the digits it is printed with: FI hides its own numbers before it prints them
+    (:func:`core.small_run.reader_text`)."""
     if not text or not values:
         return text
     protected = [m.span() for m in _ID_RE.finditer(text)]
@@ -227,16 +220,7 @@ def scrub(text: str, values: list[float] | None, printed: bool = False) -> str:
         except ValueError:
             return raw
         seen = [n / 100.0, n] if raw.endswith("%") else [n]
-        for v in values:
-            if any(abs(x - v) <= _REL * max(abs(x), abs(v)) for x in seen):
-                return PLACEHOLDER
-        sig = _significant(raw) if printed and n else 0
-        if sig >= PRINTED_DIGITS:
-            half = 0.5 * 10 ** (math.floor(math.log10(abs(n))) - sig + 1)
-            if any(abs(n - v) <= half * (1 + 1e-9) or raw.endswith("%") and abs(n / 100.0 - v) <= half / 100.0 * (1 + 1e-9)
-                   for v in values):
-                return PLACEHOLDER
-        return raw
+        return PLACEHOLDER if any(equals_one_of(x, values) for x in seen) else raw
 
     return _TOKEN_RE.sub(hit, text)
 
