@@ -639,7 +639,52 @@ def missing_outputs(protocol: dict[str, Any] | None, record: dict[str, Any]) -> 
                 continue  # computed afterwards, by the analysis
             out[name] = (f"FI's small run: `{d_id}` is computed from `{name}`, and no trial returned `{name}` "
                          f"(the trials returned {', '.join(sorted(returned)[:10]) or 'nothing'})")
-    return [Fault(MISSING, name, why + ".", fact="absent") for name, why in out.items()]
+    shapes = planned_shapes(protocol)
+    return [Fault(MISSING, name, f"{why}. {_unheld(name, shapes[name])}", send=False, fact="absent") if name in shapes
+            else Fault(MISSING, name, why + ".", fact="absent") for name, why in out.items()]
+
+
+#: The fact of :func:`unheld_shapes`: a result the plan states is a curve or a map in each run, which FI's record of a trial
+#: cannot hold (a trial returns numbers only: core/in_run.py ``read_returned``).
+UNHELD = "planned_shape"
+
+
+def planned_shapes(protocol: dict[str, Any] | None) -> dict[str, str]:
+    """``{result id: what the plan states it is in each run}`` (``a curve along `time```, ``a map over `x` and `y```) for each
+    declared result the plan states is a curve or a map (``metrics[].shape`` and ``along``, core/contract.py ``Result``); a
+    result the plan states no shape of is one number and is not here."""
+    out: dict[str, str] = {}
+    for m in (protocol or {}).get("metrics") or [] if isinstance(protocol, dict) else []:
+        along = m.get("along") if isinstance(m, dict) else None
+        if not isinstance(m, dict) or not m.get("id") or not isinstance(along, list):
+            continue
+        if m.get("shape") == "curve" and len(along) == 1:
+            out[str(m["id"])] = f"a curve along `{along[0]}`"
+        elif m.get("shape") == "map" and len(along) == 2:
+            out[str(m["id"])] = f"a map over `{along[0]}` and `{along[1]}`"
+    return out
+
+
+def _unheld(name: str, shape: str) -> str:
+    kind = shape.split()[1]
+    return (f"The plan states `{name}` is {shape} in each run, but FI keeps one number per run for a result, so no trial "
+            f"can give it the {kind}: it is not sent back, and the study's results hold no {kind} of `{name}`.")
+
+
+def unheld_shapes(protocol: dict[str, Any] | None, record: dict[str, Any]) -> list[Fault]:
+    """A result the plan states is a curve or a map in each run (:func:`planned_shapes`) that a trial of the small run returned
+    as one number: the plan's form is not what the study records. FI's record of a trial holds numbers only (a list is
+    refused, core/in_run.py ``read_returned``), so a repair asked to return the curve would make every trial fail: a line for
+    the code's reader and plan.md, never a send-back. A result no trial returned is :func:`missing_outputs`' (also a line)."""
+    shapes = planned_shapes(protocol)
+    out: list[Fault] = []
+    for name, shape in shapes.items():
+        numbers = [v for s in _settings_of(record) for v in ((s.get("values") or {}).get(name) or [])
+                   if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if numbers:
+            out.append(Fault(SHAPE, name, f"FI's small run: the trials returned one number for `{name}`. {_unheld(name, shape)}",
+                             send=False, fact=UNHELD))
+    return out
 
 
 def judge_baseline(block: dict[str, Any] | None, record: dict[str, Any]) -> list[Fault]:

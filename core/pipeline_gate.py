@@ -602,32 +602,52 @@ def _fis_analysis_result(scratch: Path, run: Any, protocol: dict[str, Any] | Non
             return GateResult(False, "derive", NOT_CHECKED, "", "FI's own analysis could not run on the small copy (FI's "
                               "fault, not the study's code): " + got["why"][:300], seconds=seconds, left_out=left_out)
         why = got["why"]
-        # what FI's record of this run says of the function: a derived quantity's record, or a figure's outcome
+        fresh = printed and not record.get("from_earlier_run")
+
+        def judged(body: str) -> tuple[str, str, str]:
+            """``(kind, sentence, exception)`` of the function ``body`` from FI's record of this run: a derived quantity's
+            record, or a figure's outcome."""
+            rec = None
+            if body and fresh:
+                rec = next((r for r in (record.get("derived") or {}).values()
+                            if isinstance(r, dict) and r.get("by") == body), None)
+                if rec is None and body.startswith("figure_"):
+                    rec = next(({"status": o.get("status"), "why": o.get("why")} for o in record.get("figures") or []
+                                if isinstance(o, dict) and f"figure_{o.get('id')}" == body), None)
+            said = str(rec.get("why") if rec else "") or (why if body == str(got["body"] or "") else "")
+            # a figure's outcome says "`figure_x` stopped with NameError: ...": the exception's name follows "stopped with"
+            m = _EXC_LINE.match(said) or re.search(r"stopped with ([A-Za-z_][\w.]*)(?::|\b)", said)
+            exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if m else "")
+            library = LIBRARY_MARK in said or (got["kind"] == "module" and raised_in_library(err))
+            if body and exc == "NotImplementedError" and not library:
+                # a function that raises it says in its own body that it is not written: said plainly, naming it
+                reason = re.search(r"NotImplementedError:\s*(.+)", said, re.S)
+                said = f"`{body}` is not written yet: it stops with NotImplementedError" + (f" ({reason.group(1).strip().rstrip('.')})" if reason else "")
+            status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
+            kind = (kind_of(exc, library) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
+            if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
+                kind = SMALL_DATA
+                said += f" (a folder too large to copy was left out of the check: {', '.join(left_out)})"
+            return kind, said, exc
+
         body = str(got["body"] or "")
-        rec = None
-        if body and printed and not record.get("from_earlier_run"):
-            rec = next((r for r in (record.get("derived") or {}).values()
-                        if isinstance(r, dict) and r.get("by") == body), None)
-            if rec is None and body.startswith("figure_"):
-                rec = next(({"status": o.get("status"), "why": o.get("why")} for o in record.get("figures") or []
-                            if isinstance(o, dict) and f"figure_{o.get('id')}" == body), None)
-        said = str(rec.get("why") if rec else "") or why
-        # a figure's outcome says "`figure_x` stopped with NameError: ...": the exception's name follows "stopped with"
-        m = _EXC_LINE.match(said) or re.search(r"stopped with ([A-Za-z_][\w.]*)(?::|\b)", said)
-        exc = last_exception(err) if got["kind"] == "module" else (m.group(1) if m else "")
-        library = LIBRARY_MARK in said or (got["kind"] == "module" and raised_in_library(err))
-        if body and exc == "NotImplementedError" and not library:
-            # a function that raises it says in its own body that it is not written: said plainly, naming the figure or result
-            reason = re.search(r"NotImplementedError:\s*(.+)", said, re.S)
-            said = f"`{body}` is not written yet: it stops with NotImplementedError" + (f" ({reason.group(1).strip().rstrip('.')})" if reason else "")
-        status = str(rec.get("status")) if rec else ("failed" if got["kind"] == "module" else "")
-        kind = (kind_of(exc, library) if exc else SMALL_DATA) if status == "failed" else FAULT if status == "refused" else SMALL_DATA
-        if kind == FAULT and exc in _MAYBE_FAULTS and left_out:
-            kind = SMALL_DATA
-            said += f" (a folder too large to copy was left out of the check: {', '.join(left_out)})"
-        where = f"code/derive.py, in {got['body']}" if got["body"] else "code/derive.py"
+        kind, said, exc = judged(body)
+        if kind != FAULT and got["kind"] == "body" and fresh:
+            # The record names the first function that failed; another that failed with a fault whatever the data (a figure
+            # whose body raises NotImplementedError after one that drew nothing on three trials) is not hidden behind it.
+            others = [str(r.get("by")) for r in (record.get("derived") or {}).values()
+                      if isinstance(r, dict) and r.get("status") in ("failed", "refused") and not r.get("fi_fault")
+                      and str(r.get("by") or "").startswith("derive_")]
+            others += [f"figure_{o.get('id')}" for o in record.get("figures") or []
+                       if isinstance(o, dict) and o.get("status") in ("failed", "refused")]
+            for other in dict.fromkeys(b for b in others if b and b != body):
+                got_other = judged(other)
+                if got_other[0] == FAULT and got_other[2] not in _MAYBE_FAULTS:
+                    body, (kind, said, exc) = other, got_other
+                    break
+        where = f"code/derive.py, in {body}" if body else "code/derive.py"
         return GateResult(False, "derive", kind, where, said[:300], exc, seconds=seconds, left_out=left_out,
-                          body=got["body"])
+                          body=body)
     if not printed:
         return GateResult(False, "derive", NOT_CHECKED, "", "FI's own analysis ended without its RESULT_JSON line (FI's "
                           "fault, not the study's code)", seconds=seconds)

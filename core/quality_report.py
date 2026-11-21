@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import time
 from collections import Counter, defaultdict
@@ -836,11 +837,55 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
             "failed": "the study's function for it failed", "refused": "FI refused what the study's function for it returned",
             "blocked": "a quantity it is worked out from was not computed",
             "missing": "the study's function for it gave no value at any setting"}
-    for item in _analysis.not_computed(_analysis.read_record(q.root)):
+    record = _analysis.read_record(q.root)
+    for item in _analysis.not_computed(record):
         out.append(_problem("analysis", f"{item['id']} was not computed: {said.get(item['status'], item['status'])}"
                             + (f" ({_one(item['why'], 200)})" if item["why"] and item["status"] != "not_written" else ""),
                             "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
+    out.extend(_planned_output_problems(q, record))
     out.extend(_planned_figure_problems(q))
+    return out
+
+
+def _holds_value(rec: Any) -> bool:
+    """Whether FI's record of one derived quantity (``derived.json``) holds a finite value at some setting."""
+    if not isinstance(rec, dict):
+        return False
+    values = [rec.get("value"), *_dict(rec.get("by_setting")).values(), *_dict(_dict(rec.get("by_level")).get("values")).values()]
+    return any(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+
+
+def _planned_output_problems(q: _Quest, record: dict[str, Any]) -> list[dict[str, str]]:
+    """What FI's records say of the plan's results after the run, beyond a result with no value (its own row above): a result
+    with a value although a quantity the plan works it out from (``derived[].inputs``) has none, so it is worked out without
+    it; and a result the plan states is a curve or a map in each run (core/small_run.py ``planned_shapes``), which FI's record
+    of a trial cannot hold (numbers only). Only after a run FI's analysis recorded; disclosed, never a stop or a changed number."""
+    from . import analysis_frame as _analysis
+    from . import paper_facts as _pf
+    from . import small_run as _small
+
+    derived = _dict(record.get("derived"))
+    if not record or not isinstance(record.get("derived"), dict) or record.get("from_earlier_run"):
+        return []  # no record of this run's analysis (a plan with no derived quantity still has an empty one)
+    try:
+        protocol = _pf.plan_protocol(q.root) or {}
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read names nothing
+        protocol = {}
+    missing = {str(x["id"]) for x in _analysis.not_computed(record)}
+    out: list[dict[str, str]] = []
+    for d in (x for x in _list(protocol.get("derived")) if isinstance(x, dict) and x.get("id")):
+        ident = str(d["id"])
+        lost = [str(i) for i in _list(d.get("inputs")) if str(i) in missing and str(i) != ident]
+        if lost and ident not in missing and _holds_value(derived.get(ident)):
+            names = ", ".join(f"`{i}`" for i in lost)
+            out.append(_problem("analysis", f"`{ident}` has a value, though {names}, which the plan works it out from, "
+                                f"{'has' if len(lost) == 1 else 'have'} none, so `{ident}` is worked out without "
+                                f"{'it' if len(lost) == 1 else 'them'}.", "FI's analysis", "left out",
+                                _analysis.DERIVED_PATH.as_posix()))
+    for ident, shape in _small.planned_shapes(protocol).items():
+        out.append(_problem("analysis", f"The plan states `{ident}` is {shape} in each run; FI keeps one number per run for a "
+                            f"result, so the study's results hold no such {shape.split()[1]}.", "FI's analysis", "left out",
+                            "needs/FROZEN_PROTOCOL.json"))
     return out
 
 
@@ -857,6 +902,7 @@ def _planned_figure_problems(q: _Quest) -> list[dict[str, str]]:
     has_row = " ".join(str(p.get("text") or "") for p in map(_dict, _list(q.cannot_repair.get("problems")))
                        if p.get("check") in ("figure_dropped", "figure_fi_fault"))
     folder = q.root / "figures"
+    declared_refs = _declared_references(q.root)
     for o in (x for x in _list(_analysis.read_record(q.root).get("figures")) if isinstance(x, dict) and x.get("id")):
         fid, name = str(o["id"]), Path(str(o.get("file") or "")).name
         if o.get("status") == "skipped" or f"Figure `{fid}`" in has_row:
@@ -869,9 +915,68 @@ def _planned_figure_problems(q: _Quest) -> list[dict[str, str]]:
         elif o.get("status") != "ok":
             text = f"Figure `{fid}` was not drawn" + (f": {_one(o['why'], 160).rstrip('.')}" if o.get("why") else "")
         else:
-            continue
-        out.append(_problem("analysis", text + ".", "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
+            text = ""
+        if text:
+            out.append(_problem("analysis", text + ".", "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
+        if o.get("status") == "ok":
+            undrawn = _undrawn_references(q, o, declared_refs)
+            if undrawn:
+                out.append(_problem("analysis", f"Figure `{fid}` draws no line of " + ", ".join(f"`{r}`" for r in undrawn)
+                                    + (", a reference line" if len(undrawn) == 1 else ", reference lines")
+                                    + " the plan names for it.", "FI's check of the figure's record against the plan",
+                                    "left out", f".fi/figure_records/{Path(name).stem}.calls.json"))
     return out
+
+
+def _declared_references(root: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """The frozen plan, and ``{figure file: {"shows", "references"}}`` for each figure whose plan entry
+    (``figure_declarations``) names reference lines, keeping only those FI holds as a reference of the figure
+    (core/contract.py ``reference_ids``, as the contract keeps them)."""
+    from . import contract as _contract
+    from . import paper_facts as _pf
+
+    try:
+        protocol = _pf.plan_protocol(root) or {}
+        decls = protocol.get("figure_declarations") if isinstance(protocol.get("figure_declarations"), dict) else {}
+        decls = {str(k): v for k, v in decls.items() if isinstance(v, dict) and isinstance(v.get("references"), list)
+                 and v["references"]}
+        if not decls:
+            return protocol, {}
+        c = _contract.from_design({"protocol": {k: v for k, v in protocol.items() if k != "figures"}})
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read names nothing
+        return {}, {}
+    out: dict[str, dict[str, Any]] = {}
+    for name, d in decls.items():
+        shows = [str(s) for s in _list(d.get("shows"))]
+        known = set(_contract.reference_ids(c.results, c.derived, shows))
+        refs = [str(r) for r in d["references"] if str(r) in known]
+        if refs:
+            out[_contract.figure_file(name)] = {"shows": shows, "references": refs}
+    return protocol, out
+
+
+def _undrawn_references(q: _Quest, outcome: dict[str, Any],
+                        declared: tuple[dict[str, Any], dict[str, dict[str, Any]]]) -> list[str]:
+    """The reference lines the plan names for a drawn figure that FI's record of its drawing does not show
+    (core/figure_text_check.py ``undrawn_declared_references``); none without a record of the drawing."""
+    from . import contract as _contract
+    from . import figure_text_check as _ftc
+
+    protocol, refs = declared
+    entry = refs.get(_contract.figure_file(str(outcome.get("file") or "")))
+    if not entry:
+        return []
+    try:
+        calls = json.loads((q.root / ".fi" / "figure_records" / f"{Path(str(outcome['file'])).stem}.calls.json")
+                           .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(calls, dict):
+        return []  # not a record FI wrote: nothing FI can read
+    try:
+        return _ftc.undrawn_declared_references(calls, entry["references"], protocol, entry["shows"])
+    except Exception:  # noqa: BLE001 -- a record FI cannot read names nothing
+        return []
 
 
 def _scale_problems(root: Any) -> list[dict[str, str]]:
