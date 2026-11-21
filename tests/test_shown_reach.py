@@ -268,6 +268,29 @@ def test_a_function_the_study_defines_is_never_a_plain_call_whatever_its_name(tm
     assert _stops(out)  # on the earlier gate: kept in the quality report, as only about the plan
 
 
+_COUNT_FILES = {"model.py": FILES["model.py"] + "\n\ndef count(x):\n    return x\n",
+                "simulate.py": "import model\n\n\ndef trial(cell, ctx):\n    return {'est_a': model.count(1), 'est_b': 2.0}\n"}
+
+
+def test_a_string_method_named_like_a_study_function_is_not_a_call_into_the_study(tmp_path: Path) -> None:
+    src = "import derive\n\n\ndef test_x():\n    assert derive.ROLES['cover'].count('a') == 2, 'wrong'\n"
+    shape = shown_reach.read_test(src)
+    assert shape is not None and shape.method_calls == {"count"} and not shape.module_calls and not shape.bare_calls
+    out, record = _run(_engine(tmp_path), src, file="model.py", function="count", quantity="est_a", files=_COUNT_FILES)
+    assert not _stops(out)  # the study's own `count` is not what a string's `count` reaches
+    assert record["issues"]["F-1"].get("about_plan_text") is True
+
+
+def test_a_study_function_called_by_import_or_as_a_module_attribute_is_still_a_call_into_the_study(tmp_path: Path) -> None:
+    for n, src in enumerate((
+            "import derive\nfrom model import count\n\n\ndef test_x():\n    assert count(derive.ROLES['cover']) == 2, 'wrong'\n",
+            "import derive\nimport model\n\n\ndef test_x():\n    assert model.count(derive.ROLES['cover']) == 2, 'wrong'\n")):
+        shape = shown_reach.read_test(src)
+        assert shape is not None and not shape.method_calls
+        out, _ = _run(_engine(tmp_path / str(n)), src, file="model.py", function="count", quantity="est_a", files=_COUNT_FILES)
+        assert _stops(out)
+
+
 def test_eval_is_not_a_plain_call(tmp_path: Path) -> None:
     src = "import derive\nfrom model import helper_for_trial\n\n\ndef test_x():\n    assert eval(derive.ROLES['cover']) == 2, 'wrong'\n"
     out, record = _run(_engine(tmp_path), src, file="model.py", function="helper_for_trial", quantity="est_a")

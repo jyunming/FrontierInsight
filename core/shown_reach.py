@@ -86,6 +86,12 @@ class TestShape:
     prefix: set[str]
     frame: set[str] = field(default_factory=set)  # constants of FI's analysis frame it reads (``derive.ROLES``)
     defaulted: set[str] = field(default_factory=set)  # keys read by ``.get``/``.pop`` with a default (the default may be compared)
+    #: ``(module, name)`` of each ``base.name(...)`` call whose base is a name the test imports (``module`` is the top-level module
+    #: it came from), and the names of the method calls on any other value (a string, a mapping, a local): only the first kind
+    #: can reach the study's own code. ``calls`` still holds every bare name.
+    module_calls: set[tuple[str, str]] = field(default_factory=set)
+    method_calls: set[str] = field(default_factory=set)
+    bare_calls: set[str] = field(default_factory=set)  # the names called as ``name(...)``
 
 
 def _call_name(node: ast.Call) -> str:
@@ -103,6 +109,31 @@ def read_test(src: str) -> TestShape | None:
     exact: set[str] = set()
     prefix: set[str] = set()
     defaulted: set[str] = set()
+    module_calls: set[tuple[str, str]] = set()
+    method_calls: set[str] = set()
+    bare_calls: set[str] = set()
+    from . import analysis_frame as _frame
+
+    constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
+    bound: dict[str, str] = {}  # a name the test imports -> the top-level module it comes from
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                bound[a.asname or a.name.split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            for a in n.names:
+                bound[a.asname or a.name] = n.module.split(".")[0]
+
+    def attribute_call(f: ast.Attribute) -> None:
+        base: ast.AST = f.value
+        first = ""
+        while isinstance(base, ast.Attribute):
+            first = base.attr
+            base = base.value
+        if isinstance(base, ast.Name) and base.id in bound and not (first in constants or (not first and base.id in constants)):
+            module_calls.add((bound[base.id], f.attr))
+        else:
+            method_calls.add(f.attr)
 
     def key(node: ast.AST) -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -122,6 +153,10 @@ def read_test(src: str) -> TestShape | None:
             name = _call_name(n)
             if name:
                 calls.add(name)
+            if isinstance(n.func, ast.Attribute):
+                attribute_call(n.func)
+            elif isinstance(n.func, ast.Name):
+                bare_calls.add(n.func.id)
             if isinstance(n.func, ast.Attribute) and n.func.attr in ("get", "pop") and n.args:
                 key(n.args[0])
                 given = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "default"), None)
@@ -131,14 +166,11 @@ def read_test(src: str) -> TestShape | None:
             key(n.slice)
         elif isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
             key(n.left)
-    from . import analysis_frame as _frame
-
-    constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
     frame = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in constants}
     frame |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names if a.name in constants}
     # a body named without being called (`derive.figure_fig1.__code__`) is still the body the test is about
     calls |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr.startswith(("derive_", "figure_"))}
-    return TestShape(calls, exact, prefix, frame, defaulted)
+    return TestShape(calls, exact, prefix, frame, defaulted, module_calls, method_calls, bare_calls)
 
 
 #: Calls an assertion may make on what it tests without comparing a value: whether something is there, how many there are.
@@ -756,12 +788,23 @@ class Reach:
                       and not r.rsplit("/", 1)[-1].startswith(("test_", "fi_")) and r != "derive.py")
 
     def _plain(self, shape: TestShape) -> bool:
-        """Whether every call a test makes is a builtin, a plain string or mapping method, or reads a frame constant: no call
-        into the study's own code."""
+        """Whether every call a test makes is a builtin, a plain string or mapping method on a value of its own, or a call into a
+        module that is not the study's: no call into the study's own code. A method call on a value (``text.split(",")``) is
+        never a call into the study, whatever the study's functions are named; a bare name or a call on an imported name
+        counts when the study defines or is that name."""
         defined = set(self.derive_fns)
+        modules = {"derive"}
         for rel in self._study_files():
             defined |= set(_function_names(self.code, rel))
-        return all((c in _BUILTIN_NAMES or c in _PLAIN_METHODS) and c not in defined for c in shape.calls)
+            parts = rel.split("/")
+            modules.add(parts[0][:-3] if len(parts) == 1 else parts[0])
+        bare = shape.bare_calls
+        if shape.calls - bare - shape.method_calls - {n for _m, n in shape.module_calls}:
+            return False  # a name the test uses without a call this reading cannot place (``derive.figure_x.__code__``)
+        return (all((c in _BUILTIN_NAMES or c in _PLAIN_METHODS) and c not in defined for c in bare)
+                and all(c in _PLAIN_METHODS or c in _BUILTIN_NAMES for c in shape.method_calls)
+                and all(m not in modules and (c in _PLAIN_METHODS or c in _BUILTIN_NAMES) and c not in defined
+                        for m, c in shape.module_calls))
 
     def _merge(self, parts: list[Effect]) -> Effect | None:
         """The union of what several parts of one test place (a stop in any is a stop); ``None`` when one cannot tell."""
