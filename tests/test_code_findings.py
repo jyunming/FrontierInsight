@@ -183,7 +183,7 @@ def test_the_convergence_statement_counts_issues_a_test_showed_not_findings_per_
     issues[2].update(demonstrated=True)
     line = cf.convergence_line(record)
     assert "3 distinct issue(s)" in line and "2 of those were shown by a failing test" in line
-    assert "1 issue(s) were repaired" in line and "1 shown result-changing issue(s) are still open" in line
+    assert "1 issue(s) were repaired" in line and "1 shown result-changing issue(s) are not repaired" in line
     assert cf.summary(record)["fixed_by"] == {"model-a": 1}
     assert cr.metrics_line(record).endswith(line)
 
@@ -252,3 +252,39 @@ def test_the_quality_report_lists_each_finding_by_id_with_what_a_test_showed_and
     assert "no: the test passed on the code, so it was not repaired" in text
     assert "no usable test could be written, so it was not repaired" in text and "plan problem: the plan contradicts itself" in text
     assert "shown by a failing test" in text and "distinct issue(s)" in text
+
+
+def _record_with_failed_repair() -> dict[str, Any]:
+    """One result-changing issue a test showed, whose repair failed, and which the later readings no longer flag; one
+    shown issue that was repaired."""
+    def issue(fid: str, outcome: str) -> dict[str, Any]:
+        return {"id": fid, "changes_result": True, "demonstrated": True, "outcome": outcome, "text": "x", "file": "m.py",
+                "function": "f", "readings": [{"n": 1, "status": "open"}, {"n": 2, "status": "not flagged"}]}
+    return {"issues": {"F-a": issue("F-a", cf.FIXED), "F-b": issue("F-b", "not repaired")}}
+
+
+def test_a_shown_issue_the_last_repair_failed_on_is_counted_as_not_repaired_in_the_sentence_and_the_table() -> None:
+    from core import quality_report as qr
+
+    record = _record_with_failed_repair()
+    assert cf.summary(record)["open_result_changing_demonstrated"] == 1
+    assert "1 shown result-changing issue(s) are not repaired" in cf.convergence_line(record)
+    rows = {r["id"]: r for r in qr._issue_rows(record)}
+    assert rows["F-b"]["not_repaired_shown"] is True and rows["F-a"]["not_repaired_shown"] is False
+    text = "\n".join(qr._issue_lines({"issues": list(rows.values()), "issue_summary": qr._issue_summary(record)}))
+    assert "is not repaired |" in text and "0 shown" not in text
+
+
+def test_the_sentence_says_zero_when_every_shown_issue_was_repaired() -> None:
+    record = _record_with_failed_repair()
+    record["issues"]["F-b"]["outcome"] = cf.FIXED
+    assert "0 shown result-changing issue(s) are not repaired" in cf.convergence_line(record)
+
+
+def test_an_issue_flagged_again_and_not_shown_is_named_in_the_sentence_so_it_does_not_say_zero_alone() -> None:
+    record = _record_with_failed_repair()
+    record["issues"]["F-b"]["outcome"] = cf.FIXED
+    record["issues"]["F-c"] = {"id": "F-c", "changes_result": True, "demonstrated": None, "outcome": cf.REOPENED, "text": "x",
+                               "readings": [{"n": 1, "status": "open"}, {"n": 2, "status": "open"}]}
+    line = cf.convergence_line(record)
+    assert "0 shown result-changing issue(s) are not repaired; 1 more are flagged and not shown by a failing test" in line
