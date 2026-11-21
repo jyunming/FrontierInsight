@@ -349,7 +349,11 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     if chosen or baseline_design:
         lines += [*_variables_table(block, baseline_design, chosen), ""]
     if best.get("best") is None:
-        lines += [f"No design that meets every limit was found: {best.get('says')}", ""]
+        says = str(best.get("says") or "").strip()
+        if not said:
+            lines += [f"No design that meets every limit was found: {says}", ""]
+        elif says and says not in said:  # the outcome line already says no design met every limit
+            lines += [says, ""]
     else:
         lines += [*_objective_rows(best, check, quantity, unit), ""]
         limit_rows = _limit_rows(check, best)

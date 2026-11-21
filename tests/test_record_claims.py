@@ -255,3 +255,4 @@ def test_the_outcome_line_opens_the_section_once_when_no_design_meets_every_limi
     head = [x for x in section.splitlines() if x.strip()]
     assert head[2].startswith(line), head[:4]
     assert "no design that meets every limit" in head[2]
+    assert section.lower().count("meets every limit") == 1, section  # the outcome is stated once
