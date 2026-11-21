@@ -5,6 +5,7 @@ topics."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -45,16 +46,35 @@ def test_only_the_plans_own_values_are_taken_out_of_what_a_reviewer_says() -> No
     assert pairs.scrub("anything 0.25", None) == "anything 0.25"
 
 
-def test_the_small_run_note_is_scrubbed_at_the_precision_it_was_printed() -> None:
-    # r6t: the small run's note printed k_true_2=0.1036 while the plan's check expects 0.1035560610989359
-    values = [0.1035560610989359, 0.0125]
-    note = "Setting noise=0.01: k_true_2=0.1036, k_true_3=0.10356, k_hat=0.1041, a share 1.25%, n=12, T=350"
-    assert "k_true_2=0.1036," in pairs.scrub(note, values)  # the plain scrub leaves a rounded value
-    got = pairs.scrub(note, values, printed=True)
-    assert got == (f"Setting noise=0.01: k_true_2={pairs.PLACEHOLDER}, k_true_3={pairs.PLACEHOLDER}, k_hat=0.1041, "
-                   f"a share {pairs.PLACEHOLDER}, n=12, T=350")
-    # two significant digits are too few to tell a plan value from any other number
-    assert pairs.scrub("about 0.10", values, printed=True) == "about 0.10"
+def _small_record(values: dict[str, list[float]]) -> dict[str, Any]:
+    return {"says": "3 trial(s) at 1 setting(s) ran", "reads": {"never": []},
+            "settings": [{"key": "noise=0.01", "planned": 3, "ok": 3, "failed": 0, "reasons": [], "values": values}]}
+
+
+def test_the_small_runs_text_hides_a_plan_value_on_the_number_fi_holds_not_on_its_printed_digits() -> None:
+    from core import small_run
+
+    values = [0.1035560610989359, 0.10003]
+    record = _small_record({"k_true": [0.1035560610989359], "echo": [0.10003], "k_hat": [0.1036, 0.1041]})
+    text = small_run.reader_text(record, hidden=values)
+    # Known positive: the run returned the plan's own value; FI holds it and hides it before it prints it.
+    assert f"k_true={pairs.PLACEHOLDER}" in text
+    # Old code: 0.10003 printed as 0.1 has too few digits for the rounding rule, so the plan's value was shown.
+    assert f"echo={pairs.PLACEHOLDER}" in text
+    # Old code: the run's own estimate 0.1036 was hidden for rounding like the plan's 0.10356; it is not that value.
+    assert "k_hat=0.1036, 0.1041" in text
+    # The text scrub matches no number by its digits.
+    assert pairs.scrub("k_hat=0.1036, about 0.10", values) == "k_hat=0.1036, about 0.10"
+    assert pairs.PLACEHOLDER not in small_run.reader_text(record)
+    # A record written before the settings' values were kept holds only printed text: every number in it is hidden.
+    old = {**record, "settings": [{"key": "noise=0.01", "planned": 3, "ok": 3}], "for_reader": "k_hat=0.1036 at n=12"}
+    assert small_run.reader_text(old) == "k_hat=0.1036 at n=12"
+    assert small_run.reader_text(old, hidden=values) == f"k_hat={pairs.PLACEHOLDER} at n={pairs.PLACEHOLDER}"
+    # The text is cut where it would be cut with nothing hidden, never inside a hidden value.
+    long_record = _small_record({f"v{i:02d}": [0.1035560610989359] for i in range(20)})
+    plain, shown = small_run.reader_text(long_record, limit=200), small_run.reader_text(long_record, hidden=values, limit=200)
+    assert plain.endswith("...") and shown.endswith("...") and "0.1036" not in shown
+    assert re.findall(r"v\d\d=", shown) == re.findall(r"v\d\d=", plain)  # the same settings and names are shown
 
 
 def test_the_plans_values_are_its_checks_expected_values_and_tolerances_and_its_examples() -> None:

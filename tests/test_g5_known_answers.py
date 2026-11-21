@@ -1,5 +1,6 @@
-"""A known-answer expectation that is wrong (a rounded form compared too tightly, a value the plan's own model derived)
-must not condemn correct code (core/equation_tests.py::rounding_of, core/evidence.py::_plan_derived_failure_gaps).
+"""A known-answer expectation that is wrong must not condemn correct code: an example that is not its equation as written
+is refused, never met by widening the bar (core/equation_tests.py::example_rows), and a value the plan's own model
+derived is reported as the plan's (core/evidence.py::_plan_derived_failure_gaps).
 Neutral made-up models only."""
 
 from __future__ import annotations
@@ -17,21 +18,17 @@ def _one(formula: str, example: dict[str, Any]) -> dict[str, Any]:
                                                       "example": example}]}})[0]
 
 
-def test_rounding_of_counts_only_decimal_constants_with_two_or_more_digits() -> None:
-    assert eqt.rounding_of("w = 0.61 * a / b") == pytest.approx(0.005 / 0.61)
-    assert eqt.rounding_of("w = 2.0 * a + 0.5 * b ** 2 + 3 * c") == 0.0
-    assert eqt.rounding_of("w = a / b") == 0.0
-    assert eqt.rounding_of("w = 9.81 * t") < eqt.rounding_of("w = 0.61 * t")
-
-
-def test_an_example_at_full_precision_of_a_rounded_equation_is_accepted_and_the_bar_covers_both() -> None:
-    """Old code: the example (full constant 0.6098...) differed from the equation (0.61) by 0.03%, beyond the 1e-6 bar, so
-    the example was called contradicting its equation (``unusable``) and correct code was repaired against it."""
-    row = _one("w = 0.61 * a / b", {"inputs": {"a": 3.0, "b": 2.0}, "expected_formula": "0.6098 * a / b"})
-    assert row["state"] == "ok" and row["equation_agrees"] is True and row["rounded_form"] is True
-    full, rounded = row["expected"], row["equation_value"]
-    assert abs(rounded - full) <= row["rel"] * abs(full), "code following the equation as written passes the test"
-    assert row["rel"] < 0.01, "the bar grows to the gap only, not to the constant's whole rounding"
+def test_an_example_that_is_not_its_equation_as_written_is_refused_never_met_by_widening_the_bar() -> None:
+    """Old code: an example within the rounding the written constant could explain was accepted and the test's bar grown
+    to the gap: 0.6137 against an equation written 0.61 (0.6%) passed, so code using 0.6137 passed a test of 0.61. The
+    digits a plan writes are not evidence that two numbers are one; the example is refused and the plan writes one."""
+    row = _one("w = 0.61 * a / b", {"inputs": {"a": 3.0, "b": 2.0}, "expected_formula": "0.6137 * a / b"})
+    assert row["state"] == "unusable" and row["equation_agrees"] is False
+    assert "the equation as written gives" in row["why"] and "rounded_form" not in row
+    full = _one("w = 0.61 * a / b", {"inputs": {"a": 3.0, "b": 2.0}, "expected_formula": "0.6098 * a / b"})
+    assert full["state"] == "unusable" and full["equation_agrees"] is False
+    same = _one("w = 0.61 * a / b", {"inputs": {"a": 3.0, "b": 2.0}, "expected_formula": "0.61 * a / b"})
+    assert same["state"] == "ok" and same["equation_agrees"] is True and same["rel"] == 1e-6
 
 
 def test_a_gap_larger_than_the_equation_s_rounding_is_still_a_contradiction() -> None:
@@ -84,14 +81,9 @@ def test_rounding_of_a_constant_in_a_small_term_does_not_excuse_a_gap_in_the_who
     assert row["state"] == "unusable" and row["equation_agrees"] is False
 
 
-def test_rounding_effect_is_the_size_of_the_term_that_holds_the_constant() -> None:
-    assert eqt.rounding_effect("y = 0.61*x + 1000", {"x": 100.0}) == pytest.approx(0.5)
-    assert eqt.rounding_effect("w = 0.61 * a / b", {"a": 3.0, "b": 2.0}) == pytest.approx(0.005 / 0.61 * 0.61 * 1.5)
-    assert eqt.rounding_effect("w = a / b", {"a": 3.0, "b": 2.0}) == 0.0
-    assert eqt.rounding_effect("w = 0.61 * a / b", {"a": 3.0}) is None, "an equation FI cannot compute widens nothing"
-
-
-def test_a_gap_inside_the_effect_of_the_rounded_constant_in_a_sum_is_still_accepted() -> None:
-    """Known positive: 0.6098 vs 0.61 on x = 100 is a gap of 0.02, within the 0.5 the rounding can explain."""
+def test_a_gap_in_a_sum_is_refused_too_and_an_example_that_is_the_equation_passes() -> None:
+    """Old code: 0.6098 vs 0.61 on x = 100 (a gap of 0.02) was accepted as rounding; it is two numbers, so refused."""
     row = _one("y = 0.61*x + 1000", {"inputs": {"x": 100.0}, "expected_formula": "0.6098*x + 1000"})
-    assert row["state"] == "ok" and row["equation_agrees"] is True and row["rounded_form"] is True
+    assert row["state"] == "unusable" and row["equation_agrees"] is False
+    same = _one("y = 0.61*x + 1000", {"inputs": {"x": 100.0}, "expected_formula": "0.61*x + 1000"})
+    assert same["state"] == "ok" and same["equation_agrees"] is True

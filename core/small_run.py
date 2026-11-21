@@ -12,7 +12,7 @@ time (:func:`budget`):
   the reason, the place in the code and the last traceback, until the small run runs or the repairs are spent
   (``RunChecksMixin._small_run_gate``).
 * What it gave (each returned value per setting, the failed trials and why) is shown to the code's reader
-  (:meth:`SmallRun.for_reader`), who then reads the code with results.
+  (:func:`reader_text`, with the plan's checked values hidden), who then reads the code with results.
 * A repair of a reader's finding is kept only if the small run still runs (``core.finding_repair.Env.small_run``).
 
 The calibration of intervals (:mod:`core.trial_checks`) needs more trials than this and is judged on the study's own run.
@@ -192,23 +192,8 @@ class SmallRun:
                 "failed." + rule + " Keep everything else as it is.")
 
     def for_reader(self, limit: int = 2500) -> str:
-        """What the code's reader is shown: each setting's returned values (at most a few per name) and its failures."""
-        if self.load_error:
-            return f"FI could not load the simulation to run it: {self.load_error}"
-        parts = [f"FI ran the simulation with its own harness before this reading: {self.says()}."]
-        if self.unread_note():
-            parts.append(self.unread_note())
-        for s in self.settings:
-            head = f"Setting {s.key or '(the one setting)'}: {s.ok} of {s.planned} trial(s) ran"
-            if s.failed:
-                head += "; failed: " + "; ".join(f"{n}x {r}" for r, n in s.reasons[:2])
-            shown = []
-            for name in sorted(s.values)[:24]:
-                vals = [_short(v) for v in s.values[name][:3]]
-                shown.append(f"{name}={', '.join(vals)}")
-            parts.append(head + ("\n  " + "; ".join(shown) if shown else ""))
-        text = "\n".join(parts)
-        return text if len(text) <= limit else text[:limit - 3] + "..."
+        """What the code's reader is shown (:func:`reader_text` of this run's record), with no value hidden."""
+        return reader_text(self.record(), limit=limit)
 
     def record(self) -> dict[str, Any]:
         return {"says": self.says(), "crashed": self.crashed, "load_error": self.load_error, "seconds": round(self.seconds, 2),
@@ -234,12 +219,72 @@ class SmallRun:
         return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": cells}
 
 
-def _short(v: Any) -> str:
+def reader_text(record: dict[str, Any], hidden: list[float] | None = None, limit: int = 2500) -> str:
+    """What the code's reader is shown of a small run, from its record (:meth:`SmallRun.record`): each setting's returned
+    values (at most a few per name) and its failures. ``hidden``: the plan's values the reader must not see
+    (:func:`core.review_pairs.plan_values`). A returned value FI recorded that equals one of them is shown as
+    :data:`core.review_pairs.PLACEHOLDER`, decided on the number FI holds, never on the digits it prints: a value 0.10003
+    printed as ``0.1`` is hidden, and the run's own estimate 0.10360, printed as ``0.1036``, is shown beside a plan value
+    of 0.103556. The text is cut where it would be cut with nothing hidden, and never inside a value. A record written
+    before the settings' values were kept holds only its printed text, where FI cannot tell which number is which: with
+    values to hide, every number in it is hidden."""
+    settings_ = record.get("settings")
+    if not isinstance(settings_, list) or any(not isinstance(s, dict) or "values" not in s for s in settings_):
+        text = str(record.get("for_reader") or "")
+        if not hidden:
+            return text
+        from . import review_pairs as _pairs
+
+        return _pairs._TOKEN_RE.sub(_pairs.PLACEHOLDER, text)
+    if record.get("load_error"):
+        return f"FI could not load the simulation to run it: {record['load_error']}"
+    pieces: list[tuple[str, str]] = []  # (as printed with nothing hidden, as shown): one per value, one per other text
+
+    def say(text: str) -> None:
+        pieces.append((text, text))
+
+    say(f"FI ran the simulation with its own harness before this reading: {record.get('says') or ''}.")
+    reads = record.get("reads") if isinstance(record.get("reads"), dict) else {}
+    if reads.get("never"):
+        names = ", ".join(f"`{a}`" for a in reads["never"])
+        say(f"\nFI's small run: the simulation never asked for {names}, a setting of the plan's grid; "
+            "every run gets the same value of it, whatever the grid gives.")
+    for s in settings_:
+        head = f"Setting {s.get('key') or '(the one setting)'}: {s.get('ok', 0)} of {s.get('planned', 0)} trial(s) ran"
+        if s.get("failed"):
+            head += "; failed: " + "; ".join(f"{n}x {r}" for r, n in (s.get("reasons") or [])[:2])
+        say("\n" + head)
+        values = s.get("values") if isinstance(s.get("values"), dict) else {}
+        for i, name in enumerate(sorted(values)[:24]):
+            say(("\n  " if i == 0 else "; ") + f"{name}=")
+            for j, v in enumerate((values[name] or [])[:3]):
+                if j:
+                    say(", ")
+                pieces.append((_short(v), _short(v, hidden)))
+    if sum(len(plain) for plain, _ in pieces) <= limit:
+        return "".join(shown for _, shown in pieces)
+    out, room = [], limit - 3
+    for plain, shown in pieces:
+        if len(plain) > room:
+            if plain == shown:
+                out.append(plain[:room])
+            break
+        out.append(shown)
+        room -= len(plain)
+    return "".join(out) + "..."
+
+
+def _short(v: Any, hidden: list[float] | None = None) -> str:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         text = json.dumps(v, default=str)
         return text if len(text) <= 40 else text[:37] + "..."
     if isinstance(v, float) and not math.isfinite(v):
         return str(v)
+    if hidden:
+        from . import review_pairs as _pairs
+
+        if _pairs.equals_one_of(float(v), hidden):
+            return _pairs.PLACEHOLDER
     return f"{v:.4g}"
 
 

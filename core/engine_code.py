@@ -2574,7 +2574,7 @@ class CodeStageMixin:
         if any(c["cut"] for c in calls):
             record["lines_cut"] = [x for c in calls for x in c["cut"]]
         earlier = _code_review.earlier_block(previous)
-        small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values, printed=True)
+        small_run = (_pairs.scrub(getattr(self, "_small_run_note", ""), values)
                      or "(FI did not run the simulation before this reading)")
         # A request whose text is the same as one made before, to the same model, is not asked again: the reply kept for it is
         # read again with today's rules (core/reuse_key.py ``answer_key``; the reply is stored only when this request's own
