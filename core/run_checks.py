@@ -743,9 +743,18 @@ class RunChecksMixin:
         return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
-        """``result_json`` without the left-out quantities."""
+        """``result_json`` without the left-out quantities and the per-trial lists FI's frame writes beside each of them
+        (core/typed_results.py ``with_trial_keys``), which hold the same values; a name that is a result of the frozen plan
+        in its own right is kept."""
         keys = self._left_out_quantities()
-        return _typed.strip_keys(result_json, keys) if keys and result_json else result_json
+        if not keys or not result_json:
+            return result_json
+        frozen = _frozen.load(self.quest_root) or {}  # type: ignore[attr-defined]
+        # a record that no longer matches its own hash names no result of its own: every per-trial list goes
+        protocol: dict[str, Any] = (frozen["protocol"] if isinstance(frozen.get("protocol"), dict)
+                                    and not frozen.get("problem") else {})
+        plan_ids = {str(m.get("id")) for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")}
+        return _typed.strip_keys(result_json, _typed.with_trial_keys(keys, plan_ids))
 
     def _lines_without_left_out(self, lines: list[str]) -> tuple[list[str], int, list[str]]:
         """``lines`` without those that name a left-out quantity: the kept lines, how many were taken out, and the names."""

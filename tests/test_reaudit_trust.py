@@ -226,6 +226,32 @@ def test_the_exclusion_persists_across_a_resume(tmp_path: Path, monkeypatch: pyt
     assert SENTINEL not in fresh._stdout_for_models(f"{sorted(left)[0]} = {SENTINEL}\n")
 
 
+def test_a_left_out_quantity_leaves_no_per_trial_list_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lists FI's frame writes beside a result (its trials, count, total, paired ids) hold its values too: they go with
+    it, in every row, while a name the frozen plan declares as a result of its own stays."""
+    from core import frozen_protocol
+    from tests.test_run_checks import _typed_engine
+
+    eng, _ = _typed_engine(tmp_path, monkeypatch, ["{}"])
+    eng._typed_result_keys = {"gain"}
+    monkeypatch.setattr(type(eng), "_result_check_keys", lambda self: set())
+    raw = {"gain": 2.0, "loss": 1.0, "rows": [{"gain": 2.0, "gain_values": [1.9, 2.1], "gain_count": 2, "gain_total": 4,
+                                               "gain_pair_id": [1, 2], "loss_values": [0.9, 1.1]}]}
+    want_row = {"loss_values": [0.9, 1.1]}
+    assert eng._without_typed_results(raw) == {"loss": 1.0, "rows": [want_row]}
+    # a plan result that happens to be named like a per-trial list of the left-out one is a result in its own right
+    frozen_protocol.freeze(eng.quest_root, {"metrics": [{"id": "gain"}, {"id": "gain_count"}], "thresholds": {}},
+                           approved_by="engine", source="test")
+    assert eng._without_typed_results(raw) == {"loss": 1.0, "rows": [{"gain_count": 2, **want_row}]}
+    # a frozen record edited after it was locked (its hash no longer matches) names no result of its own
+    path = frozen_protocol.frozen_path(eng.quest_root)
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    rec["protocol"]["metrics"].append({"id": "gain_values"})
+    path.write_text(json.dumps(rec), encoding="utf-8")
+    assert frozen_protocol.load(eng.quest_root).get("problem")
+    assert eng._without_typed_results(raw) == {"loss": 1.0, "rows": [want_row]}
+
+
 def test_the_values_left_out_are_kept_in_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
