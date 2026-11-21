@@ -703,18 +703,16 @@ async def test_the_rounds_go_on_while_each_saves_a_tenth_even_when_the_study_alr
 @pytest.mark.asyncio
 async def test_the_rounds_stop_when_a_round_costs_more_time_than_it_saves_on_the_study(fake_clock: None, tmp_path: Path) -> None:
     """A round's wall time (the model's answer and the sample) is set against what it saves on the study: on a study of a
-    second and a half, a kept change saves less than the round took, and the rounds stop there."""
+    hundredth of a second, a kept change saves less than any round can take (it runs the sample in a new process), so the
+    rounds stop there on any machine."""
     engine = _engine(tmp_path, rounds=3)
     engine._client = _Model([_edit(LOOP, FAST), _edit(LOOP, FAST)])
     root = engine.quest_root
     runner = SimpleNamespace(simulate=root / "code" / "simulate.py", deterministic=False)
     out = await engine._speed_up({}, runner, engine.executor.python_path(root), None, {"s": [1, 2, 3]}, 50, {}, {},
-                                 SimpleNamespace(seconds=1.0), 100.0)
+                                 SimpleNamespace(seconds=0.01), 100.0)
     assert out["rounds"][0]["outcome"] == "kept" and len(out["rounds"]) == 1
-    # Which of the two stops ends the rounds depends on how fast the machine is: after the round, when the round took
-    # longer than it saved; or before the next one, when the last round took longer than the least saving FI keeps.
-    assert ("it saves on the study" in out["stopped"]
-            or "more than the least saving FI keeps would give back on the study" in out["stopped"]), out["stopped"]
+    assert "it saves on the study" in out["stopped"], out["stopped"]
 
 
 @pytest.mark.asyncio
