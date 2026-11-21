@@ -335,6 +335,19 @@ def record(keys: list[str], where: list[TypedResult]) -> dict[str, Any]:
     return {"removed_quantities": keys, "calls": [f.says() for f in where], "note": plain_note(keys, where)}
 
 
+# The keys FI's analysis frame writes beside a result in each setting's row (``core/analysis_frame.py``): its trials, the
+# count and total of a proportion, and the trial ids of a paired result. They hold the quantity's values too.
+TRIAL_KEY_SUFFIXES = ("_values", "_count", "_total", "_pair_id")
+
+
+def with_trial_keys(keys: set[str] | frozenset[str] | list[str], plan_ids: set[str] | frozenset[str] = frozenset()) -> set[str]:
+    """``keys`` and the keys FI's frame writes beside each of them (:data:`TRIAL_KEY_SUFFIXES`), so a quantity taken out of
+    the results leaves no per-trial list behind. A name that is a result of the plan in its own right (``plan_ids``) is
+    never added."""
+    out = {str(k) for k in keys}
+    return out | {f"{k}{s}" for k in out for s in TRIAL_KEY_SUFFIXES if f"{k}{s}" not in plan_ids}
+
+
 def strip_keys(value: Any, keys: set[str] | frozenset[str]) -> Any:
     """``value`` (a parsed RESULT_JSON) without any mapping entry named in ``keys``, at every depth."""
     if isinstance(value, dict):

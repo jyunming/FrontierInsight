@@ -157,19 +157,19 @@ def paper_figure_set(
     numbers returned are those of the figures with a call record: only those get the paper's number and caption. A quest
     with no call record (an older one) gets :func:`figures_in_paper` and no numbers, as before. FI's set-up figure
     (``core.setup_flow``) gets the paper's number and caption like a figure with a call record: FI drew it and wrote its
-    caption from its own records."""
+    caption from its own records (the studied system's schematic, ``core.setup_schematic``, alike)."""
     from core import setup_flow as _setup_flow
 
     shown = figures_in_paper(paper_md, files)
     state = _paper_state(raw_state, quest_root)
-    setup = _setup_flow.shown(quest_root)
-    if not state.get("figure_records") and not setup:
+    setups = _setup_flow.figures(quest_root)
+    if not state.get("figure_records") and not setups:
         return shown, {}
     from core import figure_claims as _figure_claims
     from core.engine import _figure_numbers
 
     numbers = _figure_numbers(state)
-    with_calls = {name for name in numbers if name == setup or _figure_claims.load_calls(quest_root, Path(name).stem)}
+    with_calls = {name for name in numbers if name in setups or _figure_claims.load_calls(quest_root, Path(name).stem)}
     if with_calls:
         placed = {m.group(1) for m in _PLACED_FIGURE.finditer(paper_md)}
         shown = [name for name in files if name in placed and name in numbers]

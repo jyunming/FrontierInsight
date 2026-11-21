@@ -773,10 +773,16 @@ CHECKS: tuple[Check, ...] = (
           'execute_reflect', 'model_code', 'repair',
           'A value breaking a bound the design declared (result_assertions) or a bounded quantity no longer '
           'reported sends the run back for repair.'),
+    Check('bound_after_repairs', 'core.result_checks', 'bound_breaks',
+          'execute_reflect', 'model_code', 'strip',
+          'Repairs spent with a value still beyond its bound: a break of a bound the plan flags physical leaves the '
+          'quantity out (the paper says so); any other bound keeps it, marked (unconfirmed) where printed, in the '
+          'Limitations and QUALITY.md.'),
     Check('plausibility_unproven_cap', 'core.plausibility', 'check_design',
           'execute_reflect', 'model_code', 'note',
           'A value exactly on a constant the script caps at (read from call names and literals), or a quantity on a '
-          'bound in several settings, is a warning in run.log and the trace only.'),
+          'bound in several settings, is a warning in run.log and the trace; one on its bound or a cap is said in '
+          'the run record (QUALITY.md).'),
     Check('phased_split_overlap', 'core.phased', 'decide_split',
           'execute', 'own_record', 'note',
           'A split of the supplied data that puts any unit in both parts is refused (zero-overlap manifest) and '
@@ -1319,8 +1325,9 @@ CHECKS: tuple[Check, ...] = (
           'the writer once and is shown at the review pause'),
     Check('figure_placed_by_fi', 'core.engine', '_place_figures',
           'write', 'own_record', 'repair',
-          'every figure the run drew goes in under its number, with the caption FI writes from its record; the '
-          "draft's own images are taken out, no model call"),
+          'every figure the run drew goes in under its number, with the caption FI writes from its record, beside '
+          "the text that first refers to it (its number or FI's statement about it), then numbered in the order "
+          "they stand; the draft's own images are taken out, no model call"),
     Check('figure_web_license_gate', 'core.figure_sources', '_is_free_license',
           'several', 'measured', 'strip',
           'web/arXiv illustrative figure used only with a free/open license (web_figures node, no-simulation or '

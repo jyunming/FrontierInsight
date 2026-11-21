@@ -732,7 +732,8 @@ def _contract_sentence(record: Any) -> str:
 
 
 def _edge_sentence(record: Any) -> str:
-    """The results of the last run that sit on their physical bound in every setting (``.fi/edge_everywhere.json``), one
+    """The results of the last run that sit on their physical bound in every setting, on a bound in several settings, or on
+    a constant the script caps them at (``.fi/edge_everywhere.json``, ``core/engine_run.py::_said_on_bounds``), one
     sentence each."""
     rows = record.get("results") if isinstance(record, dict) else None
     said: list[tuple[str, str]] = []  # (full sentence, short clause); the short clause still names the result

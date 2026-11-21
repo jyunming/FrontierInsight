@@ -15,7 +15,8 @@ name the plan wrote as text is shown in its own words, an underscore read as a s
 the plan gives it (ids such as E1 say nothing to a reader), and a step by its card's name. Long lists are cut to their
 first entries with "and N more", which the caption FI writes says; no number is typed by a model.
 
-The figure is the paper's Figure 1, so it must exist before FI gives any figure a number: the analysis is the first step
+The figure is the paper's Figure 1 (Figure 2 when the studied system's schematic of ``core/setup_schematic.py`` is
+drawn, which comes first), so it must exist before FI gives any figure a number: the analysis is the first step
 that is shown the numbered figure list (``core.engine._figure_list_for_prompt``) and writes prose that names figures by
 number, which the writer then reads. So it is drawn at the start of every analysis (:func:`draw_quietly`, called by
 ``Engine._node_analyze``), when the frozen plan and the final code's function steps exist, into ``.fi/setup_flow.png``
@@ -100,16 +101,17 @@ def _protocol_file(root: Path) -> Path:
     return root / "needs" / "FROZEN_PROTOCOL.json"
 
 
-def _record(root: Any) -> dict[str, Any] | None:
+def _record(root: Any, name: str = RECORD) -> dict[str, Any] | None:
+    """FI's record of a set-up figure (``.fi/<name>``: this flow's by default, the system's schematic's by its name)."""
     if not root:
         return None
-    record = _json(Path(str(root)) / ".fi" / RECORD)
+    record = _json(Path(str(root)) / ".fi" / name)
     return record if isinstance(record, dict) else None
 
 
-def _drawing(root: Any) -> Path:
+def _drawing(root: Any, file: str = FILE) -> Path:
     """Where FI keeps its drawing until the write stage copies it into ``figures/`` (a run empties ``figures/``)."""
-    return Path(str(root)) / ".fi" / FILE
+    return Path(str(root)) / ".fi" / file
 
 
 def _ours(root: Any, record: dict[str, Any] | None, name: str) -> bool:
@@ -126,19 +128,20 @@ def _drawn_now(root: Any, record: dict[str, Any] | None) -> bool:
     is the one recorded."""
     if not record or not record.get("drawn") or not record.get("file"):
         return False
-    if _digest(_drawing(root)) != str(record.get("png_sha256") or "-"):
+    if _digest(_drawing(root, str(record["file"]))) != str(record.get("png_sha256") or "-"):
         return False
     return str(record.get("protocol_sha256") or "") == _digest(_protocol_file(Path(str(root))))
 
 
-def shown(root: Any) -> str | None:
+def shown(root: Any, record_name: str = RECORD) -> str | None:
     """The file name of FI's set-up figure when the study shows it, ``None`` otherwise: the one fact every figure number,
     the paper, the poster and the slides go by. Before the write stage puts it in ``figures/`` (at the analysis), it is
     shown when FI drew it from the frozen plan as it now stands (:func:`_drawn_now`). Once the write stage has tried
     (``placed`` in the record), it is shown only when that copy worked and ``figures/`` holds the file FI drew: a copy
-    that failed, or a file gone since, gives no set-up figure for every reader alike. Never raises."""
+    that failed, or a file gone since, gives no set-up figure for every reader alike. ``record_name``: another set-up
+    figure's record (the studied system's schematic, ``core.setup_schematic``), held to the same rule. Never raises."""
     try:
-        record = _record(root)
+        record = _record(root, record_name)
         if not _drawn_now(root, record):
             return None
         if "placed" in record and not (record["placed"] is True and _ours(root, record, str(record["file"]))):
@@ -148,22 +151,52 @@ def shown(root: Any) -> str | None:
         return None
 
 
-def caption(root: Any) -> str:
+def caption(root: Any, record_name: str = RECORD) -> str:
     """The caption FI wrote for its set-up figure (``""`` when there is none)."""
-    record = _record(root) or {}
+    record = _record(root, record_name) or {}
     return str(record.get("caption") or "") if record.get("drawn") else ""
 
 
-def without(root: Any, names: list[str]) -> list[str]:
-    """``names`` (files of ``figures/``) without FI's set-up figure, for the checks and lists that are about the run's own
-    figures. Only the file FI's record says it drew is left out. Never raises."""
+def _records(root: Any) -> list[dict[str, Any] | None]:
+    """FI's records of its set-up figures, in their figure order: the studied system's schematic, then this flow."""
+    from . import setup_schematic as _schematic
+
+    return [_record(root, _schematic.RECORD), _record(root, RECORD)]
+
+
+def figures(root: Any) -> list[str]:
+    """The file names of FI's set-up figures the study shows, in the order they are numbered (the studied system's
+    schematic first, then how the study is set up): the one list every figure number, the paper, the poster and the slides
+    go by. Each is held to :func:`shown`. Never raises."""
+    from . import setup_schematic as _schematic
+
     try:
-        record = _record(root)
+        return [name for name in (shown(root, _schematic.RECORD), shown(root, RECORD)) if name]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def caption_for(root: Any, name: str) -> str:
+    """FI's caption of the set-up figure saved as ``name`` (``""`` when ``name`` is none of them)."""
+    from . import setup_schematic as _schematic
+
+    for record_name in (_schematic.RECORD, RECORD):
+        record = _record(root, record_name) or {}
+        if record.get("drawn") and record.get("file") == name:
+            return caption(root, record_name)
+    return ""
+
+
+def without(root: Any, names: list[str]) -> list[str]:
+    """``names`` (files of ``figures/``) without FI's set-up figures, for the checks and lists that are about the run's own
+    figures. Only a file FI's record says it drew is left out. Never raises."""
+    try:
+        records = [r for r in _records(root) if r and r.get("drawn")]
     except Exception:  # noqa: BLE001
         return list(names)
-    if not record or not record.get("drawn"):
+    if not records:
         return list(names)
-    return [n for n in names if not _ours(root, record, Path(str(n)).name)]
+    return [n for n in names if not any(_ours(root, r, Path(str(n)).name) for r in records)]
 
 
 def quality_line(root: Any) -> str | None:
@@ -669,8 +702,9 @@ def _render(flow: Flow, png: Path) -> list[dict[str, Any]]:
 
 def _forget_copy(root: Path, old: dict[str, Any] | None) -> None:
     """Take FI's earlier copy out of ``figures/`` (only the file its record says it drew there)."""
-    if old and _ours(root, old, FILE):
-        (root / "figures" / FILE).unlink(missing_ok=True)
+    name = str((old or {}).get("file") or FILE)
+    if old and _ours(root, old, name):
+        (Path(root) / "figures" / name).unlink(missing_ok=True)
 
 
 def draw(root: Path, run_figures: list[str] | None = None) -> dict[str, Any]:
@@ -712,7 +746,7 @@ def draw_quietly(root: Path, run_figures: list[str] | None, log: Any = None) -> 
         record = draw(Path(root), run_figures)
         if log is not None:
             if record.get("drawn"):
-                log.info("[analyze] FI drew the study's set-up figure from its records (Figure 1 of the paper)")
+                log.info("[analyze] FI drew the study's set-up figure from its records (numbered before the run's figures)")
             else:
                 log.info("[analyze] no set-up figure: %s", record.get("why"))
     except Exception as exc:  # noqa: BLE001 -- the figure is extra: a paper without it is today's paper
@@ -729,43 +763,43 @@ def draw_quietly(root: Path, run_figures: list[str] | None, log: Any = None) -> 
             log.warning("[analyze] the set-up figure could not be drawn (%r); the study goes on without it", exc)
 
 
-def place_quietly(root: Path, log: Any = None) -> None:
+def place_quietly(root: Path, log: Any = None, record_name: str = RECORD) -> None:
     """The write stage's call: FI's drawing, when the study shows it (:func:`shown`), copied into ``figures/`` where the
     paper, the poster and the slides embed it. Nothing is drawn here, so the numbers the analysis was given stand. Never
-    raises."""
+    raises. ``record_name``: another set-up figure's record (the studied system's schematic)."""
     record: dict[str, Any] | None = None
     try:
         root = Path(root)
-        record = _record(root)
+        record = _record(root, record_name)
         if not _drawn_now(root, record):
             _forget_copy(root, record)
             return
         target = root / "figures" / str(record["file"])
         if _digest(target) != str(record["png_sha256"]):
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(_drawing(root), target)
+            shutil.copyfile(_drawing(root, str(record["file"])), target)
         placed = _ours(root, record, str(record["file"]))
         if placed:
             record.pop("why", None)
         else:
             record["why"] = "FI could not put it in figures/"
         record["placed"] = placed
-        _write_record(root, record)
+        _write_record(root, record, record_name)
     except Exception as exc:  # noqa: BLE001
         # the copy failed: the record says so, so no figure number, paper, poster or slide counts a set-up figure
         try:
             if record is not None and record.get("drawn"):
                 record.update(placed=False, why=f"FI could not put it in figures/ ({type(exc).__name__})")
-                _write_record(Path(root), record)
+                _write_record(Path(root), record, record_name)
         except Exception:  # noqa: BLE001
             pass
         if log is not None:
             log.warning("[write] the set-up figure could not be put in figures/ (%r); the paper goes without it", exc)
 
 
-def _write_record(root: Path, record: dict[str, Any]) -> None:
-    (root / ".fi" / RECORD).write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
+def _write_record(root: Path, record: dict[str, Any], name: str = RECORD) -> None:
+    (Path(root) / ".fi" / name).write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-__all__ = ["FILE", "RECORD", "Box", "Flow", "build", "caption", "caption_of", "draw", "draw_quietly", "place_quietly",
-           "quality_line", "render", "shown", "without"]
+__all__ = ["FILE", "RECORD", "Box", "Flow", "build", "caption", "caption_for", "caption_of", "draw", "draw_quietly",
+           "figures", "place_quietly", "quality_line", "render", "shown", "without"]
