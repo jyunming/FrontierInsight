@@ -293,6 +293,77 @@ def test_an_analysis_that_runs_again_calls_no_model_for_the_same_system(tmp_path
     assert not _draw(root2, again)["drawn"] and again.calls == 0
 
 
+class Stopped(Model):
+    """A model whose call ``stop_at`` (1 is the first) never returns: the study is stopped while it is in flight."""
+
+    def __init__(self, *bodies: str, stop_at: int, **kw: Any):
+        super().__init__(*bodies, **kw)
+        self.stop_at = stop_at
+
+    async def chat(self, prompt: str) -> str:
+        if self.calls + 1 == self.stop_at:
+            self.prompts.append(prompt)
+            raise asyncio.CancelledError
+        return await super().chat(prompt)
+
+    async def chat_image(self, prompt: str, png: bytes) -> str:
+        if self.calls + 1 == self.stop_at:
+            self.images += 1
+            raise asyncio.CancelledError
+        return await super().chat_image(prompt, png)
+
+
+def test_a_study_stopped_mid_call_goes_on_with_the_calls_it_has_left_never_more_than_3(tmp_path: Path) -> None:
+    # stopped during the first drawing: that call is counted, the drawing and its score are still made after the restart
+    root = _quest(tmp_path)
+    with pytest.raises(asyncio.CancelledError):
+        _draw(root, Stopped(GOOD, stop_at=1))
+    on_disk = json.loads((root / ".fi" / S.RECORD).read_text(encoding="utf-8"))
+    assert on_disk["calls_made"] == 1 and on_disk["done"] is False and S.shown(root) is None
+    again = Model(GOOD)
+    record = _draw(root, again)
+    assert record["drawn"] and record["done"] and again.calls == 2 and record["calls_made"] == 3
+    assert _draw(root, Model())["calls_made"] == 3, "a finished outcome makes no call"
+    # stopped during the redraw: only the score's call is left, so nothing more is drawn
+    root2 = _quest(tmp_path / "b")
+    with pytest.raises(asyncio.CancelledError):
+        _draw(root2, Stopped(GOOD + "sch.label('slab', 50, 40)\n", stop_at=2))
+    again = Model(GOOD)
+    record = _draw(root2, again)
+    assert not record["drawn"] and record["done"] and again.calls == 0 and record["calls_made"] == 2
+    assert "no call was left" in record["why"]
+    # stopped while the drawing was read: never shown while unfinished; after the restart the drawing that passed is kept,
+    # unscored, with no further call
+    root3 = _quest(tmp_path / "c")
+    with pytest.raises(asyncio.CancelledError):
+        _draw(root3, Stopped(GOOD, stop_at=2))
+    assert S.shown(root3) is None
+    again = Model(GOOD)
+    record = _draw(root3, again)
+    assert again.calls == 0 and record["calls_made"] == 2 and record["drawn"] and record["done"]
+    assert record["vision"]["scored"] is False and record["vision"]["gating"] is False
+    assert S.shown(root3) == S.FILE and (root3 / ".fi" / "figure_records" / S.CALLS_RECORD).is_file()
+    assert _draw(root3, Model())["drawn"], "finished: reused with no call"
+
+
+def test_a_newer_fi_check_or_prompt_draws_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    f = _fill()
+    key = S.key_of(f, PROMPTS)
+    changed = {**PROMPTS, "setup_schematic": string.Template(PROMPTS["setup_schematic"].template + "\nOne more rule.")}
+    assert S.key_of(f, changed) != key
+    newer = tmp_path / "setup_schematic.py"
+    newer.write_text(Path(S.__file__).read_text(encoding="utf-8") + "\n# a changed check\n", encoding="utf-8")
+    monkeypatch.setattr(S, "__file__", str(newer))
+    assert S.key_of(f, PROMPTS) != key
+    monkeypatch.undo()
+    root = _quest(tmp_path / "q")
+    _draw(root, Model(GOOD))
+    again = Model(GOOD)
+    record = asyncio.run(S.draw(root, on=True, run_figures=[RESULT], chat=again.chat, chat_image=again.chat_image,
+                                run=lambda argv: _run_here(root, argv), prompts=changed))
+    assert again.calls == 2 and record["drawn"], "an outcome kept by an older FI is not reused"
+
+
 def test_a_model_that_cannot_read_images_leaves_it_unscored_not_out(tmp_path: Path) -> None:
     from core.provider import ImageInputUnsupported
 

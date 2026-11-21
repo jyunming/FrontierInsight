@@ -162,9 +162,12 @@ def expected(f: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def key_of(f: dict[str, Any]) -> str:
-    """The digest an outcome is kept by: FI's texts and the system's ids, with the host's own text."""
-    text = json.dumps(f, sort_keys=True, ensure_ascii=False) + _host_source()
+def key_of(f: dict[str, Any], prompts: dict[str, string.Template] | None = None) -> str:
+    """The digest an outcome is kept by: FI's texts and the system's ids, with the text of FI's host, of this file (its
+    guard and its checks) and of the prompts, so a newer FI judges and draws again rather than keep an older verdict."""
+    text = "\n".join([json.dumps(f, sort_keys=True, ensure_ascii=False), _host_source(),
+                      Path(__file__).read_text(encoding="utf-8"),
+                      *(prompts[k].template for k in sorted(prompts or {}) if k.startswith(NODE))])
     return hashlib.sha256(f"{SCHEMA}\n{text}".encode("utf-8")).hexdigest()
 
 
@@ -443,10 +446,10 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
         f, why = None, f"the run drew a figure of its own named {FILE}"
     if f is None:
         _forget(root, old)
-        _write(root / ".fi" / RECORD, {**record, "why": why})
+        _write(root / ".fi" / RECORD, {**record, "why": why, "done": True})
         return _flow._record(root, RECORD)
-    key = key_of(f)
-    if old and old.get("key") == key:
+    key = key_of(f, prompts)
+    if old and old.get("key") == key and old.get("done"):
         # the same description of the system: its outcome is kept, a failure too, and no model is called again
         kept = {k: v for k, v in old.items() if k not in ("placed",)}
         kept["protocol_sha256"] = protocol_sha
@@ -462,25 +465,45 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
             shutil.copyfile(calls, target)
         _write(root / ".fi" / RECORD, kept)  # shown from .fi/ until the write stage copies it again, as the flow is
         return kept
+    if (old and old.get("key") == key and not old.get("done") and (old.get("checks") or {}).get("passed")
+            and _flow._digest(_work(root) / "kept.png") == old.get("png_sha256")):
+        # stopped while the drawing that passed FI's checks was read: it is kept, unscored, and no call is made
+        kept = {k: v for k, v in old.items() if k not in ("placed",)}
+        kept.update(protocol_sha256=protocol_sha, drawn=True, done=True)
+        kept["vision"] = {**(kept.get("vision") or {}), "scored": False,
+                          "why": "the study stopped while the drawing was read; its call is counted"}
+        shutil.copyfile(_work(root) / "kept.png", root / ".fi" / FILE)
+        target = root / ".fi" / "figure_records" / CALLS_RECORD
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_work(root) / "kept.calls.json", target)
+        _write(root / ".fi" / RECORD, kept)
+        return kept
+    # An unfinished outcome for the same system (a study stopped mid-way and resumed) goes on with the calls it has left:
+    # every call is counted on disk before it is made, so a call in flight when the study stopped is counted too.
+    spent = int(old.get("calls_made") or 0) if old and old.get("key") == key and not old.get("done") else 0
+    earlier = [m for m in (old or {}).get("model_calls") or []] if spent else []
     _forget(root, old, all_files=True)
     work = _work(root)
     work.mkdir(parents=True, exist_ok=True)
     (work / HOST_FILE).write_text(_host_source(), encoding="utf-8")
     _write(work / FILL_FILE, f)
-    record.update(key=key, calls_made=0, model_calls=[], attempts=[], left_out_values=sum(
+    record.update(key=key, done=False, calls_made=spent, model_calls=earlier, attempts=[], left_out_values=sum(
         v["left_out"] for v in f["parts"].values()))
     prompt = prompts["setup_schematic"].substitute(**prompt_fields(f))
     _write(root / ".fi" / RECORD, record)  # the key first: a fault after a call never lets an analysis call again
-    findings: list[str] = []
+    findings: list[str] = ["no call was left for this system"]
     passed: Path | None = None
     body = ""
     for n in (1, 2):
+        if record["calls_made"] >= MAX_CALLS - 1:
+            break  # the last call is kept for reading the drawing
         if n == 1:
             ask = prompt
         else:
             ask = prompts["setup_schematic_redraw"].substitute(
                 prompt=prompt, code=body, findings="\n".join(f"- {x}" for x in findings[:8]))
         record["calls_made"] += 1
+        _write(root / ".fi" / RECORD, record)  # counted before it is made
         try:
             reply = await chat(ask)
         except Exception as exc:  # noqa: BLE001 -- a failed call is one of the calls; the study goes on without it
@@ -499,6 +522,7 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
     if passed is None:
         record["why"] = (f"FI's check of the drawing failed {len(record['attempts'])} time(s) ({findings[0]})" if findings
                          and record["attempts"] else f"it could not be drawn ({findings[0] if findings else 'no reply'})")
+        record["done"] = True
         _write(root / ".fi" / RECORD, record)
         if log is not None:
             log.info("[analyze] no schematic of the studied system: %s", record["why"])
@@ -514,6 +538,7 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
                   checks={"passed": True, "attempt": len(record["attempts"]), "findings": []})
     record["vision"] = {"gating": False, "note": VISION_NOTE}
     record["calls_made"] += 1
+    _write(root / ".fi" / RECORD, {**record, "drawn": False})  # counted before it is made; shown only once scored
     try:
         reply = await chat_image(prompts["setup_schematic_score"].substitute(**_score_fields(f)),
                                  (passed / "drawing_small.png").read_bytes())
@@ -523,6 +548,7 @@ async def draw(root: Path, *, on: bool, run_figures: list[str] | None, chat: Cha
         record["vision"].update(scored=False, why=f"the model could not read the drawing ({type(exc).__name__}: "
                                                   f"{str(exc)[:160]})")
         record["model_calls"].append({"node": SCORE_NODE, "ok": False, "error": type(exc).__name__})
+    record["done"] = True
     _write(root / ".fi" / RECORD, record)
     if log is not None:
         log.info("[analyze] a model laid out the schematic of the studied system and FI's checks passed (Figure 1 of "
@@ -552,7 +578,7 @@ async def draw_quietly(root: Path, *, on: bool, run_figures: list[str] | None, c
             now = _flow._record(root, RECORD) or old  # what this draw wrote before the fault (its key, its calls)
             _forget(Path(root), now)
             kept = {k: now[k] for k in ("key", "calls_made", "model_calls", "attempts") if now and k in now}
-            _write(Path(root) / ".fi" / RECORD, {"schema": SCHEMA, "file": FILE, "drawn": False, **kept,
+            _write(Path(root) / ".fi" / RECORD, {"schema": SCHEMA, "file": FILE, "drawn": False, "done": True, **kept,
                                                  "why": f"FI could not draw it ({type(exc).__name__})"})
         except Exception:  # noqa: BLE001
             pass
