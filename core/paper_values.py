@@ -416,6 +416,9 @@ class Records:
     unread: tuple[str, ...] = ()
     #: The quantities FI left out of the results (name -> the check's note); no key reads one (:func:`left_out_of`).
     left_out: dict[str, str] = field(default_factory=dict)
+    #: The quantities kept although their values break a bound the plan only expected (name -> FI's note,
+    #: core/result_checks.py ``kept_bound_breaks``): each value a key fills of one carries FI's mark (:func:`resolve`).
+    bound_breaks: dict[str, str] = field(default_factory=dict)
     #: The plan's quantities that no trial returned and the analysis recorded one value for (name -> value): placed without
     #: settings, ``{{v:<name>}}`` (:func:`write_answers`).
     answers: dict[str, float] = field(default_factory=dict)
@@ -1721,7 +1724,49 @@ def _series_value(shown: str, rec: Records | None, prose: bool = False, typed_st
 
 
 def resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: bool = False) -> Value:
-    """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess."""
+    """The key's value rendered, or ``not recorded`` with a :class:`Hit` saying why. Never a guess. A value of a quantity
+    whose numbers break a bound the plan only expected (:attr:`Records.bound_breaks`) carries FI's mark beside it
+    (:func:`with_bound_mark`): it is worked out here, so the paper, a re-render and :func:`verify_marks` all give the same
+    text, and the writer, who gets the key back (:func:`to_placeholders`), never types it."""
+    value = _resolve(text, rec, prose, typed_stop)
+    if value.hit is None and rec is not None and rec.bound_breaks and metrics_read(value.key) & set(rec.bound_breaks):
+        value = replace(value, text=with_bound_mark(value.text))
+    return value
+
+
+def with_bound_mark(text: str) -> str:
+    """``text`` (a filled value) with FI's mark (core/result_checks.py ``BOUND_MARK``) after it, before the full stop of a
+    value filled as a sentence of its own."""
+    from .result_checks import BOUND_MARK
+
+    if text.endswith(".") and not text.endswith(".."):
+        return text[:-1] + " " + BOUND_MARK + "."
+    return text + " " + BOUND_MARK
+
+
+def metrics_read(shown: str) -> set[str]:
+    """The quantities whose values a key prints a number from, by the key's own grammar: its metric, the metric it is
+    compared with or correlated with, and for a ``trend:`` or ``comparison:`` key the names before its ``@``. A key that
+    prints a count of trials, the plan's reference or a setting (``n``, ``count``, ``failed``, ``ref``; ``argmin``,
+    ``argmax``, ``count_where``) prints no value of the quantity, and a ``calc:`` key reads only the plan's numbers.
+    Nothing is read from the paper's words."""
+    shown = shown.strip()
+    shown = shown[2:] if shown.startswith("v:") else shown
+    if shown.startswith(CALC):
+        return set()
+    if shown.startswith((TREND, COMPARISON)):
+        return set(re.findall(r"[A-Za-z_]\w*", shown.partition(":")[2].partition("@")[0]))
+    try:
+        key = parse(shown)
+        if FORM_STATISTIC.get(key.form) in ("count", "reference") or key.reducer in ("argmin", "argmax", "count_where"):
+            return set()
+        return {n for n in (key.metric, key.operand_metric, key.form_arg) if n}
+    except Exception:  # noqa: BLE001 - a key FI cannot read names its first word (a quantity of one value: {{v:<name>}})
+        head = re.match(r"\s*([A-Za-z_]\w*)", shown)
+        return {head.group(1)} if head else set()
+
+
+def _resolve(text: str, rec: Records | None, prose: bool = False, typed_stop: bool = False) -> Value:
     shown = text.strip()
     if shown.startswith("{{"):
         shown = shown[2:-2] if shown.endswith("}}") else shown[2:]
@@ -1914,6 +1959,7 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     rec = load(root, protocol, left_out=_checks.left_out_by_record(root))
     if rec is None or not rec.cells:
         return rec
+    rec.bound_breaks = bound_break_names(protocol, _checks.kept_bound_breaks(root))
     from . import paper_facts as _facts
 
     rec.drew = _facts._drew_record(root)
@@ -1941,6 +1987,16 @@ def records_of(quest_root: Path | str, protocol: dict[str, Any] | None) -> Recor
     except Exception:  # noqa: BLE001 -- an axis FI cannot tell is unread counts as read: nothing is pooled by guess
         rec.unread = ()
     return rec
+
+
+def bound_break_names(protocol: dict[str, Any] | None, kept: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """``{name: FI's note}`` for each quantity of ``kept`` (core/result_checks.py ``kept_bound_breaks``), under the plan's id
+    and under the name of the value its trials return when the plan gives it another (``reference.value``)."""
+    out = {q: str((r or {}).get("note") or "") for q, r in kept.items()}
+    for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
+        if isinstance(m, dict) and str(m.get("id") or "").strip() in kept:
+            out.setdefault(_refs.value_name(m), out[str(m["id"]).strip()])
+    return out
 
 
 #: Where FI keeps what the analysis recorded for the plan's quantities no trial returns.

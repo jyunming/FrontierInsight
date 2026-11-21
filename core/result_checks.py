@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -179,9 +180,161 @@ def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     for name in (RECORD, TYPED_RECORD):
         record = _read_json(Path(quest_root) / "needs" / name)
         note = str(record.get("note") or "")
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict) and c.get("note")]
         for k in record.get("removed_quantities") or []:
-            out.setdefault(str(k), note)
+            # the notes of the checks that name this key; the record's whole note only when none does
+            own = [str(c["note"]) for c in checks if str(k) in {str(x) for x in c.get("keys") or []} or c.get("quantity") == k]
+            out.setdefault(str(k), "; ".join(dict.fromkeys(own)) or note)
     return out
+
+
+#: ``Found.kind`` of a quantity left out because a value of it breaks the bound the plan flags as physical (``range`` with
+#: ``physical: true``) after the repairs ran out (:func:`bound_breaks`).
+PHYSICAL_KIND = "physical_bound"
+#: The words FI prints beside each number of a quantity whose value breaks a bound the plan only expected (one not flagged
+#: physical): the value is kept, and a reader is told where it stands (core/paper_values.py, core/results_by_setting.py).
+BOUND_MARK = "(unconfirmed)"
+#: Where the kept quantities of :func:`bound_breaks` are recorded in ``needs/RESULT_CHECK.json``.
+KEPT_BREAKS = "kept_bound_breaks"
+
+
+@dataclass(frozen=True)
+class BoundBreak:
+    """A quantity with values beyond the bound the plan declares for it, when the repairs have run out: ``leave_out`` when
+    one of them breaks the bound the plan flags as physical (``lo``/``hi`` are that bound), else it is kept (``lo``/``hi``
+    are the bound the run was checked against). ``value`` is the one furthest beyond it, at ``setting``; ``count`` how many
+    values are beyond it."""
+
+    quantity: str
+    leave_out: bool
+    lo: float | None
+    hi: float | None
+    unit: str
+    value: float
+    setting: str
+    count: int
+
+    def bound_text(self) -> str:
+        unit = f" {self.unit}" if self.unit else ""
+        if self.lo is not None and self.hi is not None:
+            return f"{self.lo:g} to {self.hi:g}{unit}"
+        if self.lo is not None:
+            return f"at least {self.lo:g}{unit}"
+        return f"at most {self.hi:g}{unit}" if self.hi is not None else "finite"
+
+    def value_text(self) -> str:
+        more = f" (and {self.count - 1} other value(s) beyond it)" if self.count > 1 else ""
+        return f"{self.value:g}" + (f" at {self.setting}" if self.setting else "") + more
+
+    def note(self) -> str:
+        what = "breaks its physical bound" if self.leave_out else "is outside the range the plan expected"
+        return f"`{self.quantity}` {what} ({self.bound_text()}): {self.value_text()}"
+
+    def as_record(self) -> dict[str, Any]:
+        return {"quantity": self.quantity, "min": self.lo, "max": self.hi, "unit": self.unit, "value": self.value,
+                "setting": self.setting, "count": self.count, "bound": self.bound_text(), "note": self.note()}
+
+
+def _beyond(value: float, lo: float | None, hi: float | None) -> float:
+    """How far ``value`` lies beyond ``[lo, hi]``: 0 inside it, and on a bound to the bound's own precision (the range
+    check's rule, core/plausibility.py)."""
+    from . import plausibility as _pl
+
+    if _pl._on_bound(value, _pl.Assertion("", lo, hi)) is not None:
+        return 0.0
+    return max((lo - value) if lo is not None else 0.0, (value - hi) if hi is not None else 0.0, 0.0)
+
+
+def _physical_range(design: Any, quantity: str) -> tuple[float | None, float | None, str] | None:
+    """The bound the plan flags as physical on ``quantity`` (its metric's ``range`` with ``physical: true``):
+    ``(min, max, unit)``, or ``None`` when the plan flags none."""
+    protocol = design.get("protocol") if isinstance(design, dict) else None
+    for m in (protocol.get("metrics") if isinstance(protocol, dict) else None) or []:
+        r = m.get("range") if isinstance(m, dict) else None
+        if not (isinstance(r, dict) and r.get("physical") is True and str(m.get("id") or "").strip() == quantity):
+            continue
+        ends = [float(r[k]) if isinstance(r.get(k), (int, float)) and not isinstance(r.get(k), bool) else None
+                for k in ("min", "max")]
+        if all(e is None for e in ends) or any(e is not None and not math.isfinite(e) for e in ends):
+            return None
+        return ends[0], ends[1], str(m.get("physical_unit") or r.get("unit") or "")
+    return None
+
+
+def bound_breaks(violations: Any, design: Any) -> list[BoundBreak]:
+    """What FI does with each quantity whose values the range check still finds beyond its bound once the repairs have run
+    out (``violations``: :func:`core.engine._assertion_violations`). Only ``out_of_range`` findings count: a quantity that
+    is missing, or that only sits on a bound, is not one. A value beyond the bound the plan flags as physical (``design``:
+    the design in force, its metrics' ``range`` with ``physical: true``) cannot be a result, so the quantity is left out.
+    Any other bound is what the plan expected, and in the stored studies it was wrong more often than the value: the
+    quantity is kept and marked where it is printed. One entry per quantity, in the order of the findings. No model is
+    asked."""
+    by_quantity: dict[str, list[Any]] = {}
+    for v in violations or []:
+        if getattr(v, "kind", "") != "out_of_range" or not isinstance(getattr(v, "value", None), (int, float)):
+            continue
+        quantity = str(v.assertion.path).rsplit(".", 1)[-1].strip()
+        if quantity:
+            by_quantity.setdefault(quantity, []).append(v)
+    out: list[BoundBreak] = []
+    for quantity, found in by_quantity.items():
+        physical = _physical_range(design, quantity)
+        broken = [(v, _beyond(float(v.value), physical[0], physical[1])) for v in found] if physical else []
+        broken = [(v, d) for v, d in broken if d > 0]
+        if broken:
+            lo, hi, unit = physical  # type: ignore[misc]
+            rows = broken
+        else:
+            a = found[0].assertion
+            lo, hi, unit = a.min, a.max, a.unit
+            rows = [(v, _beyond(float(v.value), v.assertion.min, v.assertion.max)) for v in found]
+        worst = max(rows, key=lambda r: r[1])[0]
+        path = str(worst.path)
+        setting = path[: -len(quantity) - 1] if path.endswith("." + quantity) else ("" if path == quantity else path)
+        out.append(BoundBreak(quantity, bool(broken), lo, hi, unit, float(worst.value), setting[:300], len(rows)))
+    return out
+
+
+def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) -> list[str]:
+    """The saved figures (file names in ``figures/``) that draw one of ``quantities`` on an axis or as a series, by FI's
+    record of each drawing call (``.fi/figure_records/<stem>.calls.json``: a panel's ``x.id``, ``y.what`` and series
+    ids). A y axis several results share counts for each of them, and so does the result each series records it draws
+    (``what``), and so does a reference line (``refs``: the result a line read from the table is drawn at, ``at``, or the
+    plan's reference id). Only what FI tied to the quantity counts: an axis or a series the record calls ``neutral`` (FI could not check
+    that it draws that quantity, core/frame_figure.py) does not. A figure with no such record is not listed."""
+    root, wanted = Path(quest_root), {str(q) for q in quantities}
+    folder, records = root / "figures", root / ".fi" / "figure_records"
+    if not wanted or not records.is_dir() or not folder.is_dir():
+        return []
+    stems: set[str] = set()
+    for path in records.glob("*.calls.json"):
+        panels = _read_json(path).get("panels")
+        for p in panels if isinstance(panels, list) else []:
+            if not isinstance(p, dict):
+                continue
+            x, y = p.get("x") if isinstance(p.get("x"), dict) else {}, p.get("y") if isinstance(p.get("y"), dict) else {}
+            series = [s for s in p.get("series") or [] if isinstance(s, dict) and not s.get("neutral")]
+            # A y axis two results share is recorded as their ids joined by " / " (core/frame_figure.py _set_y), split the
+            # same way; each series also keeps the result it draws (`what`). "other" is FI's word for a y it could not tie.
+            named = {str(x.get("id") or "") if not x.get("neutral") else "",
+                     *(str(y.get("what") or "").split(" / ") if not y.get("neutral") else ()),
+                     *(str(s.get("id") or "") for s in series), *(str(s.get("what") or "") for s in series),
+                     # a reference line: the result a line read from the table is drawn at, or the plan's reference id
+                     *(str(r.get("at") or "") if r.get("source") == "table" else str(r.get("id") or "")
+                       for r in p.get("refs") or [] if isinstance(r, dict))} - {"", "other"}
+            if named & wanted:
+                stems.add(path.name[: -len(".calls.json")])
+    return sorted(f.name for f in folder.iterdir() if f.is_file() and f.stem in stems and f.suffix.lower() != ".json")
+
+
+def kept_bound_breaks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
+    """The quantities whose values break a bound the plan only expected and that FI kept (``kept_bound_breaks`` of
+    ``needs/RESULT_CHECK.json``, :meth:`ResultChecksMixin._record_bound_breaks`), each with its record; never one FI left
+    out. The paper's marks (core/paper_values.py), its tables of every setting, its Limitations and QUALITY.md read it."""
+    record = _read_json(Path(quest_root) / "needs" / RECORD)
+    gone = set(left_out_by_record(quest_root))
+    return {str(r["quantity"]): r for r in record.get(KEPT_BREAKS) or []
+            if isinstance(r, dict) and r.get("quantity") and str(r["quantity"]) not in gone}
 
 
 def _derived_numbers(derived: Any) -> dict[str, list[float]]:
@@ -672,6 +825,66 @@ class ResultChecksMixin:
             path.write_text(json.dumps(record, indent=1), encoding="utf-8")
         except OSError as exc:
             self._log.warning("[evidence_gate] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
+
+    def _record_bound_breaks(self, breaks: list[BoundBreak], result_json: Any, figures: list[str] | None = None) -> None:
+        """When the repairs have run out with values still beyond a declared bound (``breaks``, :func:`bound_breaks`): a
+        quantity that breaks the bound the plan flags as physical is left out of the results the paper may use, with the
+        figures that draw it (``figures``), and a quantity that only breaks a bound the plan expected is kept and recorded
+        as such (``kept_bound_breaks``), for the marks beside its printed numbers, the Limitations and QUALITY.md. Both
+        are added to ``needs/RESULT_CHECK.json`` (what the run's checks left out stays); the same quantity found again
+        replaces its own entry. The writer is told either way (``say``). Nothing is sent back and the study goes on."""
+        if not breaks:
+            return
+        path = self.quest_root / "needs" / RECORD  # type: ignore[attr-defined]
+        record = _read_json(path)
+        found: list[Found] = []
+        for b in (b for b in breaks if b.leave_out):
+            q = b.quantity
+            say = (f"A value of `{q}` breaks the physical bound the plan gives it ({b.bound_text()}): {b.value_text()}. A value "
+                   f"beyond a physical bound cannot be a result of the system studied, and the repairs did not remove it, so FI "
+                   f"took `{q}` out of the results. Do NOT report, describe or quote any value for `{q}`, and do not call another "
+                   f"number by its name. Say plainly, in the limitations, that `{q}` is left out of this paper because a value "
+                   "of it breaks its physical bound.")
+            found.append(Found(PHYSICAL_KIND, ANALYSIS, "", b.note(), say, keys=[q], figures=list(figures or []), quantity=q))
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+        seen = {(c.get("kind"), c.get("quantity")) for c in checks}
+        new = [f for f in found if (f.kind, f.quantity) not in seen]
+        gone_figures = sorted({n for f in new for n in f.figures} - set(record.get("removed_figures") or []))
+        if gone_figures:
+            self._drop_figures(gone_figures, {n: "it draws a quantity whose value breaks its physical bound" for n in gone_figures})
+        keys = sorted({*(str(k) for k in record.get("removed_quantities") or []), *(k for f in new for k in f.keys)})
+        why = record.get("removed_why") if isinstance(record.get("removed_why"), dict) else {}
+        for f in new:
+            why.setdefault(f.quantity, "a value of it breaks the physical bound the plan gives it")
+        kept = [b for b in breaks if not b.leave_out and b.quantity not in keys]
+        bound_of = {b.quantity: b.bound_text() for b in breaks}
+        earlier = [r for r in record.get(KEPT_BREAKS) or [] if isinstance(r, dict)
+                   and str(r.get("quantity")) not in {b.quantity for b in breaks} and str(r.get("quantity")) not in keys]
+        kept_say = [f"A value of `{b.quantity}` is outside the range the plan expected for it ({b.bound_text()}): "
+                    f"{b.value_text()}. The repairs did not change it, and FI did not establish whether the value or the plan's "
+                    f"expected range is wrong, so the value stays in the results. Report it as it is; do not call it confirmed "
+                    f"and do not explain the difference away. FI marks each number of `{b.quantity}` it fills in as "
+                    "unconfirmed, and the Limitations say why." for b in kept]
+        record.update({
+            "removed_quantities": keys,
+            "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
+            "removed_values": _values_left_out(result_json, set(keys), self._derived_record()), "removed_why": why,
+            "checks": [*checks, *({"kind": f.kind, "note": f.note, "quantity": f.quantity, "keys": f.keys,
+                                   "bound": bound_of.get(f.quantity, "")} for f in new)],
+            KEPT_BREAKS: [*earlier, *(b.as_record() for b in kept)],
+            "note": "; ".join(x for x in [str(record.get("note") or ""), *(f.note for f in new)] if x),
+            "say": "\n\n".join(x for x in [str(record.get("say") or ""), *(f.say for f in new), *kept_say] if x)})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute_reflect] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
+            return
+        for b in breaks:
+            self._log.warning(  # type: ignore[attr-defined]
+                "[execute_reflect] %s; %s", b.note(),
+                "it is left out of the results and the paper says so" if b.leave_out
+                else "it is kept, marked unconfirmed where the paper prints it, and the paper says why")
 
     def _kept_say(self) -> list[str]:
         """For the writer: the flat quantities the plan does not say are estimated from the data, kept and stated."""

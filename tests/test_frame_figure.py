@@ -650,6 +650,27 @@ def test_uneven_error_bars_are_recorded_and_their_meaning_is_checked_against_the
     assert h.axes[0].get_ylim()[1] > 6.0
 
 
+def test_a_line_read_from_the_table_keeps_the_result_it_is_drawn_at(tmp_path):
+    from core import result_checks
+
+    h = _host_by_x()
+    h.ref(0, at="growth", key="size=2")
+    h.ref(1, "limit")
+    a, b = h.record()["panels"]
+    assert a["refs"][0]["at"] == "growth" and a["refs"][0]["source"] == "table"
+    assert "at" not in b["refs"][0]  # a reference of the plan is named by its own id
+    # a check that takes a result out finds the figure by that line, and by the plan's reference id
+    (tmp_path / "figures").mkdir()
+    (tmp_path / ".fi" / "figure_records").mkdir(parents=True)
+    for stem, panel in (("at_growth", a), ("at_limit", b)):
+        (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
+        bare = {**panel, "x": {**(panel["x"] or {}), "id": "size"}, "y": None, "series": []}  # only the line names it
+        (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(json.dumps({"panels": [bare]}, default=str),
+                                                                                encoding="utf-8")
+    assert result_checks.figures_on_axis(tmp_path, {"growth"}) == ["at_growth.png"]
+    assert result_checks.figures_on_axis(tmp_path, {"limit"}) == ["at_limit.png"]
+
+
 def test_ref_has_two_sources_and_a_typed_constant_is_never_bound_to_a_plan_reference():
     h = _host_by_x()
     h.ref(0, "limit")
