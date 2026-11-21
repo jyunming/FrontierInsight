@@ -42,8 +42,9 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-#: sha256 (first 16 hex digits) of the requests the unframed repair paths made at dd7865ff, taken from that code.
-PROMPTS_AT_DD7865FF: dict[str, Any] = {"finding": ["8ea57a1bb5da9895", "3ee0c3c6803ed282"], "crash": "bd2171823984bd1e"}
+#: sha256 (first 16 hex digits) of the requests the unframed repair paths made at dd7865ff, taken from that code; the crash
+#: request since says a capped value is recorded as one, not rejected (a cap is a warning, never a send-back).
+PROMPTS_AT_DD7865FF: dict[str, Any] = {"finding": ["8ea57a1bb5da9895", "3ee0c3c6803ed282"], "crash": "851ccac16d793583"}
 
 #: The same simulation as a model wrote it before there was a frame (the default today).
 UNFRAMED = '''import random
