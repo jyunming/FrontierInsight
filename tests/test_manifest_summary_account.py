@@ -186,3 +186,29 @@ def test_a_value_under_a_further_key_never_accounts_for_the_setting_even_when_it
     rj["by_setting"]["m=20,pi1=0.2"] = {"reference": {"gain": 0.05}}
     found = _found(rj, per_cell)
     assert found and "m=20,pi1=0.2" in found[0] and "not the mean" not in found[0], found
+
+
+def test_an_honest_mean_of_large_cancelling_values_is_within_the_precision_of_the_record() -> None:
+    # Review: trials 100000000000.1 and -100000000000.0 have the mean 0.05; FI's record keeps them to 12 significant digits
+    # (1e11 and -1e11), so its own mean is 0. Old code allowed only the printed value's precision (5e-13) and called the
+    # honest mean a disagreement. The record's values are each known to half a unit of their 12th digit (0.5 here).
+    trials = [100000000000.1, -100000000000.0]
+    honest = sum(trials) / len(trials)
+    counts = Counter(rm._tr_value_key(v) for v in trials)
+    assert rm._summary_verdict({"mean": honest}, counts) == ""
+    sd = math.sqrt(sum((x - honest) ** 2 for x in trials) / (len(trials) - 1))
+    assert rm._summary_verdict({"mean": honest, "sd": sd, "se": sd / math.sqrt(2), "n": 2}, counts) == ""
+    # Known positive: a summary beyond what the record's precision can explain is still a disagreement.
+    assert "not the mean" in rm._summary_verdict({"mean": 5.0}, counts)
+    assert "not the standard deviation" in rm._summary_verdict({"mean": honest, "sd": sd * 1.001}, counts)
+    assert "number of trials" in rm._summary_verdict({"mean": honest, "n": 3}, counts)
+
+
+def test_the_records_precision_adds_nothing_to_small_values() -> None:
+    # Values of ordinary size are recorded as they are: the allowance stays at the record's own precision, so a rounded
+    # print of such a mean is still not FI's number.
+    counts = Counter({"0.25": 3, "0.5": 1})
+    err = rm._record_error([(0.25, 3), (0.5, 1)])
+    assert err["mean"] < 1e-11 and err["n"] == 0.0
+    assert rm._summary_verdict({"mean": 0.3125}, counts) == ""
+    assert "not the mean" in rm._summary_verdict({"mean": 0.31}, counts)

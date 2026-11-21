@@ -786,18 +786,36 @@ def _listed_counts_detailed(result_json: Any, metric_id: str, grid: dict[str, li
 _SUMMARY_NAMES = {"mean": ("mean",), "se": ("se", "sem", "stderr"), "sd": ("sd", "std"), "n": ("n",)}
 
 
-#: How far a printed summary may differ from the one FI computes from its record and still be that number: FI's record
-#: keeps each value to 12 significant digits (:func:`_tr_value_key`), so a mean computed from it carries that much.
+#: The relative round-off a printed statistic may carry from the arithmetic that produced it (well above a double's).
 RECORD_PRECISION = 1e-11
 
+#: How far FI's record of one trial value may be from the value itself, relative to it: the record keeps each value to 12
+#: significant digits (:func:`_tr_value_key`, ``%.12g``), at most half a unit in the twelfth digit.
+RECORD_ROUNDING = 5e-12
 
-def _record_allowance(printed: float) -> float:
+
+def _record_allowance(printed: float, from_record: float = 0.0) -> float:
     """How far a printed statistic may lie from FI's own and still be FI's number: the precision of FI's record, never
     the digits the analysis chose to print. A mean printed as ``0.05`` stands for 0.05, not for anything from 0.045 to
-    0.055 (a nominal level printed beside a setting is not the mean of its trials); a whole number (a count) is exact."""
-    if isinstance(printed, int):
-        return 0.0
-    return RECORD_PRECISION * abs(float(printed))
+    0.055 (a nominal level printed beside a setting is not the mean of its trials); a whole number (a count) is exact.
+    ``from_record``: how far the statistic computed from FI's record can be from the one computed from the trial values
+    themselves (:func:`_record_error`), allowed twice over for the arithmetic of the two computations. It matters when
+    large values cancel (1e11 + 0.1 and -1e11 are kept as 1e11 and -1e11, so their mean 0.05 is recomputed as 0)."""
+    own = 0.0 if isinstance(printed, int) else RECORD_PRECISION * abs(float(printed))
+    return own + 2.0 * from_record
+
+
+def _record_error(values: list[tuple[float, int]]) -> dict[str, float]:
+    """The most each statistic computed from FI's record of ``values`` (value, how many trials) can differ from the same
+    statistic of the trial values themselves, each value being off by at most ``RECORD_ROUNDING`` of its size: the mean by
+    the mean of those errors; a standard deviation by their root sum of squares over sqrt(n - 1) (it moves no more than
+    the values do); a standard error by that over sqrt(n). A count is exact."""
+    n = sum(k for _, k in values)
+    if n < 1:
+        return {"mean": 0.0, "sd": 0.0, "se": 0.0, "n": 0.0}
+    mean = RECORD_ROUNDING * math.fsum(abs(v) * k for v, k in values) / n
+    sd = RECORD_ROUNDING * math.sqrt(math.fsum(v * v * k for v, k in values) / (n - 1)) if n > 1 else 0.0
+    return {"mean": mean, "sd": sd, "se": sd / math.sqrt(n), "n": 0.0}
 
 
 def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[Any]]
@@ -851,7 +869,8 @@ def _printed_summaries(result_json: Any, metric_id: str, grid: dict[str, list[An
 def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
     """Whether a printed summary of a setting is that setting's own trials: ``None`` when it prints nothing FI can compute
     from its record (no mean), ``""`` when every statistic it prints equals the one FI computes from the record of those
-    trials, to the record's own precision (:func:`_record_allowance`; a rounded print is not FI's number), else the plain
+    trials, to the record's own precision (:func:`_record_allowance` with :func:`_record_error`, the precision of the
+    recorded values themselves; a rounded print is not FI's number), else the plain
     sentence of the first that does not. ``counts``: value -> how many trials returned it (FI's record of the setting)."""
     values: list[tuple[float, int]] = []
     for key, n in (counts or {}).items():
@@ -872,10 +891,11 @@ def _summary_verdict(printed: dict[str, Any], counts: Any) -> str | None:
         mine["sd"] = sd
         mine["se"] = tuple(x / math.sqrt(n_trials) for x in sd)
     words = {"mean": "mean", "n": "number of trials", "sd": "standard deviation", "se": "standard error"}
+    error = _record_error(values)
     for stat in ("mean", "n", "sd", "se"):
         if stat not in printed or stat not in mine:
             continue
-        if not any(abs(float(printed[stat]) - c) <= _record_allowance(printed[stat]) for c in mine[stat]):
+        if not any(abs(float(printed[stat]) - c) <= _record_allowance(printed[stat], error[stat]) for c in mine[stat]):
             return (f"its printed {words[stat]} is {printed[stat]:g}, which is not the {words[stat]} of FI's "
                     f"{n_trials} trial(s) there ({mine[stat][0]:g})")
     return ""
