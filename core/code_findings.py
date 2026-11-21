@@ -492,6 +492,13 @@ def shown_open(record: dict[str, Any]) -> list[dict[str, Any]]:
                    and not i.get("plan_conflict") and i.get("outcome") not in (FIXED, GONE)), key=rank_key)
 
 
+def shown_not_repaired(issue: dict[str, Any]) -> bool:
+    """A test showed this issue to change a reported result and no repair has passed it (whether or not the latest reading
+    still flags it). The one fact the sentence of :func:`convergence_line` and the findings table both read."""
+    return (not issue.get("fi_own") and bool(issue.get("changes_result")) and issue.get("demonstrated") is True
+            and issue.get("outcome") not in (FIXED, GONE))
+
+
 def summary(record: dict[str, Any]) -> dict[str, Any]:
     """Counts for the reports: distinct issues, those that change a result, how many a test demonstrated, how many were
     repaired (and by which models), and what is still open."""
@@ -510,9 +517,9 @@ def summary(record: dict[str, Any]) -> dict[str, Any]:
         "plan_problems": sum(1 for i in every if i.get("outcome") == PLAN_PROBLEM or i.get("plan_conflict")),
         "open": len(opened),
         "about_fi": sum(1 for i in issues_of(record).values() if isinstance(i, dict) and i.get("fi_own")),
-        "open_result_changing_demonstrated": sum(
-            1 for i in opened if i.get("changes_result") and i.get("demonstrated") is True
-            and i.get("outcome") not in (FIXED, GONE)),
+        "open_result_changing_demonstrated": sum(1 for i in every if shown_not_repaired(i)),
+        "open_result_changing_not_shown": sum(1 for i in opened if i.get("changes_result") and not shown_not_repaired(i)
+                                              and i.get("outcome") not in (FIXED, GONE)),
     }
 
 
@@ -522,9 +529,12 @@ def convergence_line(record: dict[str, Any]) -> str:
     s = summary(record)
     if not s["issues"]:
         return ""
-    return (f"{s['issues']} distinct issue(s), {s['result_changing']} can change a reported result; {s['demonstrated']} of "
+    line = (f"{s['issues']} distinct issue(s), {s['result_changing']} can change a reported result; {s['demonstrated']} of "
             f"those were shown by a failing test and {s['fixed']} issue(s) were repaired; "
-            f"{s['open_result_changing_demonstrated']} shown result-changing issue(s) are still open")
+            f"{s['open_result_changing_demonstrated']} shown result-changing issue(s) are not repaired")
+    if s["open_result_changing_not_shown"]:  # still flagged by the last reading, not (or no longer) shown by a test
+        line += f"; {s['open_result_changing_not_shown']} more are flagged and not shown by a failing test"
+    return line
 
 
 #: The parts of the plan's protocol in which a contradiction about a definition can sit, and so the only parts the plan's

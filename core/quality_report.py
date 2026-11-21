@@ -1529,7 +1529,7 @@ def _issue_rows(cr: dict[str, Any], root: Path | None = None) -> list[dict[str, 
             "where": " ".join(x for x in (str(issue.get("file") or ""), str(issue.get("function") or "")) if x),
             "changes_result": bool(issue.get("changes_result")),
             "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
-            "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
+            "repaired": outcome == _issues.FIXED, "not_repaired_shown": _issues.shown_not_repaired(issue), "repaired_by": str(issue.get("fixed_by") or ""),
             "about_fi": bool(issue.get("fi_own")), "open": still and not issue.get("fi_own"), "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
             "reason": _one(issue.get("reason"), 140), "seen_in": len(readings),
             "reported_as": [str(k) for k in _list(issue.get("reported_as"))],
@@ -1725,6 +1725,8 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             still = "no: it is about FI's own lines, so it is kept here for FI to fix; it was not repaired and changes nothing"
         elif row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"
+            if row.get("not_repaired_shown"):
+                still += "; it was shown by a failing test and is not repaired"
         elif row["open"] and row.get("never_run"):
             still = "yes, but the run never calls this code, so it changes nothing reported; it is kept here, not in the paper"
         elif row["open"] and row.get("at_gate", {}).get("outcome") == "left_out":
@@ -1753,6 +1755,8 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
             still = ("yes, and it changes a result" if row["changes_result"] else
                      f"yes, but the results hold it as {', '.join(row['reported_as'][:3])}: a difference of names"
                      if row.get("reported_as") else "yes, but it changes nothing reported")
+        elif row.get("not_repaired_shown"):
+            still = "no, the last reading no longer flags it, but it was shown by a failing test and is not repaired"
         else:
             still = "no"
         lines.append(f"| {_cell(row['id'])} | {_cell(row['where'] or '-')} | {_cell(row['what'])} | "
