@@ -97,7 +97,7 @@ from .engine_base import (  # noqa: F401
     _latex_esc, _layout_views, _leading_simulatability_word, _ledger, _list_user_data_files, _lit_query,
     _literature_entry, _literature_in_citation_order, _literature_key, _literature_query_prompt,
     _literature_text_gaps, _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
-    _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mask_prose, _matching_brace_end, _math_folded,
+    _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mark_unconfirmed_results, _mask_prose, _matching_brace_end, _math_folded,
     _math_safe_cut, _mc_error, _memory, _merge_round_robin, _metric_spec, _names_a_verdict,
     _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls, _novelty,
     _number_list, _numeric, _object_among_prose, _object_spans, _objection_key, _ok_call_ids, _ok_calls, _one_line,

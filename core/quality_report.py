@@ -394,14 +394,21 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
     for item in _list(eq.get("failed")):
         item = _dict(item)
         eid = str(item.get("id") or "")
-        ok = _dict(eqs.get(eid)).get("state") == "ok" and eid not in _dict(eq.get("unconfirmed"))
+        held = eid in _dict(eq.get("unconfirmed"))
+        ok = _dict(eqs.get(eid)).get("state") == "ok" and not held
         n = _int(repairs.get(eid))
+        if held:  # the study went on with it (core/engine_code.py _settle_unconfirmed)
+            out.append(_problem("checks", f"equation {eid} could not be confirmed before the run ({item.get('reason') or ''}); "
+                                f"the study went on with it, and every result it may reach is marked (unconfirmed)",
+                                "FI's equation test", "went on, not confirmed", ".fi/equation_tests.json"))
+            continue
         out.append(_problem("checks", f"equation {eid}: its function {item.get('function') or ''} failed its test"
                             + (f", repaired {n} time{'s' if n != 1 else ''}" if n else ""),
                             "FI's equation test", "fixed" if ok else "not fixed", ".fi/equation_tests.json"))
-    for eid in _list(eq.get("not_tested")):
-        out.append(_problem("checks", f"equation {eid} has no test", "FI's equation test", "left out",
-                            ".fi/equation_tests.json"))
+    for note in _list(eq.get("not_tested")):  # each entry is FI's own sentence about one equation, said as it is
+        if "is not confirmed before the run" in str(note):
+            continue  # said above, with the failure
+        out.append(_problem("checks", str(note), "FI's equation test", "left out", ".fi/equation_tests.json"))
     from . import code_review as _cr
 
     now = _cr.version(q.root / "code")
