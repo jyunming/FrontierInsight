@@ -87,13 +87,6 @@ def test_a_claim_still_in_the_paper_stays_on_the_ledger(tmp_path: Path) -> None:
     assert ledger.read_text(encoding="utf-8") == before
 
 
-def test_the_record_take_out_prunes_the_ledger_through_its_own_path(tmp_path: Path) -> None:
-    eng, paper = _quest(tmp_path, f"# Pond\n\n## Results\n{_SENT} Ponds were sampled.\n\n## References\n1. A.\n")
-    ledger = _ledger(eng, [_SENT.rstrip(".")])
-    assert eng._take_out_contradicted({"paper_md": str(paper)}, [("the record contradicts it", _SENT)]) == [_SENT]
-    assert json.loads(ledger.read_text(encoding="utf-8"))["claims"] == []
-
-
 def test_the_unfilled_take_out_prunes_the_ledger_too(tmp_path: Path) -> None:
     eng, paper = _quest(tmp_path, PAPER)
     ledger = _ledger(eng, ["The headline setting is within tolerance"])

@@ -119,17 +119,6 @@ def test_two_objections_written_as_prose_are_two_and_each_is_said_as_written(tmp
     assert '"The baseline is weak"; "The sample is too small"' in text
 
 
-def test_an_objection_is_recorded_when_a_record_rewrite_follows_outside_the_rounds(tmp_path: Path) -> None:
-    from core import disclosure
-
-    eng = _engine(tmp_path, max_iterations=1)  # no round left: only the rewrite for FI's records follows
-    review = {"verdict": "accept",
-              "must_flag_hits": ["[methodologist] circular_evaluation", "record_contradiction: the paper says validated"]}
-    eng._note_design_objections({"iteration": 0}, review)  # type: ignore[arg-type]
-    assert disclosure.stated_objections(tmp_path) == {"circular_evaluation"}
-    assert eng._route_after_review({"review": review, "iteration": 1, "record_rewrites": 1}) == "rewrite"  # type: ignore[arg-type]
-
-
 def test_fi_adds_the_unsupported_claim_hit_from_its_own_claim_check() -> None:
     from core.engine import _unsupported_claim_hit
 

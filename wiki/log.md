@@ -148,3 +148,9 @@ Sources: core/oracle_triage.py, core/engine.py, core/oracle_card.py, core/oracle
 Pages updated: [[how-fi-judges-correctness|How FI judges correctness]] (a named "mark the check unconfirmed and go on" for a check that was measured and failed, bound to the check's conditions and the version of the code that measured it; not offered when nothing was measured; an exploration goes on by itself, recorded as automatic; research and decision quests stop; the evidence gap, the audit trace and the paper's disclosure; the old advice to set `engine.oracle_check: warn` replaced).
 
 Sources: core/accepted_checks.py, core/engine.py, core/oracle_card.py, core/evidence.py, core/todo.py, web/static/quest.html, vscode-frontier-insight/src/skills.ts, vscode-frontier-insight/src/stop-card.ts.
+
+## 2026-11-21 — FI states the search outcome; the paper's own words are only listed
+
+Pages updated: [[study-types|Study types]] (the *Best design found* section now opens with one line of what the search found against the baseline; the writer is told not to word it, and words about it that the record contradicts are listed in the quality report, never rewritten or removed).
+
+Sources: core/best_design_report.py, core/record_claims.py, core/quality_report.py, core/paper_facts.py, core/accepted_checks.py.

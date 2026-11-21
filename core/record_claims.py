@@ -1,27 +1,22 @@
-"""The paper may not claim what FI's own records contradict.
+"""Words of the paper that FI's records say nothing for, found so QUALITY.md can say FI did not check them.
 
-FI keeps records of what happened: the search for the best design (``results/best_design.json``) and FI's check of it at
-finer settings (``needs/OPTIMUM_CHECK.json``) and the known-answer checks (``needs/ORACLE_CHECK.json``). This reads the finished paper against them and returns plain must-fix hits for what they contradict. Three
-kinds, each decided from a record and each worded conservatively: a sentence is flagged only when it asserts the claim
-with none of the words that hedge or deny it, and only when the record says the opposite.
+FI states two facts itself, from its own records, and the writer is told not to: what the search for the best design
+found against the baseline (the first line of the "Best design found" section, ``core/best_design_report.py``) and which
+checks of the code against a known answer did not pass (the Limitations, ``core/paper_facts.py::known_answer_items``).
+A writer can still word either in its own sentence, and a reading of free text cannot tell which of such sentences is
+true, so this decides nothing: it never asks for a rewrite, never takes a sentence out and never stops a quest. It finds
+the sentences that touch the two facts while FI's record says the opposite of a plain reading (so that a person is told
+they were not checked), and :mod:`core.quality_report` lists them.
 
-* the paper says a design was optimised, improved or found best, while the record says the search did not beat the
-  baseline (or the check of it found it no better, no feasible design, or not a local optimum);
-* the paper's prose names a figure as showing the optimised design when the record has no optimised design (the
+* a sentence that calls a design optimised, improved or best while the record says the search did not beat the baseline
+  (or the check of it found it no better, no feasible design, or not a local optimum);
+* a sentence of the writer's that names a figure as the optimised design when the record has no optimised design (the
   figures and their captions are FI's, so only a sentence of the writer's is read);
-* the paper calls a result validated or confirmed against known answers while those checks are recorded as unconfirmed
-  or failed.
+* a sentence that calls a result validated or confirmed against known answers while those checks are recorded as
+  unconfirmed or failed.
 
-(A value of a quantity FI left out of the results is not on the sheet of keys the writer is given, so a number the writer
-types for it is a typed number: ``core/typed_numbers.py`` finds it.)
-
-When unsure, nothing is flagged: a missing record, an unreadable one or a sentence with any hedge in it gives no hit.
-
-The reading of the sentence is a reading of free text, so it can flag a sentence that says what the record says (in live
-quests it flagged "the best design found is the baseline" and "nothing ... is validated against that known answer"). So a
-hit never stops the quest: the paper is written again with the contradiction named, and a sentence still flagged after
-those rewrites is taken out of the paper (:func:`take_out`) and listed in QUALITY.md. A claim the records contradict is
-never delivered either way, and a sentence flagged wrongly costs that sentence, not the paper.
+A sentence is listed only when it asserts the claim with none of the words that hedge or deny it; a missing record, an
+unreadable one or a sentence with any hedge in it lists nothing.
 """
 
 from __future__ import annotations
@@ -30,9 +25,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-HIT = "record_contradiction"
-#: What FI took out of the paper after its rewrites (QUALITY.md prints it).
-TAKEN_OUT = ".fi/record_claims_taken_out.json"
+from .best_design_report import not_better_why
 
 _OPTIMISED = re.compile(
     r"\b(?:optimi[sz]ed|optimal|optimum|best|improved)\s+(?:design|configuration|geometry|layout|setting|solution|shape|"
@@ -60,7 +53,6 @@ _CLAUSE_BREAK = re.compile(r"[,;:()]|\b(?:but|however|although|though|while|wher
 _SAME_AS_BASELINE = re.compile(r"\b(?:same|identical|itself|equal|equals|unchanged)\b", re.IGNORECASE)
 _CAPTION_OPTIMISED = re.compile(r"\b(?:optimi[sz]ed|optimal|optimum|best)\s+design\b|\bthe\s+optimum\b", re.IGNORECASE)
 _CAPTION = re.compile(r"^\s*(?:\*\*|_|\*)?\s*(?:figure|fig\.)\s*\d+", re.IGNORECASE)
-_NOT_BETTER_VERDICTS = frozenset({"improvement_not_shown", "infeasible", "not_local_optimum"})
 _UNCONFIRMED_ORACLE = frozenset({"went_on_failing", "stopped", "failed", "unconfirmed"})
 
 
@@ -89,87 +81,51 @@ def _asserted(sentence: str, pattern: re.Pattern[str]) -> bool:
     return False
 
 
-def _shown(sentence: str) -> str:
+def _shown(sentence: str, cap: int = 160) -> str:
     one = " ".join(sentence.split())
-    return one if len(one) <= 160 else one[:157] + "..."
+    return one if len(one) <= cap else one[:cap - 3] + "..."
 
 
-def search_not_better(best_design: Any, optimum_check: Any) -> str:
-    """Why FI's record says the search did not find a better design than the baseline, in plain words; ``""`` when it
-    says nothing of the kind (no search, a better design, or a check that could not decide)."""
-    if not isinstance(best_design, dict):
-        return ""
-    improvement = best_design.get("improvement")
-    verdict = str((optimum_check or {}).get("verdict") or (best_design.get("check") or {}).get("verdict") or "")
-    if verdict in _NOT_BETTER_VERDICTS:
-        says = str((optimum_check or {}).get("says") or (best_design.get("check") or {}).get("says") or "").strip()
-        return f"FI's check of the best design at finer settings ended '{verdict.replace('_', ' ')}'" + (
-            f" ({says[:160]})" if says else "")
-    if best_design.get("best") is None and "best" in best_design:
-        return "the search found no design that meets every limit, so there is no best design"
-    if isinstance(improvement, dict) and improvement.get("better") is False:
-        return "the search found no design better than the baseline"
-    return ""
+#: What each kind of listed sentence is about, in the words QUALITY.md uses.
+SEARCH, FIGURE, KNOWN_ANSWER = "search", "figure", "known_answer"
+_ABOUT = {SEARCH: "whether the search beat the baseline",
+          FIGURE: "which design a figure shows",
+          KNOWN_ANSWER: "whether the results were checked against a known answer"}
 
 
-def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any = None, oracle: Any = None) -> list[str]:
-    """The must-fix hits for what ``paper_md`` claims against FI's records, each starting ``record_contradiction:`` and
-    saying in plain words what the paper says, what the record says and what to do. Empty when nothing is contradicted."""
-    return [hit for hit, _span in found(paper_md, best_design=best_design, optimum_check=optimum_check, oracle=oracle)]
-
-
-def take_out(paper_md: str, spans: list[str]) -> tuple[str, list[str]]:
-    """``paper_md`` with each of ``spans`` (a sentence, as :func:`found` gives them) taken out once, and the spans that
-    were there. A sentence leaves the rest of its line."""
-    text, taken = paper_md or "", []
-    for span in spans:
-        if not span or span not in text:
-            continue
-        at = text.index(span)
-        end = at + len(span)
-        while end < len(text) and text[end] in " \t":
-            end += 1
-        text = text[:at] + text[end:]
-        taken.append(span)
-    return text, taken
-
-
-def found(paper_md: str, *, best_design: Any = None, optimum_check: Any = None,
-          oracle: Any = None) -> list[tuple[str, str]]:
-    """:func:`contradictions`, each hit with the sentence of the paper it is about, so that sentence can be taken out
-    (:func:`take_out`)."""
-    hits: list[tuple[str, str]] = []
+def unchecked(paper_md: str, *, best_design: Any = None, optimum_check: Any = None,
+              oracle: Any = None) -> list[dict[str, str]]:
+    """The sentences of ``paper_md`` that word one of the two facts FI states itself in a way its record says is not so,
+    one entry each: ``kind`` (:data:`SEARCH`, :data:`FIGURE`, :data:`KNOWN_ANSWER`), ``sentence`` and ``says`` (what FI's
+    record says, in plain words). Nothing here changes the paper."""
+    out: list[dict[str, str]] = []
     sentences = _sentences(paper_md)
-
-    # (a) a design called optimised, improved or best when the record says it did not beat the baseline.
-    why_not = search_not_better(best_design, optimum_check)
+    why_not = not_better_why(best_design, optimum_check)
     if why_not:
-        for s in sentences:
-            if _asserted(s, _OPTIMISED) and not _SAME_AS_BASELINE.search(s):
-                hits.append((f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the search says {why_not}. "
-                             "Remove the claim, or say plainly what the record shows (no better design was found).", s))
-                break
-
-    # (b) a sentence of the writer's that names a figure as the optimised design when there is none. An image's own
-    # caption is FI's (written from the figure's record), so it is not read here.
-    if why_not:
-        for c, span in [(s, s) for s in sentences if _CAPTION.match(s)]:
-            if _asserted(c, _CAPTION_OPTIMISED):
-                hits.append((f"{HIT}: a figure is captioned \"{_shown(c)}\", but FI's record of the search says "
-                             f"{why_not}, so no optimised design was computed to draw. Take the figure out, or caption "
-                             "what it does show.", span))
-                break
-
-    # (c) validated or confirmed against known answers while those checks are recorded as unconfirmed or failed.
+        first = next((s for s in sentences if _asserted(s, _OPTIMISED) and not _SAME_AS_BASELINE.search(s)), None)
+        if first:
+            out.append({"kind": SEARCH, "sentence": first, "says": why_not})
+        # An image's own caption is FI's (written from the figure's record), so only a sentence of the writer's is read.
+        caption = next((s for s in sentences if _CAPTION.match(s) and _asserted(s, _CAPTION_OPTIMISED)), None)
+        if caption:
+            out.append({"kind": FIGURE, "sentence": caption, "says": f"{why_not}, so no optimised design was computed to draw"})
     status = str((oracle or {}).get("status") or "") if isinstance(oracle, dict) else ""
     if status in _UNCONFIRMED_ORACLE:
-        for s in sentences:
-            if _asserted(s, _VALIDATED):
-                hits.append((f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the known-answer checks says "
-                             "they were unconfirmed or failed (needs/ORACLE_CHECK.json). Do not call the result validated "
-                             "or confirmed against known answers; say plainly that those checks did not pass.", s))
-                break
-    return hits
+        first = next((s for s in sentences if _asserted(s, _VALIDATED)), None)
+        if first:
+            out.append({"kind": KNOWN_ANSWER, "sentence": first,
+                        "says": "the known-answer checks were unconfirmed or failed"})
+    return out
+
+
+_SHORT = {SEARCH: "no better design was found", FIGURE: "no optimised design was computed",
+          KNOWN_ANSWER: "those checks did not pass"}
+
+
+def disclosure(entry: dict[str, str], cap: int = 55) -> str:
+    """The line QUALITY.md gives for one entry of :func:`unchecked`; the sentence is shown up to ``cap`` characters."""
+    return (f"the paper's own words about {_ABOUT.get(entry['kind'], 'a result')} were not checked by FI: "
+            f"\"{_shown(entry['sentence'], cap)}\" (FI's record: {_SHORT.get(entry['kind'], entry['says'])})")
 
 
 # --- a sentence the claim check found unsupported that states a number ----------------------------------------------

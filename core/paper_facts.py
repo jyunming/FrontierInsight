@@ -2829,6 +2829,10 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
         lines.append("Do not restate these points. You may write a Limitations section about the method's scope and "
                      "assumptions (what the method cannot show, what it assumes); say \"see Limitations\" where your text "
                      "needs the list.")
+        if any(i.kind == KNOWN_ANSWER for i in real):
+            lines.append("Known answers: FI states in that list which checks of the code against a known answer did not "
+                         "pass. Do not state in your own sentence that the results or the code were validated, verified "
+                         "or confirmed against known answers.")
     lines.append("A placeholder FI cannot fill is printed as \"not recorded\", so use only the ones listed here.")
     return "\n".join(lines)
 

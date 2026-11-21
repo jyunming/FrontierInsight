@@ -831,7 +831,7 @@ class RunChecksMixin:
 
     def _note_typed_values(self, raw_result_json: Any) -> None:
         """The values of the quantities left out for being typed into the code, kept in this pass's record so the writer's
-        text can be checked for quoting one (core/record_claims.py). Nothing is added when none was left out."""
+        text can be checked for quoting one (core/typed_numbers.py). Nothing is added when none was left out."""
         from . import result_checks as _checks
 
         keys = self._typed_result_keys if getattr(self, "_typed_result_keys", None) is not None else set()

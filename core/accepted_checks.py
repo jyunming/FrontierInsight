@@ -492,7 +492,8 @@ def gap(entry: dict[str, Any]) -> str:
 
 
 def failing_disclosure(record: Any) -> str:
-    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``.
+    """What the writer is told about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``:
+    FI states each of them in the paper itself, so the writer does not.
     A check its trials could not decide is said as not decided and not validated against, in neutral words."""
     if not isinstance(record, dict) or record.get("status") != WENT_ON:
         return ""
@@ -505,16 +506,18 @@ def failing_disclosure(record: Any) -> str:
     out: list[str] = []
     if disagree:
         out.append(f"For these known-answer checks the simulation and the plan's own working of the expected value "
-                   f"disagree, and neither is confirmed: {'; '.join(gap(e) for e in disagree)}. Say so plainly where the "
-                   "checks are described, with both values (FI states each in the limitations itself): it is not a "
-                   "failure of the code shown, and nothing here may be described as checked against these known answers.")
+                   f"disagree, and neither is confirmed: {'; '.join(gap(e) for e in disagree)}. It is not a failure of the "
+                   "code shown, and nothing here may be described as checked against these known answers.")
     if failed:
         out.append(f"These known-answer checks FAILED and the run went on anyway: {'; '.join(gap(e) for e in failed)}. "
-                   "Say so plainly where the checks are described (FI states each in the limitations itself): the result is not "
-                   "validated against these known answers, and nothing here may be described as checked against them.")
+                   "The result is not validated against these known answers, and nothing here may be described as checked "
+                   "against them.")
     if undecided:
         out.append(f"These known-answer checks could not be decided at the precision their tolerance needs, and the run "
-                   f"went on: {'; '.join(gap(e) for e in undecided)}. Say plainly where the checks are described that "
-                   "each check was not decided (FI states each in the limitations itself), so the result is not validated "
-                   "against it.")
+                   f"went on: {'; '.join(gap(e) for e in undecided)}. Each check was "
+                   "not decided, so the result is not validated against it.")
+    # FI states each check itself, with its numbers, in the limitations: the writer does not word the status.
+    out.append("FI states each of these checks itself in the limitations, with its numbers. Do not write, in your own "
+               "sentence anywhere (abstract, methods, results, conclusions), that the results or the code were validated, "
+               "verified or confirmed against known answers, and do not describe these checks yourself.")
     return " ".join(out)

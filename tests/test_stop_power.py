@@ -102,15 +102,6 @@ def test_a_check_that_finds_nothing_again_takes_its_own_problems_out(tmp_path: P
     assert eng._cannot_repair_problems() == [] and not (eng.fi_dir / "cannot_repair.json").exists()
 
 
-def test_what_the_claim_check_still_flags_is_recorded_and_a_clean_pass_takes_it_out(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    assert eng._record_claims_left(["record_claims: a sentence"]) == ["record_claims: a sentence"]
-    left = [p for p in eng._cannot_repair_problems() if p["check"] == "record_claims"]
-    assert left and left[0]["source"] == sp.READ and eng._cannot_repair_stop() is None
-    eng._record_claims_left([])
-    assert eng._cannot_repair_problems() == []
-
-
 def test_a_problem_found_on_an_earlier_version_of_the_code_is_said_as_not_checked_again(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     code = eng.quest_root / "code"

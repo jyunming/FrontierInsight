@@ -546,8 +546,8 @@ def test_a_failed_records_check_never_goes_to_the_design_or_a_stop(tmp_path: Pat
     hits = eng._paper_record_hits(paper, {"iteration": 0, "exec_result": {"duration_s": 7.4}})
     assert hits and all(h.startswith("paper_record_mismatch:") for h in hits)
     review = {"verdict": "accept", "must_flag_hits": hits}
-    for iteration, record_rewrites in ((0, 0), (1, 5), (2, 5)):
-        state = {"review": review, "iteration": iteration, "record_rewrites": record_rewrites, "code": "x"}
+    for iteration in (0, 1, 2):
+        state = {"review": review, "iteration": iteration, "code": "x"}
         assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
     assert eng._route_after_review({"review": review, "iteration": 3}) in ("done", "human_feedback")  # type: ignore[arg-type]
     kept = paper_facts.kept_check(root)

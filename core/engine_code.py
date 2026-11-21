@@ -10,19 +10,19 @@ from .engine_base import (  # noqa: F401
     Any, AsyncProcessTree, Callable, Path, QuestState, _BODIES_REPLY_REMINDER, _CI_BOOTSTRAP, _CI_WILSON,
     _CLUSTER_BODIES_REMINDER, _CLUSTER_REPLY_REMINDER, _FIGURE_SUFFIXES, _FILLED_AFTER_READ, _FIT_APPROVER,
     _FIT_SOURCE, _FI_PLAN_AUTHORS, _FLAT_APPROVER, _FLAT_SOURCE, _FRESH_SCRIPT, _ModelAnswerProblem,
-    _PIP_FREEZE_TIMEOUT_S, _PY_FENCE_RE, _RECORD_REWRITES, _REDERIVE_BECAUSE, _SPLIT_REPLY_REMINDER,
-    _SPLIT_RERUN_NOTE, _TAKE_OUT_PASSES, _accepted, _agent_coder, _aggregate_result_json_replicates, _analysis_frame,
-    _assertion_violations, _attempts, _audit_open, _best_report, _changelog, _code_delta, _code_findings,
+    _PIP_FREEZE_TIMEOUT_S, _PY_FENCE_RE, _REDERIVE_BECAUSE, _SPLIT_REPLY_REMINDER,
+    _SPLIT_RERUN_NOTE, _accepted, _agent_coder, _aggregate_result_json_replicates, _analysis_frame,
+    _assertion_violations, _attempts, _audit_open, _changelog, _code_delta, _code_findings,
     _code_layout, _code_project, _code_review, _coerce_dep_list, _contract, _criteria, _declared_metrics,
     _design_parts, _disclosure, _equation_tests, _evidence, _experiment_deps, _extend_directive, _extract_result_json,
     _figdata, _finding_repair, _flat_fact_sentence, _format_clarify, _format_reflect_history, _frozen,
     _function_steps, _grid_keys, _improve, _in_run, _is_degenerate_result, _is_metric_key, _ledger, _lower_first,
     _mc_error, _metric_spec, _numeric, _one_line, _optim, _optimise, _optimise_search, _oracle, _oracle_card,
-    _oracle_challenge, _oracle_triage, _outside_run, _pairs, _paper_facts, _parse_implement_response,
+    _oracle_challenge, _oracle_triage, _outside_run, _pairs, _parse_implement_response,
     _parse_json_lenient, _parse_split_deps, _phased, _plan, _plot_scope, _precision_target_on, _protocol,
     _protocol_directive, _random_source_found, _read_figure_records, _read_json_or_none_path, _receipts,
-    _record_claims, _refine, _repair_reply_json, _replicate_assertions, _replicate_env, _replicate_metric_kinds,
-    _rerun_directive, _rerun_from, _result_comparison_stats, _review, _review_sends_the_experiment_back,
+    _refine, _repair_reply_json, _replicate_assertions, _replicate_env, _replicate_metric_kinds,
+    _rerun_directive, _result_comparison_stats, _review, _review_sends_the_experiment_back,
     _run_manifest, _second_impl, _skeleton, _split_run, _step_passages, _stop_power, _topic_req, _trial_code,
     _trial_runner, _trial_table, ast, asyncio, hashlib, json, math, node_provider_for, re, scrub_secrets, shutil,
     time, unseeded_rng_calls,
@@ -998,91 +998,6 @@ class CodeStageMixin:
         return (f"{note} Do not show, describe or quote anything from "
                 f"{'that figure' if len(record.get('removed_figures') or []) == 1 else 'those figures'}: say plainly, in "
                 "the limitations, that a figure was left out because it was not drawn from the run's results.")
-
-    def _record_contradiction_hits(self, paper_md: str, state: QuestState) -> list[str]:
-        """Must-fix hits for what the paper claims against FI's own records (core/record_claims.py). FI's own "Best design
-        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing.
-
-        Once the paper has been written again ``_RECORD_REWRITES`` times for such hits, what is still flagged is taken out
-        of the paper instead (:meth:`_take_out_contradicted`): the check reads free text and has flagged sentences that say
-        what the record says, so it never stops the quest; a claim the records contradict is not delivered either way."""
-        found = self._record_contradictions(paper_md, state)
-        if not found or int(state.get("record_rewrites") or 0) < _RECORD_REWRITES:
-            return [hit for hit, _span in found]
-        # The check names the first sentence of each kind it finds: what it flags once that one is out is taken out too,
-        # a bounded number of times.
-        for _ in range(_TAKE_OUT_PASSES):
-            taken = self._take_out_contradicted(state, found)
-            left = [hit for hit, span in found if span not in taken]
-            path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
-            if not taken or not path or not Path(path).is_file():
-                return self._record_claims_left(left)
-            found = self._record_contradictions(Path(path).read_text(encoding="utf-8"), state)
-            if not found:
-                self._clear_cannot_repair("record_claims")
-                return []
-        return self._record_claims_left([hit for hit, _span in found])
-
-    def _record_claims_left(self, left: list[str]) -> list[str]:
-        """What the claim check still flags after the rewrites and the take-out passes: recorded, so QUALITY.md lists it (a
-        reading of the paper's words, so it never stops the quest, :mod:`core.stop_power`)."""
-        self._clear_cannot_repair("record_claims")
-        for hit in left:
-            self._record_cannot_repair(
-                "the paper still has a sentence FI's records contradict: " + _one_line(str(hit), 300),
-                [f"wrote the paper again {_RECORD_REWRITES} times, naming the contradiction",
-                 "took out what could be taken out"], source=_stop_power.READ, check="record_claims")
-        return left
-
-    def _take_out_contradicted(self, state: QuestState, found: list[tuple[str, str]]) -> list[str]:
-        """The paper with each flagged sentence (or figure) taken out (core/record_claims.py::take_out), written to disk and
-        listed in ``.fi/record_claims_taken_out.json`` (QUALITY.md prints it): the spans taken out. The claim check's
-        receipt moves to the new draft, which only lost text and added no claim."""
-        path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
-        if not path or not Path(path).is_file():
-            return []
-        try:
-            before = Path(path).read_bytes()
-            text, taken = _record_claims.take_out(before.decode("utf-8"), [span for _hit, span in found])
-            if not taken:
-                return []
-            Path(path).write_bytes(text.encode("utf-8"))  # bytes back as bytes (bytes back as bytes: text mode writes the draft's CRLF as CR CR LF on Windows)
-            _receipts.carry_over(self.quest_root, "claim_check", "paper", before, Path(path).read_bytes(),
-                                 "FI took out sentences its records contradict and added no claim")
-            self._prune_ledger_after_take_out(list(taken), text)
-            record = self.quest_root / _record_claims.TAKEN_OUT
-            record.parent.mkdir(parents=True, exist_ok=True)
-            # Added to what earlier passes took out (a later review's pass, the next sentence of a kind): never replaced.
-            earlier = _read_json_or_none_path(record)
-            entries = [e for e in (earlier.get("taken_out") or []) if isinstance(e, dict)] \
-                if isinstance(earlier, dict) else []
-            seen = {str(e.get("text")) for e in entries}
-            entries += [{"text": span, "why": hit} for hit, span in found if span in taken and span not in seen]
-            record.write_text(json.dumps({"at": time.time(), "taken_out": entries}, indent=1, ensure_ascii=False) + "\n",
-                              encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            self._log.warning("[record_check] the sentences FI's records contradict could not be taken out (%s)", e)
-            return []
-        self._log.warning("[record_check] the paper was written again %d times and still says what FI's records "
-                          "contradict, so %d sentence(s) or figure(s) were taken out of it; they are listed in QUALITY.md",
-                          _RECORD_REWRITES, len(taken))
-        return taken
-
-    def _record_contradictions(self, paper_md: str, state: QuestState) -> list[tuple[str, str]]:
-        """:func:`core.record_claims.found` for this paper and quest: each hit with the text it is about."""
-        try:
-            recs = _best_report.records(self.quest_root)
-            text = _paper_facts.without_blocks(
-                _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md)))
-            hits = _record_claims.found(
-                text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
-                oracle=self._oracle_record_read())
-        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
-            self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
-            return []
-        for hit, _span in hits:
-            self._log.warning("[record_check] %s", hit)
-        return hits
 
     def _ran_once_note(self) -> str:
         """For the analysis and the paper: the frozen protocol still says N runs per setting, but FI ran each setting

@@ -413,7 +413,6 @@ class QuestState(TypedDict, total=False):
     #: crash repair); kept in the state so a resume knows.
     run_manifest_analysis_only: bool
     figure_data_repairs: int
-    record_rewrites: int
     #: The draft was written under the rule that FI fills every result number (the writer was given the sheet of keys), so
     #: the typed-number check holds it to that rule; a draft from an older build, or a study with no trial record, is not.
     paper_keys: bool
@@ -5752,8 +5751,6 @@ _TEXT_ONLY_HITS = frozenset({
     # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",
-    # A claim FI's own records contradict (core/record_claims.py): the paper is written again with it named.
-    "record_contradiction",
     # What the paper states about the run against FI's records (a run time, a limit claim, a part the study did not do that
     # the paper leaves unnamed; core/paper_facts.py): the paper is written again, the design is not touched.
     "paper_record_mismatch",
@@ -5761,13 +5758,8 @@ _TEXT_ONLY_HITS = frozenset({
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 
 
-# How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
-_RECORD_REWRITES = 2
 #: The folder of ``code/`` that holds a copy of the selected skills' files for the coding agent (FI's own, like ``tests``).
 _SKILLS_IN_CODE = "skills"
-#: Passes of taking out what the record check still flags once the rewrites are used up (each pass can bring up the next
-#: sentence of a kind the check names one of).
-_TAKE_OUT_PASSES = 5
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. The limit is a guideline: no hit is forced and
