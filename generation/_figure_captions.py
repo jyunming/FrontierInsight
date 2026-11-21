@@ -49,6 +49,23 @@ _REFERENCE_RE = re.compile(
     r"(?P<nums>\d+[a-z]?(?:\s*(?:,|and|&|–|—|-|to)\s*\d+[a-z]?)*)(?![\w.]*\.[A-Za-z])",
     re.IGNORECASE,
 )
+# A figure of a cited work, in the paper's own citation form (a numbered source "[4]" or a web page "[W2]"), is not one of
+# the paper's figures: "Fig. 3 of [4]", "Figure 3 in [4]", "Fig. 3 of Smith et al. [4]" / "Fig. 3 in Smith and Lee [4]"
+# (at most three name words and "et al."), and "[4, Fig. 3]". Only these forms; a reference beside a citation in any
+# other way ("Figure 3 agrees with [4]") stays the paper's.
+_CITED_AFTER_RE = re.compile(
+    # The joining words in any case, as the reference itself is read ("FIG. 3 OF [4]"); a name word starts with a capital.
+    r"\s+(?i:of|in)\s+(?:[A-Z][\w'’-]*(?:\s+(?i:and|&)\s+[A-Z][\w'’-]*|\s+[A-Z][\w'’-]*){0,2}"
+    r"(?:\s+(?i:et\s+al)\.?)?,?\s+)?\[W?\d")
+_CITED_BEFORE_RE = re.compile(r"\[W?\d+(?:\s*[,–-]\s*W?\d+)*,\s*$")
+_CITED_CLOSE_RE = re.compile(r"\s*\]")
+
+
+def _of_a_cited_work(m: re.Match[str]) -> bool:
+    """Whether the reference ``m`` (of :data:`_REFERENCE_RE`) names a figure of a cited work, in one of the forms above."""
+    text = m.string
+    return bool(_CITED_AFTER_RE.match(text, m.end())
+                or (_CITED_BEFORE_RE.search(text[:m.start()]) and _CITED_CLOSE_RE.match(text, m.end())))
 
 
 def figure_lines(lines: list[str]):
@@ -80,9 +97,38 @@ def _figure_order(lines: list[str]) -> dict[int, int] | None:
     return {n: i + 1 for i, n in enumerate(numbers)}
 
 
+# A reference's numbers that are a range ("2-4", "8 to 11"): it names every figure from the first to the last.
+_SPAN_RE = re.compile(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)")
+
+
+# Text no figure reference is read in: FI's marks (``{{...}}``) and HTML comments, whose keys name a figure by its file
+# ("{{figure:fig2_error:...}}" is not a reference to Figure 2).
+_NOT_REFERENCE_RE = re.compile(r"\{\{.*?\}\}|<!--.*?-->")
+
+
+def numbers_named(text: str) -> set[int]:
+    """Every figure number the references in ``text`` name: each number of a list ("Figures 2 and 3") and every number
+    a range spans ("Figs. 2-4"), outside FI's marks and HTML comments, and never a figure of a cited work
+    (:func:`_of_a_cited_work`). The one reading of a reference: FI places each
+    figure after the text that first names it (``core/engine.py:_figure_reference_end``) and numbers the figures by place
+    with :func:`renumber_references`."""
+    out: set[int] = set()
+    for m in _REFERENCE_RE.finditer(_NOT_REFERENCE_RE.sub(" ", text)):
+        if _of_a_cited_work(m):
+            continue
+        span = _SPAN_RE.fullmatch(m.group("nums"))
+        if span and int(span.group(1)) < int(span.group(3)):
+            out.update(range(int(span.group(1)), int(span.group(3)) + 1))
+        else:
+            out.update(int(d) for d in re.findall(r"\d+", m.group("nums")))
+    return out
+
+
 def _renumbered(text: str, order: dict[int, int]) -> str:
     def one(m: re.Match[str]) -> str:
-        span = re.fullmatch(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)", m.group("nums"))
+        if _of_a_cited_work(m):
+            return m.group(0)  # a figure of a cited work keeps its number
+        span = _SPAN_RE.fullmatch(m.group("nums"))
         if span and int(span.group(1)) < int(span.group(3)):
             # A range names every figure in it: renumbered, those figures are a range again only when their new
             # numbers are consecutive ("Figs. 2-3" with the two swapped is still "2-3"); otherwise they are listed.
@@ -98,13 +144,36 @@ def _renumbered(text: str, order: dict[int, int]) -> str:
     return _REFERENCE_RE.sub(one, text)
 
 
+def renumber_references(markdown: str, order: dict[int, int]) -> str:
+    """``markdown`` with every figure number its text and its figure captions give changed by ``order`` (``{old: new}``),
+    read as :func:`numbers_named` reads them. FI's marks, HTML comments and code blocks are left as they are. How FI
+    numbers the paper's figures in the order they stand (``core/engine.py:_number_figures_by_place``)."""
+    if not order or all(k == v for k, v in order.items()):
+        return markdown
+    out = []
+    fence = None
+    for line in markdown.split("\n"):
+        m = _FENCE_RE.match(line)
+        if m:
+            fence = None if fence == m.group(1) else (fence or m.group(1))
+        elif fence is None:
+            pieces, at = [], 0
+            for kept in _NOT_REFERENCE_RE.finditer(line):
+                pieces += [_renumbered(line[at:kept.start()], order), kept.group(0)]
+                at = kept.end()
+            line = "".join(pieces + [_renumbered(line[at:], order)])
+        out.append(line)
+    return "\n".join(out)
+
+
 def numbers_off_figure_captions(markdown: str) -> str:
     """``markdown`` with the writer's "Figure N." taken off each figure line's
     caption. Code blocks are left alone.
 
     The renderer numbers figures by where they stand. When the writer placed them out of number order (Figure 1, then
     3, then 2), the text's "Figure 3" would sit over the plot printed as Figure 2; so every "Figure N" reference is
-    renumbered to the place its figure has. paper.md keeps the writer's numbers."""
+    renumbered to the place its figure has. A paper FI wrote has its figures numbered by place already
+    (:func:`renumber_references`), so this changes no number of it."""
     lines = markdown.split("\n")
     order = _figure_order(lines)
     out = []
