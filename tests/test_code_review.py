@@ -70,12 +70,13 @@ def test_the_file_was_changed():
         NOTE.write_text(now)
     assert now != NOTE.read_text(), "{rel} is as it was when the problem was found"
 '''
+PASSING_TEST = "def test_nothing_is_wrong():\n    assert True\n"
 
 
 #: The functions the files of these tests define (the first one a file has is called with its arguments), so the fake model's test
 #: genuinely runs the study's code before it fails (a test that fails before any code of the study ran shows nothing about it:
 #: core/finding_repair.py ``failure_from_study``).
-_STUDY_CALLS = (("run_cell", "{}"), ("run_trial", "{'exposure_dose': 1.0, 'resist_type': 'a', 'chemistry': 'b'}"), ("result", ""), ("quality", "1.0, 1.0, 1.0"))
+_STUDY_CALLS = (("run_cell", "{'m': 1.0, 'w': 1.0, 'length': 1.0, 'c': 1.0}"), ("run_trial", "{'exposure_dose': 1.0, 'resist_type': 'a', 'chemistry': 'b'}"), ("result", ""), ("quality", "1.0, 1.0, 1.0"))
 
 
 def changed_test(rel: str) -> str:
