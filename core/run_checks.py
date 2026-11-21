@@ -2810,9 +2810,10 @@ class RunChecksMixin:
         """The small run against the frozen plan (core/small_run.py): the shape of each number the plan declares one per
         run, for a search the search's own judgement of its baseline design (objective and each constraint), a result the
         plan declares and no trial returned, and FI's analysis on the small run's trials (whatever ``engine.pipeline_gate``
-        says). An exact fault is sent back to the code once per quest (its kind and quantity), on a counter of its own in
-        ``.fi/small_run.json`` capped by ``engine.exec_reflect_max_iterations``; it never spends a crash repair, and a spent
-        crash counter never blocks it. After that, and for everything a small sample can explain, a line in plan.md and
+        says). A result the plan states is a curve or a map in each run is never sent back (FI keeps one number per run, so
+        a trial that returned the curve would fail): a line only. An exact fault is sent back to the code once per quest
+        (its kind and quantity), on a counter of its own in ``.fi/small_run.json`` capped by
+        ``engine.exec_reflect_max_iterations``; it never spends a crash repair, and a spent crash counter never blocks it. After that, and for everything a small sample can explain, a line in plan.md and
         run.log and a fact for the code's reader. Nothing here stops the quest. ``None`` to go on."""
         from . import optimise as _optimise
         from . import small_run as _small
@@ -2826,6 +2827,8 @@ class RunChecksMixin:
         faults += [f for f in _small.shape_faults(protocol, record) if f.quantity not in named]
         named |= {f.quantity for f in faults if f.send}
         faults += [f for f in _small.missing_outputs(protocol, record) if f.quantity not in named]
+        # a result the plan states is a curve or a map, returned as one number: said, never sent (FI keeps numbers only)
+        faults += [f for f in _small.unheld_shapes(protocol, record) if f.quantity not in named]
         faults += await self._small_run_analysis(state, protocol, record, search=block is not None)
         if not faults:
             return None

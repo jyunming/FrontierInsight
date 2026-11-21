@@ -283,6 +283,36 @@ def missing_references(calls: dict[str, Any], protocol: Any) -> list[dict[str, A
     return out
 
 
+def undrawn_declared_references(calls: dict[str, Any], references: Any, protocol: Any, shows: Any = ()) -> list[str]:
+    """The reference lines a figure's plan entry names (``references``, core/contract.py ``Figure``) that FI's record of the
+    figure does not show drawn, in the plan's order. A quantity of its own (a reference the plan declares, not among what the
+    figure ``shows``) is drawn when a line or curve of the record carries its id; a result the figure shows, whose plan gives
+    a reference or a known value, is drawn when a line or curve of the record is bound to that reference (:func:`_is_bound`:
+    drawn from the plan under its id, never the result's own series), and one :func:`missing_references` already names (a
+    reference the plan gives a formula or value of, beside the result's series in its panel) is left to it.
+    A figure with no record, or whose every panel is a custom drawing, says nothing FI can read, so it has none."""
+    panels = [p for p in _panels(calls) if not p.get("raw")] if isinstance(calls, dict) else []
+    if not panels or not isinstance(references, (list, tuple)):
+        return []
+    planned = planned_references(protocol)
+    out: list[str] = []
+    shown = {str(s) for s in shows or []}
+    for rid in dict.fromkeys(str(r) for r in references):
+        if rid in shown:
+            if rid in planned and _result_panels(panels, rid):
+                continue  # missing_references judges it (one line per problem)
+            bound = {"ids": (planned.get(rid) or {}).get("ids") or [rid]}
+            if any(isinstance(r, dict) and _is_bound(r, bound) for p in panels for r in p.get("refs") or []) or any(
+                    isinstance(s, dict) and _is_bound(s, bound, curve=True) for p in panels for s in p.get("series") or []):
+                continue
+        elif any(str((e.get("declared_as") or {}).get("id") if isinstance(e.get("declared_as"), dict) else "") == rid
+                 or str(e.get("id")).split("@")[0] == rid or str(e.get("what")) == rid
+                 for p in panels for e in [*(p.get("series") or []), *(p.get("refs") or [])] if isinstance(e, dict)):
+            continue
+        out.append(rid)
+    return out
+
+
 def quest_missing_references(root: Path, protocol: Any) -> list[dict[str, Any]]:
     """:func:`missing_references` for every figure that has a call record, once per figure and result: ``[{"file", "number",
     "result", "label", "formula", "record"}]``. With a delivered paper only the figures it places are read, and ``number`` is the
