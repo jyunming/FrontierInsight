@@ -28,7 +28,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import code_review as _code_review
 
@@ -64,7 +64,7 @@ def union(a: "Effect", b: "Effect") -> "Effect":
                   named=a.named or b.named, empty=a.empty or b.empty)
 
 
-_BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint"}
+_BUILTIN_NAMES = frozenset(dir(builtins)) - {"eval", "exec", "compile", "open", "__import__", "input", "breakpoint", "setattr", "delattr", "globals", "locals", "vars"}
 #: Methods of strings and mappings: a call to one is not a call into the study's own code.
 _PLAIN_METHODS = frozenset({"get", "items", "keys", "values", "join", "lower", "upper", "strip", "split", "format", "startswith",
                             "endswith", "count", "index", "append", "extend", "copy"})
@@ -86,6 +86,130 @@ class TestShape:
     prefix: set[str]
     frame: set[str] = field(default_factory=set)  # constants of FI's analysis frame it reads (``derive.ROLES``)
     defaulted: set[str] = field(default_factory=set)  # keys read by ``.get``/``.pop`` with a default (the default may be compared)
+    #: ``(module, name)`` of each ``base.name(...)`` call whose base is a name the test imports (``module`` is the top-level module
+    #: it came from), and the names of the method calls on any other value (a string, a mapping, a local): only the first kind
+    #: can reach the study's own code. ``calls`` still holds every bare name.
+    module_calls: set[tuple[str, str]] = field(default_factory=set)
+    method_calls: set[str] = field(default_factory=set)
+    bare_calls: set[str] = field(default_factory=set)  # the names called as ``name(...)``
+    #: method calls whose receiver the test's own code does not prove to be a plain value (a parameter, a fixture, an alias of a
+    #: module, ``getattr(...)``, an unresolved name): judged by their name against the study's functions, as a bare name is
+    unproven_calls: set[str] = field(default_factory=set)
+
+
+#: Builtins whose result is a plain value (a number, a string, a container), whatever they are given.
+_VALUE_BUILTINS = frozenset({"str", "int", "float", "bool", "len", "list", "tuple", "set", "frozenset", "dict", "sorted", "repr", "abs",
+                             "min", "max", "sum", "round", "range", "enumerate", "zip", "reversed", "any", "all", "bytes"})
+
+
+def _value_reader(tree: ast.AST, bound: dict[str, str], constants: set[str]) -> Callable[[ast.AST], bool]:
+    """A function that says whether an expression of the test is a plain value, proven from the test's own code: a literal, a value read from one of FI's
+    analysis-frame constants (``derive.RESULTS``), a name that is such a value on every assignment the test makes, or the result of a plain builtin or a plain method of such a value. A
+    parameter (a pytest fixture too), an import that is not a frame constant, a ``with`` target, a name bound by ``def`` or
+    ``class``, and a name with no assignment in the test are not. Scope is ignored: one unsafe binding anywhere makes the name
+    unsafe."""
+    values: dict[str, list[ast.AST | None]] = {}
+
+    tainted: set[str] = set()  # imported names the test assigns to, or assigns an attribute or item of (``derive.RESULTS = model``)
+
+    def bind(target: ast.AST, value: ast.AST | None) -> None:
+        if isinstance(target, ast.Name):
+            values.setdefault(target.id, []).append(value)
+            if target.id in bound:
+                tainted.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)):  # a display: each target takes its own element, or nothing
+                matching = len(value.elts) == len(target.elts) and not any(isinstance(x, ast.Starred) for x in (*value.elts, *target.elts))
+                for i, t in enumerate(target.elts):
+                    bind(t, value.elts[i] if matching else None)
+            else:  # every part of a proven value is proven: each target takes the value itself
+                for t in target.elts:
+                    bind(t, value)
+        elif isinstance(target, ast.Starred):
+            bind(target.value, None)
+        else:  # an attribute or an item: it binds no name, but it changes what the root name holds
+            root: ast.AST = target
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in bound:
+                tainted.add(root.id)
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                bind(t, n.value)
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+            bind(n.target, n.value if isinstance(n, ast.AugAssign) or n.value is not None else None)
+        elif isinstance(n, ast.NamedExpr):
+            bind(n.target, n.value)
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            bind(n.target, n.iter)
+        elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+            bind(n.optional_vars, None)
+        elif isinstance(n, ast.Delete):
+            for t in n.targets:
+                bind(t, None)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if not isinstance(n, ast.Lambda):
+                values.setdefault(n.name, []).append(None)
+            a = n.args
+            for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, *([a.vararg] if a.vararg else []), *([a.kwarg] if a.kwarg else [])]:
+                values.setdefault(arg.arg, []).append(None)
+        elif isinstance(n, ast.ClassDef):
+            values.setdefault(n.name, []).append(None)
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            values.setdefault(n.name, []).append(None)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for al in n.names:
+                values.setdefault((al.asname or al.name).split(".")[0], []).append(None)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            for nm in n.names:
+                values.setdefault(nm, []).append(None)
+
+    safe = set(values)
+
+    def plain(node: ast.AST | None) -> bool:
+        if node is None:
+            return False
+        if isinstance(node, (ast.Constant, ast.JoinedStr)):
+            return True
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return all(plain(e) for e in node.elts)  # a container is a plain value only when every element is
+        if isinstance(node, ast.Dict):
+            return all(k is not None and plain(k) for k in node.keys) and all(plain(v) for v in node.values)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return plain(node.elt)
+        if isinstance(node, ast.DictComp):
+            return plain(node.key) and plain(node.value)
+        if isinstance(node, ast.Name):
+            if node.id in bound:
+                return node.id in constants and node.id not in tainted  # a frame constant imported by name (``from derive import RESULTS``)
+            return node.id in values and node.id in safe
+        if isinstance(node, ast.Attribute):
+            chain: ast.AST = node
+            first = ""
+            while isinstance(chain, ast.Attribute):
+                first = chain.attr
+                chain = chain.value
+            return isinstance(chain, ast.Name) and chain.id in bound and chain.id not in tainted and first in constants
+        if isinstance(node, ast.Subscript):
+            return plain(node.value)
+        if isinstance(node, ast.BinOp):
+            return plain(node.left) and plain(node.right)
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                return f.id in _VALUE_BUILTINS and f.id not in values and f.id not in bound
+            if isinstance(f, ast.Attribute):
+                return f.attr in _PLAIN_METHODS and plain(f.value)
+        return False
+
+    while True:
+        drop = {nm for nm in safe if not all(plain(v) for v in values[nm])}
+        if not drop:
+            break
+        safe -= drop
+    return plain
 
 
 def _call_name(node: ast.Call) -> str:
@@ -103,6 +227,43 @@ def read_test(src: str) -> TestShape | None:
     exact: set[str] = set()
     prefix: set[str] = set()
     defaulted: set[str] = set()
+    module_calls: set[tuple[str, str]] = set()
+    method_calls: set[str] = set()
+    bare_calls: set[str] = set()
+    unproven_calls: set[str] = set()
+    from . import analysis_frame as _frame
+
+    constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
+    bound: dict[str, str] = {}  # a name the test imports -> the top-level module it comes from
+    origin: dict[str, str] = {}  # a name imported under another name (``from m import f as g``) -> ``f``
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                bound[a.asname or a.name.split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom):
+            for a in n.names:
+                # a relative import names its module after the dot (``from . import model``, ``from .model import f``)
+                source = (n.module or a.name) if n.level else (n.module or "")
+                bound[a.asname or a.name] = source.split(".")[0]
+                if a.asname:
+                    origin[a.asname] = a.name
+    is_value = _value_reader(tree, bound, constants)
+
+    def attribute_call(f: ast.Attribute) -> None:
+        base: ast.AST = f.value
+        first = ""
+        while isinstance(base, ast.Attribute):
+            first = base.attr
+            base = base.value
+        if isinstance(base, ast.Name) and base.id in bound:
+            if (first in constants or (not first and base.id in constants)) and is_value(f.value):
+                method_calls.add(f.attr)  # a method of a value FI wrote from the plan (``derive.RESULTS.get``)
+            else:
+                module_calls.add((bound[base.id], f.attr))
+        elif is_value(f.value):
+            method_calls.add(f.attr)
+        else:
+            unproven_calls.add(f.attr)
 
     def key(node: ast.AST) -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -122,6 +283,15 @@ def read_test(src: str) -> TestShape | None:
             name = _call_name(n)
             if name:
                 calls.add(name)
+            if isinstance(n.func, ast.Attribute):
+                attribute_call(n.func)
+            elif not isinstance(n.func, ast.Name):
+                unproven_calls.add("<computed callee>")  # ``getattr(m, "f")()``, ``fns["f"]()``: what is called is not read
+            else:
+                bare_calls.add(n.func.id)
+                if n.func.id in origin:
+                    bare_calls.add(origin[n.func.id])  # called under an alias: the name it has in its own module counts too
+                    calls.add(origin[n.func.id])
             if isinstance(n.func, ast.Attribute) and n.func.attr in ("get", "pop") and n.args:
                 key(n.args[0])
                 given = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "default"), None)
@@ -131,14 +301,11 @@ def read_test(src: str) -> TestShape | None:
             key(n.slice)
         elif isinstance(n, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in n.ops):
             key(n.left)
-    from . import analysis_frame as _frame
-
-    constants = {n for n in _frame.FRAME_NAMES if n.isupper()}
     frame = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in constants}
     frame |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names if a.name in constants}
     # a body named without being called (`derive.figure_fig1.__code__`) is still the body the test is about
     calls |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr.startswith(("derive_", "figure_"))}
-    return TestShape(calls, exact, prefix, frame, defaulted)
+    return TestShape(calls, exact, prefix, frame, defaulted, module_calls, method_calls, bare_calls, unproven_calls)
 
 
 #: Calls an assertion may make on what it tests without comparing a value: whether something is there, how many there are.
@@ -756,12 +923,23 @@ class Reach:
                       and not r.rsplit("/", 1)[-1].startswith(("test_", "fi_")) and r != "derive.py")
 
     def _plain(self, shape: TestShape) -> bool:
-        """Whether every call a test makes is a builtin, a plain string or mapping method, or reads a frame constant: no call
-        into the study's own code."""
+        """Whether every call a test makes is a builtin, a plain string or mapping method on a value of its own, or a call into a
+        module that is not the study's: no call into the study's own code. A method call on a value (``text.split(",")``) is
+        never a call into the study, whatever the study's functions are named; a bare name or a call on an imported name
+        counts when the study defines or is that name."""
         defined = set(self.derive_fns)
+        modules = {"derive"}
         for rel in self._study_files():
             defined |= set(_function_names(self.code, rel))
-        return all((c in _BUILTIN_NAMES or c in _PLAIN_METHODS) and c not in defined for c in shape.calls)
+            parts = rel.split("/")
+            modules.add(parts[0][:-3] if len(parts) == 1 else parts[0])
+        bare = shape.bare_calls | shape.unproven_calls
+        if shape.calls - bare - shape.method_calls - {n for _m, n in shape.module_calls}:
+            return False  # a name the test uses without a call this reading cannot place (``derive.figure_x.__code__``)
+        return (all((c in _BUILTIN_NAMES or c in _PLAIN_METHODS) and c not in defined for c in bare)
+                and all(c in _PLAIN_METHODS or c in _BUILTIN_NAMES for c in shape.method_calls)
+                and all(m not in modules and (c in _PLAIN_METHODS or c in _BUILTIN_NAMES) and c not in defined
+                        for m, c in shape.module_calls))
 
     def _merge(self, parts: list[Effect]) -> Effect | None:
         """The union of what several parts of one test place (a stop in any is a stop); ``None`` when one cannot tell."""
