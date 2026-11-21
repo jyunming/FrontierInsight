@@ -6,7 +6,12 @@ import json
 import types
 from pathlib import Path
 
+import pytest
+
 from core import engine_base as eb
+from core.config import (
+    Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
+)
 from core import result_checks as rc
 from generation import poster as poster_mod
 from generation import slides as slides_mod
@@ -75,7 +80,8 @@ def test_the_title_slide_gets_the_note_once_after_the_author_line_and_the_rest_i
     note = rc.marked_note(tmp_path, MARKED)
     title = text.split("\n---\n")[1]  # the first slide after the front matter
     assert text.count(note) == 1 and note in title and title.index("A. Author") < title.index(note)
-    assert text.replace("\n\n" + note, "", 1) == slides_mod._with_author_line(DECK, out)
+    assert title.index(slides_mod._NOTE_BEGIN) < title.index(note) < title.index(slides_mod._NOTE_END)
+    assert slides_mod._without_marks_note(text) == slides_mod._with_author_line(DECK, out)
     slides_mod._place_marks_note(deck, art)
     assert deck.read_text(encoding="utf-8") == text, "a deck that holds it is not touched"
     # the model wrote the title slide again without it: FI adds it last
@@ -113,3 +119,61 @@ def test_the_deliverables_read_the_papers_own_markers_which_the_delivered_copy_h
     slides_mod._place_marks_note(deck, _art(tmp_path, WORDS_ONLY))
     title = deck.read_text(encoding="utf-8").split("\n---\n")[1]
     assert "`q_mean`" in title and SENTENCES in title
+
+
+def test_a_note_gone_stale_is_taken_out_or_replaced_never_doubled(tmp_path: Path) -> None:
+    deck = tmp_path / "slides.md"
+    deck.write_text(DECK, encoding="utf-8")
+    slides_mod._place_marks_note(deck, _art(tmp_path, MARKED))
+    sentence_note = deck.read_text(encoding="utf-8")
+    _held_record(tmp_path)  # the quantities FI names changed: the text is another one
+    slides_mod._place_marks_note(deck, _art(tmp_path, MARKED))
+    changed = deck.read_text(encoding="utf-8")
+    assert changed != sentence_note and changed.count(slides_mod._NOTE_BEGIN) == 1 and "`q_mean`" in changed
+    assert "could not confirm some statements" not in changed
+    (tmp_path / ".fi" / "equation_tests.json").unlink()
+    slides_mod._place_marks_note(deck, _art(tmp_path, CLEAN))  # the marks are gone
+    assert deck.read_text(encoding="utf-8") == DECK, "nothing marked: no note, the deck as it was"
+
+
+@pytest.mark.asyncio
+async def test_a_kept_deck_is_given_the_current_note_on_a_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("generation.slides.shutil.which", lambda _n: None)
+    cfg = Config(topic="t", title="t", provider=ProviderConfig(name="openai"),
+                 engine=EngineConfig(max_iterations=1, review_loop=False),
+                 execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(kinds=["slides"], output_dir=tmp_path / "outputs"))
+    art = _art(tmp_path, MARKED)
+    art.quest_id, art.figures_dir, art.raw_state = "q", None, {}
+    (tmp_path / "slides.md").write_text(DECK, encoding="utf-8")
+    await slides_mod.SlideGenerator(cfg).generate(art, tmp_path, keep_deck=True)
+    assert (tmp_path / "slides.md").read_text(encoding="utf-8").count(slides_mod._NOTE_BEGIN) == 1
+    art = _art(tmp_path, CLEAN)  # a later pass: the claim check cleared its marks
+    art.quest_id, art.figures_dir, art.raw_state = "q", None, {}
+    await slides_mod.SlideGenerator(cfg).generate(art, tmp_path, keep_deck=True)
+    assert (tmp_path / "slides.md").read_text(encoding="utf-8") == DECK
+
+
+def test_the_note_goes_on_the_slide_that_holds_the_title_not_on_a_cover_before_it(tmp_path: Path) -> None:
+    cover = "---\nmarp: true\n---\n\n<!-- _class: lead -->\n![bg](figures/cover.png)\n\n---\n\n# Actual study title\n\n---\n\n## Next\n"
+    deck = tmp_path / "slides.md"
+    deck.write_text(cover, encoding="utf-8")
+    slides_mod._place_marks_note(deck, _art(tmp_path, MARKED))
+    slides = deck.read_text(encoding="utf-8").split("\n---\n")
+    assert slides_mod._NOTE_BEGIN not in slides[1] and slides_mod._NOTE_BEGIN in slides[2]
+    assert slides_mod._without_marks_note(deck.read_text(encoding="utf-8")) == cover
+    # no slide holds a title heading: the first slide that holds text
+    plain = "---\nmarp: true\n---\n\n## No title\n\n---\n\n## Next\n"
+    deck.write_text(plain, encoding="utf-8")
+    slides_mod._place_marks_note(deck, _art(tmp_path, MARKED))
+    assert slides_mod._NOTE_BEGIN in deck.read_text(encoding="utf-8").split("\n---\n")[1]
+
+
+def test_the_paper_note_is_not_read_by_the_writer_views(tmp_path: Path) -> None:
+    from core import paper_facts
+
+    paper = eb._mark_unconfirmed_results(MARKED, tmp_path)
+    assert "fi:marks-note" in paper
+    for view in (paper_facts.to_placeholders(paper), paper_facts.without_blocks(paper)):
+        assert "fi:marks-note" not in view and "Not confirmed" not in view and "## Abstract" in view
+    assert "fi:marks-note" in paper_facts.without_marks(paper), "the delivered paper keeps it"

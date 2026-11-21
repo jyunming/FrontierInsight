@@ -2229,6 +2229,7 @@ _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \
 #: check of the writer's text reads it (:func:`without_blocks`).
 UNCONFIRMED_MARK = "<!-- fi:unconfirmed --> (unconfirmed)<!-- /fi:unconfirmed -->"
 _UNCONFIRMED = re.compile(r"<!-- fi:unconfirmed -->.*?<!-- /fi:unconfirmed -->", re.S)
+_MARKS_NOTE = re.compile(r"<!-- fi:marks-note -->.*?<!-- /fi:marks-note -->(?:\r?\n)*", re.S)
 _ITEM_KEY = "not_done-"
 #: Where no reader sees a placeholder as text: a code block or inline code, math, an HTML comment (not FI's own markers).
 _HIDDEN = re.compile(
@@ -2338,11 +2339,18 @@ def mark_unconfirmed(markdown: str, spans: list[tuple[int, int]]) -> str:
     return out
 
 
+def without_marks_note(markdown: str) -> str:
+    """``markdown`` without FI's note under the title (``<!-- fi:marks-note -->`` block, :func:`core.engine_base._mark_unconfirmed_results`),
+    with the blank lines after it: FI's words, never the writer's. The delivered paper keeps it; every view the writer or a
+    check of the writer's text reads takes it out (:func:`to_placeholders`, :func:`without_blocks`)."""
+    return _MARKS_NOTE.sub("", markdown or "")
+
+
 def to_placeholders(markdown: str) -> str:
     """``markdown`` with every value FI filled in (between its markers) turned back into its placeholder: what the passage
     editor is given, so its edits are made on the placeholders and FI fills them again. FI's marks beside unconfirmed
-    sentences are taken out: the writer never keeps one (FI places them again from its record)."""
-    return _placeholders(without_unconfirmed(markdown))
+    sentences and its note under the title are taken out: the writer never keeps one (FI places them again from its record)."""
+    return _placeholders(without_marks_note(without_unconfirmed(markdown)))
 
 
 def _placeholders(markdown: str) -> str:
@@ -2633,10 +2641,10 @@ def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: 
 def without_blocks(markdown: str) -> str:
     """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`) taken out, markers and all: what the checks of the
     writer's own text read (the block is FI's record, printed, not a claim of the writer's). FI's marks beside unconfirmed
-    sentences are taken out too: they are FI's words, not the writer's."""
+    sentences and its note under the title are taken out too: they are FI's words, not the writer's."""
     names = "|".join(re.escape(n) for n in BLOCK_NAMES)
-    return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n", without_unconfirmed(markdown),
-                  flags=re.S)
+    return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n",
+                  without_marks_note(without_unconfirmed(markdown)), flags=re.S)
 
 
 def mask(markdown: str, token: str = " FI-FACT ") -> str:

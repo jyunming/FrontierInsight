@@ -126,10 +126,13 @@ def test_the_same_sentence_twice_is_marked_twice(tmp_path: Path) -> None:
 
 def test_no_writer_and_no_check_of_the_writers_text_reads_the_mark(tmp_path: Path) -> None:
     eng, path = _engine(tmp_path)
-    marked = _no_note(_run(eng, path))
-    assert MARK.strip() not in paper_facts.to_placeholders(marked)  # the passage editor and every rewrite
-    assert MARK.strip() not in paper_facts.without_blocks(marked)  # the claim, statistics and record checks
-    assert MARK not in _no_note(eng._kept_draft({"paper_md": str(path)}))  # type: ignore[arg-type]
+    marked = _run(eng, path)
+    assert "fi:marks-note" in marked, "the delivered paper keeps FI's note under the title"
+    kept = eng._kept_draft({"paper_md": str(path)})  # type: ignore[arg-type]
+    for view in (paper_facts.to_placeholders(marked),  # the passage editor and every rewrite
+                 paper_facts.without_blocks(marked),  # the claim, statistics and record checks
+                 kept):  # the draft a write that keeps it hands on
+        assert MARK.strip() not in view and "fi:marks-note" not in view and "Not confirmed" not in view
 
 
 def test_a_rendered_paper_keeps_its_marks(tmp_path: Path) -> None:
