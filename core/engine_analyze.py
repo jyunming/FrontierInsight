@@ -1187,7 +1187,7 @@ class AnalyzeStageMixin:
         # What an earlier pass of the gate decided about an issue is decided again on this run's code and results.
         stale = [i for i in _code_findings.issues_of(record).values()
                  if isinstance(i, dict) and any([i.pop("at_gate", None), i.pop("gate_error", None),
-                                                 i.pop("held_at_failure", None)])]
+                                                 i.pop("held_at_failure", None), i.pop("capture_unavailable", None)])]
         if stale:
             _code_review.save(self.quest_root, record)
         names = _code_review.headline_names(state.get("design"), self._protocol_block(state))
@@ -1267,16 +1267,13 @@ class AnalyzeStageMixin:
                 self._log.warning("[evidence_gate] the test that showed %s is no longer on disk (%s): nothing shows the "
                                   "fault now, and it does not stop the quest", issue.get("id"), rel or "no test recorded")
                 continue
-            runs = [await self._rerun_finding_test(rel)]
-            if runs[0] is None or runs[0].status != "pass":
-                # a test that does not pass is run once more, this time recording what the study's code gave it (a record of
-                # names FI can compare with the names the test looks for); a run that then gives no answer leaves the first one
-                runs.append(await self._rerun_finding_test(rel, capture=True))
-            held = getattr(runs[-1], "held", None) if len(runs) > 1 and runs[-1] is not None and runs[-1].status == "fail" else None
             for target in {id(x): x for x in (issue, saved) if isinstance(x, dict)}.values():
                 target.pop("held_at_failure", None)
-                if isinstance(held, dict):
-                    target["held_at_failure"] = held
+                target.pop("capture_unavailable", None)
+            # Only plain runs decide pass, fail and flakiness (never a run that records what the study did)
+            runs = [await self._rerun_finding_test(rel)]
+            if runs[0] is None or runs[0].status != "pass":
+                runs.append(await self._rerun_finding_test(rel))  # a test that does not pass is run once more
             # a pass in either run clears it (a flaky test stops nothing); else a failing assertion in either run stands
             # (an error in the other run does not hide it); else an error; else no answer at all
             given = [r for r in runs if r is not None]
@@ -1292,6 +1289,32 @@ class AnalyzeStageMixin:
             if run.status == "pass":
                 self._log.info("[evidence_gate] the test that showed %s passes on the code that ran", issue.get("id"))
             elif run.status == "fail":
+                # The failure is confirmed. One more run records what the study did, used only to tell whether it comes from
+                # a value the study returned (core/finding_repair.py::failure_from_study): the test failed before any code of
+                # the study ran (it shows nothing, as a pass), or it looks for an output the study does not give (placed
+                # below by the names it looks for, as a part not done). A recording that cannot be had leaves the verdict.
+                cap = await self._rerun_finding_test(rel, capture=True)
+                held = getattr(cap, "held", None) if cap is not None and cap.status == "fail" else None
+                if not isinstance(held, dict):
+                    held = None
+                why = self._study_failure(rel, held)
+                if why.kind == _finding_repair.NAME_NOT_GIVEN:
+                    held = _finding_repair.returned_only(held)
+                for target in {id(x): x for x in (issue, saved) if isinstance(x, dict)}.values():
+                    if held is not None:
+                        target["held_at_failure"] = held
+                    else:
+                        target["capture_unavailable"] = True
+                    if why.kind == _finding_repair.NO_STUDY_CALL:
+                        target.update(demonstrated=False, outcome=_code_findings.NOT_DEMONSTRATED, errored_only=False,
+                                      reason="no code of the study ran before its test failed: the test fails on its own "
+                                             "input and shows nothing about the study")
+                if why.kind == _finding_repair.NO_STUDY_CALL:
+                    self._log.warning("[evidence_gate] the test that showed %s failed before any code of the study ran: it "
+                                      "shows nothing and does not stop the quest", issue.get("id"))
+                    if record:
+                        _code_review.save(self.quest_root, record)
+                    continue
                 verdicts.append((issue, "its test still fails on it"))
             else:
                 # An error shows nothing, wherever it was raised (core/finding_repair.py): recorded, never a stop and never
@@ -1674,20 +1697,23 @@ class AnalyzeStageMixin:
         async def ask(prompt: str, who: str, kind: str) -> str:
             return await self._chat(prompt, node="implement.finding_test")
 
-        async def run_tests(paths: list[str]) -> dict[str, Any]:
+        async def run_tests(paths: list[str], capture: bool = False) -> dict[str, Any]:
             out: dict[str, Any] = {}
             for path in paths:
-                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path])], timeout_s=180,
-                                                         env=self._finding_test_env())
+                _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", [path], capture=capture)],
+                                                         timeout_s=180, env=self._finding_test_env())
                 out.update(_finding_repair.parse_runs(text, [path]))
             return out
+
+        async def capture_tests(paths: list[str]) -> dict[str, Any]:
+            return await run_tests(paths, True)
 
         async def nothing() -> dict[str, str]:
             return {}
 
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
-            ask=ask, run_tests=run_tests, snapshot=nothing, static=lambda: {}, keeps=lambda old, new, rel: "",
+            ask=ask, run_tests=run_tests, capture_tests=capture_tests, snapshot=nothing, static=lambda: {}, keeps=lambda old, new, rel: "",
             prompts=self._prompts, topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",
             equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=self._package_in_use(state) or "")
@@ -2300,6 +2326,14 @@ class AnalyzeStageMixin:
             self._log.warning("[evidence_gate] %s could not be read for the rerun's answer (%r)", issue.get("id"), exc)
             return False
         return True
+
+    def _study_failure(self, rel: str, held: Any) -> "_finding_repair.StudyFailure":
+        """:func:`core.finding_repair.failure_from_study` for the finding's test as it is on disk; nothing when it cannot be read."""
+        try:
+            src = (self.quest_root / rel).read_text(encoding="utf-8")
+            return _finding_repair.failure_from_study(src, held, _finding_repair.study_modules(self.quest_root / "code"))
+        except Exception:  # noqa: BLE001 - what cannot be read is judged as before
+            return _finding_repair.StudyFailure()
 
     async def _rerun_finding_test(self, rel: str, capture: bool = False) -> Any:
         """One finding test run on the code as it is, in its own process: its ``TestRun``, or ``None`` when the process

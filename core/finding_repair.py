@@ -107,6 +107,9 @@ def judged(name, e, path):
 
 HELD = {{}}
 
+def IMPORTING(on):
+    pass
+
 def RUN(fn, path):
     fn()
 {capture}
@@ -117,7 +120,11 @@ for given in {paths!r}:
     try:
         spec = importlib.util.spec_from_file_location("finding_test_" + str(len(out)), path)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        IMPORTING(True)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            IMPORTING(False)
     except BaseException as e:
         results.append(judged("(import)", e, path))
     else:
@@ -210,16 +217,22 @@ def runs_nothing_on_import(path: Path) -> bool:
 #: them). Only built-in containers and NumPy arrays of exactly their type (compared by identity) are read, never by
 #: calling a method of the value or reading an attribute of its class: any other object is not a record of names. ``record`` says whether a returned
 #: value is a record of names at all (a bare number, a list or a plain array is not), and ``complete`` whether FI listed
-#: everything: a value it cannot list, too many values or names, or nesting too deep make it false.
+#: everything: a value it cannot list, too many values or names, or nesting too deep make it false (``returned_complete``:
+#: the same for the values the study returned alone, whatever the test's own locals hold; a dict subclass, such as FI's
+#: trial record, is a record, a NumPy number is a bare number, and a return past the 200th that is a record of names already
+#: listed keeps it true). ``calls`` / ``inits``: how many calls into the study's code returned to the test, and how many of
+#: them were a constructor (not listed in ``returned``); ``call_lines``: the test's lines that made them.
 #: ``failures``: per failing test function, the line its assertion failed on and the names of that frame that held nothing
 #: (``None`` or an empty container) at that moment.
 CAPTURE = '''
-import collections as _coll, types as _types, abc as _abcmeta
+import collections as _coll, types as _types, abc as _abcmeta, threading, re as _re
 try:  # FI's own import, made before any test runs: a NumPy array is read only when it is exactly this type
     import numpy as _np
     _NDARRAY = _np.ndarray
+    _NPSCALAR = _np.generic
 except Exception:
     _NDARRAY = None
+    _NPSCALAR = None
 
 # Only inert values of known types are read, by their type's own built-in methods (dict.items(value), never value.items()).
 # A type is compared by identity only (`t is dict`): `t in (...)` could run a metaclass's __eq__, and reading an attribute of
@@ -238,9 +251,26 @@ def _one_of(t, types):
             return True
     return False
 
+def _is_dict(t):
+    # a dict or a subclass of it (FI's own trial record is one): by identity in the type's own method resolution order,
+    # never by isinstance, which can read __class__ of a foreign object, and never by ==, which can run a metaclass hook
+    for base in type.__getattribute__(t, "__mro__"):
+        if base is dict:
+            return True
+    return False
+
+def _is_npscalar(t):
+    # a NumPy number (np.float64, np.int64, np.bool_): an inert value, like a bare number
+    if _NPSCALAR is None:
+        return False
+    for base in type.__getattribute__(t, "__mro__"):
+        if base is _NPSCALAR:
+            return True
+    return False
+
 def _skipped(value):
     t = type(value)
-    return _one_of(t, _PLAIN) or _one_of(t, _SKIP)
+    return _one_of(t, _PLAIN) or _one_of(t, _SKIP) or _is_npscalar(t)
 
 def _key(k, out, state):
     if _one_of(type(k), _KEYS):
@@ -262,7 +292,7 @@ def _names(value, out, state, depth=0):
     t = type(value)
     if _skipped(value):
         return
-    if _one_of(t, _MAPS):
+    if _one_of(t, _MAPS) or _is_dict(t):
         pairs = list(dict.items(value))
         for k, v in pairs[:2000]:
             _key(k, out, state)
@@ -294,41 +324,233 @@ def _names(value, out, state, depth=0):
 
 def _is_record(value):
     t = type(value)
-    if _one_of(t, _MAPS) or t is _types.SimpleNamespace:
+    if _one_of(t, _MAPS) or _is_dict(t) or t is _types.SimpleNamespace:
         return True
     return _NDARRAY is not None and t is _NDARRAY and bool(_array_names(value))
 
 def _empty(value):
     t = type(value)
-    return value is None or (_one_of(t, _MAPS) or _one_of(t, _SEQS)) and len(value) == 0
+    if value is None:
+        return True
+    if _one_of(t, _MAPS) or _is_dict(t):
+        return dict.__len__(value) == 0
+    return _one_of(t, _SEQS) and len(value) == 0
+
+STUDY = {"funcs": 0, "unclear": False, "on": False}
+_IN_STUDY = {}
+_ROOT = os.path.dirname(os.path.abspath(code_dir))
+_RESULT_DIRS = ("results", "raw", "data", "output", "outputs")
+_RESULT_EXT = (".json", ".csv", ".npy", ".npz", ".pkl", ".pickle", ".txt", ".parquet", ".h5", ".hdf5", ".dat")
+_CHILD = ("subprocess.Popen", "_posixsubprocess.fork_exec", "os.system", "os.posix_spawn", "os.spawn", "os.exec", "_winapi.CreateProcess")
+_FORKS = ("os.fork", "os.forkpty")
+_PYTHON = _re.compile("^(python|pythonw|py|pypy)[0-9.]*([.]exe)?$", _re.I)
+
+def _words(x, out, depth=0):
+    # the strings of an argument (a program, a command line or an argument list), split into words
+    if depth > 4:
+        return
+    if type(x) is bytes:
+        x = os.fsdecode(x)
+    if type(x) is str:
+        out.append(x)
+        out.extend(w.strip(chr(34) + chr(39)) for w in x.split())
+    elif isinstance(x, (list, tuple)):
+        for y in x:
+            _words(y, out, depth + 1)
+    elif hasattr(x, "__fspath__"):
+        _words(os.fspath(x), out, depth + 1)
+
+def _runs_python(args):
+    # a child process counts only when its program or an argument names a Python interpreter (or this one)
+    out = []
+    for a in args:
+        _words(a, out)
+    for w in out:
+        if w == sys.executable or _PYTHON.match(os.path.basename(w.replace(chr(92), "/"))):
+            return True
+    return any(sys.executable in w for w in out)
+
+def _audit(event, args):
+    # a hook cannot be removed, so it acts only while the test file is imported or a test runs. What it flags is something
+    # the recording cannot watch: a child process, or a stored result file read from the quest folder.
+    if not STUDY["on"]:
+        return
+    try:
+        if event in _FORKS:
+            STUDY["unclear"] = True
+        elif event in _CHILD or event.startswith("os.exec") or event.startswith("os.spawn"):
+            if _runs_python(args):
+                STUDY["unclear"] = True
+        elif event == "open" and args:
+            path, mode = args[0], (args[1] if len(args) > 1 else None)
+            if type(path) is bytes:
+                path = os.fsdecode(path)
+            if type(path) is not str:
+                return
+            if type(mode) is str and any(c in mode for c in "wax+"):
+                return
+            try:
+                rel = os.path.relpath(os.path.abspath(path), _ROOT)
+            except ValueError:
+                return  # another drive, or a device such as nul: not under the quest folder
+            if rel.startswith(".."):
+                return
+            parts = rel.replace(os.sep, "/").split("/")
+            if parts[0] in (".venv", ".fi", "code", "paper", "figures") or "__pycache__" in parts or "site-packages" in parts:
+                return
+            if rel.lower().endswith(_RESULT_EXT) or parts[0] in _RESULT_DIRS:
+                if not rel.lower().endswith((".py", ".pyc", ".pyd", ".so", ".dll")):
+                    STUDY["unclear"] = True
+    except Exception:
+        STUDY["unclear"] = True
+
+sys.addaudithook(_audit)
+
+def _in_study(filename):
+    # whether a code object's file is under the quest's code/ (cached by file name)
+    hit = _IN_STUDY.get(filename)
+    if hit is None:
+        try:
+            hit = os.path.abspath(filename).startswith(code_dir + os.sep)
+        except Exception:
+            hit = True
+        _IN_STUDY[filename] = hit
+    return hit
+
+def _count_call(frame):
+    # a function of the study's code (a def, a lambda or a comprehension; not a module or class body) started: study code ran
+    code = frame.f_code
+    if code.co_flags & 1 and _in_study(code.co_filename):
+        STUDY["funcs"] += 1
+
+def _import_watch(frame, event, arg):
+    if event == "call":
+        _count_call(frame)
+
+def IMPORTING(on):
+    # study code that runs while the test file is imported (a module that calls functions as it loads) counts too
+    STUDY["on"] = bool(on)
+    sys.setprofile(_import_watch if on else None)
+    threading.setprofile(_import_watch if on else None)
+
+def _defs_only(path):
+    import ast as _ast
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tree = _ast.parse(fh.read())
+    except Exception:
+        return False
+    for stmt in tree.body:
+        if isinstance(stmt, (_ast.Import, _ast.ImportFrom, _ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            continue
+        if isinstance(stmt, _ast.Expr) and isinstance(stmt.value, _ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if (isinstance(stmt, _ast.If) and not stmt.orelse and isinstance(stmt.test, _ast.Compare)
+                and isinstance(stmt.test.left, _ast.Name) and stmt.test.left.id == "__name__"):
+            continue
+        return False
+    return True
+
+def _compiled_origin(v):
+    # a builtin or compiled function, or a class from a compiled module (not the interpreter's own builtins)
+    t = type(v)
+    if t is _types.BuiltinFunctionType:
+        name = getattr(v, "__module__", None)
+    elif t is type or _is_type_instance(t):
+        name = type.__getattribute__(v, "__dict__").get("__module__")
+        if type(name) is not str:
+            return False
+        mod = sys.modules.get(name)
+        f = dict.get(mod.__dict__, "__file__") if type(mod) is _types.ModuleType else None
+        return type(f) is str and f.lower().endswith((".pyd", ".so"))
+    else:
+        return False
+    if type(name) is not str or name == "builtins":
+        return False
+    return True
+
+def _is_type_instance(t):
+    for base in type.__getattribute__(t, "__mro__"):
+        if base is type:
+            return True
+    return False
+
+def _reexports_compiled(m):
+    # code/study.py that is only `from native_backend import trial`: the study's work runs in compiled code the profiler cannot see
+    for v in list(dict.values(m.__dict__)):
+        if _compiled_origin(v):
+            return True
+    return False
+
+def _study_ran():
+    # False only when no function of the study's code started and every study module that was loaded holds nothing but
+    # imports and definitions; anything unclear is True (the finding then stays shown)
+    try:
+        if STUDY["funcs"] > 0 or STUDY["unclear"]:
+            return True
+        for m in list(sys.modules.values()):
+            if type(m) is not _types.ModuleType:
+                continue
+            f = dict.get(m.__dict__, "__file__")
+            if type(f) is str and _in_study(f):
+                if not _defs_only(f) or _reexports_compiled(m):
+                    return True
+        return False
+    except Exception:
+        return True
 
 def RUN(fn, path):
+    # ``state`` is what FI listed of the values the study returned; ``held_state`` what it listed of the test's own locals
+    # (a generator the test holds there must not decide whether the study's values were listed completely)
     returned, state = [], {"seen": 0, "complete": True}
+    seen_names, call_lines, counts = set(), set(), {"calls": 0, "inits": 0, "indirect": 0}
     test_file = os.path.abspath(path)
     inside = code_dir + os.sep
 
     def watch(frame, event, arg):
+        if event == "call":
+            _count_call(frame)
+            code, back = frame.f_code, frame.f_back
+            if code.co_flags & 1 and _in_study(code.co_filename) and (
+                    back is None or not (os.path.abspath(back.f_code.co_filename) == test_file or _in_study(back.f_code.co_filename))):
+                counts["indirect"] += 1  # study code called by something that is neither the test nor the study (a wrapper)
+            return
         if event != "return" or frame.f_back is None:
             return
         if os.path.abspath(frame.f_back.f_code.co_filename) != test_file:
             return
         if not os.path.abspath(frame.f_code.co_filename).startswith(inside):
             return
+        counts["calls"] += 1
+        call_lines.add(frame.f_back.f_lineno)
         if frame.f_code.co_name == "__init__" and arg is None:
-            return
-        if len(returned) >= 200:
-            state["complete"] = False
+            counts["inits"] += 1
             return
         names = set()
+        if len(returned) >= 200:
+            # past the 200 listed returns: one that is a record holding only names already listed changes nothing; any
+            # other value makes the listing incomplete
+            extra = {"seen": 0, "complete": True}
+            _names(arg, names, extra)
+            if not (extra["complete"] and _is_record(arg) and names <= seen_names):
+                state["complete"] = False
+            return
         _names(arg, names, state)
-        returned.append({"function": frame.f_code.co_name, "record": _is_record(arg), "names": sorted(names)})
+        seen_names.update(names)
+        returned.append({"function": frame.f_code.co_name, "record": _is_record(arg), "names": sorted(names),
+                         "line": frame.f_back.f_lineno})
 
     sys.setprofile(watch)
+    threading.setprofile(watch)
+    STUDY["on"] = True
     try:
         fn()
     except AssertionError as e:
+        if sys.getprofile() is not watch:
+            STUDY["unclear"] = True
         sys.setprofile(None)
-        held = set()
+        threading.setprofile(None)
+        held, held_state = set(), {"seen": 0, "complete": True}
         for r in returned:
             held.update(r["names"])
         tb, line, empty = e.__traceback__, 0, []
@@ -337,19 +559,23 @@ def RUN(fn, path):
             if os.path.abspath(frame.f_code.co_filename) == test_file:
                 local = dict(frame.f_locals)
                 for v in list(local.values()):
-                    _names(v, held, state)
+                    _names(v, held, held_state)
                 # the frame the assertion failed in (the innermost of the test file): its line, and its names that hold
                 # nothing (None or an empty container)
                 line = tb.tb_lineno
                 empty = sorted(k for k, v in local.items() if _empty(v))
             tb = tb.tb_next
-        if len(held) > 5000:
+        if len(held) > 5000 or len(seen_names) > 5000:
             state["complete"] = False
-        HELD[id(e)] = {"returned": returned, "names": sorted(held)[:5000], "complete": state["complete"],
+        HELD[id(e)] = {"returned": returned, "names": sorted(held)[:5000],
+                       "complete": state["complete"] and held_state["complete"], "returned_complete": state["complete"],
+                       "study_ran": _study_ran(), "calls": counts["calls"], "inits": counts["inits"], "indirect": counts["indirect"], "call_lines": sorted(call_lines)[:500],
                        "failures": [{"line": line, "empty": empty}]}
         raise
     finally:
+        STUDY["on"] = False
         sys.setprofile(None)
+        threading.setprofile(None)
 '''
 
 
@@ -420,6 +646,10 @@ def _held_of(fails: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {"returned": [x for h in helds for x in (h.get("returned") or [])],
             "names": sorted({str(n) for h in helds for n in (h.get("names") or [])}),
             "complete": all(h.get("complete") is True for h in helds),
+            "returned_complete": all(h.get("returned_complete") is True for h in helds),
+            "study_ran": any(h["study_ran"] for h in helds) if all(isinstance(h.get("study_ran"), bool) for h in helds) else None,
+            "calls": sum(int(h.get("calls") or 0) for h in helds), "inits": sum(int(h.get("inits") or 0) for h in helds), "indirect": sum(int(h.get("indirect") or 0) for h in helds),
+            "call_lines": sorted({int(n) for h in helds for n in (h.get("call_lines") or []) if isinstance(n, int)}),
             "failures": [x for h in helds for x in (h.get("failures") or [])]}
 
 
@@ -472,6 +702,242 @@ def swallowed_call(text: str) -> str:
                     "caught there turns into a failed assertion and shows nothing about the values; call the code "
                     "directly (or raise again in the except) and assert on the values it returns")
     return ""
+
+
+#: What :func:`failure_from_study` says: the test failed before any call into the study returned and reads nothing of it
+#: (``NO_STUDY_CALL``), or it looks for an output name that no record the study returned holds (``NAME_NOT_GIVEN``).
+NO_STUDY_CALL = "no_study_call"
+NAME_NOT_GIVEN = "name_not_given"
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass
+class StudyFailure:
+    """What :func:`failure_from_study` found: ``kind`` is ``""`` (the failure may come from a value the study returned),
+    :data:`NO_STUDY_CALL` or :data:`NAME_NOT_GIVEN`; ``names``: for the latter, the names the test looks for and the study
+    never returned; ``why``: one plain sentence."""
+
+    kind: str = ""
+    names: list[str] = field(default_factory=list)
+    why: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.kind)
+
+
+def study_modules(code: Path) -> set[str]:
+    """The names a test imports the study's code by: its scripts by file name and its packages by folder name."""
+    names: set[str] = set()
+    try:
+        for p in code.iterdir():
+            if p.suffix == ".py":
+                names.add(p.stem)
+            elif p.is_dir() and not p.name.startswith((".", "__")):
+                names.add(p.name)
+    except OSError:
+        pass
+    return names
+
+
+def _in_span(node: ast.AST, lines: set[int]) -> bool:
+    a, b = getattr(node, "lineno", 0), getattr(node, "end_lineno", 0)
+    return any(a <= n <= b for n in lines)
+
+
+def _name_ids(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _string_probes(node: ast.AST) -> set[str]:
+    return {c.value for c in ast.walk(node)
+            if isinstance(c, ast.Constant) and isinstance(c.value, str) and _NAME.match(c.value) and len(c.value) >= 3}
+
+
+def _assertion_reads_study(tree: ast.Module, modules: set[str], call_lines: set[int]) -> dict[int, bool]:
+    """For each ``assert`` statement of the test (by its first line): whether what it tests comes from the study, by data
+    flow in the test's own text: it reads an attribute of a study module or a name imported from one, or a value (a name,
+    a call of a function of the test that reaches one) worked out from such, or from a call that returned a value to the
+    test on one of ``call_lines``."""
+    aliases: set[str] = set()
+    from_names: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            aliases.update((a.asname or a.name.split(".")[0]) for a in n.names if a.name.split(".")[0] in modules)
+        elif isinstance(n, ast.ImportFrom) and n.module and n.module.split(".")[0] in modules:
+            for a in n.names:
+                from_names.add(a.asname or a.name)
+                aliases.add(a.asname or a.name)  # ``from pkg import submodule`` binds a module
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    tainted: set[str] = set()
+    touch: set[str] = set()
+
+    def reads_study(expr: ast.AST) -> bool:
+        for n in ast.walk(expr):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in aliases:
+                return True
+            if isinstance(n, ast.Name) and n.id in from_names:
+                return True
+        return False
+
+    def from_study(expr: ast.AST | None) -> bool:
+        if expr is None:
+            return False
+        if reads_study(expr):
+            return True
+        if any(isinstance(c, ast.Call) for c in ast.walk(expr)) and _in_span(expr, call_lines):
+            return True
+        if _name_ids(expr) & tainted:
+            return True
+        return any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in touch for c in ast.walk(expr))
+
+    def base(t: ast.AST) -> str | None:
+        while isinstance(t, (ast.Subscript, ast.Attribute, ast.Starred)):
+            t = t.value
+        return t.id if isinstance(t, ast.Name) else None
+
+    for _ in range(6):
+        before = (len(tainted), len(touch))
+        for name, f in funcs.items():
+            if _in_span(f, call_lines) or reads_study(f):
+                touch.add(name)
+        for n in ast.walk(tree):
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(n, ast.Assign):
+                targets, value = list(n.targets), n.value
+            elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+                targets, value = [n.target], n.value
+            elif isinstance(n, (ast.For, ast.comprehension)):
+                targets, value = [n.target], n.iter
+            elif isinstance(n, ast.NamedExpr):
+                targets, value = [n.target], n.value
+            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                targets, value = [n.optional_vars], n.context_expr
+            elif isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute):
+                if any(from_study(a) for a in n.value.args) and base(n.value.func.value):
+                    tainted.add(str(base(n.value.func.value)))
+            if value is not None and from_study(value):
+                for t in targets:
+                    tainted.update(x.id for x in ast.walk(t) if isinstance(x, ast.Name))
+                    if base(t):
+                        tainted.add(str(base(t)))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in funcs:
+                if any(from_study(a) for a in [*n.args, *[k.value for k in n.keywords]]):
+                    args = funcs[n.func.id].args
+                    tainted.update(p.arg for p in [*args.posonlyargs, *args.args, *args.kwonlyargs])
+        if (len(tainted), len(touch)) == before:
+            break
+    return {n.lineno: from_study(n.test) for n in ast.walk(tree) if isinstance(n, ast.Assert)}
+
+
+def _failing_assert(tree: ast.Module, line: int) -> ast.Assert | None:
+    found = [n for n in ast.walk(tree) if isinstance(n, ast.Assert) and n.lineno <= line <= (n.end_lineno or n.lineno)]
+    return min(found, key=lambda n: (n.end_lineno or n.lineno) - n.lineno) if found else None
+
+
+def _absent_probes(tree: ast.Module, node: ast.Assert, line: int, empty: set[str], have: set[str]) -> list[str]:
+    """The names the failing assertion looks for (a string in it, in the statements that define the names it reads, or one a
+    caller passes for a parameter of the function it sits in) that no name in ``have`` holds, when the assertion is a
+    membership test, a ``.get`` lookup or a check on a value that held nothing; else ``[]``."""
+    want = _name_ids(node.test) | empty
+    scope = [node.test]
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Assign, ast.AugAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            if any(isinstance(x, ast.Name) and x.id in want for t in targets for x in ast.walk(t)):
+                scope.append(n.value)
+    probes: set[str] = set()
+    for part in scope:
+        probes |= _string_probes(part)
+    chain = set(want)
+    for part in scope:
+        chain |= _name_ids(part)
+    host: ast.AST | None = None
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.lineno <= line <= (fn.end_lineno or fn.lineno):
+            if host is None or fn.lineno >= host.lineno:  # type: ignore[attr-defined]
+                host = fn
+    if isinstance(host, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        params = [p.arg for p in [*host.args.posonlyargs, *host.args.args]]
+        for c in ast.walk(tree):
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == host.name:
+                passed = {params[i]: x for i, x in enumerate(c.args) if i < len(params)}
+                passed.update({k.arg: k.value for k in c.keywords if k.arg})
+                for pname, x in passed.items():
+                    if pname in chain:
+                        probes |= _string_probes(x)
+    missing = sorted(p for p in probes if not any(p in h for h in have))
+    looks = (bool(_name_ids(node.test) & empty)
+             or any(isinstance(c, ast.Compare) and any(isinstance(o, (ast.In, ast.NotIn)) for o in c.ops)
+                    for c in ast.walk(node.test))
+             or any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "get"
+                    for c in ast.walk(node.test)))
+    return missing if looks else []
+
+
+def returned_only(held: Any) -> Any:
+    """``held`` with the names and the completeness of what the study returned alone: the test's own locals (its input, a
+    name it guessed) are no part of what the study gave, so they are not compared with. A record that does not say it is
+    returned as it is."""
+    if not isinstance(held, dict) or not isinstance(held.get("returned_complete"), bool):
+        return held
+    names = sorted({str(n) for r in held.get("returned") or [] if isinstance(r, dict) for n in r.get("names") or []})
+    return {**held, "names": names[:5000], "complete": held["returned_complete"]}
+
+
+def failure_from_study(src: str, held: Any, modules: Iterable[str]) -> StudyFailure:
+    """Whether a finding test's failing assertion comes from a value the study returned, read from the test's text and from
+    what FI recorded when it ran it (``held``: :data:`CAPTURE`; ``modules``: :func:`study_modules`). A failure that does
+    not is no proof of a fault in the study:
+
+    * ``NO_STUDY_CALL``: no code of the study ran before the assertion failed. FI saw it while the test ran (the
+      capture, :data:`CAPTURE`): no function under ``code/`` started anywhere in the call tree (through the test's own
+      helpers, a wrapper module or a fixture too, in any thread), at import time or later, and every study module the test
+      loaded holds only imports and definitions. The test's own input or a literal failed. Anything unclear (no record of
+      it, a module whose top level does more than define, a child process, a stored result file read from the quest
+      folder, a compiled function the study re-exports, a replaced profiler) is ``StudyFailure()``.
+    * ``NAME_NOT_GIVEN``: the assertion depends on the study (read from the test's text), FI listed everything the study returned (every value a record
+      of names), the assertion is a membership test, a ``.get`` lookup or a check on a value that held nothing, and a name
+      it looks for is held by no name the study returned. Only the names the study returned are compared, never the test's
+      own locals. The test reads an output the study does not give, which is a part of the plan not done, not a wrong value.
+
+    Anything that cannot be read (no record, a test that does not parse, a failing line that is not an assertion, a record
+    FI did not list in full) is ``StudyFailure()``: the failure counts as before."""
+    try:
+        if not isinstance(held, dict) or not isinstance(held.get("calls"), int):
+            return StudyFailure()
+        failures = [f for f in held.get("failures") or [] if isinstance(f, dict) and isinstance(f.get("line"), int)]
+        if not failures:
+            return StudyFailure()
+        tree = ast.parse(src)
+        mods = set(modules)
+        lines = {int(n) for n in held.get("call_lines") or [] if isinstance(n, int)}
+        nodes = [_failing_assert(tree, int(f["line"])) for f in failures]
+        if any(n is None for n in nodes):
+            return StudyFailure()
+        asserts: list[ast.Assert] = [n for n in nodes if n is not None]
+        if held.get("study_ran") is False:
+            return StudyFailure(NO_STUDY_CALL, [], "no code of the study ran before its assertion failed: the test's own "
+                                                   "input failed")
+        reads = _assertion_reads_study(tree, mods, lines)
+        returned = [r for r in held.get("returned") or [] if isinstance(r, dict)]
+        if (held.get("returned_complete") is not True or held.get("inits") != 0 or held.get("indirect") != 0 or not returned
+                or not all(r.get("record") is True for r in returned)):
+            return StudyFailure()
+        have = {str(n) for r in returned for n in r.get("names") or []}
+        missing: set[str] = set()
+        for f, node in zip(failures, asserts):
+            if not reads.get(node.lineno):
+                return StudyFailure()
+            found = _absent_probes(tree, node, int(f["line"]), {str(x) for x in f.get("empty") or []}, have)
+            if not found:
+                return StudyFailure()
+            missing.update(found)
+        names = sorted(missing)
+        return StudyFailure(NAME_NOT_GIVEN, names, "its test looks for " + ", ".join(names[:4])
+                            + ", which nothing the study returned holds: an output the study does not give")
+    except Exception:  # noqa: BLE001 - what cannot be read is judged as before
+        return StudyFailure()
 
 
 def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -1858,6 +2324,10 @@ class Env:
     equations: str
     scrub: Callable[[str], str]
     log: Any
+    #: Like ``run_tests``, a failing test also records what the study's code did (``TestRun.held``, :data:`CAPTURE`). Run once,
+    #: after plain runs confirmed the failure, and used only to classify it; never to decide pass, fail or flakiness. ``None``
+    #: when the caller cannot: the test is then judged by its failure alone.
+    capture_tests: Callable[[list[str]], Awaitable[dict[str, TestRun]]] | None = None
     package: str = ""
     other: str = ""  # the name of the other model; empty when there is none
     code_model: str = ""
@@ -2074,6 +2544,25 @@ def _error_problem(detail: str) -> str:
             "computes, on the current code; an exception in the test itself shows nothing.")
 
 
+async def _study_failure(env: Env, issue: dict[str, Any], path: str, text: str) -> StudyFailure:
+    """What a failing test is, once its failure is confirmed by plain runs (the only runs that decide pass, fail and
+    flakiness): one more run that records what the study did (:attr:`Env.capture_tests`), used only for
+    :func:`failure_from_study`. A recording that cannot be had (no way to record, it ran past its time, it errored or it did
+    not fail) leaves the plain verdict as it is, is noted as ``capture_unavailable`` in the issue, and B1/B3 do not fire."""
+    run = None
+    if env.capture_tests is not None:
+        try:
+            run = (await env.capture_tests([path])).get(path)
+        except Exception:  # noqa: BLE001 - a recording that cannot be made decides nothing
+            run = None
+    if run is None or run.status != "fail" or not isinstance(run.held, dict):
+        if env.capture_tests is not None:
+            issue["capture_unavailable"] = True
+        return StudyFailure()
+    issue.pop("capture_unavailable", None)
+    return failure_from_study(text, run.held, study_modules(env.code))
+
+
 async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -> TestRun | None:
     """A shown issue's test now errors (in its own code or inside the program it called on made-up data): the code model is asked ONCE more, shown
     the error, for a test written as an assertion about the values the code computes, and it is run twice. Its
@@ -2121,8 +2610,14 @@ async def ask_again(env: Env, issue: dict[str, Any], rel: str, error: TestRun) -
     run = first
     if first.status == "fail":
         second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
-        if second.status != "fail":
+        run = second if second.status != "fail" else first
+        if second.status == "fail":
             run = second
+            if (why := await _study_failure(env, issue["asked_again"], path, text)).kind == NO_STUDY_CALL:
+                # its assertion failed on the test's own input: it shows nothing about the study
+                issue["asked_again"].update(test=path, outcome="refused: " + why.why, detail=run.detail[:300], at=run.at or error.at)
+                env.save()
+                return None
     issue["asked_again"].update(test=path, outcome=run.status, detail=run.detail[:300], at=run.at or error.at)
     if run.status == "fail":
         issue.update(test=path, failure=run.detail[:300], failure_kind=_issues.ASSERTION, assertion=run.line[:200],
@@ -2181,9 +2676,25 @@ async def demonstrate(env: Env, issue: dict[str, Any], rel: str) -> bool:
             ran = True
             second = (await env.run_tests([path])).get(path) or TestRun("error", "not run")
             if second.status == "fail":
+                why = await _study_failure(env, issue, path, text)
+                if why.kind == NO_STUDY_CALL:
+                    # the assertion failed on the test's own input, before the study returned anything: no proof. Asked for
+                    # once more with the reason, and a second such test ends the tries
+                    last = why.why
+                    if issue.get("no_study_call"):
+                        break
+                    issue["no_study_call"] = True
+                    detail = (why.why + ". Call the study's code and assert on the values it returns (what you assert on "
+                              "must come from a call into the code)")
+                    continue
                 # Only a test's own assertion about values shows a fault; what failed is kept, for the gate after the run.
                 issue.update(demonstrated=True, test=path, failure=first.detail[:300], failure_kind=_issues.ASSERTION,
                              assertion=first.line[:200], assertion_at=first.at)
+                if why.kind == NAME_NOT_GIVEN:
+                    # it looks for an output the study does not give: the gate places it as a part not done (core/shown_reach.py)
+                    issue["absent_output"] = why.names[:8]
+                else:
+                    issue.pop("absent_output", None)
                 env.save()
                 return True
             detail = "the test did not fail on a second run, so it is not deterministic: fix the seeds and make it assert one thing"

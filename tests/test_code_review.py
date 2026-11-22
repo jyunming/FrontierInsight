@@ -30,7 +30,7 @@ STATE: dict[str, Any] = {"design": DESIGN, "exec_result": {"returncode": 0}}
 WITH_PLAN: dict[str, Any] = {**STATE, "design": {**DESIGN, "protocol": PROTOCOL}}
 SIM_FULL = "# E1\ndef run_cell(cell):\n    return {'quality': 1.0}\n"
 SIM_OTHER = "# E1\ndef run_cell(cell):\n    return {'quality': 2.0}\n"
-ANALYSIS = "print('RESULT_JSON: {}')\n"
+ANALYSIS = "def result():\n    return {}\n\n\nprint('RESULT_JSON: {}')\n"
 
 
 def _engine(tmp_path: Path, *, other: bool = True) -> Engine:
@@ -73,6 +73,24 @@ def test_the_file_was_changed():
 PASSING_TEST = "def test_nothing_is_wrong():\n    assert True\n"
 
 
+#: The functions the files of these tests define (the first one a file has is called with its arguments), so the fake model's test
+#: genuinely runs the study's code before it fails (a test that fails before any code of the study ran shows nothing about it:
+#: core/finding_repair.py ``failure_from_study``).
+_STUDY_CALLS = (("run_cell", "{'m': 1.0, 'w': 1.0, 'length': 1.0, 'c': 1.0}"), ("run_trial", "{'exposure_dose': 1.0, 'resist_type': 'a', 'chemistry': 'b'}"), ("result", ""), ("quality", "1.0, 1.0, 1.0"))
+
+
+def changed_test(rel: str) -> str:
+    """:data:`CHANGED_TEST` for the file ``rel``, which first calls a function of that file (:data:`_STUDY_CALLS`), as a real
+    test of the study does. :data:`CHANGED_TEST` alone is the test that never runs the study: it is not demonstrating
+    (tests/test_finding_test_validity.py)."""
+    parts = rel[:-3].split("/")
+    imp = f"import {parts[0]} as _STUDY" if len(parts) == 1 else f"from {'.'.join(parts[:-1])} import {parts[-1]} as _STUDY"
+    run = ("    for _name, _args in " + repr(tuple((n, a) for n, a in _STUDY_CALLS)) + ":\n"
+           "        if hasattr(_STUDY, _name):\n            eval('_STUDY.' + _name + '(' + _args + ')')\n            break\n")
+    return CHANGED_TEST.format(rel=rel).replace("import hashlib, pathlib\n", f"import hashlib, pathlib\n{imp}\n", 1).replace(
+        "    now = hashlib", run + "    now = hashlib", 1)
+
+
 def code_model_answer(owner: Any, prompt: str) -> str | None:
     """What a fake code-writing model answers: ``None`` when ``prompt`` is not one of its requests; a test for a request for a
     test (one that passes when ``owner.undemonstrated`` holds the file); the file or function from ``owner.repaired`` for a
@@ -84,7 +102,7 @@ def code_model_answer(owner: Any, prompt: str) -> str | None:
     scoped = "(the function `" in prompt.split("### ", 1)[1].splitlines()[0]
     if head.startswith(TEST_HEAD):
         owner.test_prompts.append(prompt)
-        body = PASSING_TEST if rel in getattr(owner, "undemonstrated", ()) else CHANGED_TEST.format(rel=rel)
+        body = PASSING_TEST if rel in getattr(owner, "undemonstrated", ()) else changed_test(rel)
         return f"```python\n{body}```"
     owner.repair_prompts.append(prompt)
     count = len(owner.repair_prompts)
