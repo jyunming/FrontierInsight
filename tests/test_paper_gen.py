@@ -1356,35 +1356,6 @@ def test_sanitize_unicode_covers_sub_and_superscript_signs() -> None:
     assert r"\ensuremath{^{n}}" in out    # superscript n
 
 
-def test_sanitize_unicode_outside_code_helper_preserves_code_blocks() -> None:
-    """The ``_outside_code_blocks`` helper exists as a documented
-    option for callers that legitimately need prose-only rewriting.
-    The PDF pipeline does NOT use it (sanitizes everything — see
-    the ``compile_pdf`` test below) because the templates lack a
-    ``\\DeclareUnicodeCharacter`` safety net. This test just pins
-    the helper's prose-only contract for any future consumer."""
-    src = (
-        "Text with ≈ outside.\n"
-        "```\n"
-        "print('inside ≈ still raw')\n"
-        "```\n"
-        "More text with ≥.\n"
-    )
-    out = paper_mod._sanitize_unicode_outside_code_blocks(src)
-    # Outside-code occurrences rewritten.
-    assert r"\ensuremath{\approx}" in out
-    assert r"\ensuremath{\geq}" in out
-    # Inside-code occurrence preserved.
-    assert "'inside ≈ still raw'" in out
-
-
-def test_sanitize_unicode_preserves_inline_code() -> None:
-    """`backtick code` is also preserved verbatim — same reasoning."""
-    src = "Use `f(x) ≈ x²` to compute the result."
-    out = paper_mod._sanitize_unicode_outside_code_blocks(src)
-    assert "`f(x) ≈ x²`" in out, "inline code must not be sanitized"
-
-
 def test_sanitize_unicode_is_idempotent() -> None:
     """Running the sanitizer twice produces the same string the first
     pass did — important because the user's saved paper.md may itself
@@ -1470,18 +1441,6 @@ def test_compile_pdf_takes_the_writers_figure_number_off_the_caption(
     assert "![Error versus time step.](figures/error.png)" in source
     assert "As Figure 1 shows." in source
     assert "**Figure 1.**" in (out_dir / "paper.md").read_text(encoding="utf-8")
-
-
-def test_count_sanitized_glyphs_returns_source_count() -> None:
-    """Honest counter: the INFO log reports source-glyph occurrences,
-    not length-deltas. Deriving the count from length deltas would
-    go negative because LaTeX replacements (~20 chars) are longer
-    than the source glyphs (1 char each)."""
-    assert paper_mod._count_sanitized_glyphs("plain ASCII only") == 0
-    # 3 distinct glyphs, each appearing once → 3.
-    assert paper_mod._count_sanitized_glyphs("FNR ≈ x, ≥ y, × z") == 3
-    # 3 ≈ occurrences → 3 (not 1).
-    assert paper_mod._count_sanitized_glyphs("≈ a ≈ b ≈ c") == 3
 
 
 def test_compile_pdf_keeps_code_as_written_and_declares_its_glyphs_for_pdflatex(

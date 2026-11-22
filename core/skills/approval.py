@@ -71,10 +71,6 @@ def approved_hash(name: str, path: Path | None = None) -> str | None:
     return h if isinstance(h, str) and h else None
 
 
-def is_approved(name: str, content_hash: str, path: Path | None = None) -> bool:
-    return approved_hash(name, path) == content_hash
-
-
 def approve(
     name: str,
     content_hash: str,
@@ -117,18 +113,3 @@ def revoke(name: str, path: Path | None = None) -> bool:
     del data[name]
     _save(p, data)
     return True
-
-
-def all_approvals(path: Path | None = None) -> dict[str, Approval]:
-    out: dict[str, Approval] = {}
-    for name, rec in _load(path or ledger_path()).items():
-        if not isinstance(rec, dict) or not rec.get("content_hash"):
-            continue
-        out[name] = Approval(
-            name=name,
-            content_hash=str(rec["content_hash"]),
-            approved_at=str(rec.get("approved_at", "")),
-            approved_by=str(rec.get("approved_by", "")),
-            note=str(rec.get("note", "")),
-        )
-    return out

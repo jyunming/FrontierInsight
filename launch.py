@@ -4493,7 +4493,7 @@ async def _run_new(
     # Only the symbols _run_new actually uses. _cli_prompt_for
     # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
-        BYLINE_FIELDS, QUESTIONS, InterviewAnswers, answers_to_yaml,
+        BYLINE_FIELDS, InterviewAnswers, answers_to_yaml,
         derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
         preflight_clarify, question_applies, questions_for_tier, resolve_review_panel, slugify,
     )
@@ -4970,7 +4970,7 @@ def _cli_prompt_for(
     (paper_format flowing into no_simulation, etc).
     """
     from core.interview import (
-        Choice, build_smart_defaults, model_choices_for, second_reviewer_choices,
+        build_smart_defaults, model_choices_for, second_reviewer_choices,
     )
 
     # Recompute smart defaults given everything answered so far.
@@ -6348,7 +6348,6 @@ async def _why_skills(
     ``folders`` is the quest YAML's own skill folders (``--config``); without
     it, the usual places and ``FI_EXTERNAL_SKILLS_DIRS``.
     """
-    import json as _json
 
     from core.engine import _load_prompts
     from core.provider import LLMClient, ProxySupervisor, resolve_endpoint_async
@@ -6850,7 +6849,6 @@ def _approve_all_skills(
     """
     # Imported lazily, matching the installer functions: launch.py keeps
     # module-level imports minimal so --help and quest startup stay fast.
-    import subprocess
 
     from core.skills import discover
 

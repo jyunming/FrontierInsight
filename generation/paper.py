@@ -541,17 +541,6 @@ def _nfc_keeping_commands(segment: str) -> str:
     return "".join(out)
 
 
-def _nfc_outside_code(markdown: str) -> str:
-    """``markdown`` in Unicode NFC, code left exactly as written. NFC joins a letter and
-    its mark into the one character Unicode has for them (``=`` + U+0338 is ``≠``, ``e``
-    + U+0302 is ``ê``) and turns the unit signs into the letters (U+212B ANGSTROM SIGN is
-    ``Å``, U+2126 OHM SIGN is ``Ω``), which every engine sets."""
-    return "".join(
-        segment if is_code else unicodedata.normalize("NFC", segment)
-        for segment, is_code in _split_code_segments(markdown)
-    )
-
-
 @dataclass
 class _UnicodeSource:
     """The paper's source ready for one TeX engine, and what was done to its glyphs."""
@@ -797,23 +786,6 @@ def _prepare_unicode(
     )
 
 
-# Pattern: any code-fence block (used by tests + downstream tooling
-# that wants prose-only sanitization for non-PDF flows). The PDF
-# pipeline leaves code as written too (see ``_prepare_unicode``).
-_CODE_FENCE_RE = re.compile(r"(```.*?\n.*?```|`[^`\n]+`)", re.DOTALL)
-
-
-def _sanitize_unicode_outside_code_blocks(markdown: str) -> str:
-    """Apply :func:`_sanitize_unicode_for_latex` to prose but leave
-    fenced code + inline code untouched. The PDF pipeline does the same
-    through :func:`_prepare_unicode`; tests pin this helper's contract."""
-    parts = _CODE_FENCE_RE.split(markdown)
-    # Even-indexed parts are prose; odd-indexed are code matches.
-    for i in range(0, len(parts), 2):
-        parts[i] = _sanitize_unicode_for_latex(parts[i])
-    return "".join(parts)
-
-
 # Pandoc's markdown reader requires inline math to have NO whitespace
 # immediately after the opening ``$`` or before the closing ``$``.
 # When the LLM emits ``$ \beta $`` (with internal spaces) pandoc treats
@@ -920,15 +892,6 @@ def _split_math_segments(text: str):
         if pos < len(segment):
             yield segment[pos:], False
 
-
-def _count_sanitized_glyphs(markdown: str) -> int:
-    """Count how many source-glyph occurrences the sanitizer rewrote.
-    Used for the INFO log so the count is honest. Computing from
-    output-length deltas was misleading because the LaTeX
-    replacements are typically ~20 chars longer than the source
-    glyph — a single ``≈`` rewrite added ~20 chars to length but
-    only 1 to the "rewrites" count, making the delta negative."""
-    return sum(markdown.count(c) for c in _LATEX_UNICODE_REPLACEMENTS)
 
 # First top-level ATX heading in the markdown body. Used to lift the
 # title out of `# Title` and into a YAML metadata block so pandoc
@@ -1049,13 +1012,6 @@ def _add_metadata_frontmatter(
     if keywords:
         lines.append(f"keywords: {json.dumps(list(keywords))}")
     return "---\n" + "\n".join(lines) + "\n---\n\n" + body
-
-
-def _add_title_frontmatter(body: str, title: str) -> str:
-    """Backwards-compatible alias kept for older tests that imported
-    the single-arg helper. New code should call
-    :func:`_add_metadata_frontmatter` directly."""
-    return _add_metadata_frontmatter(body, title, abstract=None)
 
 
 def _author_line(output) -> tuple[str, ...]:

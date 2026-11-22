@@ -563,11 +563,6 @@ def _series(cell: dict[str, Any], name: str) -> dict[int, float]:
     return out
 
 
-def _z(level: float) -> float:
-    """The two-sided normal critical value of a level (1.96 at 0.95)."""
-    return NormalDist().inv_cdf(0.5 + level / 2.0)
-
-
 def _truth_of(truth: Any, cell: dict[str, Any], thresholds: dict[str, Any]) -> float | None:
     """The declared true value in one setting: the number itself, a threshold's value, or the setting's own value of a grid
     parameter (``None`` when it is not a number there)."""

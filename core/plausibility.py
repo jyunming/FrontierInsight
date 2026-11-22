@@ -1270,12 +1270,6 @@ def _walk_leaves(obj: Any) -> Any:
     return LeafWalk(obj).leaves()
 
 
-def _present_paths(obj: Any) -> Any:
-    """The dotted path of every leaf, whatever it holds: a number, ``null``, NaN, a string, a flag. A key reported as
-    ``null`` is still reported (the honest answer for a value the method cannot give)."""
-    return iter(LeafWalk(obj).present_paths())
-
-
 def _dotted(tokens: tuple[tuple[str, Any], ...]) -> str:
     out = ""
     for kind, val in tokens:

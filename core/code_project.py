@@ -1448,7 +1448,6 @@ def verify(quest_root: Path, *, run_timeout_s: float = 900.0, install_timeout_s:
     is a rerun that reproduced the results and only a figure was not drawn, as in the run: ``ok`` is True. ``not_finished`` is a run that
     installed and was still going when ``run_timeout_s`` ran out: FI stopped it (the whole process tree), and that
     is not a failure, so ``ok`` is False but only ``failed`` deserves a warning."""
-    import shutil
     import subprocess
     import time
 

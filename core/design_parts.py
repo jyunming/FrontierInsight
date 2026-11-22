@@ -97,10 +97,6 @@ def invalid_reason(path: Any, design: dict[str, Any]) -> str:
     return ""
 
 
-def valid_part(path: Any, design: Any = None) -> bool:
-    return not invalid_reason(path, design if isinstance(design, dict) else {})
-
-
 def _set(root: dict[str, Any], segs: list[str], value: Any) -> str:
     """Set ``value`` at ``segs`` under ``root``; ``""`` or the reason it cannot be set."""
     node: Any = root
