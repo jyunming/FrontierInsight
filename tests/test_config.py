@@ -412,6 +412,15 @@ def test_from_yaml_rejects_unknown_top_level_key(tmp_path: Path) -> None:
         Config.from_yaml(p)
 
 
+def test_a_config_that_still_sets_the_retired_attempt_memory_key_loads(tmp_path: Path, caplog) -> None:
+    for value in ("shadow", "off"):
+        p = _write(tmp_path, f"topic: t\nengine:\n  attempt_memory: {value}\n")
+        with caplog.at_level("INFO", logger="frontier_insight.config"):
+            cfg = Config.from_yaml(p)
+        assert cfg.topic == "t" and not hasattr(cfg.engine, "attempt_memory")
+    assert "engine.attempt_memory no longer does anything" in caplog.text
+
+
 def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
     # Typos of real reliability knobs — the exact silent-revert footgun.
     p = _write(

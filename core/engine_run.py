@@ -13,7 +13,7 @@ from .engine_base import (  # noqa: F401
     _bounded_seen_after, _changelog, _code_names_replicate_seed, _code_project, _deps_to_warmup_modules,
     _experiment_deps, _extract_result_json, _figdata, _figure_label_found, _figure_overlap_directive,
     _figure_overlap_findings, _format_clarify, _format_reflect_history, _gate_receipt, _in_run, _is_degenerate_result,
-    _manifest_repair_budget, _memory, _numeric, _one_line, _optim, _optimise, _optimise_search, _outside_run,
+    _manifest_repair_budget, _numeric, _one_line, _optim, _optimise, _optimise_search, _outside_run,
     _own_modules, _parse_implement_response, _phased, _put_back_paper_copies, _read_figure_records,
     _read_json_or_none_path, _read_primary_figures, _record_numbers, _rejudges_oracles_after, _rename_code_names,
     _repair_reply_json, _replicate_assertions, _replicate_env, _replicate_line_figure, _replicate_seed_reaches_rng,
@@ -97,7 +97,6 @@ class RunStageMixin:
             question = await asyncio.to_thread(self._phased_before_first_run, state)
             if question:
                 self._phased_ask_split(question)
-        await self._shadow("execute", state, taken="ran the experiment")
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving
         # the skills can run their self-tests).
@@ -1091,19 +1090,11 @@ class RunStageMixin:
                 returncode=result.returncode, has_result=bool(result_json), manifest_status=str(manifest_status or ""),
                 oracle_status=oracle_status,
             )
-            # The one signature of this run: the record keeps it and a repair of this run reads it back, so both are
-            # made from the same inputs (the last 2000 characters of stderr, the return code, the time limit, the check).
-            signature = _memory.failure_signature(
-                returncode=result.returncode, stderr=str(result.stderr or "")[-2000:],
-                timed_out=bool(getattr(result, "timed_out", False)),
-                pause=outcome if outcome in ("protocol_mismatch", "oracle_failure") else None)
-            self._last_run_signature = signature
             if outcome is None:
                 return None
             frozen = _attempts._read_json(self.quest_root / "needs" / "FROZEN_PROTOCOL.json")
             return {
                 "kind": "run", "outcome": outcome, "returncode": result.returncode,
-                "failure_signature": signature,
                 "scripts": dict(run_context.get("code") or {}),
                 # What it came from: the frozen protocol's run, and the design revision or repair recorded last.
                 "run_id": frozen.get("run_id") if isinstance(frozen, dict) else None,
@@ -1999,7 +1990,6 @@ class RunStageMixin:
             # and marked (never a stop).
             return self._bounds_after_repairs(state, implausible)
 
-        await self._shadow("repair", state, taken="repaired the script")
         history = list(state.get("exec_reflect_history") or [])
         history_block = _format_reflect_history(history)
 

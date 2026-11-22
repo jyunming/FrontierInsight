@@ -151,7 +151,8 @@ def test_a_same_size_edit_with_its_time_put_back_changes_the_hash_at_the_end(tmp
 
 # --- F-04: the seal names every record ---------------------------------------------------------------------------
 
-def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = (), records: int | None = None) -> Path:
+def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = (), records: int | None = None,
+            extra: tuple[str, ...] = ()) -> Path:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     trace = root / ".fi" / "audit.jsonl"
     trace.unlink(missing_ok=True)
@@ -162,8 +163,10 @@ def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = 
     (root / "needs" / "EVIDENCE.json").write_text(json.dumps(record), encoding="utf-8")
     for rel in (*evidence.SEALED_LEDGERS, evidence.SEALED_QUERIES):
         (root / rel).touch()
+    for rel in extra:
+        (root / rel).write_text('{"recorded": "before the seal"}\n', encoding="utf-8")
     files = {rel: (None if rel in null else evidence._file_sha256(root / rel))
-             for rel in evidence.SEALED_FILES if rel not in drop}
+             for rel in (*evidence.SEALED_FILES, *extra) if rel not in drop}
     log.append("quest_finalized", events_before=len(audit_log.read(trace)), write_errors=0, records_not_written=0,
                model_calls={"lines": 0, "counts": {}, "gaps": []},
                nodes_completed=["review", "write"], files=files, paper_path="paper/paper.md",
@@ -181,14 +184,26 @@ def test_a_seal_that_leaves_out_the_attempt_records_is_not_verified(tmp_path: Pa
     assert any("names no hash of .fi/model_calls.jsonl" in g for g in nulled["all_gaps"]["publication_ready"])
 
 
-def test_a_seal_made_before_the_shadow_record_existed_is_still_verified(tmp_path: Path) -> None:
+def test_a_seal_that_still_names_the_retired_shadow_record_is_verified(tmp_path: Path) -> None:
+    """Quests sealed while FI wrote ``shadow_recommendations.jsonl`` name it; it is read as named, and a seal that
+    does not name it is complete."""
+    root = _sealed(tmp_path / "cur", records=evidence.SEAL_RECORDS)
+    assert evidence.read(root)["trace_seal"] == "verified"
+    assert ".fi/shadow_recommendations.jsonl" not in evidence.SEALED_FILES
     shadow = ".fi/shadow_recommendations.jsonl"
-    old = evidence.read(_sealed(tmp_path / "old", drop=(shadow,)))
-    assert old["trace_seal"] == "verified", "a seal that never named the shadow record is checked against what it named"
-    new = evidence.read(_sealed(tmp_path / "new", drop=(shadow,), records=evidence.SEAL_RECORDS))
-    assert new["trace_seal"] == "not_verified", "a current seal must name it"
-    assert any(f"names no hash of {shadow}" in g for g in new["all_gaps"]["publication_ready"])
-    assert evidence.read(_sealed(tmp_path / "cur", records=evidence.SEAL_RECORDS))["trace_seal"] == "verified"
+    old = _sealed(tmp_path / "old", records=evidence.SEAL_RECORDS, extra=(shadow,))
+    assert evidence.read(old)["trace_seal"] == "verified"
+    (old / shadow).write_text('{"recorded": "after the seal"}\n', encoding="utf-8")
+    changed = evidence.read(old)
+    assert changed["trace_seal"] == "not_verified"
+    assert any(f"{shadow} changed after the quest was sealed" in g for g in changed["all_gaps"]["publication_ready"])
+    gone = _sealed(tmp_path / "gone", records=evidence.SEAL_RECORDS, extra=(shadow,))
+    (gone / shadow).unlink()
+    assert evidence.read(gone)["trace_seal"] == "not_verified"
+    for name, records in (("null2", evidence.SEAL_RECORDS), ("null1", None)):  # named with no hash, with or without the version
+        nulled = evidence.read(_sealed(tmp_path / name, records=records, extra=(shadow,), null=(shadow,)))
+        assert nulled["trace_seal"] == "not_verified"
+        assert any(f"names no hash of {shadow}" in g for g in nulled["all_gaps"]["publication_ready"])
 
 
 # --- F-05: one credential filter -----------------------------------------------------------------------------------

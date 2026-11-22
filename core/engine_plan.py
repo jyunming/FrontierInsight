@@ -239,8 +239,6 @@ class PlanStageMixin:
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
                        len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
-        await self._shadow("plan", {**state, "design": normalized},
-                           taken="held the plan for the person" if ask else "went on with the plan")
         # The checks against known answers, each in its kind's numeric form, before the person reads the plan.
         await self._guide_oracles(state)
         if from_checks:

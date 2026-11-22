@@ -134,7 +134,6 @@ class CodeStageMixin:
             return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
         if (grid_stop := self._grid_too_large_stop(state)) is not None:
             return grid_stop  # no code is written for settings FI would not list (the run step stops the same way)
-        await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept, "refine_extend": []}
