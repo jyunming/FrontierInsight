@@ -627,6 +627,9 @@ _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review
 
 # Legacy flag location (section, old key) → canonical ``pauses`` field. Read by
 # Config's root validator so old YAML keeps working without touching read sites.
+# Keys a config may still set although the setting is gone: accepted, no effect, said once in the log.
+_RETIRED_KEYS = frozenset({"engine.attempt_memory"})
+
 _LEGACY_PAUSE_FLAGS = (
     ("engine", "clarify_mode", "clarify"),
     ("engine", "human_feedback_gate", "review"),
@@ -728,11 +731,6 @@ class EngineConfig(BaseModel):
     # then does not stop for its reviewers' models, and its result is not publication-ready (the evidence level says
     # the review was one model's view).
     one_model_review: bool = False
-    # What past failed attempts would recommend at each decision (core/attempt_memory.py). ``shadow`` (the default)
-    # records it in .fi/shadow_recommendations.jsonl and acts on none of it; to work it out FI reads the failure
-    # records of the other quests under the same output folder (their ids, hashes and exception type names are copied
-    # into this quest's record). ``off`` reads and writes nothing.
-    attempt_memory: Literal["shadow", "off"] = "shadow"
     # Explore, then confirm (core/phased.py). On: the model may try designs and look at results in an exploration
     # stage; when it ends the protocol is frozen and the frozen design is run once more on data held back from the
     # person's own files (or, without enough of it, on new random seeds exploration never used). Only that confirm
@@ -1974,7 +1972,10 @@ class Config(BaseModel):
                 continue
             allowed = set(model.model_fields) | legacy.get(section, set())
             for k in sub:
-                if k not in allowed:
+                if f"{section}.{k}" in _RETIRED_KEYS:
+                    logging.getLogger("frontier_insight.config").info(
+                        "config: %s.%s no longer does anything; the line can be removed.", section, k)
+                elif k not in allowed:
                     unknown.append(f"{section}.{k}")
         if unknown:
             raise ValueError(

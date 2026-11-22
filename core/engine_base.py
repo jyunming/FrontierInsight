@@ -93,7 +93,6 @@ from . import contract as _contract
 from . import contract_parts as _contract_parts
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
-from . import attempt_memory as _memory
 from . import phased as _phased
 from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure

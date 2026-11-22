@@ -98,7 +98,7 @@ from .engine_base import (  # noqa: F401
     _literature_entry, _literature_in_citation_order, _literature_key, _literature_query_prompt,
     _literature_text_gaps, _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
     _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mark_unconfirmed_results, _mask_prose, _matching_brace_end, _math_folded,
-    _math_safe_cut, _mc_error, _memory, _merge_round_robin, _metric_spec, _names_a_verdict,
+    _math_safe_cut, _mc_error, _merge_round_robin, _metric_spec, _names_a_verdict,
     _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls, _novelty,
     _number_list, _numeric, _object_among_prose, _object_spans, _objection_key, _ok_call_ids, _ok_calls, _one_line,
     _optim, _optimise, _optimise_refine, _optimise_search, _oracle, _oracle_card, _oracle_challenge, _oracle_triage,
@@ -371,7 +371,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
-        self.__dict__.pop("_shadow_closed", None)  # a quest run again records again
 
         from . import source_failures as _source_failures
 
@@ -1144,7 +1143,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 except OSError:
                     pass
             # Nothing may be written to the trace after this.
-            self._shadow_close()
             self._seal_trace(final_state)
             if evidence_record is not None:
                 sealed = _evidence.verify_seal(self.quest_root, evidence_record)
@@ -1264,7 +1262,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 self._record(_attempts.ATTEMPTS, lambda: {
                     "kind": "quest", "execution_status": "crashed", "review_status": "none",
                     "evidence_status": "unknown", "claim_outcome": None, "error": type(exc).__name__,
-                    "failure_signature": _memory.failure_signature(error=type(exc).__name__),
                     "run_record_ids": list(getattr(self, "_run_record_ids", [])),
                     "records_not_written": _attempts.lost(self.fi_dir),
                     "answered_by": self._answering_model(),
@@ -1275,7 +1272,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 raise exc from _unusable.error
             raise
         finally:
-            self._shadow_close()
             # Outer cleanup: releases the per-quest run.log FileHandler
             # on EVERY exit path — normal completion, exception from
             # ``graph.ainvoke``, missing-callback RuntimeError, errors

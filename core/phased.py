@@ -64,8 +64,8 @@ to come on seeds no earlier run used; the earlier verdict stays. Held-back rows 
 any more, so a new candidate of a quest that held rows back cannot be confirmed (``not_confirmable``, said why). The
 record here holds the current candidate only; the evidence reads it, checked against its verdict lines.
 
-This record (``.fi/phased.json``) is apart from the attempt records and the shadow recommendations
-(``core/attempt_records.py``, ``core/attempt_memory.py``): it reads neither, and neither decides anything here.
+This record (``.fi/phased.json``) is apart from the attempt records (``core/attempt_records.py``): it reads
+neither, and neither decides anything here.
 """
 
 from __future__ import annotations

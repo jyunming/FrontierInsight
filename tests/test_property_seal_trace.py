@@ -309,27 +309,6 @@ def test_a_forged_seal_with_a_wrong_hash_is_caught(data) -> None:
         assert _standing(root) == "not_verified", "edited seal no longer matches its own hash in the chain"
 
 
-def test_a_seal_from_before_the_shadow_record_still_verifies() -> None:
-    old = tuple(f for f in evidence.SEALED_FILES if "shadow" not in f)
-    with _Dir() as root:
-        _sealed(root, files=old, sealed_records=None)
-        assert _standing(root) == "verified"
-    with _Dir() as root:
-        _sealed(root, files=old, sealed_records=1)
-        assert _standing(root) == "verified"
-
-
-@SEAL
-@given(st.sampled_from([f for f in evidence.SEALED_FILES if "shadow" not in f]), st.text(min_size=1, max_size=5))
-def test_an_old_seal_still_notices_a_change_to_the_files_it_did_name(rel, tail) -> None:
-    old = tuple(f for f in evidence.SEALED_FILES if "shadow" not in f)
-    with _Dir() as root:
-        _sealed(root, files=old, sealed_records=None)
-        p = root / rel
-        p.write_text(p.read_text(encoding="utf-8") + tail, encoding="utf-8")
-        assert _standing(root) == "not_verified"
-
-
 def test_a_current_seal_that_leaves_a_file_unnamed_is_not_verified() -> None:
     with _Dir() as root:
         _sealed(root, files=evidence.SEALED_FILES[:-1], sealed_records=evidence.SEAL_RECORDS)

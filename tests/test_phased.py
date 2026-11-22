@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -188,7 +189,7 @@ def test_the_paper_note_says_which_numbers_are_confirmed_and_holds_no_numbers(tm
     assert "numbers reported as results are that confirm run's" in block
 
 
-def test_phased_reads_no_attempt_record_or_shadow_recommendation() -> None:
+def test_phased_reads_no_attempt_record() -> None:
     tree = ast.parse(Path(phased.__file__).read_text(encoding="utf-8"))
     imported = {a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
     imported |= {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
@@ -224,6 +225,32 @@ plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('
 import random
 print('RESULT_JSON: ' + json.dumps({'score': 0.5, 'rows': rows, 'draw': random.Random(seed).random()}))
 """
+
+
+#: The only fields two runs of the same quest may differ in: when something was recorded and how long it took.
+# The paper's run record states the measured run time, so the hash of the paper an automatic accept covers differs
+# with it between two runs.
+_TIMING = ("recorded_at", "duration_s", "at", "paper_sha256")
+
+
+def _without_timing(value):
+    if isinstance(value, dict):
+        return {k: _without_timing(v) for k, v in value.items() if k not in _TIMING}
+    if isinstance(value, list):
+        return [_without_timing(v) for v in value]
+    return value
+
+
+def _normalized_state(artifacts, quest_root: Path) -> dict:
+    """The final state with what names the quest folder replaced and the timing fields (:data:`_TIMING`, at any depth)
+    left out, and FI's note of how far it wrote its record files (``record_anchor``, core/record_anchor.py); nothing
+    else is left out."""
+    state = {k: v for k, v in (artifacts.raw_state or {}).items() if k != "record_anchor"}
+    text = json.dumps(state, sort_keys=True, default=str)
+    text = re.sub(r"\d{8}-\d{6}", "<stamp>", text)  # a folder named by the moment something was set aside
+    for old in (str(quest_root).replace("\\", "\\\\"), quest_root.as_posix(), str(quest_root), quest_root.name):
+        text = text.replace(old, "<quest>")
+    return _without_timing(json.loads(text))
 
 
 def _config(root: Path, *, phased_on: bool | None):
@@ -268,7 +295,6 @@ async def test_off_the_quest_never_touches_the_phased_code(tmp_path: Path, monke
     has no confirm edge, the data and the seeds are as they were, and both quests take the same steps and end in the
     same state."""
     from core.engine import Engine
-    from tests.test_attempt_memory import _normalized_state
 
     _fake(monkeypatch)
     for name in ("prepare", "seed_env", "enter_confirm", "record_confirm", "evidence_settings", "write_note",

@@ -44,8 +44,7 @@ HEADS_LOST = "record_heads.lost"
 
 #: The record files FI notes (names in ``.fi/``): the decision trace and the record files the evidence reads and the
 #: final seal names (core/evidence.py ``SEALED_LEDGERS``), plus the model-call record kept after a seal.
-ANCHORED = ("audit.jsonl", "attempts.jsonl", "branch_ledger.jsonl", "model_calls.jsonl", "model_calls.after_seal.jsonl",
-            "shadow_recommendations.jsonl")
+ANCHORED = ("audit.jsonl", "attempts.jsonl", "branch_ledger.jsonl", "model_calls.jsonl", "model_calls.after_seal.jsonl")
 _TRACE = "audit.jsonl"
 
 #: The trace event that says a record file was changed outside FI.
