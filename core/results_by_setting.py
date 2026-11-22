@@ -981,6 +981,8 @@ def _mark_bound_breaks(built: Built | None, protocol: dict[str, Any] | None, que
             ids = ", ".join(record["unconfirmed_by"])
             why = (f" Equation{'s' if len(record['unconfirmed_by']) > 1 else ''} {ids} could not be confirmed before the run, "
                    f"so the values it may reach are marked {_result_checks.BOUND_MARK}.")
+        if not why and record.get("note"):
+            why = f" {str(record['note'])[:1].upper()}{str(record['note'])[1:]}, so the values are marked {_result_checks.BOUND_MARK}."
         t.name = f"{t.name or t.value} {_result_checks.BOUND_MARK}"
         t.caption += why
         if t.paper_caption:

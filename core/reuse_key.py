@@ -42,7 +42,7 @@ SCHEMA = 2
 #: What each kind's decision means: raised when FI changes the rule that decided it, so a record made under another
 #: rule is decided again (a ``fits`` timing written before the speed-up rule existed was reused, and the study was never
 #: sped up).
-RULES = {"trials": 2, "search": 2, "search_study": 2, "search_study_bytes": 2, "sizing": 2, "rerun": 2}
+RULES = {"trials": 2, "search": 2, "search_study": 2, "search_study_bytes": 2, "sizing": 3, "rerun": 2}
 
 #: The plain words :meth:`Inputs.changed` uses for what is not a file.
 _SETTING_WORDS = {

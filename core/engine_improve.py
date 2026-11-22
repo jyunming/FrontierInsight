@@ -226,7 +226,7 @@ class ImproveStageMixin:
                     env=env, thresholds=thresholds, case_env=dict(env), in_each_run=_in_run.of_study(protocol),
                     mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol, self.quest_root),
                     proportion_names=_mc_error.proportion_names(protocol),
-                    repeated=_mc_error.repeats_trials(protocol), protocol=protocol, log=self._log,
+                    repeated=_mc_error.quest_repeats_trials(self.quest_root, protocol), protocol=protocol, log=self._log,
                 )
                 problems += found
                 judged = _oracle_with_reader_flags(
@@ -621,8 +621,9 @@ class ImproveStageMixin:
                 return None
 
         trials = await asyncio.to_thread(read)
-        new, names, reworded = _oracle.rejudge_on_delivered(record, trials, protocol,
-                                                            self._measuring_code_version(seed_path))
+        design = _plan.load_design(self.quest_root)[0]
+        new, names, reworded = _oracle.rejudge_on_delivered(record, trials, protocol, self._measuring_code_version(seed_path),
+                                                            design if isinstance(design, dict) else None)
         if new is None:
             return []
         self._oracle_record(new)

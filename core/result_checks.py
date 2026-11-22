@@ -335,7 +335,67 @@ def marked_quantities(quest_root: Path | str) -> dict[str, dict[str, Any]]:
     its note under the title read."""
     from . import equation_tests as _equation_tests
 
-    return {**_equation_tests.unconfirmed_marks(quest_root), **kept_bound_breaks(quest_root)}
+    return {**fewer_runs_marks(quest_root), **_equation_tests.unconfirmed_marks(quest_root), **kept_bound_breaks(quest_root)}
+
+
+def _reaches_trials(ident: str, record: dict[str, Any], trial_ids: set[str], seen: set[str] | None = None) -> bool:
+    """Whether the derived result ``ident`` rests on a value a trial returns, by FI's own record of the analysis
+    (``derived.json``, core/analysis_frame.py): a formula's ``inputs`` (the results and derived quantities it read), a
+    body's ``asked`` (every name its call asked the record for), followed through the derived quantities they name. A
+    result with no such record (no record, a record of a run that did not finish, no list of what it read) is unclear and
+    counts as resting on the trials: nothing is left unmarked on a guess."""
+    seen = set() if seen is None else seen
+    rec = record.get(ident)
+    if ident in seen or not isinstance(rec, dict):
+        return ident not in seen  # no record of it: unclear, marked
+    seen.add(ident)
+    if rec.get("by") == "formula":
+        read = rec.get("inputs") if rec.get("status") == "ok" else None
+    else:
+        read = rec.get("asked")
+    if not isinstance(read, list):
+        return True
+    for name in (str(n) for n in read):
+        if name in trial_ids:
+            return True
+        if name in record and name != ident and _reaches_trials(name, record, trial_ids, seen):
+            return True
+    return False
+
+
+def fewer_runs_marks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
+    """``{quantity: {"quantity", "note"}}`` for each result of the plan when FI ran fewer runs per setting than the plan's own
+    minimum because the minimum did not fit the time allowed (``reduced.marked_unconfirmed`` of ``.fi/run_estimate.json``,
+    core/run_checks.py): every direct trial result, and each derived result whose recorded inputs reach one
+    (:func:`_reaches_trials`; unclear = marked). Never a quantity FI left out."""
+    from . import frozen_protocol as _frozen
+    from . import plan as _plan
+    from . import run_estimate as _estimate
+
+    reduced = _estimate.read_record(Path(quest_root)).get("reduced")
+    if not isinstance(reduced, dict) or not reduced.get("marked_unconfirmed"):
+        return {}
+    protocol = _frozen.protocol_of(Path(quest_root))
+    if protocol is None:
+        design = _plan.load_design(Path(quest_root))[0]
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+    protocol = protocol if isinstance(protocol, dict) else {}
+    from . import analysis_frame as _analysis
+
+    record = _analysis.read_record(Path(quest_root)).get("derived")
+    record = record if isinstance(record, dict) else {}
+    trial_ids = {str(m["id"]).strip() for m in protocol.get("metrics") or [] if isinstance(m, dict) and m.get("id")}
+    ids: list[str] = []
+    for key in ("metrics", "derived"):
+        for m in protocol.get(key) or []:
+            if isinstance(m, dict) and m.get("id") and str(m.get("role") or "result") == "result":
+                ident = str(m["id"]).strip()
+                if key == "metrics" or _reaches_trials(ident, record, trial_ids):
+                    ids.append(ident)
+    gone = set(left_out_by_record(quest_root))
+    to = (reduced.get("to") or {}).get("runs_per_setting") if isinstance(reduced.get("to"), dict) else None
+    note = f"the run has {to} runs per setting, fewer than the plan's minimum" if to else "the run has fewer runs per setting than the plan's minimum"
+    return {q: {"quantity": q, "note": note} for q in dict.fromkeys(ids) if q not in gone}
 
 
 def marked_figures(quest_root: Path | str) -> list[str]:

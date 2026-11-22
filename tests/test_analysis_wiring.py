@@ -501,7 +501,9 @@ PINS_AT_811719AF = {
     # nothing there (Table.unheld, kept beside the plain answer: an intended text change); it was "40022073322a5e86"
     # and again when the table began to keep, per call, every name it is asked for and whether the record's settings were read
     # (Table.asked, Table.looked: what FI's small run tells a function that can never give a value by); it was "cbc38ff1512770ae"
-    "run_framed": "ce4f391e26994f9a",
+    # and again when the table began to note which settings a function took the value of (Table.axes, Table.axes_all: what FI's analysis
+    # keeps a result worked out along a setting no trial read by; an intended text change); it was "ce4f391e26994f9a"
+    "run_framed": "ffbcb2cf661914cc",
 }
 
 

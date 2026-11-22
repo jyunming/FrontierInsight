@@ -668,26 +668,24 @@ async def _fdr_sizing(tmp_path: Path, *, runs: int = 1600, **protocol: Any) -> t
 
 
 @pytest.mark.asyncio
-async def test_a_run_that_cannot_fit_at_the_plans_fewest_runs_is_run_up_to_the_limit_in_the_plans_order(
+async def test_a_run_that_cannot_fit_at_the_plans_fewest_runs_runs_the_most_runs_that_fit_marked_unconfirmed(
         tmp_path: Path) -> None:
     # The real numbers: 27 settings x 1600 runs, about 43 minutes (28 in the real run) against 15 minutes allowed, and the
-    # plan's fewest runs (its precision) is 1537: no model is asked and no setting is taken out of the plan. One setting
-    # fits, so the study is not stopped: it runs in the plan's order up to the limit and the record says so.
+    # plan's fewest runs (its precision) is 1537: no model is asked and no setting is taken out of the plan. The study is not
+    # stopped and not cut to some settings: every setting runs with the most runs that fit (at least two), FI's own reduction
+    # is recorded below the plan's minimum, and the results that rest on it are marked unconfirmed.
     eng, model, runner = await _fdr_sizing(tmp_path, min_runs_per_setting=1537)
-    runner.cost = lambda cell: 1.0  # the costliest-first order of a study that fits
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert model.asked == []
     design = plan.load_design(eng.quest_root)[0]
-    assert design["protocol"]["grid"] == FDR_GRID and design["protocol"]["runs_per_setting"] == 1600
-    assert runner.cost is None, "a study cut at the limit runs in the plan's order, not the costliest first"
-    cut = _cut(eng)
-    assert cut["kind"] == "grid" and cut["order"] == "plan" and cut["limit_s"] == 900 and cut["settings"] == 27
-    assert "more than the 15 minutes allowed" in cut["detail"] and "stopped" not in run_estimate.read_record(eng.quest_root)
-    assert "in the plan's order until the time limit" in _log(eng)
+    assert design["protocol"]["grid"] == FDR_GRID and 2 <= design["protocol"]["runs_per_setting"] < 1537
+    record = run_estimate.read_record(eng.quest_root)
+    reduced = record["reduced"]
+    assert reduced["marked_unconfirmed"] and reduced["below_plan_minimum"] and "truncated" not in record and "stopped" not in record
+    assert reduced["from"]["runs_per_setting"] == 1600 and reduced["to"]["runs_per_setting"] == design["protocol"]["runs_per_setting"]
     # A resume with the same simulation and plan goes on the same way and times nothing again.
-    runner.cost = lambda cell: 1.0
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and runner.cost is None
-    assert "timed before" in _log(eng)
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == design["protocol"]["runs_per_setting"]
 
 
 @pytest.mark.asyncio

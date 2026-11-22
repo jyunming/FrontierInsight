@@ -374,6 +374,50 @@ def _asking(check):
     return wrapper
 
 
+class _Reading(dict):
+    """One setting of the record (``{axis: value}``) that notes which axes a function reads from it: FI's record of the axes a
+    result is worked out along (``Table.axes``: a value taken from a setting, or the axis ``across`` names; filtering settings by ``at`` takes none). A read of the whole mapping (a loop, ``items()``, a copy) cannot be followed
+    and is noted as such (``Table.axes_all``), and then no axis is held against the function."""
+
+    def __init__(self, table, cell):
+        super().__init__(cell)
+        self._table = table
+
+    def __getitem__(self, name):
+        self._table.axes.append(name)
+        return super().__getitem__(name)
+
+    def get(self, name, *default):
+        self._table.axes.append(name)
+        return super().get(name, *default)
+
+    def _whole(self):
+        self._table.axes_all = True
+
+    def __iter__(self):
+        self._whole()
+        return super().__iter__()
+
+    def keys(self):
+        self._whole()
+        return super().keys()
+
+    def items(self):
+        self._whole()
+        return super().items()
+
+    def values(self):
+        self._whole()
+        return super().values()
+
+    def copy(self):
+        self._whole()
+        return dict.copy(self)
+
+    def __reduce__(self):
+        return (dict, (dict.copy(self),))  # a copy or a pickle is the plain mapping, never the table it notes into
+
+
 class Table:
     """FI's own record of the trials (``raw/trials.json``), read-only, held to the results the plan declares. Reading an id the
     plan does not declare raises ``UnknownResult`` naming the declared ones; ``served`` lists the ids that were read. A setting
@@ -402,6 +446,8 @@ class Table:
         self.served = []
         self.asked = []  # every name a read asked for since the frame last cleared it, refused or not (``_asking``)
         self.looked = []  # each read of the record's shape (its settings, parts, compared factors) since the frame last cleared it
+        self.axes = []  # each setting (axis) a read took the value of (``setting(key)[axis]``, ``across(axis)``), since the frame last cleared it
+        self.axes_all = False  # a function took a whole setting (a loop over it, a copy): which axes it uses cannot be told
         self._settings = {}
         self._by_setting = {}
         for c in self._cells:
@@ -493,7 +539,7 @@ class Table:
 
     def setting(self, key):
         """The setting named ``key``: ``{axis: value}``."""
-        return dict(self._cell(key).get("cell") or {})
+        return _Reading(self, self._cell(key).get("cell") or {})
 
     def per_level(self, name, key):
         """The values (or combinations) the runs of setting ``key`` compared inside them that ``name`` is recorded under, as
@@ -712,6 +758,7 @@ class Table:
     def across(self, axis, **fixed):
         """``(value, key)`` for every setting that has ``axis`` and holds the values in ``fixed``, ordered by the value when
         they are all numbers, else in the record's order."""
+        self.axes.append(axis)
         pairs = [(self._settings[k]["cell"][axis], k) for k in self.at(**fixed) if axis in self._settings[k].get("cell", {})]
         if pairs and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v, _k in pairs):
             pairs.sort(key=lambda p: p[0])
@@ -726,7 +773,7 @@ class Table:
         import fi_table
 
         self._check(name)
-        base = self.setting(key)
+        base = dict(self._cell(key).get("cell") or {})
         wanted = set(fixed) | {factor}
         out, seen = {}, set()
         for c in self._cells:

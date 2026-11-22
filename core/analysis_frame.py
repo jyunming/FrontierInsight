@@ -1008,7 +1008,8 @@ def _holds_number(v):
 
 def _never_computed(records):
     """The quantities of a counting role whose function ran but whose record holds no number at any setting: not worked out,
-    whatever status the function returned. ``[{"id", "status": "missing", "why"}]``, the why from the function's own reason."""
+    whatever status the function returned. ``[{"id", "status": "missing", "why"}]``, the why from the function's own reason; a
+    result FI held back (``held_back``: its record could not have moved it) has the status ``held_back``."""
     out = []
     for ident, rec in records.items():
         if rec.get("status") != "ok" or rec.get("role") not in COUNTING:
@@ -1016,7 +1017,7 @@ def _never_computed(records):
         held = [rec[k] for k in ("value", "by_setting", "by_level") if k in rec]
         if held and not any(_holds_number(v) for v in held):
             why = next((str(w) for w in (rec.get("missing") or {}).values() if w), "") or "no setting gave a value for it"
-            out.append({"id": ident, "status": "missing", "why": why})
+            out.append({"id": ident, "status": "held_back" if rec.get("held_back") else "missing", "why": why})
     return out
 
 
@@ -1162,9 +1163,11 @@ def _call(by, fn, *args):
     for t in tables:
         t.unheld.clear()
         t.unheld_at.clear()
-        for kept in ("asked", "looked"):
+        for kept in ("asked", "looked", "axes"):
             if isinstance(getattr(t, kept, None), list):
                 del getattr(t, kept)[:]  # what this call reads of the table, alone (``_derived`` keeps it)
+        if hasattr(t, "axes_all"):
+            t.axes_all = False
     began = time.monotonic()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -1385,7 +1388,41 @@ def _reference_body(by, role, fn, table):
     return out
 
 
-def _derived(table, base, compared):
+def _never_read(path):
+    """The settings no trial of the run read, from FI's record of the trials (``never_read``, written beside the cells when the
+    run's trials were summed up): what the code asked the settings for, never a reading of its text. ``[]`` when the record
+    names none, or an older record does not say."""
+    if os.path.isdir(path):
+        path = os.path.join(path, "raw", "trials.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    got = data.get("never_read") if isinstance(data, dict) else None
+    return [str(a) for a in got] if isinstance(got, list) else []
+
+
+def _could_not_move(rec, never_read):
+    """Why FI's own record could not have moved what a function of the study's returned, or ``""``: the function worked it out
+    along a setting no trial read (``never_read`` in FI's record of the trials, what the code asked the settings for, never a
+    reading of its text), so the values of that setting never reached the simulation and every one of them gave one result
+    repeated. The settings a function took the value of are what it worked out along (``Table.axes``); one that filtered by a
+    setting only, or took the settings whole (a loop, a copy), makes no claim."""
+    if rec.get("status") != "ok" or rec.get("role") != "result" or not _holds_number(
+            [rec.get(k) for k in ("value", "by_setting", "by_level") if k in rec]):
+        return ""
+    if rec.get("axes_all"):
+        return ""
+    dead = [a for a in dict.fromkeys(str(a) for a in rec.get("axes") or []) if a in never_read]
+    if not dead:
+        return ""
+    return ("FI's record could not have moved it: it is worked out along %s, which no trial of the run read, so the values of %s "
+            "never reached the simulation and every one of them gave the same result" % (
+                ", ".join("`%s`" % a for a in dead), "it" if len(dead) == 1 else "them"))
+
+
+def _derived(table, base, compared, never_read=()):
     records = {}
     order, circle = _order(PLAN.DERIVED)
     for ident in circle:
@@ -1417,6 +1454,12 @@ def _derived(table, base, compared):
                 rec = check_return(by, role, value, table.keys(), compared)
             if asked is not None and looked is not None:
                 rec["asked"], rec["looked"] = asked, looked
+            if isinstance(getattr(table, "axes", None), list):
+                rec["axes"], rec["axes_all"] = sorted({str(a) for a in table.axes}), bool(table.axes_all)
+                why = _could_not_move({**rec, "role": role}, set(never_read))
+                if why:
+                    rec = {"status": "ok", "why": "", "value": None, "missing": {"": why}, "held_back": why,
+                           "asked": rec.get("asked"), "looked": rec.get("looked"), "axes": rec["axes"], "axes_all": False}
         rec.update({"role": role, "by": by})
         rec.setdefault("inputs", [i for i in table.served if i not in before])
         records[ident] = rec
@@ -1763,7 +1806,7 @@ def run(record_path, quest_root):
                   getattr(PLAN, "KINDS", {}), inputs=inputs, own=own)
     table._thresholds = _thresholds(record_path)  # read only by the figures: a threshold line is named by the plan's key
     compared = {k: list(v) for k, v in PLAN.COMPARED.items()}
-    records = earlier["derived"] if only else _derived(table, base, compared)
+    records = earlier["derived"] if only else _derived(table, base, compared, _never_read(record_path))
     _progress("fi: printing the results")
     out = {} if only else result_json(table, records, compared)
     outcomes, said, figure_code, figure_faults = _figures(table, quest_root, records)
@@ -1822,7 +1865,7 @@ def main():
         for note in r.get("disclosed") or []:
             sys.stderr.write("%s: %s\\n" % (ident, note))
     for item in document["not_computed"]:
-        if item["status"] in ("no_data", "missing"):
+        if item["status"] in ("no_data", "missing", "held_back"):
             sys.stderr.write("%s: %s\\n" % (item["id"], item["why"]))
     for text in [document["figures_said"]] + document["notes"] + document["fi_faults"]:
         if text:
