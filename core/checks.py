@@ -723,7 +723,8 @@ CHECKS: tuple[Check, ...] = (
     Check('pilot_metric_undefined', 'core.run_estimate', 'undefined_metrics',
           'execute', 'measured', 'stop',
           'A protocol metric that is not a number in any pilot trial is sent back for repair '
-          '(engine.exec_reflect_max_iterations), then ends in the honest stop.'),
+          '(engine.exec_reflect_max_iterations); if the repairs end and another result has a value it is left out '
+          'with its reason (paper and QUALITY.md) and the study runs for the rest, else the honest stop.'),
     Check('pilot_metric_constant', 'core.run_estimate', 'pilot_problems',
           'execute', 'model_code', 'stop',
           'A mean metric exactly constant in all pilot trials while others move, and built from no setting per '

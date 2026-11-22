@@ -741,7 +741,9 @@ class RunChecksMixin:
             from . import result_checks as _checks
 
             return set(_checks.left_out_by_record(self.quest_root))  # type: ignore[attr-defined]
-        return set(typed) | self._result_check_keys()  # type: ignore[attr-defined]
+        pilot = {str(d.get("metric")) for d in _estimate.read_pilot_record(self.quest_root).get("left_out") or []  # type: ignore[attr-defined]
+                 if isinstance(d, dict) and d.get("metric")}
+        return set(typed) | self._result_check_keys() | pilot  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
         """``result_json`` without the left-out quantities and the per-trial lists FI's frame writes beside each of them
@@ -2425,7 +2427,7 @@ class RunChecksMixin:
         # The code part of a kept key is read by the rule it was made with (main's, for a record an older FI wrote).
         sha_now, _, kinds_now = code_key.partition("|")
         sha_kept, _, kinds_kept = str(record.get("code_key") or "").partition("|")
-        seen = bool(sha_now) and kinds_kept == kinds_now and _hidden.CodeNow(self.quest_root, sha_now).same(sha_kept)  # type: ignore[attr-defined]
+        seen = record.get("schema") == _estimate.PILOT_SCHEMA and bool(sha_now) and kinds_kept == kinds_now and _hidden.CodeNow(self.quest_root, sha_now).same(sha_kept)  # type: ignore[attr-defined]
         if seen and record.get("outcome") == "passed":
             self._log.info("[execute] the pilot has read this version of the simulation already: nothing was wrong")  # type: ignore[attr-defined]
             return None
@@ -2435,7 +2437,8 @@ class RunChecksMixin:
                 checked=[str(x) for x in record.get("metrics_read") or []],
                 problems=[_estimate.PilotProblem(str(d.get("metric")), str(d.get("kind")), str(d.get("says")))
                           for d in record["problem_items"] if isinstance(d, dict)],
-                unsure=[str(x) for x in record.get("not_ruled_out") or []])
+                unsure=[str(x) for x in record.get("not_ruled_out") or []],
+                with_values=[str(x) for x in record.get("metrics_with_values") or []])
         else:
             # The extra trials come out of the sizing's own budget (at most half of it in all, across the rounds).
             left = max(0.0, budget_s / 2.0 - self._pilot_spent)
@@ -2448,7 +2451,7 @@ class RunChecksMixin:
                 in_each_run=_in_run.of_study(protocol))
             self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
-                "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,
+                "not_ruled_out": result.unsure, "metrics_with_values": result.with_values, "schema": _estimate.PILOT_SCHEMA, "at": time.time(), "trial_count_read": total, "code_key": code_key,
                 "problem_items": [{"metric": p.metric, "kind": p.kind, "says": p.says} for p in result.problems]}
         if result.unsure:
             self._log.info("[execute] the pilot could not try every combination of the small settings, so it says nothing of "  # type: ignore[attr-defined]
@@ -2458,11 +2461,27 @@ class RunChecksMixin:
                            "wrong%s", result.trials, result.settings, len(result.checked),
                            f" (after {repairs} repair(s))" if repairs else "")
             _estimate.write_pilot_record(self.quest_root, {**base, "outcome": "passed", "repairs": repairs, "problems": []})  # type: ignore[attr-defined]
+            self._note_not_done([], kind="never_a_number")  # type: ignore[attr-defined]
             return None
         says = [p.says for p in result.problems]
         iters = int(state.get("exec_reflect_iter") or 0)
         for line in says:
             self._log.warning("[execute] the pilot found: %s", line)  # type: ignore[attr-defined]
+        left = _estimate.left_out_metrics(result, _estimate.headline_metrics(protocol)) if iters >= self.config.engine.exec_reflect_max_iterations else []  # type: ignore[attr-defined]
+        if left:
+            # The repairs ended and these results are still never a number: they are left out, with their reason in the record
+            # the paper and QUALITY.md read (``not_done``), and the study runs for the results that have a value.
+            sentence = {n: _estimate.left_out_sentence(n, result.settings) for n in left}
+            self._note_not_done(  # type: ignore[attr-defined]
+                [{"name": n, "sentence": sentence[n], "kind": "never_a_number"} for n in left], kind="never_a_number")
+            _estimate.write_pilot_record(  # type: ignore[attr-defined]
+                self.quest_root, {**base, "outcome": "passed", "repairs": repairs, "problems": [],
+                                  "left_out": [{"metric": n, "says": sentence[n]} for n in left]})
+            self._log.warning("[execute] %s; the study runs for the other %d result(s) that have a value",  # type: ignore[attr-defined]
+                              "; ".join(sentence.values()), len(result.with_values))
+            print(f"[FI] {len(left)} planned result(s) were never a number in the small trial run and are left out ("
+                  + ", ".join(f"`{n}`" for n in left) + "); the study runs for the rest")
+            return None
         if iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
             # Counted BEFORE the run goes back: a quest killed here never repairs more often than it may.
             _estimate.write_pilot_record(  # type: ignore[attr-defined]

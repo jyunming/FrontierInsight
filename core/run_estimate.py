@@ -761,6 +761,8 @@ MIN_CONSTANT_SETTINGS = 3
 MIN_STUCK_TRIALS = 4
 MIN_STUCK_SETTINGS = 2
 PILOT_RECORD = Path(".fi") / "pilot_check.json"
+#: The version of what the pilot record holds; a record of another version is read again, never reused.
+PILOT_SCHEMA = 2
 
 
 @dataclass
@@ -782,6 +784,49 @@ class Pilot:
     problems: list[PilotProblem] = field(default_factory=list)
     #: Metrics that looked undefined but whose subsets could not all be tried: nothing is claimed about them.
     unsure: list[str] = field(default_factory=list)
+    #: The metrics read that were a number in at least one pilot trial (the results the study can still give).
+    with_values: list[str] = field(default_factory=list)
+
+
+def headline_metrics(protocol: dict[str, Any] | None) -> set[str]:
+    """The plan's main quantity, from the frozen protocol's own record: ``precision.metric`` (a name, or a list of names; a
+    list of precision entries is read the same way). Empty when the protocol names none."""
+    if not isinstance(protocol, dict):
+        return set()
+    precision = protocol.get("precision")
+    entries = precision if isinstance(precision, list) else [precision]
+    out: set[str] = set()
+    for entry in entries:
+        named = entry.get("metric") if isinstance(entry, dict) else None
+        for n in (named if isinstance(named, (list, tuple)) else [named]):
+            if isinstance(n, str) and n.strip():
+                out.add(n.strip())
+    return out
+
+
+def left_out_metrics(pilot: Pilot, headline: Iterable[str] = ()) -> list[str]:
+    """The metrics to leave out once the repairs have ended: when every finding of the pilot is a metric that is never a
+    number (at any setting FI tried, the cell cover of :func:`pilot` included) and at least one other metric of the protocol
+    was a number in the pilot, those metrics are left out and the study runs for the rest. Any other finding beside them, no
+    metric with a value, or a metric that is the plan's main quantity (``headline``: :func:`headline_metrics`) gives none:
+    the study stops as before."""
+    if not pilot.problems or not pilot.with_values:
+        return []
+    if any(p.kind != "undefined" or not p.metric for p in pilot.problems):
+        return []
+    # The same reading of "the main quantity" as the code review's (core/code_review.py: a metric is the main one when its
+    # name, in any case, is the plan's precision metric or contains it, as a per-trial or prefixed name does).
+    heads = {h.strip().lower() for h in headline if isinstance(h, str) and h.strip()}
+    if any(m == h or h in m for m in (p.metric.lower() for p in pilot.problems) for h in heads):
+        return []
+    return [p.metric for p in pilot.problems]
+
+
+def left_out_sentence(name: str, settings: int) -> str:
+    """The plain reason the paper and the quality report give for a result that was not obtained (:func:`left_out_metrics`)."""
+    return (f"`{name}` was not obtained: it was not a number at any of the {settings} settings FI tried, which include every "
+            "value of every setting, and the repairs of the simulation did not give it a value; the paper reports no value, "
+            "table cell, figure point or claim for it")
 
 
 def _finite(value: Any) -> bool:
@@ -885,6 +930,7 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
         pilot.problems.append(PilotProblem("", "aggregate", why))
     returned = sorted({n for _c, v in obs for n in v})
     pilot.checked = [n for n in kinds if n in returned]
+    pilot.with_values = [n for n in pilot.checked if any(_finite(v[n]) for _c, v in obs if n in v)]
     if not obs:
         return pilot
     for name in undefined_metrics(obs, pilot.checked):

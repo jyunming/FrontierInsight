@@ -751,7 +751,13 @@ def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
     trials, settings = _int(p.get("trials")), _int(p.get("settings"))
     read = f"{trials} trial(s) at {settings} setting(s) were read before the full run"
     if p["outcome"] == "passed":
-        said = f"{read}; nothing was wrong" + (" once the simulation was repaired" if repairs else "")
+        left = [str(d.get("metric")) for d in _list(p.get("left_out")) if isinstance(d, dict)]
+        if left:
+            said = (f"{read}; {len(left)} planned result(s) ({', '.join(f'`{n}`' for n in left)}) were not a number at any "
+                    "setting and the repairs of the simulation did not give them a value, so they are left out and the study "
+                    "ran for the rest")
+        else:
+            said = f"{read}; nothing was wrong" + (" once the simulation was repaired" if repairs else "")
     elif p["outcome"] == "stopped":
         said = f"{read}; they showed the simulation does not measure what the protocol names, and its repairs did not remove it"
     else:
