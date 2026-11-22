@@ -784,7 +784,12 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
     out: list[dict[str, Any]] = []
     for run in runs:
         out.extend(_in_run.summary_cells(run.cell, run.key, run.planned, run.rows, run.levels))
-    return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
+    summary: dict[str, Any] = {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
+    # The settings of the study no trial of the run read (FI's own record of what the code asked for): the analysis does not
+    # keep a result it worked out along one (core/analysis_frame.py ``_could_not_move``). Left out when there is none.
+    if never := unread_axes([r for r in runs if getattr(r, "rows", None) is not None]):
+        summary["never_read"] = never
+    return summary
 
 
 def summary_of(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> dict[str, Any]:

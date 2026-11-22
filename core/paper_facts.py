@@ -389,7 +389,11 @@ def required_items(quest_root: Path | str) -> list[Item]:
                "not_written": ("the study's code to work it out was not written", "the study's code to work them out was not written"),
                "blocked": ("a quantity it is worked out from was not computed", "a quantity each is worked out from was not computed"),
                "missing": ("the study's code to work it out gave no value at any setting",
-                           "the study's code to work them out gave no value at any setting")}
+                           "the study's code to work them out gave no value at any setting"),
+               "held_back": ("FI's record could not have moved the value the study's code gave (it was worked out along a setting "
+                             "no trial read, or from results that never differed)",
+                             "FI's record could not have moved the values the study's code gave (each was worked out along a "
+                             "setting no trial read, or from results that never differed)")}
     other = ("the study's code to work it out gave no usable value", "the study's code to work them out gave no usable value")
     by_reason: dict[str, list[str]] = {}
     for item in _analysis.not_computed(_read(root, _analysis.DERIVED_PATH.as_posix()) or {}):

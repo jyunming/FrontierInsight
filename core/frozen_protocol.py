@@ -104,6 +104,30 @@ def load(quest_root: Path) -> dict[str, Any] | None:
     return record
 
 
+def _counts_repeat(protocol: Any) -> bool:
+    from . import mc_error as _mc  # a late import: core.mc_error reads the frozen record
+
+    return bool(_mc.repeats_trials(protocol if isinstance(protocol, dict) else None))
+
+
+def _reading_fields(repeats_trials: bool | None) -> dict[str, Any]:
+    if repeats_trials is None:
+        return {}
+    return {"repeats_trials": bool(repeats_trials), "repeats_trials_sha256": sha256({"repeats_trials": bool(repeats_trials)})}
+
+
+def repeats_trials_of(quest_root: Path) -> bool | None:
+    """The reading of whether the study repeats its trials that was frozen with the protocol, or ``None`` when nothing is
+    frozen, the frozen record was written before it kept the reading (the caller then reads the plan as it stands), or the
+    stored value does not match its own hash (an edit is not believed)."""
+    record = load(quest_root)
+    if not record or not isinstance(record.get("repeats_trials"), bool):
+        return None
+    if record.get("repeats_trials_sha256") != sha256({"repeats_trials": record["repeats_trials"]}):
+        return None
+    return record["repeats_trials"]
+
+
 def protocol_of(quest_root: Path) -> dict[str, Any] | None:
     """The frozen protocol itself (``None`` when nothing is frozen or the study froze without one)."""
     record = load(quest_root)
@@ -114,13 +138,18 @@ def protocol_of(quest_root: Path) -> dict[str, Any] | None:
 def freeze(
     quest_root: Path, protocol: dict[str, Any] | None, *, approved_by: str, source: str,
     version: int = 1, amendments: int = 0, sources: list[dict[str, str]] | None = None,
+    repeats_trials: bool | None = None,
 ) -> dict[str, Any]:
     """Freeze ``protocol`` (idempotent: an existing record is returned untouched). ``protocol`` may be ``None``: the study
     is then recorded as having run without one, which the evidence level says.
 
     ``sources``: the sources the quest had retrieved when the protocol was frozen, as its checks cite them ([n], title,
     DOI; :func:`core.oracle_check.retrieved_sources`). Kept beside the protocol, not in its hash: the paper later cites a
-    subset under new numbers, and a check's ``[3]`` means the source that was [3] when the plan was written."""
+    subset under new numbers, and a check's ``[3]`` means the source that was [3] when the plan was written.
+
+    ``repeats_trials``: whether the study repeats its trials, read once from the plan's words and the protocol's counts
+    (:func:`core.mc_error.planned_repeats_trials`). Kept beside the protocol with a hash of its own, so every later check of
+    the trials reads this answer and not a plan.md edited since (:func:`repeats_trials_of`)."""
     existing = load(quest_root)
     if existing is not None:
         return existing
@@ -136,6 +165,7 @@ def freeze(
         "source": source,
         "amendments": amendments,
         **({"sources": list(sources), "sources_sha256": sha256(list(sources))} if sources is not None else {}),
+        **_reading_fields(repeats_trials),
     }
     _write(frozen_path(quest_root), record)
     _write(_needs(quest_root) / "protocol_versions" / f"v{version}.json", record)
@@ -354,6 +384,9 @@ def apply(quest_root: Path, pending: dict[str, Any], approval: dict[str, Any], *
         # The sources the checks cite are the ones retrieved before the first freeze; an amendment keeps their numbers.
         **({"sources": frozen["sources"], "sources_sha256": frozen.get("sources_sha256")}
            if isinstance(frozen.get("sources"), list) else {}),
+        # The reading frozen with the first protocol stays (the words it came from do not change); a raised count can only add.
+        **_reading_fields(None if repeats_trials_of(quest_root) is None else (
+            repeats_trials_of(quest_root) or _counts_repeat(pending["proposed_protocol"]))),
     }
     _write(frozen_path(quest_root), new_frozen)
     _write(_needs(quest_root) / "protocol_versions" / f"v{version}.json", new_frozen)

@@ -37,6 +37,7 @@ from typing import Any
 from . import cost_model as _cost_model
 from . import execution as _execution
 from . import frozen_protocol as _frozen
+from . import mc_error as _mc_error
 from . import numeric_warnings as _numeric
 from . import in_run as _in_run
 from . import optimise_search as _optimise_search
@@ -989,7 +990,7 @@ class RunChecksMixin:
             existing = (self.quest_root / "code" / _split_run.SIMULATE_NAME).read_text(encoding="utf-8")  # type: ignore[attr-defined]
         except (OSError, UnicodeDecodeError):
             existing = ""
-        return _skeleton.frame_for(design, stochastic=_split_run.design_is_stochastic(design),
+        return _skeleton.frame_for(design, stochastic=_mc_error.design_repeats_trials(design),
                                    strict=_contract.from_design(design).form == "contract", existing=existing)
 
     def _strict_frame(self, state: Any) -> bool:
@@ -1425,7 +1426,7 @@ class RunChecksMixin:
             return False
         if not _skeleton.has_frame(text):
             return False
-        healed = _skeleton.heal_results(text, design, stochastic=_split_run.design_is_stochastic(design),
+        healed = _skeleton.heal_results(text, design, stochastic=_mc_error.design_repeats_trials(design),
                                         strict=self._strict_frame(state))
         if healed == text:
             return False
@@ -1656,6 +1657,8 @@ class RunChecksMixin:
             if runner.group_reuse is not None:
                 runner.group_reuse.discard()
             runner.group_reuse = None
+        if isinstance(runner, _trial_runner.TrialsRunner) and int(state.get("iteration", 0) or 0) == 0                 and _frozen.load(self.quest_root) is None:  # type: ignore[attr-defined]
+            self._raise_runs_to_the_minimum(state)
         # A run_trial that returns the mean of many trials (it calls run_cell) is a fault of the code, not of the plan's size:
         # it goes back to the code step, never to the plan to shrink the grid (which dropped settings the topic required).
         if isinstance(runner, _trial_runner.TrialsRunner):
@@ -1866,6 +1869,13 @@ class RunChecksMixin:
                                          topic_limit=by_topic, spreads=est.spreads, at_once=est.at_once,
                                          slowdown=est.slowdown)
             over_topic = ""
+            unconfirmed = False
+            if fit is None and not by_topic and not cut_done:
+                # The plan's own minimum does not fit the time allowed: FI does not stop. It runs the most runs per setting that
+                # fit (at least two), says so as its own reduction, and what rests on those trials is marked unconfirmed.
+                fit = _estimate.fit_runs(grid, runs, runner.deterministic, probes, protocol, limit_s=limit_s, topic_limit=False,
+                                         spreads=est.spreads, at_once=est.at_once, slowdown=est.slowdown, any_runs=True)
+                unconfirmed = fit is not None
             if fit is None and by_topic and not cut_done:
                 # Not even the fewest runs meet the topic's limit: going below the plan's minimum would not meet it either,
                 # so the plan's minimum stands and the run is nearest the limit there, over it (said in the paper). Only a
@@ -1900,7 +1910,8 @@ class RunChecksMixin:
                     return None
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
-            note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic)
+            note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic,
+                                        unconfirmed=unconfirmed)
             if note is None:
                 text = self._too_long_text(est, hard_s)
                 fits_in = self._what_fits(est, hard_s)
@@ -1910,7 +1921,7 @@ class RunChecksMixin:
                 _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
                 return self._stop_too_long(text, fit=fits_in)
             cut_done = True
-            reduced = note
+            reduced = {**note, "marked_unconfirmed": True} if unconfirmed else note
             self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
             _estimate.write_record(self.quest_root, {**base, "fits": False, "reduced": reduced})  # type: ignore[attr-defined]
             await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
@@ -2480,9 +2491,44 @@ class RunChecksMixin:
         design["protocol"] = {**(design.get("protocol") if isinstance(design.get("protocol"), dict) else {}), **sized}
         return design
 
+    def _raise_runs_to_the_minimum(self, state: Any) -> int | None:
+        """A plan that states fewer runs per setting than its own fewest (``runs_per_setting: 1`` beside
+        ``min_runs_per_setting: 200``) contradicts itself: the minimum is what the plan says it needs to answer its question,
+        so before the protocol is frozen FI makes the runs per setting that minimum, in plan.md as a version of the engine (no
+        request to the plan's model). The run is then timed and, when it does not fit, cut or run up to the limit the same
+        way as any other, with the paper saying so. The runs now planned, or ``None`` when the plan has no such conflict or
+        plan.md could not be changed."""
+        if _estimate.read_record(self.quest_root).get("reduced"):  # type: ignore[attr-defined]
+            return None  # FI lowered the runs itself (for the time allowed, disclosed in the paper): a resume never undoes that
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        fewest, runs = protocol.get("min_runs_per_setting"), protocol.get("runs_per_setting")
+        if not isinstance(fewest, (int, float)) or isinstance(fewest, bool) or int(fewest) <= max(1, int(runs or 1)):
+            return None
+        raised = int(fewest)
+        path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
+        try:
+            text = path.read_text(encoding="utf-8")
+            edited = _plan.edit_design_block(
+                text, lambda d: {**d, "protocol": {**(d.get("protocol") or {}), "runs_per_setting": raised}})
+            if edited is None or _plan.parse(edited).design is None:
+                return None
+            edited = _plan.refresh_model_section(edited)
+            _plan.note_edit(self.quest_root, text)  # type: ignore[attr-defined]
+            path.write_text(edited, encoding="utf-8")
+            _plan.record_version(self.quest_root, edited, by="engine",  # type: ignore[attr-defined]
+                                 note="runs per setting raised to the plan's own minimum, set by FI")
+        except OSError as e:
+            self._log.warning("[execute] FI could not raise the runs per setting in plan.md: %r", e)  # type: ignore[attr-defined]
+            return None
+        self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": raised}
+        self._log.warning(  # type: ignore[attr-defined]
+            "[execute] the plan runs %s per setting and also says it needs at least %s; FI runs %s per setting (the plan's own "
+            "minimum) and times that", int(runs or 1), raised, raised)
+        return raised
+
     def _lower_the_runs(self, state: Any, runs: int, fit: _estimate.Fit, est: _estimate.Estimate, limit_s: float,
                         grid: dict[str, list[Any]], protocol: dict[str, Any], *, topic: bool = False,
-                        over_topic: str = "") -> dict[str, Any] | None:
+                        over_topic: str = "", unconfirmed: bool = False) -> dict[str, Any] | None:
         """FI's own smaller run: the same settings with ``fit.runs`` runs each, written into plan.md as a version of the engine
         (no request to the plan's model). The record of it (the plain note the paper states, the precision those runs give,
         and whether they are fewer than the plan's minimum), or ``None`` when plan.md could not be changed. ``topic``: the
@@ -2518,8 +2564,9 @@ class RunChecksMixin:
         if fit.below_plan:
             note += (f" That is fewer than the {fit.plan_floor} runs per setting the plan allows at the least ("
                      + ("its minimum and its precision target" if fit.precision_known else "its stated minimum")
-                     + "): the topic's time limit asked for it, so the plan's minimum number of runs is a part of the study "
-                     "not fully done.")
+                     + f"): {'the topic' + chr(39) + 's time limit' if topic else 'the time allowed'} asked for it, so the plan's "
+                     "minimum number of runs is a part of the study not fully done"
+                     + ("; the results that rest on these runs are marked (unconfirmed)." if unconfirmed else "."))
         elif not _estimate.floor_is_stated(protocol) and topic and not over_topic:
             note += (" The plan states no fewest number of runs per setting; for the topic's own limit FI goes down to "
                      f"{_estimate.fewest_for_topic(protocol, grid, runs)} at the least.")

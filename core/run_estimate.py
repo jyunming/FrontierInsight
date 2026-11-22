@@ -1239,6 +1239,11 @@ def seconds_at(grid: dict[str, list[Any]], runs: int, runs_now: int, determinist
     return None if est is None else est.seconds
 
 
+#: The fewest runs per setting FI goes down to for a plan whose own minimum does not fit the time allowed (a random study needs two
+#: to show any spread).
+MIN_RUNS_ANY = 2
+
+
 @dataclass
 class Fit:
     """FI's smaller run: ``runs`` per setting, every setting kept. ``below_plan`` when that is fewer than the plan's own
@@ -1256,7 +1261,7 @@ class Fit:
 
 def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe], protocol: dict[str, Any] | None,
              *, limit_s: float, topic_limit: bool, spreads: dict[str, float] | None = None, at_once: int = 1,
-             slowdown: float = 1.0) -> Fit | None:
+             slowdown: float = 1.0, any_runs: bool = False) -> Fit | None:
     """The most runs per setting (fewer than ``runs``) whose estimate, with its margin, fits ``limit_s``, every setting kept;
     ``None`` when none does. For FI's own limit the fewest allowed is the plan's own (:func:`runs_floor`, when the plan
     states one: FI invents no number of runs for its own limit, and with a target on a mean whose spread is not known it
@@ -1276,11 +1281,15 @@ def fit_runs(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
         # plan's own runs read as a "minimum".
         stated = _stated_min(protocol)
         floor = min(int(runs), stated) if stated is not None else None
-        if not topic_limit:
+        if not topic_limit and not any_runs:
             return None  # FI's own limit never cuts below a precision it cannot work out
     need = runs_checks_need(protocol, grid)
-    if topic_limit:
-        lowest: int | None = max(MIN_RUNS_FOR_LIMIT, need)
+    if any_runs:
+        if floor is None or topic_limit:
+            return None
+        lowest = MIN_RUNS_ANY
+    elif topic_limit:
+        lowest = max(MIN_RUNS_FOR_LIMIT, need)
     else:
         lowest = None if floor is None else max(floor, need)
     if lowest is None or lowest >= int(runs):

@@ -1901,7 +1901,7 @@ class PlanStageMixin:
                 # Only `per_trial` of the checks asked about is taken (core/mc_error.py::unsaid_reading): never a
                 # tolerance, an expected value or anything else of a check. The checks asked about are those of the
                 # plan as it was (`old_protocol`), never those a part merged from this answer (new metrics) would add.
-                names = set(_mc_error.unsaid_reading(old_protocol))
+                names = set(_mc_error.unsaid_reading(old_protocol, old if isinstance(old, dict) else None))
                 said = new_protocol.get("oracles") if isinstance(new_protocol.get("oracles"), list) else (
                     new.get("oracles") if isinstance(new.get("oracles"), list) else [])
                 answers = {str(e.get("name") or "").strip(): _mc_error.per_trial_flag(e) for e in said
@@ -2136,7 +2136,7 @@ class PlanStageMixin:
         does not say whether it holds in every single trial or only on average (:func:`core.mc_error.unsaid_reading`):
         asked of the plan's model once, never guessed by FI and never a stop."""
         protocol = design.get("protocol") if isinstance(design, dict) and isinstance(design.get("protocol"), dict) else None
-        names = _mc_error.unsaid_reading(protocol)
+        names = _mc_error.unsaid_reading(protocol, design)
         if not names:
             return {}
         return {"per_trial": (f"the checks {', '.join(repr(n) for n in names)} run on many random trials, and the plan "

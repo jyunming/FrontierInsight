@@ -46,8 +46,10 @@ judges with them. The first rule is that a check the trials cannot decide is nev
 from __future__ import annotations
 
 import ast
+import json
 import math
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +57,7 @@ from . import metric_spec as _metric_spec
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import trial_checks as _trial_checks
+from .split_run import _STOCHASTIC_RE
 
 #: How many standard errors the band around a measured mean is (about 99.7% two-sided for a normal mean). Two would
 #: decide a correct simulation wrongly on one check in twenty, and a plan has several.
@@ -100,9 +103,22 @@ def proportion_names(protocol: dict[str, Any] | None) -> frozenset[str]:
     return _metric_spec.proportion_ids(protocol)
 
 
-def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
+# The words that say a design draws random numbers are kept where the split-run keeps them (one list).
+
+
+def repeats_trials(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> bool | None:
     """Whether the plan runs more than one trial per setting (``runs_per_setting`` or ``min_runs_per_setting`` above
-    1): a random study. ``False`` for one run per setting (a deterministic study), ``None`` when the plan says neither."""
+    1): a random study. ``False`` for one run per setting (a deterministic study), ``None`` when the plan says neither.
+
+    This is the one reading of the plan's run counts: the frame the simulation is written in (``run_trial`` or
+    ``run_cell``), the raw-data check, the checks of a random quantity and the planned runs all follow it, so a plan that
+    says one run per setting beside a minimum of 200 is never a deterministic study in one place and a random one in
+    another. With ``design`` given, a design whose own words (hypothesis, method, expected outcome, variables) name a random
+    process (:data:`_STOCHASTIC_RE`) also repeats trials, whatever the counts say."""
+    if isinstance(design, dict) and _STOCHASTIC_RE.search(json.dumps(
+            {key: design.get(key) for key in ("hypothesis", "method", "expected_outcome", "variables")},
+            ensure_ascii=False, default=str)):
+        return True
     if not isinstance(protocol, dict):
         return None
     runs = [protocol.get(k) for k in ("runs_per_setting", "min_runs_per_setting")]
@@ -110,6 +126,38 @@ def repeats_trials(protocol: dict[str, Any] | None) -> bool | None:
     if not runs:
         return None
     return max(runs) > 1
+
+
+def design_repeats_trials(design: Any) -> bool:
+    """:func:`repeats_trials` read from a whole design (its protocol and its words), ``False`` when it says nothing."""
+    if not isinstance(design, dict):
+        return False
+    protocol = design.get("protocol")
+    return bool(repeats_trials(protocol if isinstance(protocol, dict) else None, design))
+
+
+def planned_repeats_trials(quest_root: Path | str, protocol: dict[str, Any] | None,
+                           design: dict[str, Any] | None = None) -> bool | None:
+    """:func:`repeats_trials` of ``protocol`` with the words of ``design`` (given, else the quest's ``plan.md``): the reading
+    made before a protocol is frozen, and the one that is frozen with it. Without a design (a quest FI did not plan) it is
+    the protocol's counts alone."""
+    if not isinstance(design, dict):
+        from . import plan as _plan  # a late import: core.plan imports this module
+
+        design = _plan.load_design(Path(quest_root))[0]
+    return repeats_trials(protocol, design if isinstance(design, dict) else None)
+
+
+def quest_repeats_trials(quest_root: Path | str, protocol: dict[str, Any] | None) -> bool | None:
+    """Whether the study repeats its trials: what every check that runs or judges the trials asks, so the frame, the
+    known-answer cases, the raw-data check and the judging of a random quantity read one answer. After the freeze it is the
+    reading frozen with the protocol (``needs/FROZEN_PROTOCOL.json``, covered by its own checksum), so a plan.md edited
+    afterwards cannot change it for the same run. Before the freeze, and for a frozen record written before it kept the
+    reading, it is :func:`planned_repeats_trials` (the plan.md's words with the protocol's counts)."""
+    from . import frozen_protocol as _frozen
+
+    kept = _frozen.repeats_trials_of(Path(quest_root))
+    return kept if kept is not None else planned_repeats_trials(quest_root, protocol)
 
 
 def paired(protocol: dict[str, Any] | None, quest_root: Path | str | None = None) -> bool:
@@ -140,7 +188,7 @@ def per_trial_flag(oracle: dict[str, Any]) -> bool | None:
 ASKED_KEY = "reading_asked"
 
 
-def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
+def unsaid_reading(protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[str]:
     """The checks whose reading the plan's model has not been asked: every check FI can run on a case of its own, when the
     study repeats its trials (or the plan does not say it does not), until the focused question (``PART_RULES["per_trial"]``
     in core/plan.py) has been answered for it (:data:`ASKED_KEY`); a check whose measure takes mean() or sd() over the trials is
@@ -149,7 +197,7 @@ def unsaid_reading(protocol: dict[str, Any] | None) -> list[str]:
     answered right), while volunteered beside everything else it got 3 of 53 wrong. Whether a check holds in every single
     trial or only on average is a fact about the science, so FI asks once and never guesses it; a check still unsaid is
     read on the mean over trials (:func:`reads_a_mean`) unless its kind is a rule of every trial."""
-    if not isinstance(protocol, dict) or repeats_trials(protocol) is False:
+    if not isinstance(protocol, dict) or repeats_trials(protocol, design) is False:
         return []
     return [str(o["name"]).strip() for o in protocol.get("oracles") or []
             if isinstance(o, dict) and str(o.get("name") or "").strip() and _oracle.case_of(o) is not None

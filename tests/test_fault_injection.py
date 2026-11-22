@@ -46,7 +46,7 @@ import pytest
 
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
-from core.split_run import design_is_stochastic
+from core.mc_error import design_repeats_trials as design_is_stochastic
 from core import metric_spec as ms
 
 AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"

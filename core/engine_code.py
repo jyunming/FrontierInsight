@@ -710,6 +710,10 @@ class CodeStageMixin:
                                "after the plan was read (their numbers are as read)")
         approved_by += unsourced_note
         replaced = _frozen.open_replacement(self.quest_root)
+        # whether the study repeats its trials, read once here and kept with the protocol: every later check of the trials reads it
+        reading = bool(_mc_error.planned_repeats_trials(
+            self.quest_root, protocol if isinstance(protocol, dict) else None,
+            state.get("design") if isinstance(state.get("design"), dict) else None))
         if replaced is not None:
             approved_by = (f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
                            + unsourced_note)
@@ -720,11 +724,11 @@ class CodeStageMixin:
             record = _frozen.freeze(
                 self.quest_root, protocol, approved_by=approved_by, source=source,
                 version=int(replaced.get("from_version", 1) or 1) + 1, amendments=int(replaced["n"]),
-                sources=self._retrieved_sources(state))
+                sources=self._retrieved_sources(state), repeats_trials=reading)
             _frozen.close_replacement(self.quest_root, replaced, str(record["sha256"]))
         else:
             record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source,
-                                    sources=self._retrieved_sources(state))
+                                    sources=self._retrieved_sources(state), repeats_trials=reading)
         for lost in _audit_open.check_against(
                 self.quest_root, record.get("protocol"),
                 why="the protocol that was frozen does not have it, though the audit's change was reported as made"):
@@ -1096,7 +1100,7 @@ class CodeStageMixin:
             # One script (split_analysis: false, a reply that held one, or a quest begun before every simulation got its
             # own script): no manifest. That is a gap for a stochastic study; a deterministic one (an ODE sweep) has no
             # per-trial outcomes to record.
-            return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
+            return ("single_script" if _mc_error.design_repeats_trials(state.get("design")) else "not_applicable"), []
         if not self._run_produced(result):
             return "not_run", []
         result_json = _extract_result_json(getattr(result, "stdout", "") or "")
@@ -4709,7 +4713,7 @@ class CodeStageMixin:
                             case_env=dict(_replicate_env(exec_env, 0, stride)), in_each_run=_in_run.of_study(protocol),
                             mean_names=_mc_error.mean_names(protocol), paired=_mc_error.paired(protocol, self.quest_root),
                             proportion_names=_mc_error.proportion_names(protocol),
-                            repeated=_mc_error.repeats_trials(protocol), protocol=protocol,
+                            repeated=_mc_error.quest_repeats_trials(self.quest_root, protocol), protocol=protocol,
                             log=self._log,
                         )
                     except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report

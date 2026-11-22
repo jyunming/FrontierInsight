@@ -136,9 +136,9 @@ def test_a_relative_folder_is_fine_with_docker_and_an_absolute_one_with_venv(tmp
     (None, False),
 ])
 def test_a_design_counts_as_stochastic_by_its_runs_or_its_words(design, expected) -> None:
-    from core.split_run import design_is_stochastic
+    from core.mc_error import design_repeats_trials
 
-    assert design_is_stochastic(design) is expected
+    assert design_repeats_trials(design) is expected
 
 
 def _engine_with(tmp_path: Path, **execution) -> Engine:

@@ -1050,7 +1050,7 @@ def _delivered_rows(cell: dict[str, Any], names: list[str]) -> list[dict[str, fl
 
 
 def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | None, version: str,
-                         ) -> tuple[dict[str, Any] | None, list[str], list[str]]:
+                         design: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, list[str], list[str]]:
     """``(record, decided, reworded)``: ``needs/ORACLE_CHECK.json`` with each check that the trials of the gate could not
     decide for lack of time (``mc.why == "time"``), or that an earlier delivered run could not decide either
     (``mc.why == "delivered"``), judged again on the delivered run's own trials (``trials``: ``raw/trials.json``); the
@@ -1087,7 +1087,7 @@ def rejudge_on_delivered(record: Any, trials: Any, protocol: dict[str, Any] | No
         return None, [], []
     named = {str(o["name"]).strip().lower(): o for o in declared(protocol)}
     means, proportions = _mc.mean_names(protocol), _mc.proportion_names(protocol)
-    repeated = _mc.repeats_trials(protocol)
+    repeated = _mc.repeats_trials(protocol, design)  # the design's own words count (``design`` None: a quest with no plan.md)
     out = copy.deepcopy(record)
     out_last = out["attempts"][-1]
     entries = {str(e.get("name") or "").strip().lower(): e for e in out.get("went_on") or [] if isinstance(e, dict)}
