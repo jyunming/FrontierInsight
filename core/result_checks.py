@@ -175,7 +175,7 @@ def takes_out(record: dict[str, Any], check: dict[str, Any]) -> bool:
 def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
     """The quantities FI left out of the results, each with the check's own note: what the results check
     (``needs/RESULT_CHECK.json``) and the typed-number check (``needs/TYPED_RESULTS_CHECK.json``) wrote as
-    ``removed_quantities``. The one place that names them; the analysis (core/run_checks.py) and the paper's values
+    ``removed_quantities``, and the results the pilot left out as never a number (``.fi/pilot_check.json`` ``left_out``). The one place that names them; the analysis (core/run_checks.py) and the paper's values
     (core/paper_values.py) both read it."""
     out: dict[str, str] = {}
     for name in (RECORD, TYPED_RECORD):
@@ -186,6 +186,13 @@ def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
             # the notes of the checks that name this key; the record's whole note only when none does
             own = [str(c["note"]) for c in checks if str(k) in {str(x) for x in c.get("keys") or []} or c.get("quantity") == k]
             out.setdefault(str(k), "; ".join(dict.fromkeys(own)) or note)
+    # A result the pilot found never a number at any setting FI tried, once the repairs ended (core/run_estimate.py
+    # ``left_out_metrics``): left out here too, so a value the full run gives it at a setting the pilot did not try
+    # reaches neither the analysis, the tables, the figures nor the paper.
+    pilot = _read_json(Path(quest_root) / ".fi" / "pilot_check.json")
+    for d in pilot.get("left_out") or []:
+        if isinstance(d, dict) and d.get("metric"):
+            out.setdefault(str(d["metric"]), str(d.get("says") or ""))
     return out
 
 

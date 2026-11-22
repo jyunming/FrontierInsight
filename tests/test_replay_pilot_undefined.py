@@ -64,6 +64,16 @@ def _honest(record: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _all_undefined(record: dict[str, Any]) -> dict[str, Any]:
+    """The same record where no metric is ever a number (nothing the plan asks for has a value)."""
+    out = copy.deepcopy(record)
+    for c in out["cells"]:
+        for trial in c["trials"]:
+            for name in trial:
+                trial[name] = float("nan")
+    return out
+
+
 def _key(cell: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(sorted(cell.items()))
 
@@ -245,11 +255,11 @@ def _engine_and_runner(tmp_path: Path, record: dict[str, Any]) -> tuple[Any, Any
 
 
 @pytest.mark.asyncio
-async def test_the_pilot_sends_the_simulation_back_with_the_exact_finding_and_then_ends_in_the_honest_stop(
+async def test_the_pilot_sends_the_simulation_back_with_the_exact_finding_and_then_ends_in_the_honest_stop_when_no_result_has_a_value(
     tmp_path: Path,
 ) -> None:
-    record = _record()
-    facts = _facts(record)
+    record = _all_undefined(_record())
+    facts = _facts(_record())
     first, second = facts.broken
     eng, runner, ex = _engine_and_runner(tmp_path, record)
     state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": 0}
@@ -281,6 +291,167 @@ async def test_the_pilot_sends_the_simulation_back_with_the_exact_finding_and_th
     run_items = [p for s in report["stages"] if s["stage"] == "run" for p in s["problems"]["items"]]
     assert any(p["found_by"] == "FI's pilot check" and p["status"] == "not fixed" for p in run_items)
     assert "Pilot check:" in shown and "Repairs it caused: 1." in shown
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_is_never_a_number_is_left_out_after_the_repairs_and_the_study_runs_for_the_rest(
+    tmp_path: Path,
+) -> None:
+    """The decision: the repairs ended and two of the plan's results are still never a number while the others have values:
+    the two are left out with their reason (the record the paper and QUALITY.md read), the study is not stopped."""
+    from core import paper_facts
+
+    record = _record()
+    facts = _facts(record)
+    eng, runner, ex = _engine_and_runner(tmp_path, record)
+    state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": 0}
+    assert await eng._size_the_run(state, runner, "python", None) is not None, "the repairs come first, as before"
+    assert est.read_pilot_record(eng.quest_root)["outcome"] == "repairing"
+    assert not eng._topic_covered_read().get("not_done")
+    state["exec_reflect_iter"] = eng.config.engine.exec_reflect_max_iterations
+    assert await eng._size_the_run(state, runner, "python", None) is None, "no stop: the other results have values"
+    pilot = est.read_pilot_record(eng.quest_root)
+    assert pilot["outcome"] == "passed" and pilot["problems"] == []
+    assert [d["metric"] for d in pilot["left_out"]] == facts.broken
+    entries = eng._topic_covered_read()["not_done"]
+    assert [e["name"] for e in entries] == facts.broken and {e["kind"] for e in entries} == {"never_a_number"}
+    assert "was not obtained: it was not a number at any of the" in entries[0]["sentence"]
+    # the paper must say it (the Limitations), through the path every other thing not done takes
+    items = {i.name: i for i in paper_facts.required_items(eng.quest_root)}
+    assert set(facts.broken) <= set(items) and all("not obtained" in items[n].sentence for n in facts.broken)
+    report = quality_report.build(eng.quest_root, running=False)
+    assert "left out and the study ran for the rest" in report["pilot"]["says"] and facts.broken[0] in report["pilot"]["says"]
+    # a resume with the same simulation reads nothing again and keeps them
+    before = ex.calls
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    assert ex.calls == before, "nothing is timed or read again"
+    eng._refresh_not_done(state)
+    assert [e["name"] for e in eng._topic_covered_read()["not_done"]] == facts.broken
+    # the pilot's record no longer names them (a new version of the code that gives them values): they are taken away
+    est.write_pilot_record(eng.quest_root, {**est.read_pilot_record(eng.quest_root), "left_out": []})
+    eng._refresh_not_done(state)
+    assert not eng._topic_covered_read().get("not_done")
+
+
+@pytest.mark.asyncio
+async def test_a_left_out_result_is_withheld_even_where_the_full_run_gives_it_a_value(tmp_path: Path) -> None:
+    """The full run returns a finite value for a result the pilot left out, at a setting the pilot did not try: no value
+    for it reaches the results the analysis sees, the tables or the paper's facts; the Limitations note stands."""
+    from core import paper_facts, result_checks, trial_table
+
+    record = _record()
+    facts = _facts(record)
+    eng, runner, _ex = _engine_and_runner(tmp_path, record)
+    state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    gone = facts.broken[0]
+    assert gone in result_checks.left_out_by_record(eng.quest_root)
+    run = {"results": {gone: 3.21, f"{gone}_values": [3.1, 3.3], "kept": 7.5}, "by_setting": [{"x": 1, gone: 2.2, "kept": 1.0}]}
+    seen = eng._without_typed_results(run)
+    assert gone not in json.dumps(seen) and seen["results"]["kept"] == 7.5, seen
+    raw = eng.quest_root / "raw"
+    raw.mkdir(exist_ok=True)
+    (raw / "trials.json").write_text(json.dumps({"cells": [{"cell": {"x": 1}, "metrics": {gone: {"values": [3.2, 3.4]},
+                                                                                         "kept": {"values": [1.0, 2.0]}}}]}),
+                                     encoding="utf-8")
+    shown = trial_table._record(eng.quest_root)
+    assert shown and all(gone not in c["metrics"] and "kept" in c["metrics"] for c in shown)
+    items = {i.name: i for i in paper_facts.required_items(eng.quest_root)}
+    assert gone in items and "not obtained" in items[gone].sentence, "the Limitations note stands"
+    # nothing was left out for a pilot that did not leave anything out
+    est.write_pilot_record(eng.quest_root, {**est.read_pilot_record(eng.quest_root), "left_out": []})
+    assert gone not in result_checks.left_out_by_record(eng.quest_root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_list", [False, True])
+async def test_a_result_that_is_the_plans_main_quantity_is_never_left_out_the_study_stops(tmp_path: Path, as_list: bool) -> None:
+    """The plan's own record names its main quantity (``protocol.precision.metric``, a name or a list of names): when that
+    result is never a number, the study stops as before even though others have values."""
+    record = _record()
+    facts = _facts(record)
+    eng, runner, _ex = _engine_and_runner(tmp_path, record)
+    head = facts.broken[1]
+    eng._protocol_block({})["precision"] = {"target_half_width": 0.1, "metric": [head, "other"] if as_list else head}
+    state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
+    stop = await eng._size_the_run(state, runner, "python", None)
+    assert stop is not None and stop["exec_result"]["cannot_repair"].startswith("a small trial run before the study")
+    assert est.read_pilot_record(eng.quest_root)["outcome"] == "stopped"
+    assert not eng._topic_covered_read().get("not_done")
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_is_not_the_main_quantity_is_still_left_out_when_the_plan_names_another(tmp_path: Path) -> None:
+    record = _record()
+    facts = _facts(record)
+    eng, runner, _ex = _engine_and_runner(tmp_path, record)
+    valued = next(m["id"] for m in record["metrics"] if m["id"] not in facts.broken)
+    eng._protocol_block({})["precision"] = {"target_half_width": 0.1, "metric": valued}
+    state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": eng.config.engine.exec_reflect_max_iterations}
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    assert [d["metric"] for d in est.read_pilot_record(eng.quest_root)["left_out"]] == facts.broken
+
+
+def test_the_main_quantity_is_read_from_the_protocols_precision() -> None:
+    assert est.headline_metrics({"precision": {"metric": "a"}}) == {"a"}
+    assert est.headline_metrics({"precision": {"metric": ["a", " b ", 3]}}) == {"a", "b"}
+    assert est.headline_metrics({"precision": [{"metric": "a"}, {"metric": ["c"]}]}) == {"a", "c"}
+    assert est.headline_metrics({"precision": {"target": 1}}) == set() and est.headline_metrics(None) == set()
+    pilot = est.Pilot(problems=[est.PilotProblem("a", "undefined", "s")], with_values=["b"])
+    assert est.left_out_metrics(pilot, {"a"}) == [] and est.left_out_metrics(pilot, {"b"}) == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_a_pilot_record_of_an_older_version_is_read_again_not_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record an older FI wrote has no list of the metrics that had a value, so reusing it would bring back the stop that
+    leaving a result out removes: it is not reused."""
+    record = _honest(_record())
+    eng, runner, ex = _engine_and_runner(tmp_path, record)
+    state = {"iteration": 0, "exec_reflect_iter": 0}
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    pilot = est.read_pilot_record(eng.quest_root)
+    assert pilot["schema"] == est.PILOT_SCHEMA
+    seen: list[float] = []
+    real = est.pilot
+
+    async def watching(*a: Any, **kw: Any) -> Any:
+        seen.append(float(kw["budget_s"]))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(est, "pilot", watching)
+    grid, runs, thresholds = eng._grid_and_runs(state)
+    probes, _why = await est.measure(ex, "python", eng.quest_root, runner.simulate, grid, runs=runs, deterministic=False,
+                                     limit_s=8 * 3600, budget_s=600)
+    assert await eng._pilot_gate(state, runner, "python", None, grid, probes, thresholds, 8 * 3600, 600.0) is None
+    assert seen == [], "a record of this version is reused"
+    legacy = {k: v for k, v in pilot.items() if k not in ("schema", "metrics_with_values")}
+    est.write_pilot_record(eng.quest_root, legacy)
+    assert await eng._pilot_gate(state, runner, "python", None, grid, probes, thresholds, 8 * 3600, 600.0) is None
+    assert len(seen) == 1, "a record without the version is read again"
+
+
+def test_only_a_pilot_whose_every_finding_is_a_never_a_number_metric_with_another_result_valued_leaves_it_out() -> None:
+    def problem(metric: str, kind: str = "undefined") -> est.PilotProblem:
+        return est.PilotProblem(metric, kind, "says")
+
+    assert est.left_out_metrics(est.Pilot(problems=[problem("a")], with_values=["b"])) == ["a"]
+    assert est.left_out_metrics(est.Pilot(problems=[problem("a"), problem("b")], with_values=["c"])) == ["a", "b"]
+    assert est.left_out_metrics(est.Pilot(problems=[problem("a")], with_values=[])) == [], "nothing has a value: the stop stays"
+    assert est.left_out_metrics(est.Pilot(problems=[problem("a"), problem("b", "constant")], with_values=["c"])) == []
+    assert est.left_out_metrics(est.Pilot(problems=[problem("", "aggregate")], with_values=["c"])) == []
+    assert est.left_out_metrics(est.Pilot(problems=[], with_values=["c"])) == []
+    # The main quantity is matched as the code review matches it: in any case, and inside a per-trial or prefixed name.
+    assert est.left_out_metrics(est.Pilot(problems=[problem("headline")], with_values=["aux"]), {"Headline"}) == []
+    assert est.left_out_metrics(est.Pilot(problems=[problem("per_trial_outcome")], with_values=["aux"]), {"outcome"}) == []
+    assert est.left_out_metrics(est.Pilot(problems=[problem("a")], with_values=["b"]), {"b"}) == ["a"]
+
+
+def test_the_pilot_names_the_metrics_that_were_a_number_somewhere() -> None:
+    obs = [({"x": 1}, {"a": float("nan"), "b": 1.0, "c": None}), ({"x": 2}, {"a": float("nan"), "b": float("nan"), "c": None})]
+    pilot = est.pilot_problems(obs, {"a": "mean", "b": "mean", "c": "mean"})
+    assert pilot.with_values == ["b"] and {p.metric for p in pilot.problems} == {"a", "c"}
 
 
 @pytest.mark.asyncio

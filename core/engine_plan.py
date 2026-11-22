@@ -1389,7 +1389,8 @@ class PlanStageMixin:
     def _refresh_not_done(self, state: QuestState) -> None:
         """Before the run: take away each ``not_done`` entry the plan as it now stands no longer supports (an approved
         change, a person's edit of plan.md), so the paper is never made to state a limitation the study does not have.
-        Every entry has a ``kind``; an entry of an unknown kind (none is written any more) is taken away too."""
+        Every entry has a ``kind``; an entry of an unknown kind (none is written any more) is taken away too. A result left out
+        by the pilot (``never_a_number``) stays only while the pilot's record names it."""
         entries = [e for e in self._topic_covered_read().get("not_done") or [] if isinstance(e, dict)]
         if not entries:
             return
@@ -1402,7 +1403,12 @@ class PlanStageMixin:
             "code_files": bool(_code_layout.files_note(layout)),
             "split_overridden": self._split_overridden(state),
         }
-        kept = [e for e in entries if still.get(str(e.get("kind")), False)]
+        from . import run_estimate as _estimate
+
+        # A result left out because it was never a number stands while the pilot's record of this code says so.
+        left = {str(d.get("metric")) for d in _estimate.read_pilot_record(self.quest_root).get("left_out") or [] if isinstance(d, dict)}
+        kept = [e for e in entries if (str(e.get("name")) in left if e.get("kind") == "never_a_number"
+                                       else still.get(str(e.get("kind")), False))]
         if kept != entries:
             self._topic_covered_write(not_done=kept)
             gone = ", ".join(str(e.get("name")) for e in entries if e not in kept)
