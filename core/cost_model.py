@@ -366,20 +366,6 @@ def verdict(model: CostModel, limit_s: float | None = None) -> str:
     return "stop" if one is not None and one > limit else "run_to_limit"
 
 
-# ---- what a settings-per-process change would give ---------------------------------------------------------------------
-
-
-def seconds_with_settings_per_process(model: CostModel, settings: int, per_process: int) -> float | None:
-    """The time of ``settings`` settings of one trial each when ``per_process`` of them share one process: every setting
-    pays its per-trial time, and the fixed cost (process, loading) is paid once per process. ``None`` when the two terms
-    are not known. Settings that run at the same time are not shared out here: the result is one after another."""
-    fixed, per_trial = model.seconds("fixed"), model.seconds("per_trial")
-    if fixed is None or per_trial is None or settings <= 0:
-        return None
-    processes = math.ceil(settings / max(1, int(per_process)))
-    return settings * per_trial + processes * fixed
-
-
 # ---- the size of a search ---------------------------------------------------------------------------------------------
 
 

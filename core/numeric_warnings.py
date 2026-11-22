@@ -82,10 +82,6 @@ def _non_finite_leaves(result: Any, prefix: str = "", keys: tuple[str, ...] = ()
     return found
 
 
-def _non_finite(result: Any, prefix: str = "") -> list[str]:
-    return [f"{path} is {value}" for path, _keys, value in _non_finite_leaves(result, prefix)]
-
-
 #: The roles whose numbers the paper stands on: a non-finite one of these asks for a repair. Any other is disclosed.
 COUNTING_ROLES = ("result", "reference", "physical_bound")
 

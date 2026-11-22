@@ -3588,25 +3588,6 @@ class PlanStageMixin:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
 
-    def _measure_instead_possible(self, text: str) -> bool:
-        """Whether "measure over the planned settings" can be done from this plan: it lists settings, each with a range or a
-        list of values (so :meth:`_check_measure_instead` can hold the measured values to them). Only then is it offered."""
-        design = _plan.raw_design_block(text)
-        if not isinstance(design, dict):
-            return False
-        block = (design.get("protocol") or {}).get("optimisation") if isinstance(design.get("protocol"), dict) else None
-        items = block.get("design_variables") if isinstance(block, dict) else None
-        if not isinstance(items, list) or not items:
-            return False
-        named: set[str] = set()
-        for index, item in enumerate(items, start=1):
-            variable = _optim._variable(item, index)[0]
-            if variable is None:
-                return False
-            named.add(str(variable["name"]))
-        independent = (design.get("variables") or {}).get("independent") if isinstance(design.get("variables"), dict) else None
-        return all(str(n) in named for n in independent) if isinstance(independent, list) else True
-
     def _check_measure_instead(self, before_text: str, after_text: str) -> str:
         """``after_text`` when a rewrite to "measure over the planned settings instead of searching" kept the plan's question
         and settings: its hypothesis, expected outcome and measured quantity are unchanged, and every setting it measures

@@ -40,7 +40,6 @@ hint when a destructive invalidation is requested.
 
 from __future__ import annotations
 
-import asyncio
 import re
 import sys
 from dataclasses import asdict
@@ -62,11 +61,9 @@ from core.interview import (
     CLARIFY_WHEN_PRESENT,
     EDITABLE_FIELDS,
     InterviewAnswers,
-    PAPER_FORMATS,
     QUESTIONS,
     STAGE_INVALIDATION,
     answers_to_yaml,
-    build_smart_defaults,
     expand_ensemble_profile,
     parse_page_limit_answer,
 )

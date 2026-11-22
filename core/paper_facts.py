@@ -3075,7 +3075,6 @@ def run_numbers(quest_root: Path | str | None, protocol: dict[str, Any] | None) 
     settings and the failed trials of the trial ledger (the figures of the ``Run`` paragraph), the trials the plan asked for
     (its ``runs_per_setting``, which the plan's numbers leave out because the paper gets them from FI), the base seed, and the
     sizes of the plan's grid (levels of each axis, settings in all). Nothing here is read from prose. Empty without a quest."""
-    from decimal import Decimal
 
     found: set[Any] = set()
     if quest_root is None:

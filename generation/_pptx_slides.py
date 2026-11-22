@@ -625,7 +625,6 @@ def _render_lead(slide, s: Slide, page: int) -> None:
     along the top edge.
     """
     from pptx.enum.text import PP_ALIGN
-    from pptx.util import Pt
     _set_bg(slide, INK)
     _rect(slide, 0, 0, SLIDE_W_IN, 0.10, ACCENT)
 

@@ -161,7 +161,6 @@ async def _ask_bridge_for_models(
     swallowed because the caller already has a static fallback —
     a probe error shouldn't bubble up as a 500 to the picker.
     """
-    import sys
     from core.vscode_bridge import _open_ipc_connection, BridgeError
     try:
         reader, writer = await asyncio.wait_for(

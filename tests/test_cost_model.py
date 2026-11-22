@@ -195,13 +195,6 @@ def test_a_scan_and_a_check_that_fill_the_time_leave_no_evaluations() -> None:
     assert got.evaluations == 0 and "already fill the time allowed" in got.why
 
 
-def test_settings_that_share_a_process_pay_its_fixed_cost_once() -> None:
-    model = cm.CostModel(terms={"fixed": cm.Term(2.0, cm.MEASURED), "per_trial": cm.Term(0.1, cm.MEASURED)})
-    assert cm.seconds_with_settings_per_process(model, 100, 1) == pytest.approx(210.0)
-    assert cm.seconds_with_settings_per_process(model, 100, 50) == pytest.approx(14.0)
-    assert cm.seconds_with_settings_per_process(cm.CostModel(), 100, 1) is None
-
-
 # ---- the sizing keeps its timings ----------------------------------------------------------------------------------------
 
 

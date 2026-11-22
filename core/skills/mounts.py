@@ -199,10 +199,6 @@ class MountPlan:
     mounts: dict[str, SkillMount] = field(default_factory=dict)
     refused: dict[str, str] = field(default_factory=dict)
 
-    def container_path(self, name: str) -> str | None:
-        m = self.mounts.get(name)
-        return m.container if m else None
-
 
 def plan_mounts(states: Iterable[SkillState], *, home: Path | None = None) -> MountPlan:
     """The mounts for the skills a quest selected. ``states`` are what

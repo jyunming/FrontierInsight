@@ -699,9 +699,6 @@ class AgentCoder:
     def fixes_left(self) -> int:
         return max(0, self.max_fixes - int(self.load().get("fixes") or 0))
 
-    def has_written(self) -> bool:
-        return bool(self.load().get("write_done"))
-
     # -- the rest of the quest folder --
 
     def _outside(self, *, with_code: bool = False) -> tuple[dict[str, tuple[Any, bytes | None]], set[str]]:
