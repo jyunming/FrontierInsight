@@ -396,7 +396,7 @@ CHECKS: tuple[Check, ...] = (
     Check('plan_grid_too_large_note', 'core.engine', 'Engine._grid_too_large_stop',
           'design', 'own_record', 'note',
           'A grid larger than FI lists no longer stops the quest (always returns None); run.log says FI will '
-          "plan the reachable settings in the plan's order."),
+          "time it and run the reachable settings spread over the plan's values."),
     Check('plan_search_block_unreadable', 'core.engine', 'Engine._ask_plan_for_the_search',
           'design', 'model_text', 'repair',
           'A find_best_design plan whose optimisation block is missing or unreadable (or whose coarse scan '
@@ -748,8 +748,9 @@ CHECKS: tuple[Check, ...] = (
           "plan.md; below the plan's minimum the paper says part of the study is not fully done."),
     Check('run_cut_to_time_limit', 'core.run_checks', 'RunChecksMixin._run_up_to_the_limit',
           'execute', 'measured', 'note',
-          "A grid too long is run in the plan's order up to the time limit when the cheapest setting fits; the "
-          "paper says how many of the plan's settings that was."),
+          "A grid too long is run up to the time limit, its settings spread over the plan's values, when the "
+          "cheapest setting fits and at least one in ten fit (fewer: the plan is asked once first); the paper says "
+          "how many of the plan's settings that was."),
     Check('run_over_topic_limit', 'core.run_checks', 'RunChecksMixin._size_the_run',
           'execute', 'measured', 'note',
           "Over the topic's own time limit but within FI's hard limit, the run goes ahead and the paper says it "

@@ -96,7 +96,23 @@ TIMING_TRIALS = 2000
 #: The fewest runs per setting FI goes down to for the topic's own time limit, whatever the plan states (and never below what
 #: the plan's checks need, :func:`runs_checks_need`). The paper names every such cut (``core.paper_facts.FEWER_RUNS``).
 MIN_RUNS_FOR_LIMIT = 10
+#: A study FI's own timing says does not fit, of which fewer than this share of the plan's settings fit the time allowed,
+#: goes back to the plan once for a study that fits before it is cut (``RunChecksMixin._cut_grid``): a cut that keeps so
+#: little of the plan says little of what the plan asked.
+FEW_FIT_SHARE = 0.10
 RECORD = Path(".fi") / "run_estimate.json"
+
+
+def few_fit(fit: dict[str, Any] | None) -> bool:
+    """Whether FI's measure of a study too long to run (``RunChecksMixin._what_fits``) says fewer than
+    :data:`FEW_FIT_SHARE` of its settings fit the time allowed; ``False`` when nothing was measured."""
+    if not isinstance(fit, dict):
+        return False
+    try:
+        settings, fits = int(fit.get("settings") or 0), int(fit.get("settings_that_fit") or 0)
+    except (TypeError, ValueError):
+        return False
+    return settings > 0 and fits / settings < FEW_FIT_SHARE
 
 
 def plain_duration(seconds: float) -> str:

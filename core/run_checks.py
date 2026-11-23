@@ -1652,6 +1652,7 @@ class RunChecksMixin:
         # Every sizing starts with no cut: what an earlier sizing set (the settings planned, the run's id) is decided again below.
         if isinstance(runner, _trial_runner.TrialsRunner):
             runner.first_cells = None
+            runner.order = _trial_runner.ORDER_PLAN
             runner.run_id = ""
             runner.per_process = 1
             runner.shared_groups = None
@@ -1741,11 +1742,15 @@ class RunChecksMixin:
             if record.get("key") == key and record.get("truncated"):
                 self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
                                record.get("says") or "the experiment is run up to the time limit")
-                runner.cost = None  # type: ignore[attr-defined]  # the plan's order
+                runner.cost = None  # type: ignore[attr-defined]  # the order the cut kept (an older record: the plan's)
                 runner.run_id = str((record.get("truncated") or {}).get("run_id") or "")  # type: ignore[attr-defined]
                 runner.first_cells = (record.get("truncated") or {}).get("planned_settings")  # type: ignore[attr-defined]
+                runner.order = str((record.get("truncated") or {}).get("order") or _trial_runner.ORDER_PLAN)  # type: ignore[attr-defined]
                 return None
-            if record.get("key") == key and record.get("stopped"):
+            # A stop that asked the plan for a study that fits stands only while the plan may still be asked: once it was
+            # asked, the same study is timed again and cut (a plan that came back with the same grid has the same key).
+            if record.get("key") == key and record.get("stopped") and (
+                    not record.get("fit_ask") or self._asks_plan_before_cut(state, self.quest_root, record.get("fit"))):  # type: ignore[attr-defined]
                 return self._stop_too_long(str(record["stopped"]), fit=record.get("fit"))
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
@@ -1806,7 +1811,7 @@ class RunChecksMixin:
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
             # More settings than FI lists: the whole grid is never built. The settings the time allowed can reach are planned,
-            # in the plan's order, and run up to the limit (a study that fits would still be cut at what FI lists).
+            # spread over the plan's values, and run up to the limit (a study that fits would still be cut at what FI lists).
             oversized = _optimise_search.grid_size(grid) > _optimise_search.MAX_LISTED_SETTINGS
             if not oversized and not _estimate.known_too_long(est, limit_s, timed_again=cut_done):
                 if _estimate.known_too_long(est, limit_s):
@@ -1818,18 +1823,36 @@ class RunChecksMixin:
                 self._say_headroom(est, hard_s)
                 _estimate.write_record(self.quest_root, {**base, "fits": True})  # type: ignore[attr-defined]
                 return None
+            if oversized and not cut_done and _estimate.known_too_long(est, limit_s):
+                # Before the cut, fewer runs per setting (every setting kept, nothing listed: arithmetic on the estimate),
+                # by the same rules as below; settings sharing processes cannot be checked on a grid FI cannot list.
+                protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+                fit = _estimate.fit_runs(grid, runs, runner.deterministic, probes, protocol, limit_s=limit_s,
+                                         topic_limit=by_topic, spreads=est.spreads, at_once=est.at_once,
+                                         slowdown=est.slowdown)
+                unconfirmed = False
+                if fit is None and not by_topic:
+                    fit = _estimate.fit_runs(grid, runs, runner.deterministic, probes, protocol, limit_s=limit_s,
+                                             topic_limit=False, spreads=est.spreads, at_once=est.at_once,
+                                             slowdown=est.slowdown, any_runs=True)
+                    unconfirmed = fit is not None
+                note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic,
+                                            unconfirmed=unconfirmed) if fit is not None else None
+                if fit is not None and note is not None:
+                    cut_done = True
+                    reduced = {**note, "marked_unconfirmed": True} if unconfirmed else note
+                    self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
+                    _estimate.write_record(self.quest_root, {**base, "fits": False, "reduced": reduced})  # type: ignore[attr-defined]
+                    await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
+                    continue  # the fewer runs are timed again, then the study is cut at what FI lists
             if oversized:
                 fits_in = self._what_fits(est, hard_s)
                 reach = int(fits_in["settings_that_fit"]) if fits_in else _optimise_search.MAX_LISTED_SETTINGS
                 first = max(1, min(_optimise_search.MAX_LISTED_SETTINGS, reach))
-                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid",
-                                             base=base, detail=self._too_long_text(est, hard_s), fit=fits_in,
-                                             first_cells=first):
-                    return None
                 text = _optimise_search.grid_too_large(_optimise_search.study_grid(self._protocol_block(state) or {})) \
                     or self._too_long_text(est, hard_s)
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
-                return self._stop_too_long(text, fit=fits_in)
+                return self._cut_grid(state, runner, est, hard_s, probes, base=base, detail=self._too_long_text(est, hard_s),
+                                      stop_text=text, first_cells=first)
             self._log.warning("[execute] %s, so it would not finish within it", line)  # type: ignore[attr-defined]
             if not grouping_done and isinstance(runner, _trial_runner.TrialsRunner):
                 # Over the time allowed: before anything is cut, settings may share processes when a sample shows the
@@ -1906,22 +1929,12 @@ class RunChecksMixin:
                         return None
             if fit is None:
                 text = self._too_long_text(est, hard_s)
-                fits_in = self._what_fits(est, hard_s)
-                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
-                                             detail=text, fit=fits_in):
-                    return None
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
-                return self._stop_too_long(text, fit=fits_in)
+                return self._cut_grid(state, runner, est, hard_s, probes, base=base, detail=text, stop_text=text)
             note = self._lower_the_runs(state, runs, fit, est, limit_s, grid, protocol, topic=by_topic, over_topic=over_topic,
                                         unconfirmed=unconfirmed)
             if note is None:
                 text = self._too_long_text(est, hard_s)
-                fits_in = self._what_fits(est, hard_s)
-                if self._run_up_to_the_limit(runner, est, hard_s, _estimate.cheapest_setting_s(probes), kind="grid", base=base,
-                                             detail=text, fit=fits_in):
-                    return None
-                _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in})  # type: ignore[attr-defined]
-                return self._stop_too_long(text, fit=fits_in)
+                return self._cut_grid(state, runner, est, hard_s, probes, base=base, detail=text, stop_text=text)
             cut_done = True
             reduced = {**note, "marked_unconfirmed": True} if unconfirmed else note
             self._sized_protocol = {**(self._sized_protocol or {}), "runs_per_setting": fit.runs}
@@ -3984,32 +3997,79 @@ class RunChecksMixin:
         if record.pop("truncated", None) is not None:
             _estimate.write_record(self.quest_root, record)  # type: ignore[attr-defined]
 
+    def _cut_grid(self, state: Any, runner: Any, est: _estimate.Estimate, limit_s: float, probes: list[Any], *,
+                  base: dict[str, Any], detail: str, stop_text: str, first_cells: int | None = None) -> dict[str, Any] | None:
+        """A grid study FI's timing says does not fit, after every speed-up: ``None`` to go on, cut at the time limit
+        (:meth:`_run_up_to_the_limit`), else the quest's stop. When fewer than :data:`core.run_estimate.FEW_FIT_SHARE` of its
+        settings fit and the plan has not been asked yet (:meth:`_asks_plan_before_cut`), FI stops with what it measured
+        instead, so the evidence gate asks the plan once for a study that fits; after that ask the study is cut. Not even one
+        setting fitting stops as before."""
+        fits_in = self._what_fits(est, limit_s)
+        one_s = _estimate.cheapest_setting_s(probes)
+        if _estimate.one_fits(one_s, limit_s) and self._asks_plan_before_cut(state, self.quest_root, fits_in):  # type: ignore[attr-defined]
+            text = self._few_fit_text(est, limit_s, fits_in or {})
+            self._log.warning("[execute] %s", text)  # type: ignore[attr-defined]
+            print(f"[FI] {text[:1].upper()}{text[1:]}.")
+            _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in,  # type: ignore[attr-defined]
+                                                     "fit_ask": True})
+            return self._stop_too_long(text, fit=fits_in)
+        if self._run_up_to_the_limit(runner, est, limit_s, one_s, kind="grid", base=base, detail=detail, fit=fits_in,
+                                     first_cells=first_cells):
+            return None
+        _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": stop_text, "fit": fits_in})  # type: ignore[attr-defined]
+        return self._stop_too_long(stop_text, fit=fits_in)
+
+    @staticmethod
+    def _asks_plan_before_cut(state: Any, quest_root: Any, fit: dict[str, Any] | None) -> bool:
+        """Whether a grid study that does not fit goes back to the plan once before it is cut: FI's own timing says fewer than
+        :data:`core.run_estimate.FEW_FIT_SHARE` of its settings fit (:func:`core.run_estimate.few_fit`), and the plan has
+        not yet been asked for a study that fits, on the conditions the evidence gate asks it on
+        (``Engine._no_results_verdict``: no such ask yet, the first design, a plan.md)."""
+        state = state if isinstance(state, dict) else {}
+        return (_estimate.few_fit(fit) and int(state.get("evidence_fit_redesigns") or 0) < 1
+                and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(Path(quest_root)).is_file())
+
+    @staticmethod
+    def _few_fit_text(est: _estimate.Estimate, limit_s: float, fit: dict[str, Any]) -> str:
+        """The stop's sentence when fewer than one in ten of a study's settings fit (:meth:`_cut_grid`)."""
+        at_once = f" with {est.at_once} running at the same time" if est.at_once > 1 else ""
+        n, total = int(fit.get("settings_that_fit") or 1), int(fit.get("settings") or est.cells)
+        return (f"the experiment's {total:,} settings would take {'at least ' if est.at_least else 'about '}"
+                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}{at_once}, more than the "
+                f"{_estimate.plain_duration(limit_s)} allowed, and only {n:,} of them fit, fewer than one in ten; FI asks the "
+                "plan once for a study that fits before it runs only a part of this one")
+
     def _run_up_to_the_limit(self, runner: Any, est: _estimate.Estimate, limit_s: float, one_s: float | None, *, kind: str,
                              base: dict[str, Any] | None = None, planned: dict[str, Any] | None = None,
                              reserve_s: float = 0.0, detail: str = "", fit: dict[str, Any] | None = None,
                              first_cells: int | None = None, deadline_s: float | None = None) -> bool:
-        """A study FI's own timing says does not fit the time allowed is run anyway, in the plan's order, up to the limit,
-        unless not even one setting (or one design) fits: ``True`` to go on. FI does not choose which settings matter, so
-        the grid runs in the plan's order (not costliest first), and a search runs its baseline, its coarse scan, its
-        search and then FI's check, as it always does; the check keeps the time it needs (``reserve_s``, never more than
-        half the limit) so the scan and the search cannot take all of it. The cut is kept in ``.fi/run_estimate.json``
-        (``truncated``); the paper and the quality report say what ran from FI's records (:func:`core.disclosure.cut_short_text`)."""
+        """A study FI's own timing says does not fit the time allowed is run anyway, up to the limit, unless not even one
+        setting (or one design) fits: ``True`` to go on. FI does not choose which settings matter, so a grid runs its
+        settings spread over the plan's values (``order: spread``, :func:`core.optimise_search.iter_spread_cells`: every
+        value of every setting is reached early, with no model and no randomness, instead of the plan's first few), and a
+        search runs its baseline, its coarse scan, its search and then FI's check, as it always does; the check keeps the
+        time it needs (``reserve_s``, never more than half the limit) so the scan and the search cannot take all of it. The
+        cut is kept in ``.fi/run_estimate.json`` (``truncated``); the paper and the quality report say what ran from FI's
+        records (:func:`core.disclosure.cut_short_text`)."""
         if not _estimate.one_fits(one_s, limit_s):
             return False
         reserve = min(max(0.0, reserve_s), limit_s / 2.0)
         cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),
-               "limit_s": float(limit_s), "settings": int(est.cells), "one_s": one_s, "order": "plan",
+               "limit_s": float(limit_s), "settings": int(est.cells), "one_s": one_s,
+               "order": _trial_runner.ORDER_SPREAD if kind == "grid" else _trial_runner.ORDER_PLAN,
                "run_id": uuid.uuid4().hex[:12], "check_reserve_s": round(reserve, 1), **(planned or {}), "detail": detail.split("; FI does not run")[0],
                **({"planned_settings": int(first_cells)} if first_cells else {}), **({"fit": fit} if fit else {})}
         what = "the search for the best design" if kind == "search" else "the experiment"
         line = (f"The plan has {int(est.cells):,} settings, more than the {_optimise_search.MAX_LISTED_SETTINGS:,} FI lists at most; FI estimates they "
                 f"would take {'at least ' if est.at_least else 'about '}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}"
-                f" (the limit is {_estimate.plain_duration(limit_s)}); it will plan the first {first_cells:,} in the plan's order "
-                "and run them until the time limit, and the paper will say what was and was not done") if first_cells else (
+                f" (the limit is {_estimate.plain_duration(limit_s)}); it will plan {first_cells:,} of them, spread over the "
+                "plan's values, and run them until the time limit, and the paper will say what was and was not done"
+                ) if first_cells else (
                 f"FI estimates {what} would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
-                f"{_estimate.plain_duration(limit_s)} allowed; it will run the plan's settings in the plan's order until "
-                "the time limit, and the paper will say what was and was not done")
+                f"{_estimate.plain_duration(limit_s)} allowed; it will run the plan's settings "
+                + ("spread over the plan's values" if kind == "grid" else "in the plan's order")
+                + " until the time limit, and the paper will say what was and was not done")
         self._log.warning("[execute] %s", line)  # type: ignore[attr-defined]
         print(f"[FI] {line}")
         runner.run_id = cut["run_id"]
@@ -4017,6 +4077,8 @@ class RunChecksMixin:
             runner.first_cells = int(first_cells)
         if kind == "grid":
             runner.cost = None
+            if hasattr(runner, "order"):
+                runner.order = cut["order"]
         else:
             runner.check_reserve_s = reserve
             # The search stops at the time FI's cost model gives it, so the check and the analysis keep theirs.

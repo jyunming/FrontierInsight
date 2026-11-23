@@ -932,7 +932,7 @@ async def run_trials(
     in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, cost: Any = None,
     first_cells: int | None = None, per_process: int = 1, groups: list[list[str]] | None = None,
     group_allowance_s: float | None = None, reuse: "GroupedRun | None" = None,
-    cell_list: list[dict[str, Any]] | None = None,
+    cell_list: list[dict[str, Any]] | None = None, order: str = "plan",
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -944,7 +944,10 @@ async def run_trials(
     :func:`measure_grouping` (:class:`GroupedRun`); when it is this very study (:meth:`GroupedRun.problem` finds nothing
     against it) its processes are not started again and their results are the run's, else the study runs as usual and the
     log says why. ``cell_list``: run only these settings of ``grid``, in this order (a rerun of the settings an earlier run
-    of the study delivered numbers for, :mod:`core.rerun_check`); not with ``first_cells`` or ``reuse``."""
+    of the study delivered numbers for, :mod:`core.rerun_check`); not with ``first_cells`` or ``reuse``. ``order``:
+    :data:`ORDER_PLAN` (the plan's order, as always) or :data:`ORDER_SPREAD` for a study cut at the time limit: the
+    settings start in an order that reaches every value of every setting early (:func:`core.optimise_search.iter_spread_cells`;
+    with ``first_cells`` the first of that order are planned, lazily). The ledger and the summary keep the plan's order."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -956,6 +959,8 @@ async def run_trials(
     if cell_list is not None and (first_cells is not None or reuse is not None):
         raise ValueError("run_trials: cell_list runs the settings it names, so it takes no first_cells or reuse")
     lazy = first_cells is not None
+    spread = order == ORDER_SPREAD and cell_list is None
+    ranks: dict[str, Any] = {}  # a lazily planned spread-out study: each planned setting's place in the plan's order
     plan: list[dict[str, Any]] = []
     reused: dict[int, tuple[Any, float]] = {}
     units_now: list[dict[str, Any]] | None = None
@@ -1066,13 +1071,17 @@ async def run_trials(
         if units_now is not None:
             await asyncio.gather(*(one(unit) for unit in units_now))
         elif not lazy:
-            await asyncio.gather(*(one(unit) for unit in _units(quest_root, plan, per_process, cost, work, groups=groups, allowance_s=group_allowance_s)))
+            # A study cut at the time limit starts its settings spread over the plan's values; the plan itself (the ledger's
+            # order) stays the plan's.
+            started_in = _spread_ranked(plan, grid) if spread else plan
+            await asyncio.gather(*(one(unit) for unit in _units(quest_root, started_in, per_process, cost, work, groups=groups, allowance_s=group_allowance_s)))
         else:
             # More settings than FI lists: the first of them are planned and run a batch at a time, so the time before the
             # first trial is one batch's, and the study's time limit decides how many batches there are. A setting never
             # planned is not in the ledger (the paper says how many were: core/disclosure.py).
             batch = max(64, 4 * int(at_once or 1))
-            source = itertools.islice(_search.iter_grid_cells(grid), max(1, int(first_cells)))
+            source = itertools.islice(_spread_source(grid, ranks) if spread else _search.iter_grid_cells(grid),
+                                      max(1, int(first_cells)))
             # A setting starts only with a whole second left (start() above); a batch planned with less would not run one
             # setting and would only fill the folder with specs until the clock ran out.
             while timeout_s - (time.monotonic() - started) >= 1:
@@ -1093,12 +1102,38 @@ async def run_trials(
         elif gate.at_once > 1:
             with contextlib.suppress(OSError):
                 (work / "at_once.json").write_text(json.dumps(gate.record()), encoding="utf-8")
+    if lazy and spread:
+        plan.sort(key=lambda task: ranks[task["key"]])  # the ledger lists what ran in the plan's order
     run = _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="", walls=walls,
                    most_at_once=running[1])
     run.per_process = max([1, *(len(g) for g in groups or [])]) if groups else max(1, int(per_process or 1))
     if reused and reuse is not None:
         run.wall_s = reuse.wall_s
     return run
+
+
+#: The order a study's settings start in: the plan's own (every study that fits), or spread over the plan's values (a study
+#: cut at the time limit, so the part that runs reaches every value of every setting early; core/run_checks.py sets it).
+ORDER_PLAN = "plan"
+ORDER_SPREAD = "spread"
+
+
+def _spread_source(grid: dict[str, list[Any]], ranks: dict[str, Any]) -> Any:
+    """The settings of ``grid`` in the spread-out order (:func:`core.optimise_search.iter_spread_indexes`), lazily, each
+    one's place in the plan's order put into ``ranks`` (by its key) as it is taken."""
+    axes = list(grid.items())
+    position = _search.plan_position(grid)
+    for picked in _search.iter_spread_indexes(grid):
+        cell = {a: v[i] for (a, v), i in zip(axes, picked)}
+        ranks[cell_key(cell)] = position(picked)
+        yield cell
+
+
+def _spread_ranked(plan: list[dict[str, Any]], grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """The tasks of a plan listed whole, in the spread-out order of ``grid``'s settings (a task the order does not name
+    keeps its place after them)."""
+    rank = {cell_key(c): i for i, c in enumerate(_search.iter_spread_cells(grid))}
+    return sorted(plan, key=lambda task: (rank.get(task["key"], len(rank)), task["index"]))
 
 
 class _ProcessEnd:
@@ -2124,9 +2159,12 @@ class TrialsRunner:
         self.cost: Any = None
         #: The id of a cut study (set by the run's sizing), written into the ledger's rows.
         self.run_id = ""
-        #: How many of the plan's settings are planned, in the plan's order, when the grid is more than FI lists (set by the
-        #: run's sizing); ``None``: all of them.
+        #: How many of the plan's settings are planned when the grid is more than FI lists (set by the run's sizing);
+        #: ``None``: all of them.
         self.first_cells: int | None = None
+        #: The order the settings start in (:data:`ORDER_PLAN`, or :data:`ORDER_SPREAD` for a study the sizing cut at the time
+        #: limit).
+        self.order = ORDER_PLAN
         #: How many settings share one process (set by the run's sizing after :func:`measure_grouping` showed the same
         #: numbers); 1: one process per setting, as always.
         self.per_process = 1
@@ -2215,6 +2253,13 @@ class TrialsRunner:
         except (OSError, ValueError, AttributeError):
             return summary
 
+    def cut_key(self) -> dict[str, Any] | None:
+        """Which cut the trials are of, for the reuse key (:func:`_run_inputs`): the cut's run id (a new sizing makes a new
+        one), the order the settings run in and how many were planned; ``None`` for a study that is not cut."""
+        if not self.run_id and self.order == ORDER_PLAN and self.first_cells is None:
+            return None
+        return {"run_id": self.run_id, "order": self.order, "first_cells": self.first_cells}
+
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         with _step_writes.watching(self.quest_root) as self._steps:  # which step wrote which result file (core/step_writes.py)
             return await self._execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
@@ -2231,7 +2276,7 @@ class TrialsRunner:
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = _search.study_grid(protocol)
         runs = int(protocol.get("runs_per_setting") or 1)
-        inputs = _run_inputs(self.simulate, protocol, runs, base, self.deterministic)
+        inputs = _run_inputs(self.simulate, protocol, runs, base, self.deterministic, cut=self.cut_key())
         key = inputs.key
         # Each trial number gets one seed across the settings only when the plan asks for common random numbers.
         paired = _mc.paired(protocol, self.quest_root)
@@ -2317,6 +2362,7 @@ class TrialsRunner:
                 paired=paired, on_plan=self._note_plan, in_each_run=inside, log=self.log, at_once=self.at_once,
                 cost=self.cost, run_id=self.run_id, first_cells=self.first_cells, per_process=self.per_process,
                 groups=self.shared_groups, group_allowance_s=self.group_allowance_s, reuse=self.group_reuse,
+                order=self.order,
             )
             self.group_reuse = None  # used once: a later run of the trials runs them
             self._plan_seen = None
@@ -2639,15 +2685,19 @@ def _last_result_json(stdout: str) -> dict[str, Any] | None:
 RUN_RECORD = Path(".fi") / "trials" / "run.json"
 
 
-def _run_inputs(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> Any:
+def _run_inputs(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool,
+                cut: dict[str, Any] | None = None) -> Any:
     """What decides a set of trials, as :class:`core.reuse_key.Inputs`: every file the simulation may read (the model's
     package, a helper module, a parameter file, the quest's ``inputs/`` and ``data/``), FI's own harness, the protocol
     (the whole of it is passed), the count, the base seed and whether each setting runs once (``run_cell``). The quest's
-    folder is the one that holds ``code/`` (the simulation's parent folder)."""
+    folder is the one that holds ``code/`` (the simulation's parent folder). ``cut``: for a study cut at the time limit,
+    which cut it is (its run id, the order its settings run in and how many it planned, :meth:`TrialsRunner.cut_key`):
+    the trials of a run in another order, or of another cut, are not this cut's. A study that is not cut has none, so its
+    key is what it always was."""
     from . import reuse_key as _reuse
 
     return _reuse.computed("trials", Path(simulate).parent.parent, grid, seed=base,
-                           config={"runs": runs, "deterministic": deterministic})
+                           config={"runs": runs, "deterministic": deterministic, **({"cut": dict(cut)} if cut else {})})
 
 
 def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:

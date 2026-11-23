@@ -385,7 +385,8 @@ def computed(kind: str, quest_root: Path | str, protocol: Any = None, *, seed: i
     the run uses and the settings only that kind has (``config``); the rounds of a continued search are read here, and the
     stops are armed or not by ``config["stops"]``, so a reader cannot ask with other arguments than the writer did.
 
-    ``trials`` and ``sizing``: ``config`` has ``runs`` and ``deterministic`` (and ``limit_s`` / ``at_once`` for a sizing);
+    ``trials`` and ``sizing``: ``config`` has ``runs`` and ``deterministic`` (and ``limit_s`` / ``at_once`` for a sizing;
+    ``cut`` for the trials of a study cut at the time limit: which cut, the order and how many settings it planned);
     ``protocol`` is the plan's protocol (the whole of it is in the key). ``search``: ``protocol`` is the normalised
     optimisation block; ``config`` has ``entry``, ``thresholds`` and ``stops``. ``search_study`` and
     ``search_study_bytes``: a search without the seed, the rounds and the stops, by the study's version (tokens) or its
@@ -393,7 +394,7 @@ def computed(kind: str, quest_root: Path | str, protocol: Any = None, *, seed: i
     root = Path(quest_root)
     cfg = dict(config or {})
     if kind in ("trials", "sizing"):
-        extra = {k: cfg[k] for k in ("limit_s", "at_once") if k in cfg}
+        extra = {k: cfg[k] for k in ("limit_s", "at_once", "cut") if k in cfg}
         return _build_trials(root, protocol, int(cfg.get("runs") or 1), int(seed), bool(cfg.get("deterministic")), kind, extra)
     if kind == "search":
         from . import optimise as _optimise

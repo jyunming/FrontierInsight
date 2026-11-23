@@ -2987,9 +2987,11 @@ class PlanStageMixin:
         """A protocol whose ``grid`` holds more settings than FI lists is no longer a stop (reached before any code is written
         and again before it runs, after the plan's model was asked once to make the grid smaller,
         :meth:`_ask_plan_for_the_grid`): it is said in run.log and the quest goes on. The run is timed on a few real trials
-        (:meth:`_size_the_run`), the settings the time allowed can reach are planned lazily in the plan's order, run up to
-        the time limit, and the paper says how many of the plan's settings that was; the quest stops only when not even one
-        setting fits. Always ``None``: kept so the two places that asked for the stop still read the same."""
+        (:meth:`_size_the_run`), given fewer runs per setting first when the whole study then fits, and cut: the settings the
+        time allowed can reach are planned lazily in an order spread over the plan's values, run up to the time limit, and the
+        paper says how many of the plan's settings that was. When fewer than one in ten fit, the plan is first asked once for
+        a study that fits; the quest stops at once only when not even one setting fits. Always ``None``: kept so the two
+        places that asked for the stop still read the same."""
         if not self._runs_code(state):
             return None
         protocol = self._protocol_block(state)
@@ -2997,8 +2999,9 @@ class PlanStageMixin:
             return None
         said = _optimise_search.grid_too_large(_optimise_search.study_grid(protocol))
         if said:
-            self._log.warning("[design] the plan's grid is more than FI lists (%s); FI will plan the settings it can reach in "
-                              "the plan's order and run them up to the time limit", _one_line(said, 400))
+            self._log.warning("[design] the plan's grid is more than FI lists (%s); FI will time it, and run the settings the "
+                              "time allows, spread over the plan's values, up to the time limit (when fewer than one in ten "
+                              "fit, it first asks the plan once for a study that fits)", _one_line(said, 400))
         return None
 
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:

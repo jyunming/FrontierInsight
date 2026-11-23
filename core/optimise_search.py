@@ -2986,6 +2986,91 @@ def iter_grid_cells(grid):
         yield {a: v[i] for (a, v), i in zip(axes, picked)}
 
 
+def _spread_values(n):
+    """The indexes ``0 .. n-1`` in an order that covers their range early: both ends, then the middle of each gap, level by
+    level (``0, n-1, n//2, ...``). A permutation; no randomness."""
+    if n <= 0:
+        return []
+    if n == 1:
+        return [0]
+    out, gaps = [0, n - 1], [(0, n - 1)]
+    while gaps:
+        wider = []
+        for lo, hi in gaps:
+            if hi - lo >= 2:
+                mid = (lo + hi) // 2
+                out.append(mid)
+                wider += [(lo, mid), (mid, hi)]
+        gaps = wider
+    return out
+
+
+def _spread_product(choices):
+    """Every combination of ``choices`` (for each axis, the list of its value indexes) once, lazily, in an order that reaches
+    every value of every axis within the first ``max(len)`` combinations. The longest axis (the first of them) is the
+    counter ``p``; every other axis takes ``(p + shift) mod n`` of its own spread-out order (:func:`_spread_values`), one
+    block of ``max(len)`` combinations for each vector of shifts, the shifts taken in turn. Each combination is in exactly
+    one block (its shift on each axis is fixed by its position on the longest one), so this is a permutation."""
+    sizes = [len(c) for c in choices]
+    if not choices:
+        yield ()
+        return
+    if not all(sizes):
+        return
+    lead = sizes.index(max(sizes))
+    orders = [[c[i] for i in _spread_values(len(c))] for c in choices]
+    others = [a for a in range(len(sizes)) if a != lead]
+    for shift in itertools.product(*(range(sizes[a]) for a in others)):
+        offset = dict(zip(others, shift))
+        for p in range(sizes[lead]):
+            yield tuple(orders[a][p] if a == lead else orders[a][(p + offset[a]) % sizes[a]] for a in range(len(sizes)))
+
+
+def iter_spread_indexes(grid):
+    """The settings of :func:`grid_cells`, each once, in an order that reaches every value of every setting early (each as
+    the index of its value on every axis), lazily, without the size check: what a study cut at the time limit runs, so the
+    part that runs is spread over the plan's values rather than its first few (:func:`_spread_product`). With sub-studies
+    they take turns, one new setting each, so every part of the study starts early. Deterministic: no model, no randomness."""
+    subs = getattr(grid, "sub_studies", None)
+    if not subs:
+        yield from _spread_product([list(range(len(v))) for v in grid.values()])
+        return
+    seen = set()
+    parts = [_spread_product(_axis_choices(grid, sub)) for sub in subs]
+    while parts:
+        alive = []
+        for part in parts:
+            for picked in part:
+                if picked not in seen:
+                    seen.add(picked)
+                    yield picked
+                    alive.append(part)
+                    break
+        parts = alive
+
+
+def iter_spread_cells(grid):
+    """The settings of :func:`iter_spread_indexes` as settings (``{axis: value}``)."""
+    axes = list(grid.items())
+    for picked in iter_spread_indexes(grid):
+        yield {a: v[i] for (a, v), i in zip(axes, picked)}
+
+
+def plan_position(grid):
+    """A function giving, for a setting's value indexes (as :func:`iter_grid_indexes` yields them), a key that sorts settings
+    in the plan's own order (:func:`grid_cells`), without listing the grid."""
+    subs = getattr(grid, "sub_studies", None)
+    if not subs:
+        return lambda picked: (0, tuple(picked))
+    choices = [[set(c) for c in _axis_choices(grid, sub)] for sub in subs]
+
+    def key(picked):
+        part = next((i for i, one in enumerate(choices) if all(k in c for k, c in zip(picked, one))), len(choices))
+        return (part, tuple(picked))
+
+    return key
+
+
 def first_grid_cells(grid, n):
     """The first ``n`` settings of :func:`grid_cells` (the plan's order), listed lazily: a grid of more settings than FI lists
     is never built whole."""
