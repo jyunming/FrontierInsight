@@ -160,7 +160,8 @@ _OWN: dict[str, list[str]] = {
     "claims": [*_CLAIM_CHECK, *_CITATION_CHECK, *_DELIVERED],
     "writing": [*_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     "evidence": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
-    "crosscheck": [*_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
+    # The judgement of the plan's controls is made at the cross-check step (core/controls.py).
+    "crosscheck": [".fi/controls.json", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     "analysis": _PAPER,
     "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK, *_CITATION_CHECK],
     # The mean-over-seeds redraw is written into code/ by the run.

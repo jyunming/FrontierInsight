@@ -2,7 +2,7 @@
 
 The paper carries no mark beside a value and no note about how FI got it. Five cases still matter to a reader: a printed value
 outside the range the plan expected (FI kept it, :func:`core.result_checks.kept_bound_breaks`), a result whose check against a known answer did not pass and the study went on
-(:func:`has_failed_check`), a result that rests on an
+(:func:`has_failed_check`) or a control of the plan that failed on the full run (:func:`has_failed_control`), a result that rests on an
 equation not confirmed before the run (:func:`core.equation_tests.unconfirmed_marks`), a result from fewer runs than the plan
 asked for (:func:`core.result_checks.fewer_runs_marks`) and a sentence the final claim check found unsupported that stays in
 the paper (``claims`` of :data:`core.paper_facts.UNSUPPORTED_RECORD`). Only then the
@@ -67,6 +67,18 @@ def has_failed_check(quest_root: Path | str) -> bool:
     return any(isinstance(e, dict) and (e.get("name") or e.get("unmeasured")) for e in record.get("went_on") or [])
 
 
+def has_failed_control(quest_root: Path | str) -> bool:
+    """Whether a control of the plan (a setting whose answer is known before the run, core/controls.py) failed on the full
+    run: a result checked against a known answer that did not pass, named by the same words. A control not decided is
+    the quality report's only."""
+    from . import controls as _controls
+
+    try:
+        return _controls.has_failed(quest_root)
+    except Exception:  # noqa: BLE001 -- a record that cannot be read names no case
+        return False
+
+
 def has_unconfirmed_equation(quest_root: Path | str) -> bool:
     """Whether a result of the plan rests on an equation the test could not confirm before the run, and the study went on
     with it (:func:`core.equation_tests.unconfirmed_marks`; never a quantity FI left out)."""
@@ -109,7 +121,8 @@ def sentence(outside_range: bool, unsupported: bool, equation: bool = False, few
 def text(quest_root: Path | str) -> str:
     """The sentence FI's records call for now, ``""`` with no case."""
     return sentence(has_outside_range(quest_root), has_unsupported(quest_root),
-                    has_unconfirmed_equation(quest_root), has_fewer_runs(quest_root), has_failed_check(quest_root))
+                    has_unconfirmed_equation(quest_root), has_fewer_runs(quest_root),
+                    has_failed_check(quest_root) or has_failed_control(quest_root))
 
 
 def in_paper(markdown: str) -> str:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from .engine_base import (  # noqa: F401
     Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, _FRESH_SCRIPT, _ModelAnswerProblem,
     _STOPPED_BEFORE_THE_STUDY, _UNPLACED_FINDING, _aggregate_result_json_replicates,
-    _analysis_frame, _code_findings, _code_project, _code_reach, _code_review, _compact_result_json_block,
+    _analysis_frame, _code_findings, _code_project, _code_reach, _code_review, _compact_result_json_block, _controls,
     _cross_check_items, _elide_value_lists, _evidence_gate_rule, _figure_list_for_prompt, _finding_repair,
     _fit_request, _fit_scope, _flat_fact_sentence, _flat_moved, _flat_request, _format_clarify, _format_lit, _frozen,
     _function_steps, _gate_inputs, _is_degenerate_result, _is_preliminary_memory, _load_persona_prefix,
@@ -355,6 +355,9 @@ class AnalyzeStageMixin:
         become a query, a sentence to classify or a stored claim. A result with no value is entered as not checked, with
         FI's reason, and not searched. Results land in ``state['cross_check']`` and are surfaced in the write prompt's
         ``$cross_check_block``."""
+        # The plan's own controls, judged on FI's record of the full run and disclosed (QUALITY.md, the paper's closing
+        # sentence), at every exit of the step; they never change the route.
+        self._judge_controls(state)
         per_finding_k = self.config.engine.cross_check_per_finding_k
         if per_finding_k <= 0:
             self._log.info("[cross_check] disabled by config (per_finding_k=0)")
@@ -592,6 +595,44 @@ class AnalyzeStageMixin:
             self._log.info("[cross_check] analyze.next_step=%s -> %s (iteration %d)",
                            (state.get("analysis") or {}).get("next_step", "publish"), route, patch["iteration"])
         return patch
+
+    def _judge_controls(self, state: QuestState) -> list[dict[str, Any]]:
+        """The plan's own controls (``protocol.controls`` of the frozen protocol, else of the design) judged on FI's record
+        of the full run (core/controls.py), written to ``.fi/controls.json`` and said in run.log. They are disclosed, never
+        a route: a failed one is listed in QUALITY.md and named by the paper's closing sentence (core/quality_pointer.py).
+        A plan with no control leaves no record (an earlier one, from a plan that had controls, is removed so it is never
+        read again). A simulation that gave no results to judge them on judges none; a study of collected data is judged
+        on FI's analysis record (``data/results/derived.json``) when there is one."""
+        protocol = _frozen.protocol_of(self.quest_root) or (
+            (state.get("design") or {}).get("protocol") if isinstance(state.get("design"), dict) else None)
+        controls = _controls.of_protocol(protocol)
+        if not controls:
+            (self.quest_root / _controls.RECORD_PATH).unlink(missing_ok=True)
+            return []
+        from . import mc_error as _mc_error
+        from . import numeric_oracle as _numeric_oracle
+        from . import reported_settings as _reported
+
+        derived = _analysis_frame.read_record(self.quest_root)
+        repeated = _mc_error.quest_repeats_trials(self.quest_root, protocol)  # the reading the trials were run and judged on
+        if state.get("no_simulation_resolved"):
+            verdicts = (_controls.judge(controls, derived, [], protocol, repeated=repeated) if derived.get("derived") else
+                        _controls.not_judged(controls, "this study analyses collected data, and FI's analysis kept no "
+                                                       "record of its values to judge it on"))
+        else:
+            exec_result = state.get("exec_result") if isinstance(state.get("exec_result"), dict) else {}
+            # The evidence check's own reading of "no result" (Engine._no_results_verdict): such a run is judged nowhere.
+            ran = (bool(exec_result) and not any(exec_result.get(k) for k in _STOPPED_BEFORE_THE_STUDY)
+                   and exec_result.get("returncode") in (0, None) and not exec_result.get("timed_out")
+                   and any(True for _ in _numeric_oracle.flatten_numbers(state.get("result_json"), keep_zero=True)))
+            verdicts = (_controls.judge(controls, derived, _reported.read_record(self.quest_root), protocol,
+                                        repeated=repeated) if ran
+                        else _controls.not_judged(controls, "the run gave no results to judge it on"))
+        for v in verdicts:
+            say = self._log.warning if v["verdict"] == _controls.FAILED else self._log.info
+            say("[controls] %s", _controls.words(v))
+        _controls.write_record(self.quest_root, verdicts, iteration=int(state.get("iteration", 0) or 0))
+        return verdicts
 
     def _resolve_write_persona(self, state: QuestState) -> str:
         """Pick a persona prefix for the ``write`` node based on the

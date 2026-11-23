@@ -1218,6 +1218,11 @@ CHECKS: tuple[Check, ...] = (
           'cross_check', 'own_record', 'repair',
           'write, broaden_lit or redesign from analyze.next_step, the precision record, the phased confirm '
           'stage and engine.max_iterations'),
+    Check('plan_controls', 'core.controls', 'judge',
+          'cross_check', 'own_record', 'note',
+          "Each control the plan types (protocol.controls: a setting, a result, an expected value and a tolerance) "
+          "judged on FI's record of the full run at every setting it covers, by the mean check's rule; a failed one is "
+          "listed in QUALITY.md and named by the paper's closing sentence, never a route."),
     Check('cross_check_literature', 'core.engine', 'Engine._node_cross_check',
           'cross_check', 'model_judge', 'note',
           'Each key finding searched in the literature and classed supporting/conflicting/neutral with an '
