@@ -881,7 +881,17 @@ def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
                             "FI's analysis", "left out", _analysis.DERIVED_PATH.as_posix()))
     out.extend(_planned_output_problems(q, record))
     out.extend(_planned_figure_problems(q))
+    out.extend(_control_problems(q))
     return out
+
+
+def _control_problems(q: _Quest) -> list[dict[str, str]]:
+    """The plan's own controls as FI judged them on the last full run (``.fi/controls.json``, core/controls.py): each that
+    failed, could not be judged, or passed after failing before the redesign."""
+    from . import controls as _controls
+
+    return [_problem("analysis", text, "FI's control check", status, _controls.RECORD_PATH.as_posix())
+            for text, status in _controls.quality_rows(_controls.read_record(q.root))]
 
 
 def _holds_value(rec: Any) -> bool:

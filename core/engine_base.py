@@ -74,6 +74,7 @@ from . import agent_coder as _agent_coder
 from . import audit_log as _audit_log
 from . import audit_open_items as _audit_open
 from . import confirmations as _confirmations
+from . import controls as _controls
 from . import cross_check_items as _cross_check_items
 from . import record_anchor as _record_anchor
 from . import evidence as _evidence
@@ -2644,7 +2645,8 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
     "holds_for": "<the range of parameters where it holds>",
     "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>", "example": {"inputs": {"<the equation's input, named as the code will name its argument>": <a number>}, "expected_formula": "<the equation's output for those inputs, as a formula>"}}]
   },
-  "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
+  "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}],
+  @@CONTROLS_FIELD@@
 }
 
 `grid` is crossed: the study runs every combination of the values of ALL its settings, so each setting multiplies every other. When the topic is several separate studies (for example one comparison of methods, and a different sweep of a condition that only matters for one method), do not put all their settings into one `grid`: list every setting with its values in `grid`, and divide them in `sub_studies`, one entry for each part, naming in `vary` the settings that part crosses (a setting can be in several parts). The study then runs the settings of each part in turn, so its size is the sum of the parts, not the product of every setting; a setting a part does not vary stays at the one value you give it in `hold` (write one for every other setting of `grid` that has several values). Every setting of `grid` that takes more than one value must be varied by some part, or held at each of its values by the parts between them, or its values would never be run. Leave `sub_studies` out when every setting is meant to be crossed with every other. FI runs the settings of `grid` (and of `sub_studies`) and nothing else: when the method says a setting is also run (a second step size at two ratios, an extra condition), that run must be a value of a `grid` setting or a part of `sub_studies`, never only a sentence in the method; a run the method describes and the grid does not hold is not run. (In a search for the best design the `grid` and `sub_studies` are those of its `optimisation` block, described below.)
@@ -2656,6 +2658,8 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. On a random simulation FI runs each check's case many times; do not write how a check is read over those runs (FI asks you that afterwards, check by check). `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. A check on a quantity across trials (a coverage fraction, a spread) writes it with `mean(x)` or `sd(x)` of the per-trial result `x` the simulation returns, for example `abs(mean(covered) - 0.95)` or `abs(sd(estimate) / reference_sd - 1)`; FI works these out over the trials together, and such a check is not `per_trial`. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. r = sqrt(2) = 1.4142>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
+
+@@CONTROLS_RULE@@
 
 @@LEDGER@@
 
@@ -2702,6 +2706,9 @@ _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@KNOWN_RULE@@", _metric_spec.PLAN_RU
 # A metric's reference value, a formula FI computes at every setting and prints beside the result (core/reference_values.py).
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@REFERENCE_FIELD@@", _reference_values.PLAN_FIELD)
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@REFERENCE_RULE@@", _reference_values.PLAN_RULE)
+# The study's own controls, judged by FI after the full run (core/controls.py).
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@CONTROLS_FIELD@@", _controls.PLAN_FIELD)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@CONTROLS_RULE@@", _controls.PLAN_RULE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
 # directive, so the rules above stay as they are for a measurement.
@@ -4617,6 +4624,10 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
                 if isinstance(c, dict) and c.get("oracle")]
     hidden = [o.get(k) for o in oracles for k in ("expected", "tolerance", "limit")]
     hidden += [c.get(k) for c in criteria for k in ("target", "tolerance")]
+    # Likewise what each of the study's own controls must give (core/controls.py): FI judges it after the run.
+    controls = [c for c in (protocol.get("controls") if isinstance(protocol.get("controls"), list) else [])
+                if isinstance(c, dict)]
+    hidden += [c.get(k) for c in controls for k in ("expected", "tolerance")]
     inputs = _input_numbers(protocol)
     hidden = [v for v in hidden if isinstance(v, (int, float)) and not isinstance(v, bool) and float(v) not in inputs]
     for oracle in oracles:
@@ -4625,6 +4636,9 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
     for criterion in criteria:
         criterion.pop("target", None)
         criterion.pop("tolerance", None)
+    for control in controls:
+        for key in ("expected", "tolerance", "tolerance_mode"):
+            control.pop(key, None)
     _mask_prose(protocol, hidden)
 
 
@@ -4652,11 +4666,14 @@ def _input_numbers(protocol: dict[str, Any]) -> set[float]:
             return {_prose_value(m) for m in _PROSE_NUMBER.finditer(node)} - {None}
         return set()
 
-    found = walk({k: v for k, v in protocol.items() if k not in ("oracles", "criteria", "model")})
+    found = walk({k: v for k, v in protocol.items() if k not in ("oracles", "criteria", "model", "controls")})
     found |= walk({k: protocol.get(k) for k in _SETTING_FIELDS if protocol.get(k) is not None}, text=True)
     for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
         if isinstance(o, dict):
             found |= walk(o.get("case") or {}, text=True)
+    for c in protocol.get("controls") if isinstance(protocol.get("controls"), list) else []:
+        if isinstance(c, dict):
+            found |= walk(c.get("setting") or {}, text=True)
     return found
 
 

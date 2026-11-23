@@ -88,6 +88,7 @@ PROTOCOL_PARTS = (
     "optimisation", "grid", "sub_studies", "in_each_run", "runs_per_setting", "min_runs_per_setting", "numerical_axes",
     "thresholds", "constants", "metrics",
     "oracles", "criteria", "precision", "seed_policy", "shared_draws", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
+    "controls",
 )
 
 
@@ -788,6 +789,16 @@ def protocol_fault(protocol: Any) -> tuple[dict[str, Any] | None, _reading.Fault
         if fixed_criteria is None:
             return None, _fault("protocol.criteria", str(why))
         out["criteria"] = fixed_criteria
+    if out.get("controls") is not None:
+        # The study's own controls (core/controls.py): after the grid and the declared results, which each names.
+        from . import controls as _controls
+
+        fixed_controls, index, why = _controls.normalize(out["controls"], out)
+        if fixed_controls is None:
+            entries = out["controls"] if isinstance(out["controls"], list) else [out["controls"]]
+            return None, _fault(_reading.join("protocol.controls", index) if index else "protocol.controls", str(why),
+                                as_written=entries[index - 1] if index and index <= len(entries) else out["controls"])
+        out["controls"] = fixed_controls
     if out.get("optimisation") is not None:
         # A search for the best design (core/optimisation_plan.py). A coarse scan before the search is the block's own
         # `grid`: a protocol is either a sweep or a search, never both.
@@ -1383,6 +1394,27 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                     out["oracles"] = kept_o
                 else:
                     del out["oracles"]
+                continue
+        if key == "controls" and isinstance(out["controls"], list):
+            # One control that cannot be judged is left out, not every control of the plan (a plan with none is valid).
+            from . import controls as _controls
+
+            base = protocol_fault({k: v for k, v in out.items() if k != "controls"})[0] or out
+            kept_k: list[Any] = []
+            for index, item in enumerate(out["controls"], start=1):
+                reason = _controls.entry_fault(index, item, base)
+                if reason is None:
+                    kept_k.append(item)
+                    continue
+                label = (str(item.get("name") or "").strip() if isinstance(item, dict) else "") or f"number {index}"
+                faults.append(_fault(_reading.join("protocol.controls", index), reason, as_written=item))
+                notes.append(f"the control {label!r} was left out of `protocol.controls` because it could not be judged "
+                             f"({reason}); FI does not judge it")
+            if len(kept_k) < len(out["controls"]):
+                if kept_k:
+                    out["controls"] = kept_k
+                else:
+                    del out["controls"]
                 continue
         if key == "model":
             # One equation that cannot be read is left out, not the model it is part of.

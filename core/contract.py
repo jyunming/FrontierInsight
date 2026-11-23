@@ -261,6 +261,7 @@ class Checks(_Strict):
     criteria: tuple[dict[str, Any], ...] = ()
     assertions: tuple[dict[str, Any], ...] = ()  # result bounds on a path that is not a declared result
     topic_map: tuple[dict[str, Any], ...] = ()
+    controls: tuple[dict[str, Any], ...] = ()  # the study's own controls, judged after the run (core/controls.py)
 
 
 class StudyContract(_Strict):
@@ -343,7 +344,7 @@ _DESIGN_NOTES = ("hypothesis", "method", "expected_outcome", "rationale", "varia
 #: Protocol keys the reader places; any other key goes to the notes and is named in the gaps.
 _PLACED = {"grid", "sub_studies", "in_each_run", "numerical_settings", "constants", "thresholds", "runs_per_setting",
            "min_runs_per_setting", "precision", "metrics", "oracles", "criteria", "topic_map", "optimisation", "model",
-           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", "dependent_map", "system", *_NOTE_KEYS}
+           "labels", "comparisons", "derived", "figures", "steps", "shared_draws", "form", "parts_left_out", "names_not_asked", "figure_declarations", "dependent_map", "system", "controls", *_NOTE_KEYS}
 
 
 def oracle_measures(protocol: Any) -> tuple[dict[str, list[str]], set[str]]:
@@ -647,7 +648,8 @@ def from_design(design: dict[str, Any] | None, *, fi_analysis: bool = False,
     base = {"form": form, "settings": settings, "budget": budget, "labels": labels, "notes": notes,
             "checks": Checks(oracles=_rows(p.get("oracles"), gaps, "the known-answer checks"),
                              criteria=_rows(p.get("criteria"), gaps, "the criteria"),
-                             assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"), gaps, "the topic map")),
+                             assertions=tuple(assertions), topic_map=_rows(p.get("topic_map"), gaps, "the topic map"),
+                             controls=_rows(p.get("controls"), gaps, "the controls")),
             "model": _mapping(p.get("model")) if isinstance(p.get("model"), dict) else
             ({"summary": p["model"]} if isinstance(p.get("model"), str) else {}),
             "search": _mapping(p.get("optimisation")) or None, "shared_draws": p.get("shared_draws") is True,
