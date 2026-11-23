@@ -675,3 +675,59 @@ def test_a_cli_call_refused_before_the_service_is_a_passing_problem_not_a_sign_i
     outer = _cli_failure("claude exited rc=1 (stream error: Not logged in. Please run /login): ", "authentication_failed")
     outer.__cause__ = _cli_failure(said, "authentication_failed", page)
     assert ck.classify(outer, provider="claude_cli", model="some-model").kind == "setup"
+
+
+
+def _failed_after(seconds: float) -> httpx.ReadTimeout:
+    exc = httpx.ReadTimeout("t")
+    exc._fi_failed_call_s = seconds  # what _recorded_call keeps on the error of a call that failed
+    return exc
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_only_waited_on_the_failed_call_is_run_again(monkeypatch) -> None:
+    """The step's whole working time went to the one model call that stopped it (four silent CLI attempts of about 180 s
+    each): a retry repeats no work, so the passing problem is tried again instead of ending the quest."""
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time() - 914
+    graph = _Graph(_Snap("scope", "c1", None))
+    assert await eng._try_step_again(graph, {}, _failed_after(912.0)) is True
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_worked_long_before_the_failed_call_is_not_run_again(monkeypatch) -> None:
+    """The known positive: real work longer than the limit before the failing call still keeps the step from repeating."""
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time() - ck.RETRY_ONLY_UNDER_S - 300
+    graph = _Graph(_Snap("execute", "c1", None))
+    assert await eng._try_step_again(graph, {}, _failed_after(200.0)) is False
+
+
+@pytest.mark.asyncio
+async def test_an_error_with_no_call_time_keeps_the_old_rule(monkeypatch) -> None:
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time() - ck.RETRY_ONLY_UNDER_S - 60
+    graph = _Graph(_Snap("scope", "c1", None))
+    assert await eng._try_step_again(graph, {}, httpx.ReadTimeout("t")) is False
+
+
+@pytest.mark.asyncio
+async def test_the_failed_call_s_wait_is_kept_on_its_error(monkeypatch) -> None:
+    """_recorded_call keeps how long the failing call waited on the error it raises (and only on that error)."""
+    eng, _ = _bare_engine()
+    eng.fi_dir = None
+    monkeypatch.setattr(eng, "_record_attempts", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(eng, "_record_model_call", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(eng, "_cost_of_failed_attempt", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(eng, "_save_thinking", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(eng, "_keeps_thinking", lambda: False, raising=False)
+
+    async def call():
+        raise httpx.ReadTimeout("silent")
+
+    with pytest.raises(httpx.ReadTimeout) as got:
+        await eng._recorded_call("scope", [], call)
+    assert isinstance(got.value._fi_failed_call_s, float) and got.value._fi_failed_call_s >= 0.0
