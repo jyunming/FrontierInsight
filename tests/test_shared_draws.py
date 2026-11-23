@@ -121,7 +121,7 @@ def test_an_interval_over_settings_that_share_draws_is_not_the_naive_pooled_one(
     naive = pv.resolve(KEY, rec)
     rec.seeds = seeds
     got = pv.resolve(KEY, rec)
-    assert got.filled and "50 different random draws" in got.text
+    assert got.filled and "50 random draws shared by the settings" in got.text
     per_draw = np.mean([c["metrics"]["x"]["values"] for c in cells], axis=0)
     allv = np.concatenate([c["metrics"]["x"]["values"] for c in cells])
     half = _stats._t95(49) * np.std(per_draw, ddof=1) / math.sqrt(50)
@@ -149,7 +149,7 @@ def test_every_way_of_loading_the_records_reads_the_seeds(tmp_path):
     (tmp_path / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
     rec = pv.load(tmp_path)
     assert rec is not None and rec.share_draws(rec.cells)
-    assert "different random draws" in pv.resolve(KEY, rec).text
+    assert "random draws shared by the settings" in pv.resolve(KEY, rec).text
 
 
 # --- every reducer and interval form counts the draws, with the inputs the review used ----------------------------
@@ -183,10 +183,10 @@ def test_sd_ci_and_corr_ci_count_the_draws_and_give_none_for_one_draw():
     rec.seeds = {}
     naive = pv.resolve("x:sd_ci @ n=all", rec)
     rec.seeds = seeds
-    assert "6 different random draws" in shared.text   # the known positive: cells sharing their seeds are pooled over the draws
+    assert "6 random draws shared by the settings" in shared.text   # the known positive: cells sharing their seeds are pooled over the draws
     assert not naive.filled and "different settings" in naive.hit.reason   # without shared seeds they are different populations
     corr = pv.resolve("x:corr_ci:y @ n=all", rec)
-    assert corr.filled and "6 different random draws" in corr.text    # 6 pairs, not 12 trials
+    assert corr.filled and "6 random draws shared by the settings" in corr.text    # 6 pairs, not 12 trials
     one = _record({"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}, {"a": {0: 5, 1: 5}, "b": {0: 5, 1: 5}}, {"y": {"a": {0: 1.0, 1: 2.0}, "b": {0: 1.0, 1: 2.0}}})
     for key in ("x:mean_ci @ n=all", "x:se @ n=all", "x:sd_ci @ n=all", "x:corr_ci:y @ n=all"):
         assert not pv.resolve(key, one).filled, key
@@ -216,7 +216,7 @@ def test_sd_ci_under_shared_draws_is_the_spread_of_the_draws_values():
     seeds = {"a": {0: 100, 1: 101}, "b": {0: 100, 1: 101}}
     rec = _record({"a": {0: 0.0, 1: 10.0}, "b": {0: 0.0, 1: 20.0}}, seeds)
     got = pv.resolve("x:sd_ci @ n=all", rec)
-    assert got.filled and "2 different random draws" in got.text
+    assert got.filled and "2 random draws shared by the settings" in got.text
     assert math.isclose(got.numbers[0], 10.6066, rel_tol=1e-4), got.numbers
 
 

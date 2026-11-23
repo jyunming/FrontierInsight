@@ -212,6 +212,7 @@ class Measured:
     upper: float | None = None
     method: str = ""  # "95% Wilson interval"
     n: int | None = None  # trials behind it
+    draws: int | None = None  # the different random draws behind it, when the settings share their draws
     successes: int | None = None
     words: str = ""
     symmetric: bool = False  # a t interval: ``pm`` may print it as value +/- half-width
@@ -259,7 +260,8 @@ def fmt(m: Measured, form: str = "mean", percent: bool = False, bare: bool = Fal
             return f"{v}{tail} ± {interval_places(0.0, -(m.upper - m.value) * scale, (m.upper - m.value) * scale)[2]}{tail}"
         if form == "pm":
             return f"{lo}{tail} to {hi}{tail}"
-        trials = f"; {m.n} trials" if m.n else ""
+        trials = (f"; {m.n} trials" if m.n else
+                  f"; {m.draws} random draws shared by the settings" if m.draws else "")
         return f"{v}{tail} ({ci_name(m.method)} {lo}{tail} to {hi}{tail}{trials})"
     digits = 3 if m.kind == "ratio" else 4
     return sig(m.value * scale, digits) + tail
@@ -1013,8 +1015,8 @@ def _one_run_each(cells: list[dict[str, Any]], metric: str) -> int:
     return ran if ran > 1 and all(n <= 1 for n in counts) else 0
 
 
-def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None]:
-    """``(mean, lower, upper, method, n, symmetric, standard error)`` of ``metric`` over ``cells``, from
+def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[float, float | None, float | None, str, int | None, bool, float | None, int | None]:
+    """``(mean, lower, upper, method, n, symmetric, standard error, shared draws)`` of ``metric`` over ``cells``, from
     :func:`_observations`. With shared draws it is a t interval over the different draws (also for a 0/1 value: the
     draws' proportions); with fewer than two draws there is no interval."""
     if ran := _one_run_each(cells, metric):
@@ -1028,11 +1030,11 @@ def _interval(rec: Records, cells: list[dict[str, Any]], metric: str) -> tuple[f
         se = summary["sd"] / math.sqrt(len(obs))
         half = _stats._t95(len(obs) - 1) * se
         return (summary["mean"], summary["mean"] - half, summary["mean"] + half,
-                f"95% t interval over {len(obs)} different random draws, which the settings share", None, True, se)
+                f"95% t interval over {len(obs)} different random draws, which the settings share", None, True, se, len(obs))
     lo, hi, how = _tt.interval(summary)
     se = summary["sd"] / math.sqrt(summary["n"]) if summary["n"] >= 2 else None
     return (summary["mean"], lo, hi, "95% Wilson interval" if how == "Wilson" else f"95% {how}", summary["n"],
-            how != "Wilson", se)
+            how != "Wilson", se, None)
 
 
 def _setting_values(cells: list[dict[str, Any]], metric: str) -> list[float] | None:
@@ -1249,12 +1251,12 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
             return Measured(values[0], exact)
         return Measured(_tt.summary(_observations(rec, cells, metric)[0])["mean"])
     if form in ("mean_ci", "ci", "pm"):
-        mean, lo, hi, words, n, symmetric, _se = _interval(rec, cells, metric)
+        mean, lo, hi, words, n, symmetric, _se, draws = _interval(rec, cells, metric)
         if lo is None or hi is None:
             raise _Unfilled("too few trials for an interval")
-        return Measured(mean, "interval", lo, hi, words, n, symmetric=symmetric)
+        return Measured(mean, "interval", lo, hi, words, n, symmetric=symmetric, draws=draws)
     if form == "se":
-        _mean, _lo, _hi, _words, _n, _sym, se = _interval(rec, cells, metric)
+        _mean, _lo, _hi, _words, _n, _sym, se, _draws = _interval(rec, cells, metric)
         if se is None:
             raise _Unfilled("fewer than two trials, so there is no standard error")
         return Measured(se)
@@ -1274,7 +1276,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
         return Measured(sd, "interval", sd * math.sqrt(df / chi2_quantile(0.975, df)),
                         sd * math.sqrt(df / chi2_quantile(0.025, df)),
                         "95% chi-square interval" + (f" over {len(obs)} different random draws, which the settings share" if shared else ""),
-                        None if shared else summary["n"])
+                        None if shared else summary["n"], draws=len(obs) if shared else None)
     shared = len(cells) > 1 and rec.share_draws(cells)
     xs, ys = _per_draw_pairs(rec, cells, metric, arg) if shared else _paired(cells, metric, arg)
     if shared and len(xs) < 2:
@@ -1289,7 +1291,7 @@ def _measure(rec: Records, metric: str, form: str, arg: str, where: dict[str, Pi
     z, half = math.atanh(r), 1.96 / math.sqrt(len(xs) - 3)
     return Measured(r, "interval", math.tanh(z - half), math.tanh(z + half),
                     "95% Fisher interval" + (f" over {len(xs)} different random draws, which the settings share" if shared else ""),
-                    None if shared else len(xs))
+                    None if shared else len(xs), draws=len(xs) if shared else None)
 
 
 def _combine(key: Key, a: Measured, b: float) -> Measured:
