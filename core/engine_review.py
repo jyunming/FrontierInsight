@@ -818,10 +818,17 @@ class ReviewStageMixin:
         # This call's own id: one left by an earlier call of the node must not be read if this call's record fails.
         self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
         holder, holder_token = _thinking.open_holder(want=self._keeps_thinking())
+        started = time.monotonic()
         try:
             try:
                 response = await call()
             except Exception as exc:
+                # How long this call waited before it failed, kept on the error itself: when this error is the one that
+                # stops the step, that wait is no work a retry of the step repeats (``_try_step_again``).
+                try:
+                    exc._fi_failed_call_s = time.monotonic() - started  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 -- an error that takes no attribute keeps the old rule
+                    pass
                 failed = _LAST_CALL.get() or {}
                 if isinstance(exc, _ModelAnswerProblem) and not exc.node:
                     exc.node = node  # the step a pause names (a CLI does not know it)
@@ -1426,7 +1433,11 @@ class ReviewStageMixin:
             created = getattr(snap, "created_at", None)
             if created:
                 began = max(began, datetime.fromisoformat(str(created)).timestamp())
-            ran_s = time.time() - began if began else 0.0
+            # The model call whose failure stopped the step waited without working: that wait is not counted (a
+            # call that answered, or work beside it, is).
+            waited = getattr(exc, "_fi_failed_call_s", 0.0)
+            waited = float(waited) if isinstance(waited, (int, float)) and not isinstance(waited, bool) else 0.0
+            ran_s = max(0.0, time.time() - began - max(0.0, waited)) if began else 0.0
             if ran_s > _crash_kind.RETRY_ONLY_UNDER_S:
                 self._log.warning("[run] a passing problem stopped the step %s after %d s of work; not running it "
                                   "again by itself", step, int(ran_s))
