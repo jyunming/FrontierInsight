@@ -1,6 +1,6 @@
 """A result the plan works out afterwards from the trials (derive.py's AFTERWARDS) has FI's own per-setting value as its only
 value when no trial returned it: the table serves that value (``Table.set_derived``), so a figure line drawn from exactly
-those numbers is named by the result instead of "computed value". A result a trial returned is never replaced. Made-up study:
+those numbers is named by the result (FI's check finds it is that result). A result a trial returned is never replaced. Made-up study:
 a colony's ``spread`` worked out from its trials' ``growth`` at two sizes. No model is called."""
 from __future__ import annotations
 
@@ -40,7 +40,11 @@ def _drawn_what(records, ys, what="spread"):
     h.derived_ids = list(records)
     h.labels = {"spread": "Spread", "growth": "Growth", "size": "Size"}
     h.line(0, "fast", [1, 2], ys, what)
-    return h.record()["panels"][0]["series"][0]["what"]
+    panel = h.record()["panels"][0]
+    if not panel["series"]:  # FI compared the line with its record and it is not that result: left out of the figure
+        assert [e["declared"] for e in panel["left_out"]] == [what]
+        return "left out"
+    return panel["series"][0]["what"]
 
 
 def test_a_result_worked_out_afterwards_is_read_from_fis_record():
@@ -49,18 +53,18 @@ def test_a_result_worked_out_afterwards_is_read_from_fis_record():
 
 
 def test_a_line_of_exactly_fis_values_of_it_is_named_by_the_result():
-    # before: the table refused FI's value of a declared id and read the trials, which hold nothing: "computed value"
+    # before: the table refused FI's value of a declared id and read the trials, which hold nothing: not that result
     assert _drawn_what({"spread": _record(SPREAD)}, [0.25, 0.5]) == "spread"
 
 
 def test_known_positive_other_numbers_under_its_name_stay_unnamed():
-    assert _drawn_what({"spread": _record(SPREAD)}, [0.3, 0.5]) == "other"
+    assert _drawn_what({"spread": _record(SPREAD)}, [0.3, 0.5]) == "left out"
 
 
 def test_a_result_a_trial_returned_is_never_replaced_by_a_derived_record():
     table = _table({"growth": _record({"size=1": 99.0, "size=2": 99.0})})
     assert table.mean("growth", "size=1") == 2.0  # the trials' mean, not the record's 99
-    assert _drawn_what({"growth": _record({"size=1": 99.0, "size=2": 99.0})}, [99.0, 99.0], "growth") == "other"
+    assert _drawn_what({"growth": _record({"size=1": 99.0, "size=2": 99.0})}, [99.0, 99.0], "growth") == "left out"
     assert _drawn_what({"growth": _record({"size=1": 99.0, "size=2": 99.0})}, [2.0, 4.0], "growth") == "growth"
 
 

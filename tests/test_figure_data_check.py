@@ -272,9 +272,10 @@ def test_a_figure_function_of_fis_derive_py_is_scanned_though_it_never_saves_a_f
 
 
 def test_numbers_typed_into_a_primitive_call_are_not_caught_by_the_call_record_so_the_rule_stays() -> None:
-    """Why the typed-series rule is kept for every panel: the frame's drawing calls take any numbers as y, check none of
-    them against the table, and record the panel as verified, while the rule reads plotting methods and so does not see a
-    primitive call either. The known positive for retiring the rule does not show."""
+    """Why the typed-series rule is kept for every panel: the frame's drawing calls take any numbers as y without refusing
+    the call (numbers FI finds are not the table's are left out of the figure) and record the panel as verified, while the
+    rule reads plotting methods and so does not see a primitive call either. The known positive for retiring the rule does
+    not show."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

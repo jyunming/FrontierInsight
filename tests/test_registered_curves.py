@@ -20,6 +20,10 @@ class _Grid(_Table):
 
     _references = {"law": {"size=%d,step=%d" % (s, t): float(s * t) for t in (1, 2) for s in (1, 2, 3)}}
 
+    def mean(self, name, key):  # every result is size * step, so a line drawn as the law at a step is FI's record there
+        got = dict(part.split("=") for part in key.split(","))
+        return float(got["size"]) * float(got["step"])
+
 
 def _host():
     h = _Host()
@@ -52,6 +56,15 @@ def test_a_reference_curve_needs_the_data_first():
     h._panel(0)[1]["hold"] = {"step": 1}
     with pytest.raises(ValueError):
         h.ref(0, "law")
+
+
+def test_a_reference_curve_of_a_panel_whose_data_was_left_out_is_left_out_too():
+    h = _host()
+    h._panel(0)[1]["hold"] = {"step": 2}
+    assert h.line(0, "fast", [1, 2, 3], [9.0, 9.0, 9.0], "growth") == []  # not FI's record (2, 4, 6): left out
+    assert h.ref(0, "law") == []  # nothing to draw it along, so the figure's code is not refused for it
+    rec = h.record()["panels"][0]
+    assert rec["series"] == [] and [e["id"] for e in rec["left_out"]] == ["fast"]
 
 
 def test_a_curve_the_body_computes_itself_is_refused_and_points_to_the_records():

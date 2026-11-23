@@ -117,8 +117,8 @@ def _two_panel_levels():
 def test_a_setting_value_drawn_alike_in_two_panels_is_one_legend_entry():
     h = _two_panel_levels()
     for t in (10, 20):
-        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
-        h.line(1, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
+        h.line(1, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")
     h.finish(h.labels, {})
     rec = h.record()
     texts = list(rec["legend"]["entries"])
@@ -151,9 +151,9 @@ def test_two_lines_that_share_a_name_and_look_alike_are_one_entry():
 def test_two_results_at_one_value_in_one_panel_keep_two_colours_and_two_entries():
     h = _two_panel_levels()
     for t in (10, 20):
-        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
-        h.line(0, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
-        h.line(1, t, [1, 2, 3], [0.4, 0.6, 0.8 + t], "spread")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")
+        h.line(1, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")
     h.finish(h.labels, {})
     rec = h.record()
     first = h._fc_extra[0]["series"]
@@ -215,7 +215,7 @@ def test_a_constant_equal_to_a_threshold_and_to_a_reference_is_not_named_by_the_
     h = _Host(identity=True)
     h.references = {"error_limit": {"value": 0.05, "label": "error_limit = 0.05", "fixed": True},
                     "theory": {"value": 0.05, "label": "Theory"}}
-    h.line(0, "fast", [1, 2, 3], [0.1, 0.2, 0.3], "growth")
+    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     with pytest.raises(ValueError, match="never matched"):
         h.ref(0, value=0.05)
 
@@ -259,9 +259,9 @@ def test_more_than_twelve_values_keep_one_colour_per_value_across_panels():
 
     h = _Two()
     for t in range(0, 13):
-        h.line(0, t, [1, 2, 3], [1.0, 2.0, 3.0 + t], "growth")
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "growth")
     for t in range(6, 19):
-        h.line(1, t, [1, 2, 3], [0.5, 0.7, 0.9 + t], "spread")
+        h.line(1, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")
     h.finish(h.labels, {})
     colour = {}
     for i, rec in ((0, h._panel(0)[1]), (1, h._panel(1)[1])):

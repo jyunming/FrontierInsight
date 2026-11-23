@@ -412,15 +412,16 @@ class WriteStageMixin:
         one place every write round, rewrite and edit goes through, so a rewrite never leaves the table out. The closing
         sentence that points to the quality report (core/quality_pointer.py) is written from the records the same way."""
         self._write_asked_results(state)
-        self._write_quality_pointer()
+        self._write_quality_pointer(text)
         return _paper_facts.place_blocks(text, self.quest_root, fallback_s=(state.get("exec_result") or {}).get("duration_s"))
 
-    def _write_quality_pointer(self) -> None:
+    def _write_quality_pointer(self, paper_md: str | None = None) -> None:
         """Save (or take away, when no case stands) the closing sentence that points to the quality report, from the records
-        as they are now. Never raises: the paper then has no such sentence."""
+        as they are now and the paper being written (``paper_md``: the figures it places). Never raises: the paper then has no
+        such sentence."""
         path = self.quest_root / _quality_pointer.FILE
         try:
-            said = _quality_pointer.text(self.quest_root)
+            said = _quality_pointer.text(self.quest_root, paper_md)
             if said:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(said + "\n", encoding="utf-8")
@@ -3478,7 +3479,8 @@ class WriteStageMixin:
                               "QUALITY.md lists them", len(standing))
         # The paper's closing sentence says what the records say now (a sentence still unsupported, or the last one gone).
         try:
-            if _quality_pointer.in_paper(Path(paper_path).read_text(encoding="utf-8")) != _quality_pointer.text(self.quest_root):
+            delivered = Path(paper_path).read_text(encoding="utf-8")
+            if _quality_pointer.in_paper(delivered) != _quality_pointer.text(self.quest_root, delivered):
                 self._rewrite_fi_blocks(state, "FI wrote its closing sentence again and added no claim", path=Path(paper_path))
         except (OSError, UnicodeDecodeError) as e:
             self._log.warning("[claim_check] the closing sentence of the paper could not be brought up to date (%s)", e)

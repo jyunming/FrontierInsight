@@ -154,9 +154,9 @@ _RECORD = {"axes": [{"title": "load 3", "xlabel": "Step size", "ylabel": "Error 
 def test_caption_names_computed_quantity_as_drawn() -> None:
     # Fault 3: the body worked out a quantity no table column holds; the call says so (what == "other"), so the caption
     # names it neutrally and does not call it a result of the plan.
-    calls = _calls(_panel(series=[_series("other", "computed value")], y_what="other", y_label="computed value"))
+    calls = _calls(_panel(series=[_series("other", "value")], y_what="other", y_label="value"))
     caption = _figure_caption_text("a.png", _RECORD, n_seeds=None, calls=calls)
-    assert caption.startswith("computed value against Problem size.")
+    assert caption.startswith("value against Problem size.")
     assert "Error of the estimate" not in caption
 
 

@@ -376,8 +376,14 @@ def _draw_one(spec: dict[str, Any], body: Any, table: Any, out_dir: str, plan: d
         emptied = {r.get("panel") for r in left_out if isinstance(r, dict)}
         empty = _empty_panels(axes)
         if empty and (len(empty) == len(axes) or not set(empty) <= emptied):
-            return dict(_outcome(fid, file, "failed", _with_forms(
-                "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty))), spec, table)),
+            # a series FI compared with its record and found to be something else is not drawn: the repair is told which
+            why = [str(e.get("reason")) for p in ((handle.record().get("panels") or []) if calls else [])
+                   if isinstance(p, dict) and p.get("panel") in empty
+                   for e in p.get("left_out") or [] if isinstance(e, dict) and e.get("reason")]
+            text = "`figure_%s` drew nothing on panel %s." % (fid, " and ".join(map(str, empty)))
+            if why:
+                text += " FI left out what it drew there: %s." % "; ".join(dict.fromkeys(why))
+            return dict(_outcome(fid, file, "failed", _with_forms(text, spec, table)),
                         **({"removed": left_out} if left_out else {}))
         none_drawn = _drew_nothing(spec, table)
         if none_drawn:

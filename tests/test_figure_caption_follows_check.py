@@ -1,6 +1,7 @@
-"""A figure's caption and axis come from the same fact, the quantity FI's check found the series draws
-(core/frame_figure.py ``_add_series``, the caption in core/engine.py ``_call_levels``, the quality line in
-core/quality_report.py). Made-up study: a colony whose ``growth`` is read at settings of ``size`` for each ``temp``."""
+"""FI's check of a drawn series against its record never renames it (core/frame_figure.py ``_add_series``): a series FI
+could not compare keeps the plan's name in the caption and on the axis; one FI compared and found not to be its record is
+left out of the figure, and the quality line says which (core/quality_report.py). Made-up study: a colony whose ``growth``
+is read at settings of ``size`` for each ``temp``."""
 
 from __future__ import annotations
 
@@ -57,14 +58,14 @@ def _draw(matching):
     return h
 
 
-def test_a_series_that_is_not_the_declared_result_is_described_as_a_computed_value():
+def test_a_series_that_is_not_the_declared_result_is_left_out_with_the_reason():
     h = _draw(False)  # these are not the table's value of the result: another quantity
-    text = _caption(h)
-    assert "Growth rate" not in text and "computed value" in text
-    assert h.axes[0].get_ylabel() == frame_figure.NEUTRAL_Y
-    s = h.record()["panels"][0]["series"][0]
-    assert s["declared_as"] == {"id": "growth", "label": "Growth rate", "checked": "differs"}
-    assert s["level"]["declared_as"] == "growth" and s["level"]["result_label"] == frame_figure.NEUTRAL_Y
+    rec = h.record()["panels"][0]
+    assert rec["series"] == [] and not h.axes[0].lines
+    assert rec["left_out"] == [
+        {"id": "growth@temp:%d" % t, "kind": "curve", "declared": "growth", "label": "Growth rate",
+         "name": "Growth rate at Temperature (K) = %d" % t, "setting": str(t), "setting_label": "Temperature (K)",
+         "reason": "the drawn values are not FI's record of Growth rate at Temperature (K) = %d" % t} for t in (10, 20)]
 
 
 def test_a_series_that_is_the_declared_result_keeps_its_label_in_caption_and_axis():
@@ -72,7 +73,7 @@ def test_a_series_that_is_the_declared_result_keeps_its_label_in_caption_and_axi
     assert "2 curves of Growth rate, one per Temperature (K)" in _caption(h)
     assert h.record()["panels"][0]["y"]["what"] == "growth"
     s = h.record()["panels"][0]["series"][0]
-    assert "declared_as" not in s and s["level"]["result"] == "growth"
+    assert "declared_as" not in s and s["level"]["result"] == "growth" and "left_out" not in h.record()["panels"][0]
 
 
 def _quest(tmp_path, matching, host=None):
@@ -85,11 +86,12 @@ def _quest(tmp_path, matching, host=None):
     return root
 
 
-def test_the_quality_report_lists_a_series_drawn_as_a_computed_value(tmp_path):
+def test_the_quality_report_lists_a_series_left_out_of_a_figure(tmp_path):
     found = quality_report._paper_problems(quality_report._Quest(_quest(tmp_path, False)))
-    lines = [p["text"] for p in found if "declared as" in p["text"]]
-    assert lines == ["Figure 2: a series declared as Growth rate does not match FI's record of that result; "
-                     "it is drawn as a computed value."]
+    rows = [p for p in found if "declared as" in p["text"]]
+    assert [p["text"] for p in rows] == ["Figure 2: a series declared as Growth rate at Temperature (K) = %d does not match "
+                                         "FI's record of that result; it is left out of the figure." % t for t in (10, 20)]
+    assert {r["status"] for r in rows} == {"left out"}
 
 
 def test_the_quality_report_is_silent_when_the_series_matches(tmp_path):
@@ -97,60 +99,126 @@ def test_the_quality_report_is_silent_when_the_series_matches(tmp_path):
     assert not [p for p in found if "declared as" in p["text"]]
 
 
-def test_two_declared_results_that_do_not_match_stay_two_numbered_groups_on_one_panel():
+def test_two_declared_results_that_do_not_match_are_both_left_out():
     h = _Host()
     h.table.declared = ["growth", "spread"]
     h.labels = {**h.labels, "spread": "Spread"}
     for t in (10, 20):
         h.line(0, t, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")
         h.line(0, t, [1, 2, 3], [8e-10, 9e-10, 9.5e-10], "spread")
-    h.finish({}, {})
-    text = _caption(h)
-    assert "Growth rate" not in text and "Spread" not in text
-    assert "2 curves of computed value 1, one per Temperature (K)" in text
-    assert "2 curves of computed value 2, one per Temperature (K)" in text
-    assert len({e["label"] for e in h.record()["panels"][0]["series"]}) == 4  # no two curves share a legend name
+    rec = h.record()["panels"][0]
+    assert rec["series"] == []
+    assert [(e["declared"], e["setting"]) for e in rec["left_out"]] == [
+        ("growth", "10"), ("spread", "10"), ("growth", "20"), ("spread", "20")]
 
 
-def test_a_series_that_could_not_be_compared_is_not_said_to_differ(tmp_path):
+def test_a_series_that_could_not_be_compared_keeps_its_plan_name_and_is_not_said_to_differ(tmp_path):
     h = _Host()
     h.derived_ids = ["ratio"]  # a quantity the study computes: FI holds no table value of it to compare with
     h.labels = {**h.labels, "ratio": "Growth ratio"}
     for t in (10, 20):
         h.line(0, t, [1, 2, 3], [0.5, 0.6, 0.7], "ratio")
-    h.finish({}, {})
-    assert "Growth ratio" not in _caption(h) and "computed value" in _caption(h)
-    assert h.record()["panels"][0]["series"][0]["declared_as"]["checked"] == "not compared"
+    h.finish(h.labels, {})
+    assert "2 curves of Growth ratio, one per Temperature (K)" in _caption(h)
+    assert h.axes[0].get_ylabel() == "Growth ratio"
+    s = h.record()["panels"][0]["series"][0]
+    assert s["declared_as"]["checked"] == "not compared" and s["what"] == "other"  # no claim reads its values
     found = quality_report._paper_problems(quality_report._Quest(_quest(tmp_path, False, h)))
-    lines = [p["text"] for p in found if "declared as" in p["text"]]
-    assert lines == ["Figure 2: a series declared as Growth ratio could not be checked against FI's record of that result; "
-                     "it is drawn as a computed value."]
+    rows = [p for p in found if "declared as" in p["text"]]
+    assert [p["text"] for p in rows] == ["Figure 2: a series declared as Growth ratio could not be checked against FI's "
+                                         "record of that result; it is drawn under that name."]
+    assert rows[0]["status"] == "disclosed"
 
 
-def test_a_series_that_was_compared_and_differs_is_said_to_differ():
-    h = _draw(False)
-    assert h.record()["panels"][0]["series"][0]["declared_as"]["checked"] == "differs"
+def test_a_series_that_was_compared_and_differs_is_said_to_differ(tmp_path):
+    from core import figure_text_check
+
+    got = figure_text_check.quest_neutral_declared(_quest(tmp_path, False))
+    assert [(f["label"], f["kind"], f["checked"], f["drawn"]) for f in got] == [
+        ("Growth rate at Temperature (K) = %d" % t, "curve", "differs", False) for t in (10, 20)]
 
 
-def test_a_matched_line_and_unmatched_points_of_one_level_have_two_legend_entries():
+def test_a_matched_line_and_unmatched_points_of_one_level_keep_only_the_line():
     h = _Host()
     h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")  # the table's values
-    h.points(0, 10, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")  # not the table's values
+    assert h.points(0, 10, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth") == []  # not the table's values
     h.finish({}, {})
     entries = list(h.record()["legend"]["entries"]) if h.record().get("legend") else [t.get_text() for t in h.axes[0].get_legend().get_texts()]
-    assert len(entries) == 2, entries
-    assert sorted(e.split(",")[0] for e in entries) == ["Growth rate", "computed value"], entries
+    assert entries == ["Temperature (K) = 10"], entries
+    assert [e["kind"] for e in h.record()["panels"][0]["series"]] == ["line"]
 
 
-def test_the_numbers_of_computed_values_skip_a_name_a_label_already_has():
+def test_a_matched_result_keeps_its_label_when_two_other_results_are_left_out():
     h = _Host()
     h.table.declared = ["growth", "spread", "rate"]
-    h.labels = {**h.labels, "spread": "computed value 1", "rate": "Rate"}
+    h.labels = {**h.labels, "spread": "Spread", "rate": "Rate"}
     for t in (10, 20):
-        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")  # the table's values, and a plan label that reads like a number
+        h.line(0, t, [1, 2, 3], [t, t + 1.0, t + 2.0], "spread")  # the table's values
         h.line(0, t, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")
         h.line(0, t, [1, 2, 3], [8e-10, 9e-10, 9.5e-10], "rate")
     h.finish({}, {})
     text = _caption(h)
-    assert "2 curves of computed value 2," in text and "2 curves of computed value 3," in text, text
-    assert text.count("computed value 1") == 1, text  # the matched result's own label
+    assert "2 curves of Spread, one per Temperature (K)" in text, text
+    assert "Growth rate" not in text and "Rate" not in text, text
+    assert {e["declared"] for e in h.record()["panels"][0]["left_out"]} == {"growth", "rate"}
+
+
+class _Grid3:
+    """Growth at each size for each feed level and temperature: ``temp + 10 * feed + size``."""
+
+    declared = ["growth"]
+
+    def keys(self):
+        return ["size=%d,feed=%d,temp=%d" % (s, f, t) for t in (10, 20) for f in (1, 2) for s in (1, 2, 3)]
+
+    def mean(self, name, key):
+        size, feed, temp = (float(part.split("=")[1]) for part in key.split(","))
+        return temp + 10 * feed + size
+
+
+class _TwoPanelHost(_Host):
+    """Two panels, one per temperature (``fig.panel``), each with one curve per feed level."""
+
+    def __init__(self):
+        self.fig, axes = plt.subplots(1, 2, squeeze=False)
+        self.axes = list(axes[0])
+        self.table = _Grid3()
+        self.x = "size"
+        self.series = "feed"
+        self.fallback = False
+        self.settings = ["size", "feed", "temp"]
+        self.series_ids = []
+        self.labels = {"growth": "Growth rate", "size": "Size", "feed": "Feed level", "temp": "Temperature (K)"}
+
+
+def test_a_level_left_out_of_two_panels_is_listed_once_per_panel_setting(tmp_path):
+    h = _TwoPanelHost()
+    for panel, temp in ((0, 10), (1, 20)):
+        h._panel(panel)[1]["hold"] = {"temp": temp}  # what `fig.panel(panel, temp=temp)` records
+        h.line(panel, 1, [1, 2, 3], [temp + 11.0, temp + 12.0, temp + 13.0], "growth")  # FI's record: drawn
+        h.line(panel, 2, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")  # not FI's record at feed level 2: left out
+    h.points(0, 2, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")  # the same level left out again in the same panel
+    h.finish(h.labels, {})
+    root = tmp_path / "q"
+    (root / ".fi" / "figure_records").mkdir(parents=True)
+    (root / "paper").mkdir()
+    (root / ".fi" / "figure_records" / "g.calls.json").write_text(json.dumps(h.record()), encoding="utf-8")
+    (root / "paper" / "paper.md").write_text("![A figure.](figures/g.png)\n", encoding="utf-8")
+    found = quality_report._paper_problems(quality_report._Quest(root))
+    assert [p["text"] for p in found if "declared as" in p["text"]] == [
+        "Figure 1: a series declared as Growth rate at Feed level = 2 in the panel at Temperature (K) = %d does not match "
+        "FI's record of that result; it is left out of the figure." % t for t in (10, 20)]
+
+
+def test_a_curve_left_out_of_one_panel_of_two_names_its_panel(tmp_path):
+    # Two panels that hold no setting; only panel 2 loses a curve. The row names panel 2, as it would if both lost one.
+    h = _Host()
+    h.fig, axes = plt.subplots(1, 2, squeeze=False)
+    h.axes = list(axes[0])
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")  # FI's record at temperature 10: drawn
+    h.line(1, 20, [1, 2, 3], [5e-10, 6e-10, 7e-10], "growth")  # not FI's record at temperature 20: left out
+    h.finish({}, {})
+    found = quality_report._paper_problems(quality_report._Quest(_quest(tmp_path, False, h)))
+    assert [p["text"] for p in found if "declared as" in p["text"]] == [
+        "Figure 2: a series declared as Growth rate at Temperature (K) = 20 in panel 2 does not match FI's record of that "
+        "result; it is left out of the figure."]

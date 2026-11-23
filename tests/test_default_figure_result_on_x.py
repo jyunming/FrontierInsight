@@ -267,6 +267,13 @@ def _body_figure(tmp_path, table, body, series=None, ok=True):
     return out
 
 
+def _left_out(tmp_path, table, body, series=None):
+    """The figure's one series is not the trials' own pairs: FI leaves it out, so the figure draws nothing and says why."""
+    out = _body_figure(tmp_path, table, body, series=series, ok=False)
+    assert out["status"] == "failed", out
+    assert "FI left out what it drew there: the drawn values are not FI's record of Leaf area" in out["said"], out
+
+
 def test_a_figure_body_that_draws_the_trials_own_pairs_gets_both_names(tmp_path, frame5):
     table = _table()
 
@@ -279,40 +286,29 @@ def test_a_figure_body_that_draws_the_trials_own_pairs_gets_both_names(tmp_path,
     assert (xlabel, ylabel) == ("Plant height", "Leaf area") and series[0]["what"] == "leaf_area"
 
 
-def test_a_figure_whose_points_are_not_one_trial_s_pairs_keeps_the_computed_names(tmp_path, frame5):
+def test_a_figure_whose_points_are_not_one_trial_s_pairs_is_left_out(tmp_path, frame5):
     """Known positive: the same values, but the y of each point is another trial's (shuffled pairing)."""
-    from core import frame_figure
-
     table = _table()
 
     def figure_g(fig, tbl):
         xs, ys = _true_pairs(tbl)
         fig.points(0, "leaf_area", ("height", xs), ys[1:] + ys[:1], "leaf_area")
 
-    _body_figure(tmp_path, table, figure_g)
-    xlabel, ylabel, series = _axes_of(frame5, "g.png")
-    assert (xlabel, ylabel) == (frame_figure.NEUTRAL_X, frame_figure.NEUTRAL_Y)
-    assert series[0]["what"] == "other" and "x_paired" not in series[0]
-    assert series[0]["declared_as"]["checked"] == "differs"
+    _left_out(tmp_path, table, figure_g)
 
 
 def test_a_trial_s_pair_drawn_twice_is_not_two_trials(tmp_path, frame5):
-    from core import frame_figure
-
     table = _table()
 
     def figure_g(fig, tbl):
         xs, ys = _true_pairs(tbl)
         fig.points(0, "leaf_area", ("height", xs + xs[:1]), ys + ys[:1], "leaf_area")
 
-    _body_figure(tmp_path, table, figure_g)
-    assert _axes_of(frame5, "g.png")[:2] == (frame_figure.NEUTRAL_X, frame_figure.NEUTRAL_Y)
+    _left_out(tmp_path, table, figure_g)
 
 
 def test_the_points_of_one_series_value_must_be_that_value_s_trials(tmp_path, frame5):
     """The legend says "soil = sand", but the points are the clay trials': not the curve it is named as."""
-    from core import frame_figure
-
     table = _table(soils=("clay", "sand"))
     for c in table._cells:  # the sand trials give other values than the clay ones
         if c["cell"]["soil"] == "sand":
@@ -322,13 +318,12 @@ def test_the_points_of_one_series_value_must_be_that_value_s_trials(tmp_path, fr
         xs, ys = _true_pairs(tbl, soil="clay")
         fig.points(0, "sand", ("height", xs), ys, "leaf_area")
 
-    _body_figure(tmp_path, table, figure_g, series="soil")
-    assert _axes_of(frame5, "g.png")[:2] == (frame_figure.NEUTRAL_X, frame_figure.NEUTRAL_Y)
+    _left_out(tmp_path, table, figure_g, series="soil")
 
 
 def test_tiny_values_a_factor_apart_are_not_one_trial_s_pair(tmp_path, frame5):
     """Values near zero (1e-15 and 3e-15) are two values: a shuffled pairing of them is no trial's pair, whatever their size."""
-    from core import frame_figure, frame_table, skeleton
+    from core import frame_table, skeleton
 
     sys.modules["fi_table"] = frame_table
     ns: dict[str, Any] = {"fi_table": frame_table}
@@ -342,8 +337,7 @@ def test_tiny_values_a_factor_apart_are_not_one_trial_s_pair(tmp_path, frame5):
         xs, ys = _true_pairs(tbl)
         fig.points(0, "leaf_area", ("height", xs), ys[1:] + ys[:1], "leaf_area")
 
-    _body_figure(tmp_path, table, figure_g)
-    assert _axes_of(frame5, "g.png")[:2] == (frame_figure.NEUTRAL_X, frame_figure.NEUTRAL_Y)
+    _left_out(tmp_path, table, figure_g)
 
 
 def test_the_pair_check_does_not_count_as_a_read_of_the_body(tmp_path, frame5):

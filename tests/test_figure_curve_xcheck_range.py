@@ -1,5 +1,5 @@
 """Final-review fixes of the drawing record and its claims: a curve's name and y are FI's (no body words or digits reach a checked
-panel), a series FI found is not its result keeps neither the result's name nor an unchecked x, and error bars / bands called
+panel), a series FI could not check keeps its plan name but no claim reads its values or an unchecked x, and error bars / bands called
 "range" are kept only when they are the table's min and max. The studies are the invented fixtures of
 ``tests/fixtures/figure_claims/``."""
 
@@ -64,21 +64,21 @@ def test_a_curve_the_body_computes_is_not_drawn(tmp_path):
 INVERSE = HONEST + 'fig.line(0, "sample_a", [1 / w for w in waves], means, "signal")\n'
 
 
-def test_a_series_drawn_against_a_transform_of_x_keeps_neither_name_nor_x_claims(tmp_path):
+def test_a_series_drawn_against_a_transform_of_x_keeps_its_name_but_no_x_claims(tmp_path):
     calls, offers, host = _draw(INVERSE, tmp_path, ids=True)
     s = calls["panels"][0]["series"][0]
-    assert s["what"] == "other" and s["label"] == "computed value"
-    assert calls["panels"][0]["x"]["label"] != "Wavelength (nm)"
+    assert s["what"] == "other" and s["label"] == "Sample A" and s["declared_as"]["checked"] == "not compared"
+    assert calls["panels"][0]["x"]["neutral"] is True and calls["panels"][0]["x"]["label"] == "Wavelength (nm)"
     by = {o["claim"] for o in offers}
     assert not by & {"trend", "order", "crossing", "no_crossing", "steps", "value_at", "missing_x"}
     assert not [o for o in offers if o["claim"] == "range" and o["args"].get("axis") == "x"]
-    assert "Sample A" not in _texts(offers) and "decreases" not in _texts(offers)
+    assert "decreases" not in _texts(offers)
 
 
-def test_the_x_axis_of_such_a_series_is_named_neutrally_in_the_figure(tmp_path):
+def test_the_x_axis_of_such_a_series_keeps_the_plan_label_in_the_figure(tmp_path):
     _c, _o, host = _draw(INVERSE, tmp_path, ids=True)
     host.finish(host.labels, {})
-    assert host.axes[0].get_xlabel() != "Wavelength (nm)"
+    assert host.axes[0].get_xlabel() == "Wavelength (nm)"
 
 
 def test_missing_x_is_not_offered_for_points_on_a_transformed_x(tmp_path):
@@ -93,13 +93,14 @@ def test_an_honest_line_on_the_settings_own_x_keeps_trend_and_range(tmp_path):
     assert calls["panels"][0]["series"][0]["label"] == "Sample = a"
 
 
-def test_two_downgraded_series_get_numbered_neutral_names(tmp_path):
+def test_two_series_fi_could_not_compare_keep_their_plan_names(tmp_path):
     body = HONEST + ('fig.line(0, "sample_a", waves, [m + 0.3 for m in means], "signal")\n'
                      'fig.line(0, "sample_b", waves, [m + 0.5 for m in means], "signal")\n')
     calls, _o, host = _draw(body, tmp_path, ids=True)
-    assert [s["label"] for s in calls["panels"][0]["series"]] == ["computed value 1", "computed value 2"]
+    assert [s["label"] for s in calls["panels"][0]["series"]] == ["Sample A", "Sample B"]
+    assert {s["what"] for s in calls["panels"][0]["series"]} == {"other"}
     host.finish(host.labels, {})
-    assert _legend(host) == ["computed value 1", "computed value 2"]
+    assert _legend(host) == ["Sample A", "Sample B"]
 
 
 # ---- I6 --------------------------------------------------------------------------------------------------------------------
@@ -140,26 +141,25 @@ def test_a_band_called_range_is_checked_and_an_honest_one_kept(tmp_path):
 
 # ---- fix round 1 -------------------------------------------------------------------------------------------------------------
 
-def test_a_series_declared_other_never_carries_a_results_plan_label(tmp_path):
+def test_a_series_declared_other_keeps_its_ids_plan_label_and_states_no_value(tmp_path):
     body = HONEST + 'fig.line(0, "signal", waves, [9, 7, 5, 3, 2, 1], "other")\n'
     calls, offers, host = _draw(body, tmp_path, ids=True)
     host.finish(host.labels, {})
-    assert calls["panels"][0]["series"][0]["label"] == "computed value"
-    assert _legend(host) == ["computed value"]
-    assert "Signal" not in _texts(offers)
+    assert calls["panels"][0]["series"][0]["label"] == "Signal" and calls["panels"][0]["series"][0]["what"] == "other"
+    assert _legend(host) == ["Signal"]
+    assert not [o for o in offers if o["claim"] in ("value_at", "steps")]
     # the known positive: an arm id (not a result) declared `other` keeps its own name
     calls, offers, host = _draw(HONEST + 'fig.line(0, "sample_a", waves, [9, 7, 5, 3, 2, 1], "other")\n', tmp_path, ids=True)
     assert calls["panels"][0]["series"][0]["label"] == "Sample A"
 
 
-def test_a_merged_legend_entry_never_names_a_result_whose_values_fi_did_not_find(tmp_path):
+def test_a_merged_legend_entry_names_both_series_by_their_plan_labels(tmp_path):
     # the arm's series is drawn first and kept; the result-named one with the same values merges into it
     body = HONEST + ('fig.line(0, "sample_a", waves, [9, 7, 5, 3, 2, 1], "other")\n'
                      'fig.line(0, "signal", waves, [9, 7, 5, 3, 2, 1], "other")\n')
     calls, offers, host = _draw(body, tmp_path, ids=True)
     host.finish(host.labels, {})
-    legend = " | ".join(_legend(host))
-    assert "Sample A" in legend and "Signal" not in legend, legend
+    assert _legend(host) == ["Sample A = Signal"]
 
 
 def _hand(series_extra=None, **top):
@@ -214,4 +214,4 @@ def test_two_identical_downgraded_series_share_one_legend_entry_naming_both(tmp_
                      'fig.line(0, "sample_b", waves, [m + 0.3 for m in means], "signal")\n')
     _c, _o, host = _draw(body, tmp_path, ids=True)
     host.finish(host.labels, {})
-    assert _legend(host) == ["computed value 1 = computed value 2"]
+    assert _legend(host) == ["Sample A = Sample B"]

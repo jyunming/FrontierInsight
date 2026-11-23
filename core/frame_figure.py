@@ -62,12 +62,9 @@ class BadArgument(ValueError):
 
 
 RECORD_VERSION = 2  # 2: a curve's name and y are FI's, series carry ``x_checked`` / ``neutral``, "range" bars are checked
-NEUTRAL_X = "computed x"  # the x axis of a panel that draws values FI did not find among the setting's values (or, for a result
-# on x, did not find to be the trials' own pairs of the two results)
 #: Set by FI for the last run, when no repair of a figure is left: a line FI cannot name is then left out of the figure and
 #: recorded in ``removed``, where before it is refused (sent to the figure's repair).
 LAST_RUN_ENV = "FI_FIGURE_FALLBACK"
-NEUTRAL_Y = "computed value"  # the neutral name of a quantity FI did not tie to a result of the table
 LEGEND_LEVELS = 12  # a figure with one curve per level of a setting names every level in its legend up to this many; more: the lowest and the highest
 LEGEND_SHARE = 0.2  # a legend whose box lies this much over a panel it does not belong to is over it (the share the layout check of plot_style uses)
 LEGEND_INSET_PX = 3  # a legend's box is measured this many pixels in from its frame, so a line that only grazes the frame is not under it
@@ -474,6 +471,10 @@ class FigureCalls:
             return str(got.get("label") or ident)
         return str(got) if got else str(ident)
 
+    def _shown_label(self, ident):
+        """The axis name of a quantity a call drew as ``ident``: its plan label; ``other`` (no result declared) is "value"."""
+        return "value" if ident == "other" else self._label_of(ident)
+
     def _reference_label(self, ident):
         """The name of a plan reference: the plan's own label; a reference that is the plan's formula for one of the study's
         results is named as what the plan says it is (that result's expected value, or an upper or a lower bound of it), so
@@ -532,7 +533,7 @@ class FigureCalls:
             except (TypeError, ValueError):
                 text = _read_back(series)
         info = {"setting": setting, "setting_label": label, "value": series, "text": text, "result": what,
-                "result_label": NEUTRAL_Y if what == "other" else self._label_of(what)}
+                "result_label": self._shown_label(what)}
         return "%s@%s:%s" % (what, setting, text), info
 
     def _series_ok(self, series):
@@ -569,18 +570,25 @@ class FigureCalls:
             raise ValueError("panel %d already has `%s` on its x axis; one panel has one x axis (use another panel for `%s`)"
                              % (rec["panel"], rec["x"]["id"], x_id))
         if rec["x"] is not None and rec["x"].get("neutral"):
-            return  # one series whose x FI could not tie to the setting makes the axis neutral for the whole panel
+            return  # one series whose x FI could not tie to the setting marks the axis for the whole panel (no claim reads it)
         if not checked:
-            new.update(label=NEUTRAL_X, neutral=True)
+            new["neutral"] = True  # the axis keeps the plan's label; the flag says FI could not check the drawn x
         rec["x"] = new
 
-    def _set_y(self, rec, what):
+    def _set_y(self, rec, what, shown=None):
+        """The y axis of a panel: ``what`` is the quantity FI's check found (``other`` when it found none: no claim reads it),
+        ``shown`` the id the code drew it as (default ``what``), which names the axis. Two quantities on one axis are both
+        named, each list joined by " / "."""
+        shown = what if shown is None else shown
         if rec["y"] is None:
-            rec["y"] = {"what": what, "label": NEUTRAL_Y if what == "other" else self._label_of(what),
-                        "scale": "linear"}
-        elif what not in rec["y"]["what"].split(" / "):  # two results on one axis: both are named
+            rec["y"] = {"what": what, "shown": shown, "label": self._shown_label(shown), "scale": "linear"}
+            return
+        if what not in rec["y"]["what"].split(" / "):
             rec["y"]["what"] += " / " + what
-            rec["y"]["label"] += " / " + (NEUTRAL_Y if what == "other" else self._label_of(what))
+        named = rec["y"].setdefault("shown", rec["y"]["what"])
+        if shown not in named.split(" / "):  # two quantities on one axis: both are named
+            rec["y"]["shown"] += " / " + shown
+            rec["y"]["label"] += " / " + self._shown_label(shown)
 
     # ---- series ------------------------------------------------------------------------------------------------------
 
@@ -937,8 +945,8 @@ class FigureCalls:
         return "matches"
 
     def _checked_what(self, what, form, x_id, xs, ys):
-        """``what`` when the drawn y is the table's own value, else ``other``: the series keeps its shape but FI states no value
-        from it. A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
+        """``what`` when the drawn y is the table's own value, else ``other``: FI states no value from the series (one FI
+        compared and found different is left out of the figure by ``_add_series``). A declared ``other`` stays. Everything FI cannot compare is ``other`` as well (fail closed): a quantity that is
         not a result of the plan (a derived one: FI holds no value of it here), an x that is a result and not a setting whose
         points are not FI's own pairs of the two results (``_pair_check``), a figure without a table, a point the table cannot
         say, a series with no finite y. ``form`` (default the mean) says which statistic of the trials y is. No case refuses the
@@ -1114,25 +1122,36 @@ class FigureCalls:
             yerr_meaning = self._checked_meaning(yerr_meaning, what, x_id, xs, ys, lo, hi)
         declared = what
         what, how = self._check_of_what(what, form, x_id, xs, ys, level, rec, series)
+        if how == "differs":
+            # FI compared the drawn values with its record of the declared result and they are not it: the curve is not drawn
+            # under that name (nor under any other), and the panel's record says what was left out and why.
+            label = self._label_of(declared)
+            name = "%s at %s = %s" % (label, level["setting_label"], level["text"]) if level else label
+            self._leave_out(rec, {"id": series, "kind": "curve", "declared": declared, "label": label, "name": name,
+                                  "setting": level["text"] if level else None,
+                                  "setting_label": level["setting_label"] if level else None,
+                                  "reason": "the drawn values are not FI's record of %s" % name})
+            return []
         x_ok = self._x_checked(x_id, xs, ys)
         # One result against another: when every point is one of FI's own pairs of the two results (the check above kept the
         # result), both axes carry the results' names. ``x_checked`` stays False: the x values are no setting's, so no claim
         # that reads x (a trend, an order at an x, a crossing) is offered.
         x_paired = what != "other" and self._x_is_table_result(x_id)
-        # A series the body gave as a result of the plan that FI did not find to be the table's value of it keeps neither that
-        # result's name (nor the series' own plan label, which names the same thing): its name is the neutral one, numbered below.
+        # A series FI did not tie to a result of its table (``what`` "other"): the record marks it ``neutral`` when the code drew
+        # it as a result (declared, or named by one), so nothing that reads the record counts it as showing that result. Its
+        # words stay the plan's: the name of the id the code drew it as (``shown`` names the axis).
         neutral = what == "other" and (declared != "other" or (level is None and self._names_a_result(series)))
-        # The caption and the axis come from one fact, the quantity FI's check found: a level that carried the declared result's
-        # label no longer does, and the declared id stays beside it in the record.
+        shown = declared if declared != "other" else (series if level is None and self._names_a_result(series) else "other")
         declared_as = None
         if what == "other" and declared != "other":
             declared_as = {"id": declared, "label": self._label_of(declared), "checked": how}
             if level:
-                level.update(result_label=NEUTRAL_Y, declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
-        legend = "%s = %s" % (level["setting_label"], level["text"]) if level else NEUTRAL_Y if neutral else self._label_of(series)
+                level.update(declared_as=declared, declared_label=declared_as["label"], checked=how)  # "result" stays the curve's identity
+        # the record's name of the curve, as for a series FI matched (the legend reads the plan's label, else "value")
+        legend = "%s = %s" % (level["setting_label"], level["text"]) if level else self._label_of(series)
         with _undone(ax, rec, self):
             self._set_x(rec, x_id, x_ok or x_paired)
-            self._set_y(rec, what)
+            self._set_y(rec, what, shown)
             arts = self._draw_series(ax, kind, xs, ys, legend, step)
             self._tag(arts)
             if lo is not None:
@@ -1147,25 +1166,7 @@ class FigureCalls:
                                   "x_checked": x_ok, **({"x_paired": True} if x_paired else {}),
                                   **({"neutral": True} if neutral else {}), **({"declared_as": declared_as} if declared_as else {}),
                                   **({"level": level} if level else {})})
-            loose = [e for e in rec["series"] if e.get("neutral") and not e.get("level")]
-            for k, e in enumerate(loose, 1):
-                e["label"] = NEUTRAL_Y if len(loose) == 1 else "%s %d" % (NEUTRAL_Y, k)
             levelled = [e for e in rec["series"] if e.get("level")]
-            # Curves FI found not to be the result they were declared as are all "a computed value"; when the panel has curves
-            # declared as different results, each such result's curves are numbered, so no two groups share a name or a count.
-            unchecked = list(dict.fromkeys(e["level"]["declared_as"] for e in levelled if e["level"].get("declared_as")))
-            # a number is skipped when a label of the figure (a plan label, a series' name) is already that name
-            taken = {str(v.get("label") if isinstance(v, dict) else v) for v in (getattr(self, "labels", None) or {}).values()}
-            taken |= {str(r.get("label")) for st in self._state().values() for r in st["series"] if not r.get("declared_as")}
-            names, n = {}, 0
-            for ident in unchecked:  # in the order the panel first draws them
-                n += 1
-                while "%s %d" % (NEUTRAL_Y, n) in taken:
-                    n += 1
-                names[ident] = "%s %d" % (NEUTRAL_Y, n)
-            for e in levelled:
-                if e["level"].get("declared_as"):
-                    e["level"]["result_label"] = names[e["level"]["declared_as"]] if len(unchecked) > 1 else NEUTRAL_Y
             several = len({(e["level"]["result"], e["level"]["result_label"]) for e in levelled}) > 1  # two results on one panel: each curve says which
             for e in levelled:
                 lv = e["level"]
@@ -1318,7 +1319,11 @@ class FigureCalls:
     def _reference_curve(self, panel, ax, rec, ref_id):
         """A plan reference that changes along the panel's x, drawn as a curve through FI's own values of it at the settings the
         panel shows (the table's references: FI's evaluation of the plan's formula), named by the plan. Refused when the panel
-        has no x of a setting yet, or when the reference also changes with a setting the panel does not hold."""
+        has no x of a setting yet, or when the reference also changes with a setting the panel does not hold. A panel whose
+        data FI left out (``left_out``: not FI's record of its result) and that draws nothing else has nothing to draw it
+        along: the reference is left out with the data."""
+        if rec["x"] is None and rec.get("left_out"):
+            return []
         if rec["x"] is None or rec["x"].get("kind") != "setting":
             raise ValueError("draw the data of panel %d first, along a setting: a reference curve is drawn at the settings the "
                              "panel's x names" % (panel,))
@@ -1355,6 +1360,16 @@ class FigureCalls:
             self._group_bars(panel)  # a curve along x keeps the bars of the panel at their x values
         return arts
 
+    @staticmethod
+    def _leave_out(rec, entry):
+        """Record in the panel's ``left_out`` a series FI did not draw: the drawn values are not its record of what the call
+        named. ``entry``: ``id``, ``kind`` (curve or image), ``declared``, ``label`` (the plan's label of the result), ``name`` (the
+        plan's words for the series: the label, with the level's setting and value for a level curve), ``setting`` (the level's
+        value) and ``setting_label`` (``None`` without a level), ``reason``."""
+        left = rec.setdefault("left_out", [])
+        if entry not in left:
+            left.append(entry)
+
     def image(self, panel, z, x=None, y=None, what="other"):
         """A heat map or raster of ``z`` (rows of values); ``x`` and ``y`` are the coordinates of its columns and rows."""
         ax, rec = self._panel(panel)
@@ -1375,7 +1390,16 @@ class FigureCalls:
         extent = None
         if all(_finite(v) for v in cols + rws) and cols and rws:
             extent = [min(cols), max(cols), max(rws), min(rws)]
+        declared = what
         what = self._checked_image_what(what, x_id, y_id, cols, rws, rows) if x is not None and y is not None else "other"
+        if declared != "other" and what == "other":
+            # FI could not tie the map to its record of the result the call named: the map is not drawn under that name (nor
+            # under any other), and the panel's record says what was left out and why.
+            label = self._label_of(declared)
+            self._leave_out(rec, {"id": declared, "kind": "image", "declared": declared, "label": label, "name": label,
+                                  "setting": None, "setting_label": None,
+                                  "reason": "FI could not confirm the drawn map is its record of %s" % label})
+            return None
         with _undone(ax, rec, self):
             if rec["x"] is None:
                 rec["x"] = {"id": "column", "kind": "setting", "label": "column", "scale": "linear"}
@@ -1383,7 +1407,7 @@ class FigureCalls:
             art = ax.imshow([_gaps(r) for r in rows], aspect="auto", extent=extent,
                             vmin=min(nums) if nums else None, vmax=max(nums) if nums else None)
             self._tag(art)
-            label = NEUTRAL_Y if what == "other" else self._label_of(what)  # the neutral name an unchecked quantity's axis has
+            label = self._shown_label(what)  # the plan's name only of a map FI tied to its record; else "value"
             rec["series"].append({"id": what, "label": label, "kind": "image", "step": False, "x": cols, "y": rws,
                                   "yerr": None, "yerr_lo": None, "yerr_hi": None, "yerr_meaning": None, "merged_with": [], "z": rows, "what": what})
             self._remember(panel, "series", None, what)
@@ -1427,6 +1451,8 @@ class FigureCalls:
         if not len(xs) == len(los) == len(his):
             raise ValueError("x, lo and hi must have the same length (%d, %d, %d)" % (len(xs), len(los), len(his)))
         drawn = [e for e in rec["series"] if e["id"] == series and e["kind"] != "curve"]
+        if not drawn and any(e.get("id") == series for e in rec.get("left_out") or []):
+            return None  # the band of a series FI left out (its values are not FI's record of its result) is left out with it
         if not drawn:
             raise ValueError("series `%s` has not been drawn on panel %d: draw it with line, points or bars before its band; the "
                              "series on this panel are: %s" % (series, panel, ", ".join(sorted({e["id"] for e in rec["series"]})) or "(none)"))
@@ -1781,9 +1807,11 @@ class FigureCalls:
 
         An axis label is, in this order: the plan's label of the id, with its unit ("Growth (1/h)"); else a short form of the
         result's plan description (up to its first stop or bracket, at most 48 characters); else "value" with the unit. The id
-        itself is never a label. Two results on one axis are joined with " / "; ``what="other"`` is "computed value". The x label
-        comes from the id of the call's ``x=``; it is "computed x" when FI could not check the drawn x (not the setting's values,
-        or, for a result on x, not the trials' own pairs of the two results). In an image panel the vertical axis is "row".
+        itself is never a label. The y label names what the calls drew the series as (the record's ``y.shown``), whatever FI's
+        check found (``y.what``): two quantities on one axis are joined with " / "; ``what="other"`` is "value". The x label
+        comes from the id of the call's ``x=``, also when FI could not check the drawn x (the record's ``x.neutral``: not the
+        setting's values, or, for a result on x, not the trials' own pairs of the two results). In an image panel the vertical
+        axis is "row".
 
         Series whose x, y, error bars, kind and result are equal within ``IDENTICAL_RTOL`` (relative) are one line to the reader:
         the later ids go to the first one's ``merged_with`` (both entries stay in the record, since both were drawn) and the
@@ -1908,13 +1936,11 @@ class FigureCalls:
             return
         image = any(e["kind"] == "image" for e in rec["series"])
         x = rec["x"]
-        if x.get("neutral"):
-            x["label"] = NEUTRAL_X
-        elif not (image and x["id"] == "column" and "column" not in spec_labels):
+        if not (image and x["id"] == "column" and "column" not in spec_labels):
             x["label"] = self._name_of(x["id"], spec_labels, result_info)
         if rec["y"] is not None:
-            parts = rec["y"]["what"].split(" / ")
-            names = dict.fromkeys(NEUTRAL_Y if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
+            parts = str(rec["y"].get("shown") or rec["y"]["what"]).split(" / ")
+            names = dict.fromkeys("value" if w == "other" else self._name_of(w, spec_labels, result_info) for w in parts)
             rec["y"]["label"] = " / ".join(names)
         if x.get("scale") == "log":
             x["label"] += LOG_NOTE
@@ -2158,8 +2184,6 @@ class FigureCalls:
                 got = record_label
             return str(got or _short((result_info.get(ident) or {}).get("description")) or "value")
 
-        # FI's neutral name, never the plan's label of a series whose values FI did not find, whichever was drawn first
-        neutral_by_id = {s["id"]: s["label"] for s in rec["series"] if s.get("neutral")}
         shown = self._shown_levels(rec)
         named = set()  # a level drawn as a line and as points is named once
         out = []
@@ -2173,8 +2197,8 @@ class FigureCalls:
                     continue
                 named.add(self._level_ident(e))
             plan_curve = e["kind"] == "curve" and e.get("source") == "plan" and e["id"] in self._results()
-            first = e["label"] if e.get("neutral") or plan_curve else name(e["id"], e["label"])
-            text = " = ".join([first] + [neutral_by_id.get(i) or name(i) for i in e["merged_with"]])
+            first = e["label"] if plan_curve else name(e["id"], e["label"])
+            text = " = ".join([first] + [name(i) for i in e["merged_with"]])
             out.append((self._colour_key(e), extra["series"][k][0], text))
         for r, art in zip(rec["refs"], extra["refs"]):
             # a reference that is the plan's formula for a result keeps the name ref() gave it, never the result's own name

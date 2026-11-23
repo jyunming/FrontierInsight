@@ -1,11 +1,12 @@
 """The one plain sentence that ends the paper's body when something the reader could not otherwise see stands in it.
 
-The paper carries no mark beside a value and no note about how FI got it. Five cases still matter to a reader: a printed value
+The paper carries no mark beside a value and no note about how FI got it. Six cases still matter to a reader: a printed value
 outside the range the plan expected (FI kept it, :func:`core.result_checks.kept_bound_breaks`), a result whose check against a known answer did not pass and the study went on
 (:func:`has_failed_check`) or a control of the plan that failed on the full run (:func:`has_failed_control`), a result that rests on an
 equation not confirmed before the run (:func:`core.equation_tests.unconfirmed_marks`), a result from fewer runs than the plan
-asked for (:func:`core.result_checks.fewer_runs_marks`) and a sentence the final claim check found unsupported that stays in
-the paper (``claims`` of :data:`core.paper_facts.UNSUPPORTED_RECORD`). Only then the
+asked for (:func:`core.result_checks.fewer_runs_marks`), a curve or map FI left out of a figure the paper places because the
+drawn values were not its record (:func:`has_left_out_figure`) and a sentence the final claim check found unsupported that
+stays in the paper (``claims`` of :data:`core.paper_facts.UNSUPPORTED_RECORD`). Only then the
 paper ends its body with a single sentence that points to the quality report, and it names only the kinds that occur: no
 count, no identifier, no file name. The sentence is FI's block ``{{quality_pointer}}`` (core/paper_facts.py ``BLOCK_NAMES``):
 put in after every write round and replaced, never repeated, and gone when the last case is gone. QUALITY.md lists every
@@ -101,16 +102,40 @@ def has_fewer_runs(quest_root: Path | str) -> bool:
         return False
 
 
+def has_left_out_figure(quest_root: Path | str, paper_md: str | None = None) -> str:
+    """What FI left out of a figure the paper places because the drawn values were not its record (``left_out`` of the
+    figure's call record, :func:`core.figure_text_check.quest_neutral_declared`): ``"curves"``, ``"maps"``, ``"curves and
+    maps"``, or ``""`` when nothing was left out. ``paper_md``: the paper as it is being written (the figures it places),
+    else the saved paper."""
+    from . import figure_text_check as _ftc
+
+    try:
+        kinds = {f.get("kind") for f in _ftc.quest_neutral_declared(Path(quest_root), paper_md) if not f.get("drawn", True)}
+    except Exception:  # noqa: BLE001 -- a record that cannot be read names no case
+        return ""
+    return " and ".join(w for k, w in (("curve", "curves"), ("image", "maps")) if k in kinds)
+
+
+#: The words for what FI left out of a figure (:func:`has_left_out_figure`): a curve FI compared and found is not the result it
+#: was drawn as; a map FI could not tie to the result it was drawn as.
+_LEFT_OUT = {"curves": "curves left out of a figure because their values did not match the study's results",
+             "maps": "maps left out of a figure because their values could not be confirmed as the study's results",
+             "curves and maps": "curves and maps left out of a figure because their values could not be confirmed as the "
+                                "study's results"}
+
+
 def sentence(outside_range: bool, unsupported: bool, equation: bool = False, fewer_runs: bool = False,
-             failed_check: bool = False) -> str:
+             failed_check: bool = False, left_out: str = "") -> str:
     """The closing sentence for the kinds that occur, in this order: values outside the expected range, results whose check against a known answer did not pass, results resting on an
-    equation not confirmed before the run, results from fewer runs than planned, statements not supported. One kind is named
-    plainly; several are a short list joined with commas and "and". ``""`` when none occurs."""
+    equation not confirmed before the run, results from fewer runs than planned, curves or maps left out of a figure
+    (``left_out``: what :func:`has_left_out_figure` gives), statements not supported. One kind is named plainly; several are a
+    short list joined with commas and "and". ``""`` when none occurs."""
     kinds = [text for on, text in (
         (outside_range, "values that fell outside the range the study expected"),
         (failed_check, "results whose check against a known answer did not pass"),
         (equation, "results that rest on an equation not confirmed before the run"),
         (fewer_runs, "results from fewer runs than planned"),
+        (bool(left_out), _LEFT_OUT.get(left_out, _LEFT_OUT["curves"])),
         (unsupported, "statements that the study's results and the cited sources do not support")) if on]
     if not kinds:
         return ""
@@ -118,11 +143,13 @@ def sentence(outside_range: bool, unsupported: bool, equation: bool = False, few
     return what[0].upper() + what[1:] + " are listed in the accompanying quality report."
 
 
-def text(quest_root: Path | str) -> str:
-    """The sentence FI's records call for now, ``""`` with no case."""
+def text(quest_root: Path | str, paper_md: str | None = None) -> str:
+    """The sentence FI's records call for now, ``""`` with no case. ``paper_md``: the paper as it is being written, whose
+    figures decide whether a figure FI left something out of is in it (else the saved paper)."""
     return sentence(has_outside_range(quest_root), has_unsupported(quest_root),
                     has_unconfirmed_equation(quest_root), has_fewer_runs(quest_root),
-                    has_failed_check(quest_root) or has_failed_control(quest_root))
+                    has_failed_check(quest_root) or has_failed_control(quest_root),
+                    has_left_out_figure(quest_root, paper_md))
 
 
 def in_paper(markdown: str) -> str:

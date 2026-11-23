@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .frame_figure import hold_text as _hold_text
+
 #: A legend text that names nothing: the placeholders older figures carried.
 PLACEHOLDER = re.compile(r"^\s*(reference line|a curve|curve \d+|computed x)?\s*$", re.IGNORECASE)
 _FIGURE_IMAGE = re.compile(r"!\[(?P<caption>(?:[^\[\]]|\[[^\]]*\])*)\]\((?P<path>[^)\s]+)\)")
@@ -138,18 +140,25 @@ def quest_findings(root: Path) -> list[dict[str, Any]]:
     return out
 
 
-def quest_neutral_declared(root: Path) -> list[dict[str, Any]]:
-    """The series of every placed figure that its body declared as a result of the plan but that FI's check found not to draw
-    that result (the figure draws it as a computed value): ``[{"file", "number", "label", "record"}]``, one per figure and
-    declared result, ``number`` the figure's place among the paper's figures."""
+def quest_neutral_declared(root: Path, paper_md: str | None = None) -> list[dict[str, Any]]:
+    """The series of every placed figure that its body declared as a result of the plan but that FI's check did not find to
+    draw that result: ``[{"file", "number", "label", "kind", "checked", "drawn", "record"}]``, one per figure and declared
+    result (one per panel, kind, declared result and level for a curve or map left out, the panel named by the setting it
+    holds, else by its number, when the figure has several), ``number`` the figure's place among the paper's figures,
+    ``kind`` curve or image. ``checked`` is ``differs`` (FI compared and the values are not its record, or a map FI could not confirm as its
+    record: the series is left out of the figure, ``drawn`` False, ``label`` the plan's words for it; an older record drew it
+    under another name) or ``not compared`` (drawn under the plan's name of the result). ``paper_md``: the paper's text when
+    it is not yet the saved file (a write round's draft), else the saved paper is read."""
     root = Path(root)
-    paper = root / "paper" / "paper.md"
-    if not paper.exists():
-        paper = root / "paper.md"
-    try:
-        captions = paper_captions(paper.read_text(encoding="utf-8"))
-    except OSError:
-        return []
+    if paper_md is None:
+        paper = root / "paper" / "paper.md"
+        if not paper.exists():
+            paper = root / "paper.md"
+        try:
+            paper_md = paper.read_text(encoding="utf-8")
+        except OSError:
+            return []
+    captions = paper_captions(paper_md)
     out: list[dict[str, Any]] = []
     for number, name in enumerate(captions, 1):
         rec_path = root / ".fi" / "figure_records" / f"{Path(name).stem}.calls.json"
@@ -158,14 +167,31 @@ def quest_neutral_declared(root: Path) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         seen: set[str] = set()
-        for p in _panels(calls):
+        gone: set[tuple[Any, ...]] = set()
+        panels = _panels(calls)
+        several = len(panels) > 1
+        for p in panels:
+            # Each curve or map left out is its own omission, told apart by its panel, its kind, the result it was declared
+            # as and its level (never by its words: two results may share a label); the same one left out twice in one panel
+            # is one. In a figure of several panels each row names its panel by the setting it holds, else by its number.
+            held = _hold_text(p)
+            where = " in the panel at %s" % held if held else " in panel %s" % p.get("panel") if several else ""
+            for s in p.get("left_out") or []:  # compared, not FI's record: the series is not drawn
+                said = str(s.get("name") or s.get("label") or s.get("declared") or "") if isinstance(s, dict) else ""
+                kind = "image" if isinstance(s, dict) and s.get("kind") == "image" else "curve"
+                key = (p.get("panel"), kind, str(s.get("declared")) if isinstance(s, dict) else "",
+                       str(s.get("setting")) if isinstance(s, dict) else "")
+                if said and s.get("declared") and key not in gone:
+                    gone.add(key)
+                    out.append({"file": name, "number": number, "label": said + where, "kind": kind,
+                                "checked": "differs", "drawn": False, "record": rec_path.relative_to(root).as_posix()})
             for s in p.get("series") or []:
                 got = s.get("declared_as") if isinstance(s, dict) else None
                 if isinstance(got, dict) and got.get("id") and str(got["id"]) not in seen:
                     seen.add(str(got["id"]))
-                    out.append({"file": name, "number": number, "label": str(got.get("label") or got["id"]),
+                    out.append({"file": name, "number": number, "label": str(got.get("label") or got["id"]), "kind": "curve",
                                 "checked": "differs" if got.get("checked", "differs") == "differs" else "not compared",
-                                "record": rec_path.relative_to(root).as_posix()})
+                                "drawn": True, "record": rec_path.relative_to(root).as_posix()})
     return out
 
 

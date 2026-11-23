@@ -224,16 +224,18 @@ def _first(offers, claim):
 def _check_fails_closed(name, tmp_path, monkeypatch):
     contract, stem, offers = _honest(name, tmp_path)
     lines = {s["id"] for p in figure_claims.load_calls(tmp_path / "honest", stem)["panels"] for s in p["series"] if s["kind"] != "image"}
-    # a line keeps its own name when its values are not the table's; an image is named by its quantity, which FI then withholds
     true_one = next(o for o in offers if o["claim"] == "drawn" and o["args"]["series"] in lines)
     value = _first(offers, "value_at")
     series = true_one["args"]["series"]
-    # (a) value_at on an `other` quantity: the body drew values that are not the table's, so FI holds no value to state
+    # (a) the body drew values that are not the table's: FI leaves those lines out, so it states neither a value nor that
+    # the line is drawn
     _run(name, tmp_path / "other", shift=0.5)
     other = figure_claims.load_calls(tmp_path / "other", stem)
-    assert any(s["what"] == "other" for p in other["panels"] for s in p["series"] if s["kind"] != "image"), "the record says `other`"
+    gone = {e["id"] for p in other["panels"] for e in p.get("left_out") or []}
+    assert series in gone, "the shifted line is left out"
+    assert not [s for p in other["panels"] for s in p["series"] if s["id"] in gone]
     assert figure_claims.evaluate(other, "value_at", value["args"], plan=contract["plan"]) is None
-    assert figure_claims.evaluate(other, "drawn", true_one["args"]) is not None, "the shape of the drawing is still stated"
+    assert figure_claims.evaluate(other, "drawn", true_one["args"]) is None, "a line left out is not said to be drawn"
     # (b) any claim on a raw panel: nothing is offered or evaluated for the panel the body drew itself
     shown = true_one["args"]["panel"]  # the panel of the statement the writer states below
     _run(name, tmp_path / "raw", raw=int(shown) - 1)
@@ -245,17 +247,18 @@ def _check_fails_closed(name, tmp_path, monkeypatch):
     assert figure_claims.evaluate(other, BAD_ID, {"series": series}) is None
     assert figure_claims.evaluate(other, BAD_ID, {}) is None
     unknown = "{{figure:%s:%s @ series=%s, panel=1}}" % (stem, BAD_ID, series)
-    # through the write node: the writer states (a) and (c); the true statement stays, the others are gone, and QUALITY.md's
-    # list (not the paper) says so once
+    # through the write node: the writer states (a) and (c) about the shifted figure; every one is gone, and QUALITY.md's list
+    # (not the paper) says so once
     from tests.test_fi_places_figures import _listed
     paper, kept = _write_paper(tmp_path / "w1", monkeypatch, other, stem, [true_one["mark"], value["mark"], unknown])
-    # the series FI did not find to be the table's result is named neutrally now, not by the result's or the plan's label
-    stays = figure_claims.evaluate(other, "drawn", true_one["args"])[0]
-    assert stays in paper, "the statement FI can check stays"
-    assert value["text"] not in paper and "not recorded" not in paper and BAD_ID not in paper, paper
+    assert true_one["text"] not in paper and value["text"] not in paper and "not recorded" not in paper and BAD_ID not in paper, paper
     assert DISCLOSURE not in paper and _listed(tmp_path / "w1" / "quest", DISCLOSURE) == 1
     keys = [d["key"] for d in kept if str(d.get("key", "")).startswith("figure:")]
-    assert any("value_at" in k for k in keys) and any(BAD_ID in k for k in keys), keys
+    assert any("value_at" in k for k in keys) and any(BAD_ID in k for k in keys) and any(":drawn" in k for k in keys), keys
+    # the known positive: on the honest figure the same true statement stays
+    honest_calls = figure_claims.load_calls(tmp_path / "honest", stem)
+    paper, _kept = _write_paper(tmp_path / "w0", monkeypatch, honest_calls, stem, [true_one["mark"]])
+    assert true_one["text"] in paper, "the statement FI can check stays"
     # through the write node: the writer states a claim on the raw panel
     paper, kept = _write_paper(tmp_path / "w2", monkeypatch, raw, stem, [true_one["mark"]])
     assert true_one["text"] not in paper and "not recorded" not in paper
@@ -288,53 +291,64 @@ def _states_a_value(o):
     return o["claim"] in VALUE_CLAIMS or (o["claim"] == "range" and o["args"].get("axis") == "y" and "has values" not in o["text"])
 
 
-def _check_shifted_values_are_withheld(name, tmp_path, *, kept_shape):
-    """The body draws means 0.5 too high. Caught: every statement of a drawn value (a value, a y range, steps) is withdrawn on the
-    lines, the statements of shape that remain are true, and the honest figure offered the statements of value."""
+def _check_shifted_values_are_withheld(name, tmp_path, *, left_out):
+    """The body draws means 0.5 too high. Caught: the shifted lines are left out of the figure (``left_out`` names some of
+    them), so every statement of a drawn value (a value, a y range, steps) and every statement that names one of them is
+    withdrawn, and the honest figure offered the statements of value."""
     contract, stem, honest = _honest(name, tmp_path)
     _run(name, tmp_path / "bad", shift=0.5)
     calls = figure_claims.load_calls(tmp_path / "bad", stem)
     bad = figure_claims.menu(calls, contract["plan"], stem=stem)
-    line_panels = {str(p["panel"]) for p in calls["panels"] if any(s["kind"] != "image" for s in p["series"])}
+    honest_calls = figure_claims.load_calls(tmp_path / "honest", stem)
+    line_panels = {str(p["panel"]) for p in honest_calls["panels"] if any(s["kind"] != "image" for s in p["series"])}
 
     def on_lines(offers):
         return [o for o in offers if str(o["args"].get("panel")) in line_panels and _states_a_value(o)]
 
     assert on_lines(honest), "the honest figure states values"
     assert not on_lines(bad), [o["text"] for o in on_lines(bad)]
-    for claim, args in kept_shape:
-        assert any(o["claim"] == claim and all(o["args"].get(k) == v for k, v in args.items()) for o in bad), (claim, args)
+    gone = {e["id"] for p in calls["panels"] for e in p.get("left_out") or []}
+    assert set(left_out) <= gone, gone
+    named = [o for o in bad if o["claim"] != "not_drawn" and {o["args"].get(k) for k in ("series", "a", "b")} & gone]
+    assert not named, [o["text"] for o in named]
     return honest, bad
 
 
 def test_spectra_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the 95% error bars, which are checked against the table too, are withdrawn."""
     honest, bad = _check_shifted_values_are_withheld(
-        "spectra", tmp_path, kept_shape=[("drawn", {"series": "signal@sample:a"}), ("crossing", {"a": "signal@sample:a"})])
+        "spectra", tmp_path, left_out=["signal@sample:a"])
     assert [o for o in honest if o["claim"] == "errorbars"] and not [o for o in bad if o["claim"] == "errorbars"]
 
 
 def test_map_own_mutation_caught(tmp_path):
-    _check_shifted_values_are_withheld("map", tmp_path, kept_shape=[("drawn", {"series": "load@row:0"}), ("trend", {"series": "load@row:0"})])
+    _check_shifted_values_are_withheld("map", tmp_path, left_out=["load@row:0"])
 
 
 def test_survival_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the 95% band, whose edges are checked against the table's interval, is withdrawn."""
-    honest, bad = _check_shifted_values_are_withheld("survival", tmp_path, kept_shape=[("drawn", {"series": "survival@group:a"})])
+    honest, bad = _check_shifted_values_are_withheld("survival", tmp_path, left_out=["survival@group:a"])
     assert [o for o in honest if o["claim"] == "band"] and not [o for o in bad if o["claim"] == "band"]
 
 
-def test_a_heat_map_whose_values_are_not_the_tables_is_named_neutrally(tmp_path):
-    """The image keeps its shape statement, under the neutral name an axis of an unchecked quantity has, never the id `other`."""
-    contract, _h, stem = _run("map", tmp_path, shift=0.5)
-    offers = figure_claims.menu(figure_claims.load_calls(tmp_path, stem), contract["plan"], stem=stem)
-    drawn = [o["text"] for o in offers if o["claim"] == "drawn" and o["args"].get("panel") == "1"]
-    assert drawn == ["computed value is drawn in panel 1"], drawn
+def test_a_heat_map_whose_values_are_not_the_tables_is_left_out(tmp_path):
+    """A map FI could not confirm as its record of the result its code named is left out of the figure with the reason, never
+    drawn under the plan's name; no statement is offered about it. The honest map is drawn under that name."""
+    contract, _h, stem = _run("map", tmp_path / "honest", shift=0.0)
+    offers = figure_claims.menu(figure_claims.load_calls(tmp_path / "honest", stem), contract["plan"], stem=stem)
+    assert [o["text"] for o in offers if o["claim"] == "drawn" and o["args"].get("panel") == "1"] == ["Load is drawn in panel 1"]
+    contract, _h, stem = _run("map", tmp_path / "shifted", shift=0.5)
+    calls = figure_claims.load_calls(tmp_path / "shifted", stem)
+    gone = calls["panels"][0]["left_out"]
+    assert [e["reason"] for e in gone if e["kind"] == "image"] == ["FI could not confirm the drawn map is its record of Load"]
+    assert not [s for s in calls["panels"][0]["series"] if s.get("kind") == "image"]
+    offers = figure_claims.menu(calls, contract["plan"], stem=stem)
+    assert not [o for o in offers if o["args"].get("panel") == "1"]
 
 
 def test_bars_heatmap_own_mutation_caught(tmp_path):
     """Drawn values that are not the table's: the standard-deviation bars, checked against the table, are withdrawn."""
-    honest, bad = _check_shifted_values_are_withheld("bars_heatmap", tmp_path, kept_shape=[("drawn", {"series": "growth@arm:treated"})])
+    honest, bad = _check_shifted_values_are_withheld("bars_heatmap", tmp_path, left_out=["growth@arm:treated"])
     assert [o for o in honest if o["claim"] == "errorbars"] and not [o for o in bad if o["claim"] == "errorbars"]
 
 

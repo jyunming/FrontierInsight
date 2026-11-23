@@ -1,4 +1,6 @@
-"""A drawn series is named by its result only when every point is FI's own value at the one setting the call says.
+"""A drawn series is FI's record of its result only when every point is FI's own value at the one setting the call says; one
+FI compared there and found to be other numbers is left out of the figure (a figure left with nothing drawn is not drawn, and
+FI says why).
 
 The setting a point is checked at is fixed by the drawn x, the curve's level and the settings its panel holds (``fig.panel``);
 every one of them must be in the table's key, once, at an equal value. When further settings still vary there, the series is
@@ -65,14 +67,21 @@ def _key(s, r):
 SPREAD = {"status": "ok", "by_setting": {_key(s, r): s + r for s in SIZES for r in RATES}, "role": "result"}
 
 
-def _run(tmp_path, body, series="fast", table=None, records=None, labels=None):
+def _run(tmp_path, body, series="fast", table=None, records=None, labels=None, ok=True):
     ns = types.SimpleNamespace(figure_g=body, COMPARED={"speed": ["fast", "slow"]}, DERIVED={"spread": {"by": "derive_spread"}})
     spec = {"id": "g", "file": "g.png", "panels": 1, "x": "size", "series": series, "shows": ["growth"],
             "settings": {"rate": RATES, "size": SIZES}, "labels": labels or {}}
     args = (records,) if records is not None else ()
     out = af.run_figures([spec], ns, table or _table(), str(tmp_path / "figures"), *args)[0]
-    assert out["status"] == "ok", out
+    assert not ok or out["status"] == "ok", out
     return out
+
+
+def _left_out(tmp_path, body, **kw):
+    """Run a figure whose one series FI compares and finds is not its record: it is left out, the figure draws nothing, and
+    FI says why."""
+    out = _run(tmp_path, body, ok=False, **kw)
+    assert out["status"] == "failed" and "FI left out what it drew there: the drawn values are not FI's record of" in out["said"], out
 
 
 def _series(frame5):
@@ -89,8 +98,7 @@ def _at(table, rate, name="growth"):
 
 # ---- the curve's level ----------------------------------------------------------------------------------------------------
 def test_a_curve_drawn_with_another_levels_values_is_not_named(tmp_path, frame5):
-    _run(tmp_path, lambda fig, t: fig.line(0, 0.1, SIZES, _at(t, 0.2), "growth"), series="rate")
-    assert _whats(frame5) == ["other"]
+    _left_out(tmp_path, lambda fig, t: fig.line(0, 0.1, SIZES, _at(t, 0.2), "growth"), series="rate")
 
 
 def test_a_curve_drawn_with_its_own_levels_values_keeps_its_name(tmp_path, frame5):
@@ -105,8 +113,7 @@ def test_a_series_of_another_slice_than_its_panel_holds_is_not_named(tmp_path, f
         fig.panel(0, rate=0.2)
         fig.line(0, "fast", SIZES, _at(t, 0.1), "growth")
 
-    _run(tmp_path, body)
-    assert _whats(frame5) == ["other"]
+    _left_out(tmp_path, body)
 
 
 def test_a_series_of_the_slice_its_panel_holds_keeps_its_name(tmp_path, frame5):
@@ -134,8 +141,7 @@ def test_a_drawn_near_zero_is_not_a_recorded_zero(tmp_path, frame5):
         fig.panel(0, rate=0.1)
         fig.line(0, "fast", SIZES, [9e-13, 0.0, 0.0], "zero")
 
-    _run(tmp_path, body)
-    assert _whats(frame5) == ["other"]
+    _left_out(tmp_path, body)
 
 
 def test_two_points_at_one_x_are_not_compared(tmp_path, frame5):
@@ -175,8 +181,7 @@ def _per_value_cells():
 def test_a_series_drawn_with_another_compared_values_numbers_is_not_named(tmp_path, frame5):
     table = _table(_per_value_cells(), ("growth", "flat"))
     slow = [s * 3.0 for s in SIZES]
-    _run(tmp_path, lambda fig, t: fig.line(0, "fast", SIZES, slow, "growth"), table=table)
-    assert _whats(frame5) == ["other"]
+    _left_out(tmp_path, lambda fig, t: fig.line(0, "fast", SIZES, slow, "growth"), table=table)
     _run(tmp_path, lambda fig, t: fig.line(0, "slow", SIZES, slow, "growth"), table=_table(_per_value_cells(), ("growth", "flat")))
     assert _whats(frame5) == ["growth"]  # known negative: its own compared value
 
@@ -189,8 +194,7 @@ def test_pairs_of_another_held_setting_are_not_named(tmp_path, frame5):
             fig.points(0, "fast", ("growth", _at(t, rate)), _at(t, rate, "yield"), "yield")
         return draw
 
-    _run(tmp_path, body(0.2))
-    assert _whats(frame5) == ["other"]
+    _left_out(tmp_path, body(0.2))
     _run(tmp_path, body(0.1))
     assert _whats(frame5) == ["yield"]  # known negative: the panel's own pairs
 
@@ -212,7 +216,9 @@ def test_a_derived_quantity_of_another_slice_is_not_named(tmp_path, frame5):
         fig.line(0, "slow", SIZES, [s + 0.2 for s in SIZES], "spread")
 
     _run(tmp_path, body, records={"spread": SPREAD})
-    assert _whats(frame5) == ["growth", "other"]
+    assert _whats(frame5) == ["growth"]
+    panel = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"][0]
+    assert [(e["id"], e["declared"]) for e in panel["left_out"]] == [("slow", "spread")]
 
 
 def test_without_the_derived_record_a_derived_quantity_stays_not_compared(tmp_path, frame5):
