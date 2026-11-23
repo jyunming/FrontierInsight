@@ -1,12 +1,9 @@
 """The frame measures whether a trial drew random numbers (``Ctx.rng``, ``Ctx.rngs()``, ``Ctx.seed``) and says so in the row FI's
-harness writes for the trial (``drew``); the seed sentence of the paper is built from it. Neutral made-up trials."""
+harness writes for the trial (``drew``); what the writer is told a seed means is built from it. Neutral made-up trials."""
 from __future__ import annotations
 
-import json
 import types
-from pathlib import Path
 
-from core import paper_facts as pf
 from core import skeleton
 
 
@@ -58,23 +55,3 @@ def test_outside_the_harness_nothing_is_written_and_nothing_fails() -> None:
     frame = _frame()
     ctx = frame.Ctx(seed=3, trial=0)
     assert ctx.rng is not None and ctx.seed == 3
-
-
-def _quest(tmp_path: Path, rows: list[dict]) -> Path:
-    (tmp_path / ".fi" / "trials").mkdir(parents=True)
-    (tmp_path / ".fi" / "trials" / "cell0.out.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    return tmp_path
-
-
-def test_the_seed_sentence_is_built_from_what_the_trials_measured(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(pf._run_facts, "seed_verdict", lambda root: {"verdict": pf._run_facts.UNKNOWN})
-    monkeypatch.setattr(pf._disclosure, "recorded_seeds", lambda root: (0, frozenset()))
-    ok = {"status": "ok"}
-    drew = _quest(tmp_path / "a", [{**ok, "drew": True}, {**ok, "drew": True}])
-    assert pf._seed_text(drew) == "each trial drew its random numbers from its own seed, derived from base seed 0"
-    none = _quest(tmp_path / "b", [{**ok, "drew": False}])
-    assert pf._seed_text(none) == "none: no trial drew random numbers (each setting's result does not depend on a seed)"
-    old = _quest(tmp_path / "c", [{**ok}])  # a quest from before the record: today's sentence
-    assert "FI could not tell from the code" in pf._seed_text(old)
-    mixed = _quest(tmp_path / "d", [{**ok, "drew": True}, {**ok, "drew": False}])
-    assert "FI could not tell from the code" in pf._seed_text(mixed)

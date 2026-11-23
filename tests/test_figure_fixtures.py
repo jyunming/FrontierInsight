@@ -245,19 +245,22 @@ def _check_fails_closed(name, tmp_path, monkeypatch):
     assert figure_claims.evaluate(other, BAD_ID, {"series": series}) is None
     assert figure_claims.evaluate(other, BAD_ID, {}) is None
     unknown = "{{figure:%s:%s @ series=%s, panel=1}}" % (stem, BAD_ID, series)
-    # through the write node: the writer states (a) and (c); the true statement stays, the others are gone with one disclosure
+    # through the write node: the writer states (a) and (c); the true statement stays, the others are gone, and QUALITY.md's
+    # list (not the paper) says so once
+    from tests.test_fi_places_figures import _listed
     paper, kept = _write_paper(tmp_path / "w1", monkeypatch, other, stem, [true_one["mark"], value["mark"], unknown])
     # the series FI did not find to be the table's result is named neutrally now, not by the result's or the plan's label
     stays = figure_claims.evaluate(other, "drawn", true_one["args"])[0]
     assert stays in paper, "the statement FI can check stays"
     assert value["text"] not in paper and "not recorded" not in paper and BAD_ID not in paper, paper
-    assert paper.count(DISCLOSURE) == 1
+    assert DISCLOSURE not in paper and _listed(tmp_path / "w1" / "quest", DISCLOSURE) == 1
     keys = [d["key"] for d in kept if str(d.get("key", "")).startswith("figure:")]
     assert any("value_at" in k for k in keys) and any(BAD_ID in k for k in keys), keys
     # through the write node: the writer states a claim on the raw panel
     paper, kept = _write_paper(tmp_path / "w2", monkeypatch, raw, stem, [true_one["mark"]])
     assert true_one["text"] not in paper and "not recorded" not in paper
-    assert paper.count(DISCLOSURE) == 1 and any(str(d.get("key", "")).startswith("figure:") for d in kept)
+    assert DISCLOSURE not in paper and _listed(tmp_path / "w2" / "quest", DISCLOSURE) == 1
+    assert any(str(d.get("key", "")).startswith("figure:") for d in kept)
 
 
 def test_spectra_unsupported_claim_fails_closed(tmp_path, monkeypatch):

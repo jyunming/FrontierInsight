@@ -73,7 +73,7 @@ def test_s2_sd_keys_of_one_setting_render_and_match_numpy(s2, key):
     where = {"noise_sigma": float(key.split("noise_sigma=")[1].split(",")[0]),
              "n_points": int(key.split("n_points=")[1].split(" ")[0])}
     got = pv.resolve(key, s2)
-    assert got.filled and "(95% chi-square interval " in got.text and got.text.count("%") >= 3
+    assert got.filled and "(95% chi-square CI " in got.text and got.text.count("%") >= 3
     assert got.numbers[0] == pytest.approx(_within_sd(_cells("s2_kinetics_trials.json"), "Ea_rel_bias", **where))
 
 
@@ -108,8 +108,8 @@ def test_s2_coverage_wilson_interval_is_two_ends_and_count_is_exact(s2):
     allv = np.concatenate([c["metrics"]["coverage_Ea"]["values"] for c in cells])
     k, n = int(allv.sum()), len(allv)
     got = pv.resolve("{{v:coverage_Ea:mean_ci @ noise_sigma=all, n_points=all}}", s2)
-    assert got.filled and "Wilson interval" in got.text and "±" not in got.text
-    assert got.text.startswith(f"{k / n:.4f} (95% Wilson interval ") and got.text.endswith(f", {n} trials)")
+    assert got.filled and "Wilson CI" in got.text and "±" not in got.text
+    assert got.text.startswith(f"{k / n:.4f} (95% Wilson CI ") and got.text.endswith(f"; {n} trials)")
     z = 1.959964
     centre = (k / n + z * z / (2 * n)) / (1 + z * z / n)
     half = z * math.sqrt(k / n * (1 - k / n) / n + z * z / (4 * n * n)) / (1 + z * z / n)
@@ -142,7 +142,7 @@ def test_marker_round_trip(s2):
     filled, hits = pv.fill(paper, s2)
     assert hits == []
     sd = pv.resolve("Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %", s2).text
-    assert "chi-square interval" in sd
+    assert "chi-square CI" in sd
     assert filled == ("SD is <!-- fi:v {{v:Ea_rel_bias:sd @ noise_sigma=0.01, n_points=5 | %}} -->" + sd +
                       "<!-- /fi:v --> here.")
     assert pv.to_placeholders(filled) == paper
@@ -218,8 +218,8 @@ def test_rounding_rules():
     assert pv.sig(19.6123, 3) == "19.6"
     assert pv.fmt(pv.Measured(19.6123, "ratio")) == "19.6"
     assert pv.fmt(pv.Measured(5609, "int")) == "5609"
-    m = pv.Measured(0.9348, "interval", 0.9283, 0.9408, "95% Wilson interval", 6000)
-    assert pv.fmt(m) == "0.9348 (95% Wilson interval 0.9283 to 0.9408, 6000 trials)"
+    m = pv.Measured(0.9348, "interval", 0.9283, 0.9408, "95% Wilson CI", 6000)
+    assert pv.fmt(m) == "0.9348 (95% Wilson CI 0.9283 to 0.9408; 6000 trials)"
     assert pv.fmt(m, "ci") == "0.9283 to 0.9408"
     assert pv.fmt(m, "pm") == "0.9283 to 0.9408"           # not symmetric by the rule: never ±
     t = pv.Measured(1.003, "interval", 0.991, 1.015, "95% t interval of the mean", 30, symmetric=True)
@@ -241,11 +241,11 @@ def test_other_scalar_forms(s2):
         np.std(x, ddof=1) / math.sqrt(len(x)))
     assert pv.resolve("Ea_rel_bias:n @ noise_sigma=0.05, n_points=all", s2).text == str(len(x))
     got = pv.resolve("Ea_rel_bias:sd_ci @ noise_sigma=0.05, n_points=5", s2)
-    assert got.filled and "chi-square interval" in got.text and "±" not in got.text
+    assert got.filled and "chi-square CI" in got.text and "±" not in got.text
     r = pv.resolve("Ea_rel_bias:corr:coverage_Ea @ noise_sigma=0.05, n_points=all", s2)
     y = np.concatenate([c["metrics"]["coverage_Ea"]["values"] for c in cells if c["cell"]["noise_sigma"] == 0.05])
     assert r.numbers[0] == pytest.approx(np.corrcoef(x, y)[0, 1])
-    assert "Fisher interval" in pv.resolve("Ea_rel_bias:corr_ci:coverage_Ea @ noise_sigma=0.05, n_points=all", s2).text
+    assert "Fisher CI" in pv.resolve("Ea_rel_bias:corr_ci:coverage_Ea @ noise_sigma=0.05, n_points=all", s2).text
     d = pv.resolve("Ea_rel_bias @ noise_sigma=0.1, n_points=all | diff @ noise_sigma=0.005, n_points=all", s2)
     lo = np.mean(np.concatenate([c["metrics"]["Ea_rel_bias"]["values"] for c in cells if c["cell"]["noise_sigma"] == 0.005]))
     hi = np.mean(np.concatenate([c["metrics"]["Ea_rel_bias"]["values"] for c in cells if c["cell"]["noise_sigma"] == 0.1]))
@@ -357,7 +357,7 @@ def test_a_measured_value_with_one_trial_per_setting_is_not_taken_for_a_referenc
               "metrics": {"err": {"values": [h * 2.0]}}} for h in (0.1, 0.2, 0.4)]
     rec = pv.from_cells(cells)
     got = pv.resolve("err @ h=all", rec)
-    assert got.filled and got.text == "0.4667 (mean over 3 settings, one run each; no interval)"
+    assert got.filled and got.text == "0.4667 (mean over 3 settings, one run each)"
 
 
 def test_a_measured_value_that_varies_between_trials_is_not_a_reference(s5):
@@ -655,7 +655,7 @@ def test_one_trial_per_setting_offers_the_mean_not_an_interval(tmp_path):
     sheet = pv.sheet(rec)
     assert "{{v:gain @ dose=1, steps=16}}" in sheet and "{{v:gain @ dose=1, steps=all}}" in sheet
     assert ":mean_ci @" not in sheet and ":mean_ci @" not in block.split("The study's quantities")[0]
-    assert any(l.startswith("- {{v:gain @ dose=1, steps=all}}") and "mean over 2 settings, one run each; no interval" in l for l in sheet.splitlines())
+    assert any(l.startswith("- {{v:gain @ dose=1, steps=all}}") and "mean over 2 settings, one run each" in l for l in sheet.splitlines())
     assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).filled
     assert not pv.resolve("{{v:gain:mean_ci @ dose=1, steps=16}}", rec).filled  # the review's handling is unchanged
 
@@ -670,7 +670,7 @@ def test_a_study_with_repeated_trials_is_offered_the_interval_as_before(tmp_path
 def test_a_pooled_plain_mean_of_one_run_settings_keeps_its_note_in_the_paper(tmp_path):
     rec = pv.records_of(_quest(tmp_path, _one_trial_cells()), None)
     got = pv.resolve("{{v:gain @ dose=1, steps=all}}", rec)
-    assert got.filled and got.text == "0.1400 (mean over 2 settings, one run each; no interval)", got.text
+    assert got.filled and got.text == "0.1400 (mean over 2 settings, one run each)", got.text
     assert pv.resolve("{{v:gain @ dose=1, steps=16}}", rec).text == "0.1160"  # one setting: the value itself
     sheet_line = next(l for l in pv.sheet(rec).splitlines() if l.startswith("- {{v:gain @ dose=1, steps=all}}"))
     assert sheet_line.split(" -> ")[1].startswith(got.text)  # the sheet shows what the key fills
@@ -801,3 +801,46 @@ def test_exact_through_fmt_is_never_rounded(x, want):
 def test_exact_metric_filled_into_the_paper_is_never_rounded():
     cells = _ex_cells(tally=[0.30000000000000004] * 2)
     assert _ex_text(cells, _ex_plan(tally=True), "tally") == "0.30000000000000004"
+
+
+def test_the_true_value_of_a_result_without_a_reference_is_its_reference_value() -> None:
+    protocol = {
+        "constants": {"x_true": 10.0},
+        "metrics": [
+            {"id": "x_hat", "kind": "mean",
+             "known_value": {"true_value": "x_true", "estimate": "x_hat", "standard_error": "x_se", "level": 0.95}},
+            {"id": "y_hat", "kind": "mean",
+             "known_value": {"true_value": "y_true", "estimate": "y_hat", "standard_error": "y_se", "level": 0.95}},
+        ],
+    }
+    assert pv.known_truth(protocol, "x_hat") == 10.0
+    assert pv.known_truth(protocol, "y_hat") is None  # y_true is no fixed number of the plan
+    assert pv.known_truth(protocol, "nothing") is None
+
+
+def test_the_values_of_a_setting_are_those_of_the_cells_that_carry_the_result() -> None:
+    def cell(dt, ang, vals):
+        return {"cell": {"dt": dt, "ang": ang}, "key": f"dt={dt},ang={ang}", "planned": 2, "ok": 2, "failed": 0,
+                "metrics": {"m": {"values": vals, "trials": list(range(len(vals))), "count": len(vals), "total": 0.0,
+                                  "non_finite": 0}}}
+    later = pv.from_cells([cell(2, 1, [1.0]), cell(3, 1, [1.0])])
+    assert later.values_of("m", "dt") == [2, 3]
+    assert later.values_of("m", "missing_axis") == []
+
+
+def test_a_setting_written_with_a_leading_zero_is_read_as_the_text_the_record_holds():
+    """A setting value the record holds as text ("01", a transition named by its two levels) is not the number 1: a key
+    that names it fills the stored value. Known positives: a numeric setting still matches by number, and a key naming a
+    value the record does not hold still fails."""
+    cells = [{"cell": {"transition": t}, "key": f"transition={t}", "planned": 2, "ok": 2, "failed": 0,
+              "metrics": {"gap": {"values": [v, v + 0.1]}}} for t, v in (("01", 1.0), ("12", 3.0))]
+    rec = pv.from_cells(cells)
+    got = pv.resolve("gap @ transition=01", rec)
+    assert got.filled and got.text.startswith("1.05"), got.text
+    assert pv.resolve("gap @ transition=12", rec).filled
+    assert not pv.resolve("gap @ transition=1", rec).filled, "a setting held as the text 01 is not the number 1"
+    assert not pv.resolve("gap @ transition=02", rec).filled
+    numeric = pv.from_cells([{"cell": {"h": h}, "key": f"h={h}", "planned": 2, "ok": 2, "failed": 0,
+                              "metrics": {"err": {"values": [h, h]}}} for h in (1, 2)])
+    assert pv.resolve("err @ h=1", numeric).filled and pv.resolve("err @ h=1.0", numeric).filled
+    assert pv.resolve("err @ h=01", numeric).filled, "a setting held as a number is read by number"

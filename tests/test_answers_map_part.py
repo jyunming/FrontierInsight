@@ -13,7 +13,6 @@ from typing import Any
 
 from core import contract_parts as cp
 from core import paper_facts as pf
-from core import paper_values as pv
 from core import topic_requirements as tr
 
 TEMPLATES = {"plan_answers": string.Template((Path(__file__).parent.parent / "agents" / "plan_answers.md").read_text(encoding="utf-8"))}
@@ -160,71 +159,8 @@ def _quest(tmp_path: Path, monkeypatch, topic_map: list[dict[str, Any]]) -> Path
     return tmp_path
 
 
-def test_a_compared_setting_is_answered_for_each_value_and_an_at_pins_the_quantity(tmp_path, monkeypatch) -> None:
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
-                                          {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1}}])
-    text = pf.answers_text(root)
-    peak = [ln for ln in text.splitlines() if ln.startswith("- peak algae")]
-    assert len(peak) == 1 and "(measured as: `algae_peak`), by temp: 10: {{v:algae_peak @ nutrient=each, temp=10 | range}}; 20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in peak[0]
-    assert "{{v:algae_peak @ nutrient=each, temp=each | range}}" not in text  # no one range across the compared values
-    assert "(when nutrient = 1)" in text and "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text
-    assert "- water clarity: the plan links no result of the study to it here" in text  # the known positive
-    out = pv.fill_values(text, pv.records_of(root, pf.plan_protocol(root)))[0]
-    assert "not recorded" not in out
-
-
-def test_a_map_without_at_or_comparisons_is_read_as_before(tmp_path, monkeypatch) -> None:
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak"}])
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {**PROTOCOL, "comparisons": [],
-                                                              "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]})
-    assert "- peak algae (measured as: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in pf.answers_text(root)
-
-
-def test_a_study_run_through_the_deterministic_entry_says_no_seed_was_passed_otherwise_the_recorded_base_seed(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(pf._run_facts, "seed_verdict", lambda root: {"verdict": pf._run_facts.UNKNOWN})
-    monkeypatch.setattr(pf._disclosure, "recorded_seeds", lambda root: (0, frozenset()))
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {"seed_policy": "A constant base_seed of 99 is used."})
-    (tmp_path / "code").mkdir()
-    study = tmp_path / "code" / "study.json"
-    study.write_text(json.dumps({"entry": "run_trial", "base_seed": 0}), encoding="utf-8")
-    assert pf._seed_text(tmp_path) == ("a seed passed to each trial, derived from base seed 0 "
-                                       "(FI could not tell from the code whether the simulation uses it)")  # the plan's prose is not quoted
-    study.write_text(json.dumps({"entry": "run_cell", "base_seed": 0}), encoding="utf-8")
-    assert pf._seed_text(tmp_path) == "none (each setting ran once with no random numbers; FI passed no seed)"
-
-
 DERIVED = [{"id": "peak_ratio", "inputs": ["algae_peak"], "role": "result", "label": "ratio of the peak at the high to the low temperature",
             "asked": True}]
-
-
-def test_a_comparison_of_a_worked_out_quantity_does_not_split_its_setting_into_a_line_for_each_value(tmp_path, monkeypatch) -> None:
-    """Before: a comparison whose result is a quantity worked out from the results (here across nutrient) made every value of
-    that setting an alternative, one near-identical line each. Now only a comparison of a reported result splits."""
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}}])
-    worked = {**PROTOCOL, "derived": DERIVED, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}}],
-              "comparisons": [{"id": "r_by_nutrient", "result": "peak_ratio", "across": "nutrient", "values": [1, 2], "how": "ratio"}]}
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: worked)
-    text = pf.answers_text(root)
-    assert "- peak algae (measured as: `algae_peak`): {{v:algae_peak @ nutrient=each, temp=each | range}}" in text
-    assert "nutrient = " not in text.split("water clarity")[0]
-
-
-def test_a_quantity_worked_out_from_the_mapped_result_is_disclosed_and_never_replaces_the_map(tmp_path, monkeypatch) -> None:
-    protocol = {**PROTOCOL, "derived": DERIVED, "topic_map": [{"item": "Q1", "by": "metric:algae_peak"}]}
-    design = {**DESIGN, "protocol": protocol}
-    asked = tr.quantities_to_place(REQ, protocol)
-    kept = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:peak_ratio"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
-    assert {"item": "Q1", "by": "metric:algae_peak", "at": {}, "other_candidate": "metric:peak_ratio"} in kept["topic_map"]
-    # an answer that is not worked out from the mapped result leaves the plan's own map, with nothing to disclose
-    other = cp._apply_answers(protocol, design, {"Q1": {"by": "metric:bloom"}, "Q2": {"by": "none"}, "Q3": {"by": "none"}}, asked)
-    assert {"item": "Q1", "by": "metric:algae_peak", "at": {}} in other["topic_map"]
-    # the paper still answers by the plan's result; the model's proposal is only told to the reader of the quality report
-    root = _quest(tmp_path, monkeypatch, kept["topic_map"])
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: kept)
-    text = pf.answers_text(root)
-    assert "- peak algae (measured as: `algae_peak`)" in text and "{{v:algae_peak" in text and "peak_ratio" not in text
-    assert "peak_ratio" in cp._answers_prompt(TEMPLATES, design, asked, [], "")  # the model is shown what it is worked out from
-    assert pf.other_candidates(root) == [{"name": "peak algae", "planned": "metric:algae_peak", "candidate": "metric:peak_ratio"}]
 
 
 def test_a_variance_worked_out_from_a_mean_is_not_printed_as_the_mean() -> None:
@@ -238,36 +174,6 @@ def test_a_variance_worked_out_from_a_mean_is_not_printed_as_the_mean() -> None:
     assert row["by"] == "metric:algae_peak" and row["other_candidate"] == "metric:peak_variance"
     again = cp._apply_answers({**protocol, "topic_map": [row]}, design, {"Q1": {"by": "metric:algae_peak"}}, asked)["topic_map"][0]
     assert "other_candidate" not in again  # the entry is rewritten by each answer: an earlier candidate does not stay
-
-
-def test_a_condition_the_question_already_states_is_not_added_again(tmp_path, monkeypatch) -> None:
-    """Before: the question 'chance of a bloom (when nutrient = 1)' with the plan pinning nutrient to 1.0 printed
-    '(when nutrient = 1) (when nutrient = 1.0)'. 1 and 1.0 are one value, said once; a pin the words do not state is still added."""
-    monkeypatch.setitem(REQ["quantities"][1], "name", "chance of a bloom (when nutrient = 1)")
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
-                                          {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1.0}}])
-    line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- chance of a bloom"))
-    assert line.count("nutrient = 1") == 1 and "nutrient = 1.0" not in line
-    monkeypatch.setitem(REQ["quantities"][1], "name", "chance of a bloom (when nutrient = 2)")
-    (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
-    line = next(ln for ln in pf.answers_text(root).splitlines() if ln.startswith("- chance of a bloom"))
-    assert "nutrient = 2)" in line and "nutrient = 1.0" in line  # a different stated value is not the pin: both are shown
-
-
-def test_a_stated_condition_is_matched_as_a_whole_name_and_a_whole_number() -> None:
-    """Before: 'beta = 2 error' counted as stating 'a = 2' (a name ending in the setting's name), 'dt = 1-3' as 'dt = 1',
-    so the pin was dropped and the line lost which setting the number belongs to."""
-    class _Rec:
-        label = short = staticmethod(lambda a: a)
-
-    pins = lambda name, at: pf._pins_not_in(name, _Rec(), at)  # noqa: E731
-    assert pins("beta = 2 error", {"a": 2}) == ["a = 2"]
-    assert pins("run = 5 error", {"n": 5}) == ["n = 5"]
-    assert pins("error at dt = 1-3", {"dt": 1}) == ["dt = 1"]
-    assert pins("error at dt = 1/2", {"dt": 1}) == ["dt = 1"]
-    assert pins("error at a = 20", {"a": 2}) == ["a = 2"]
-    assert pins("error (when a = 2)", {"a": 2}) == []  # a condition really stated is still said once
-    assert pins("error when a = 2.", {"a": 2}) == []
 
 
 # Two different questions the map answers with one number (the same result at the same setting with the same statistic)
@@ -332,75 +238,6 @@ def test_one_question_one_number_asks_nothing_more() -> None:
     plain = {**PROTOCOL, "topic_map": [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
                                        {"item": "Q2", "by": "metric:bloom", "at": {}}]}
     assert tr.shared_answers(REQ_TWO, plain) == {}
-
-
-def test_the_paper_never_gives_two_questions_one_number_whatever_map_it_reads(tmp_path, monkeypatch) -> None:
-    # A frozen or resumed plan whose map still answers two questions with one number (the answers step never asked, or failed)
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
-                                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
-    text = pf.answers_text(root)
-    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
-    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
-    # the same result read at different settings is two numbers: both answered (the known negative)
-    root2 = tmp_path / "two"
-    root2.mkdir()
-    root2 = _quest(root2, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1}},
-                                        {"item": "Q3", "by": "metric:algae_peak", "at": {"nutrient": 2}}])
-    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in pf.answers_text(root2)
-
-
-def test_a_map_with_several_entries_still_never_gives_two_questions_one_number(tmp_path, monkeypatch) -> None:
-    # Q1 has an entry for a result the study lacks and one for algae_peak; the paper reads algae_peak for it, as for Q3
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:not_a_result", "at": {}},
-                                          {"item": "Q1", "by": "metric:algae_peak", "at": {}},
-                                          {"item": "Q3", "by": "metric:algae_peak", "at": {}}])
-    text = pf.answers_text(root)
-    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
-    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
-
-
-def test_one_number_the_analysis_worked_out_is_not_given_to_two_questions_at_different_settings(tmp_path, monkeypatch) -> None:
-    # an analysis answer is one number whatever setting the map pins: two settings in the map still print one number
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:clarity", "at": {"nutrient": 1}},
-                                          {"item": "Q3", "by": "metric:clarity", "at": {"nutrient": 2}}])
-    protocol = {**pf.plan_protocol(root), "metrics": [*PROTOCOL["metrics"], {"id": "clarity", "kind": "mean", "estimand": "clarity"}]}
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: protocol)
-    (root / pv.ANSWERS).write_text(json.dumps({"scheduled": 1, "runs": [{"run": "0", "values": {"clarity": 0.5}}]}), encoding="utf-8")
-    text = pf.answers_text(root)
-    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
-    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
-    assert text.count("{{v:clarity}}") == 1
-    # the known negative: one question on that number is answered with it
-    protocol["topic_map"] = [{"item": "Q1", "by": "metric:clarity", "at": {"nutrient": 1}}]
-    assert "- peak algae (measured as: `clarity`): {{v:clarity}}" in pf.answers_text(root)
-
-
-def test_one_place_written_two_ways_is_still_one_number(tmp_path, monkeypatch) -> None:
-    # the settings in another order, and 10 written as 10.0, read the same trials
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"nutrient": 1, "temp": 10}},
-                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10.0, "nutrient": 1}}])
-    text = pf.answers_text(root)
-    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
-    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
-
-
-def test_a_setting_the_record_does_not_have_does_not_make_two_numbers(tmp_path, monkeypatch) -> None:
-    # the map pins a setting the study never varied: the line reads the result without it, so both print one number
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {"salinity": 3}},
-                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"salinity": 4}}])
-    text = pf.answers_text(root)
-    assert "- peak algae; water clarity (" in text and "(the plan gives these different questions one number, so it can be the answer to only one of them)" in text
-    assert not [ln for ln in text.splitlines() if ln.startswith("- water clarity")]
-
-
-def test_a_question_at_one_setting_of_a_result_another_gives_for_each_setting_keeps_its_answer(tmp_path, monkeypatch) -> None:
-    # Q1 is answered for each temp, Q3 at temp 10 only: one of Q1's numbers, not all of them; both keep their answers
-    root = _quest(tmp_path, monkeypatch, [{"item": "Q1", "by": "metric:algae_peak", "at": {}},
-                                          {"item": "Q3", "by": "metric:algae_peak", "at": {"temp": 10}}])
-    text = pf.answers_text(root)
-    assert "(the plan gives these different questions one number, so it can be the answer to only one of them)" not in text
-    assert "20: {{v:algae_peak @ nutrient=each, temp=20 | range}}" in text and "- water clarity" in text
-    assert "{{v:algae_peak @ nutrient=each, temp=10 | range}}" in [ln for ln in text.splitlines() if ln.startswith("- water clarity")][0]
 
 
 def test_a_shared_question_moved_to_a_result_with_a_true_value_may_ask_for_its_bias() -> None:

@@ -1,5 +1,6 @@
 """The run's facts reach the paper as one paragraph FI writes and places itself, ``{{run_facts}}`` (core/paper_facts.py):
-composed from FI's records, put at the end of the Methods, never asked of the writer. No model is called; the quests are
+composed from FI's records (the counts and the measured run time; the delivered code's own run and the topic's time
+limit are QUALITY.md's), put at the end of the Methods, never asked of the writer. No model is called; the quests are
 made up here (a neutral study of a made-up bridge sensor)."""
 
 from __future__ import annotations
@@ -38,59 +39,51 @@ PAPER = "# A title\n\n## Abstract\nShort.\n\n## Methods\nWe ran it.\n\n## Result
 
 def test_settings_run_at_the_same_time_read_as_whole_sentences(tmp_path: Path) -> None:
     root = _quest(tmp_path, AT_ONCE)
-    text = pf.run_facts_text(root, topic=TOPIC)
+    text = pf.run_facts_text(root)
     assert text == (
         "**Run.** The 680 settings ran 16 at a time; the run took 611.1 s (about 10.2 minutes). The trials' own "
-        "computation adds up to 31.3 s. The delivered code runs the settings one after another and was not timed as a "
-        "whole; from the settings' own times such a run takes at least 31.3 s. Whether it keeps to the topic's limit of "
-        "60 s is not shown.")
+        "computation adds up to 31.3 s.")
     assert "((" not in text and ") (" not in text, "no nested or stacked brackets"
 
 
-def test_the_other_verdicts_of_the_delivered_code(tmp_path: Path) -> None:
+def test_the_delivered_codes_own_run_and_the_time_limit_are_not_in_the_paragraph(tmp_path: Path) -> None:
+    """Before: the paragraph also described how the delivered code runs and judged it against the topic's time limit."""
     over = _quest(tmp_path / "a", {**AT_ONCE, "trial_sum_s": 75.0, "settings_s": 400.0})
-    assert pf.run_facts_text(over, topic=TOPIC).endswith("It goes over the topic's limit of 60 s.")
-    # the settings' process times added up (50 s) are no upper bound: only FI's timed run of the delivered code says within
-    within = _quest(tmp_path / "b", {**AT_ONCE, "trial_sum_s": 5.0, "settings_s": 50.0})
-    assert pf.run_facts_text(within, topic=TOPIC).endswith("Whether it keeps to the topic's limit of 60 s is not shown.")
-    (within / "code").mkdir()
-    (within / "code" / "run.py").write_text("print(1)", encoding="utf-8")
-    (within / "needs").mkdir()
-    (within / code_project.CHECK_RECORD).write_text(json.dumps(
-        {"ok": True, "status": "ran", "seconds": 96, "run_seconds": 21.4, "code": code_project.code_digest(within)}),
+    assert "topic's limit" not in pf.run_facts_text(over) and "delivered code" not in pf.run_facts_text(over)
+    timed = _quest(tmp_path / "b", {**AT_ONCE, "trial_sum_s": 5.0, "settings_s": 50.0})
+    (timed / "code").mkdir()
+    (timed / "code" / "run.py").write_text("print(1)", encoding="utf-8")
+    (timed / "needs").mkdir()
+    (timed / code_project.CHECK_RECORD).write_text(json.dumps(
+        {"ok": True, "status": "ran", "seconds": 96, "run_seconds": 21.4, "code": code_project.code_digest(timed)}),
         encoding="utf-8")
-    text = pf.run_facts_text(within, topic=TOPIC)
-    assert "FI ran it once in a clean environment and it took 21.4 s." in text
-    assert text.endswith("It keeps to the topic's limit of 60 s.")
+    text = pf.run_facts_text(timed)
+    assert "clean environment" not in text and "21.4" not in text and "topic's limit" not in text
+    assert text.startswith("**Run.** The 680 settings ran 16 at a time; the run took 611.1 s")
 
 
 def test_settings_run_one_after_another_and_the_counts(tmp_path: Path) -> None:
     root = _quest(tmp_path, {"wall_s": 42.0, "trials": 12, "cells": 4, "trial_sum_s": 41.0, "at_once": 1},
                   settings=4, per=3, failed=2)
-    text = pf.run_facts_text(root, topic=TOPIC)
-    assert text.startswith("**Run.** The study ran 4 settings, 3 trials in each. 2 trials failed. ")
-    assert "The run took 42 s." in text
-    assert text.endswith("The run keeps to the topic's limit of 60 s.")
+    text = pf.run_facts_text(root)
+    assert text == "**Run.** The study ran 4 settings, 3 trials in each. 2 trials failed. The run took 42 s."
     clean = _quest(tmp_path / "c", {"wall_s": 42.0, "trials": 12, "cells": 4, "trial_sum_s": 41.0, "at_once": 1},
                    settings=4, per=3)
-    assert "No trial failed." in pf.run_facts_text(clean, topic=TOPIC)
+    assert "No trial failed." in pf.run_facts_text(clean)
 
 
-def test_no_record_gives_no_block_and_a_limit_alone_gives_one_sentence(tmp_path: Path) -> None:
+def test_no_record_gives_no_block(tmp_path: Path) -> None:
     root = _quest(tmp_path, None)
-    assert pf.run_facts_text(root, topic="Compare two filters.") == ""
-    assert pf.block_text(root, "run_facts", topic="Compare two filters.") == ""
-    assert pf.place_blocks(PAPER, root, topic="Compare two filters.").replace("\n\n{{limitations}}", "\nFew.") == PAPER, \
-        "nothing to place (but FI's Limitations, which every paper has)"
-    only_limit = pf.run_facts_text(root, topic=TOPIC)
-    assert only_limit == "**Run.** Whether the run keeps to the topic's limit of 60 s is not shown."
+    assert pf.run_facts_text(root) == ""
+    assert pf.block_text(root, "run_facts") == ""
+    assert pf.place_blocks(PAPER, root) == PAPER, "nothing to place"
 
 
 # ---- where FI puts it ------------------------------------------------------------------------------------------------
 
 
 def _at(text: str, root: Path) -> str:
-    return pf.place_blocks(text, root, topic=TOPIC)
+    return pf.place_blocks(text, root)
 
 
 def test_fi_puts_the_block_at_the_end_of_the_methods(tmp_path: Path) -> None:
@@ -115,7 +108,7 @@ def test_without_a_methods_heading_it_goes_before_the_results_or_after_the_abstr
 def test_the_writers_own_place_is_kept_and_a_second_pass_adds_nothing(tmp_path: Path) -> None:
     root = _quest(tmp_path, AT_ONCE)
     own = PAPER.replace("It agrees.", "It agrees.\n\n{{run_facts}}")
-    assert _at(own, root).replace("\n\n{{limitations}}", "\nFew.") == own, "the writer put it in the Results; FI leaves it there"
+    assert _at(own, root) == own, "the writer put it in the Results; FI leaves it there"
     placed = _at(PAPER, root)
     filled = pf.render(placed, root, topic=TOPIC).text
     assert filled.count("**Run.**") == 1 and "{{" not in filled
@@ -159,12 +152,12 @@ def test_the_typed_number_check_does_not_read_fis_block_as_numbers_the_writer_ty
 
 def test_the_writer_is_told_about_the_paragraph_and_no_longer_about_required_placeholders(tmp_path: Path) -> None:
     root = _quest(tmp_path, AT_ONCE)
-    text = pf.writer_section(root, topic=TOPIC)
+    text = pf.writer_section(root)
     assert "Required" not in text and "{{seed}}" not in text and "{{run_time}}" not in text
     assert "Example (in the Methods)" not in text
     assert "the run facts in the Methods" not in text and "The 680 settings ran 16 at a time" in text
     assert "Do not state these facts yourself" in text
-    assert pf.writer_section(_quest(tmp_path / "none", None), topic="Compare two filters.") == ""
+    assert pf.writer_section(_quest(tmp_path / "none", None)) == ""
 
 
 def test_the_old_placeholders_of_a_resumed_draft_are_still_filled(tmp_path: Path) -> None:
@@ -176,7 +169,7 @@ def test_the_old_placeholders_of_a_resumed_draft_are_still_filled(tmp_path: Path
 def test_one_trial_in_each_setting_reads_singular(tmp_path: Path) -> None:
     """A deterministic study runs one trial per setting: the count reads "1 trial", not "1 trials"."""
     root = _quest(tmp_path, None, settings=3, per=1)
-    text = pf.run_facts_text(root, topic=TOPIC)
+    text = pf.run_facts_text(root)
     assert "The study ran 3 settings, 1 trial in each." in text
     assert "1 trials" not in text
 
@@ -201,31 +194,26 @@ def test_a_heading_inside_a_structured_abstract_is_never_where_the_paragraph_goe
 def test_singular_settings(tmp_path: Path) -> None:
     root = _quest(tmp_path, {"wall_s": 5.0, "trials": 3, "cells": 1, "trial_sum_s": 4.0, "at_once": 4,
                              "settings_s": 20.0}, settings=1, per=3)
-    text = pf.run_facts_text(root, topic=TOPIC)
+    text = pf.run_facts_text(root)
     assert "The study ran 1 setting, 3 trials in each." in text and "The 1 setting ran 4 at a time" in text
     assert "1 settings" not in text
-
-
-def test_the_trials_own_time_stays_a_lower_bound_when_the_other_measure_is_smaller() -> None:
-    said = pf._delivered_sentence({"least": 50.0, "most": 40.0, "at_once": 4, "overlap": True})
-    assert "takes at least 50 s." in said and "40" not in said
 
 
 def test_trials_cut_off_by_the_time_limit_are_said_beside_no_failure(tmp_path: Path) -> None:
     root = _quest(tmp_path, None, settings=2, per=3, failed=3)
     (root / ".fi" / "trial_checks.json").write_text(json.dumps({"out_of_time": [{"key": "gain=0", "planned": 3, "trials": 3}]}),
                                                     encoding="utf-8")
-    text = pf.run_facts_text(root, topic="Compare two filters.")
+    text = pf.run_facts_text(root)
     assert "No trial failed; 3 were cut off by the time limit." in text
 
 
-def test_it_is_the_run_unless_the_delivered_code_was_just_described(tmp_path: Path) -> None:
+def test_with_only_the_trials_least_time_the_paragraph_says_the_whole_run_was_not_timed(tmp_path: Path) -> None:
     root = _quest(tmp_path, None)
     (root / "raw").mkdir()
     rows = [{"event": "trial", "cell": "a", "trial": 0, "seed": 1, "status": "ok", "duration_s": 100.0}]
     (root / "raw" / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    text = pf.run_facts_text(root, topic=TOPIC)  # only the trials' least time is known
-    assert "FI's whole run was not timed." in text and text.endswith("The run goes over the topic's limit of 60 s.")
+    text = pf.run_facts_text(root)  # only the trials' least time is known
+    assert text.endswith("The trials alone took at least 100 s. FI's whole run was not timed.")
 
 
 def test_a_paper_resumed_straight_into_review_gets_the_run_paragraph(tmp_path: Path) -> None:

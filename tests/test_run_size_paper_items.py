@@ -99,11 +99,11 @@ def test_every_cut_is_an_item_with_its_numbers_and_a_paper_that_leaves_it_out_is
     assert "195 runs per setting instead of the 1000 the plan asked for" in text
     assert "fits the topic's time limit" in text and "the plan states no fewest number of runs" in text
     assert "95% interval of power is about ±0.0702" in text
-    # FI writes the Limitations from its record; the writer is shown them.
-    assert items[0].id == "fewer-runs" and items[0].sentence in paper_facts.writer_section(root, topic="t")
+    # QUALITY.md lists it from FI's record; the writer is not given it.
+    assert items[0].id == "fewer-runs" and items[0].sentence not in paper_facts.writer_section(root)
     bare = "# P\n\n## Limitations\nThe grid is coarse.\n"
-    assert paper_facts.placement_hits(bare, root) == []  # FI places it itself, so nothing is sent back
-    assert "The experiment ran 195 runs per setting" in paper_facts.render(paper_facts.place_blocks(bare, root), root).text
+    assert paper_facts.placement_hits(bare, root) == []  # the paper need not say it, so nothing is sent back
+    assert "The experiment ran 195 runs per setting" not in paper_facts.render(paper_facts.place_blocks(bare, root), root).text
     placed = bare + "{{not_done:fewer-runs}}\n"
     assert paper_facts.placement_hits(paper_facts.render(placed, root).text, root) == []
     assert "The experiment ran 195 runs per setting instead of the 1000" in paper_facts.render(placed, root).text
@@ -180,7 +180,7 @@ def test_a_warned_difference_is_an_item_in_plain_words(tmp_path: Path) -> None:
                                       "headline": headline})
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.RUN_DIFFERENCE]
     assert [i.name for i in items] == ["difference from the run record"] and "(for final_size: ...)" in items[0].text
-    assert items[0].sentence in paper_facts.render(paper_facts.place_blocks("# P\n\nNothing.\n", root), root).text
+    assert items[0].sentence not in paper_facts.render(paper_facts.place_blocks("# P\n\nNothing.\n", root), root).text
     placed = f"# P\n\n## Limitations\n{{{{not_done:{items[0].id}}}}}\n"
     assert paper_facts.placement_hits(paper_facts.render(placed, root).text, root) == []
     assert "do not all match the record of the trials" in paper_facts.render(placed, root).text

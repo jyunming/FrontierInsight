@@ -230,7 +230,7 @@ CHECKS: tuple[Check, ...] = (
     Check('code_review_open_findings', 'core.code_review', 'write_note',
           'write', 'model_judge', 'note',
           "Findings still open after repairs, and quantities not computed, are said in the paper's limitations "
-          '(also {{not_done:}} items).'),
+          "(QUALITY.md lists them too)."),
     Check('results_report_failure', 'core.engine', 'Engine._reports_no_quantity',
           'evidence_gate', 'own_record', 'stop',
           "Run result says it failed (errors/status) and holds a number for none of the protocol's metrics: "
@@ -778,8 +778,8 @@ CHECKS: tuple[Check, ...] = (
     Check('bound_after_repairs', 'core.result_checks', 'bound_breaks',
           'execute_reflect', 'model_code', 'strip',
           'Repairs spent with a value still beyond its bound: a break of a bound the plan flags physical leaves the '
-          'quantity out (the paper says so); any other bound keeps it, marked (unconfirmed) where printed, in the '
-          'Limitations and QUALITY.md.'),
+          'quantity out (the paper says so); any other bound keeps it as printed, listed in QUALITY.md, '
+          'and the paper ends with one sentence that points there.'),
     Check('plausibility_unproven_cap', 'core.plausibility', 'check_design',
           'execute_reflect', 'model_code', 'note',
           'A value exactly on a constant the script caps at (read from call names and literals), or a quantity on a '
@@ -1160,15 +1160,15 @@ CHECKS: tuple[Check, ...] = (
           '.fi/source_failures.json'),
     Check('seed_reaches_code', 'core.run_facts', 'seed_verdict',
           'write', 'model_code', 'note',
-          "Reads the code to say whether FI's per-trial seed reaches the simulation; the paper's run paragraph ({{run_facts}}) and a "
-          'log warning use it'),
+          "Reads the code to say whether FI's per-trial seed reaches the simulation; QUALITY.md, the writer's seed "
+          'note and a log warning use it'),
     Check('shared_random_streams', 'core.run_facts', 'shared_stream_notes',
           'write', 'measured', 'note',
           "From FI's trial record: settings that drew the same random numbers; a note only"),
     Check('reader_run_time_verdict', 'core.run_facts', 'reader_verdict',
           'write', 'own_record', 'note',
           "Whether a reader's run of the delivered code is over or within the time limit (FI's timed clean run of "
-          "that code decides when there is one); given to the paper's run-time sentence"),
+          "that code decides when there is one); kept in FI's run record for QUALITY.md"),
     Check('evidence_ladder', 'core.evidence', 'assess',
           'evidence_gate', 'own_record', 'note',
           'Classifies the quest on the six-level evidence ladder from its records and lists one gap per missing '
@@ -1271,7 +1271,8 @@ CHECKS: tuple[Check, ...] = (
     Check('paper_result_key_unfilled', 'core.paper_facts', 'value_hits',
           'review', 'own_record', 'strip',
           'a {{v:...}} result key FI cannot fill from trials/plan; rewritten, and with no round left the '
-          'sentence or key is taken out (take_out_unfilled); only when the paper was written under result keys'),
+          'sentence, table row or line that holds it is taken out (take_out_unfilled); only when the paper was '
+          'written under result keys'),
     Check('paper_typed_number_not_plan', 'core.typed_numbers', 'hits',
           'review', 'own_record', 'repair',
           'rule R1: a number the writer typed that is not a plan/topic number or a label; rewritten, with no '
@@ -1280,11 +1281,6 @@ CHECKS: tuple[Check, ...] = (
           'review', 'own_record', 'repair',
           'when no review round is left, the sentences with typed or unfilled numbers get one passage edit '
           'before anything is taken out'),
-    Check('paper_limitations_block', 'core.paper_facts', 'limitations_text',
-          'write', 'own_record', 'note',
-          "FI adds a list to the end of the paper's Limitations section from its records (what the study did not "
-          "do, an unmet target, a page overrun, claims found unsupported, the last review's open points); the "
-          "writer's own Limitations text is kept, and with nothing to state nothing is added"),
     Check('extension_result_unreported', 'core.number_provenance', 'unreported_results',
           'write', 'own_record', 'repair',
           "a result a refine's extension added that the paper does not report: writer asked once more, then "
@@ -1340,8 +1336,8 @@ CHECKS: tuple[Check, ...] = (
           'code/ run in a clean environment once per code version; a failure is a warning only'),
     Check('page_limit_supplement', 'core.engine', 'Engine._fit_with_supplement',
           'review', 'measured', 'strip',
-          'paper over the page limit: FI moves its own tables, Limitations (one line stays) and Further reading to '
-          'paper/supplement.md, in that order, until it fits; no model call'),
+          'paper over the page limit: FI moves its own tables and Further reading to paper/supplement.md, in '
+          'that order, until it fits; no model call'),
     Check('page_limit_body_trim', 'core.engine', 'Engine._trim_body_to_fit',
           'review', 'model_judge', 'strip',
           'a model ranks sentences, FI moves background/discussion sentences to paper/supplement.md (never one '

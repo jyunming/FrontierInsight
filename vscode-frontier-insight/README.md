@@ -58,8 +58,8 @@ trace to the experiment, to words quoted from a cited source (the quote must be
 in the source, however that source's PDF rendered its mathematics or spaced its
 words; a quote spanning a formula the stored text lost is not found), or are
 unsupported (unsupported claims force a revise). A sentence still unconfirmed
-when the paper is delivered stays where it is, listed in the Limitations and marked
-beside it *(unconfirmed)*. The
+when the paper is delivered stays where it is, as written; the paper's closing
+sentence points to the quality report, and `QUALITY.md` lists it. The
 check reads every finding the run recorded, whole, with the results branches
 those findings name, so a claim is never called unsupported because the
 evidence that proves it was cut short. Each
@@ -99,12 +99,9 @@ a third of the text height, smaller References and Further reading lists), and
 the writer gets a word budget. After each draft the review renders it the way
 `paper.pdf` will be and counts its pages. The limit is a guideline: a draft over
 it is never sent back to be written again. Every paper, with or without a
-limit, keeps FI's tables of every setting, its answers to the questions asked
-in full (one short line per question stays) and its Further reading in a
-supplement, `paper/supplement.md` (one line in the paper points to each); a
-paper over its limit then moves its Limitations there too (one line stays,
-naming each part of the topic the study did not do), without a model call; the
-References stay. When the body is still a few sentences over (about 400 words or
+limit, keeps FI's tables of every setting and its Further reading in a
+supplement, `paper/supplement.md` (one line in the paper points to each),
+without a model call; the References stay. When the body is still a few sentences over (about 400 words or
 fewer), the model is asked which sentences of the background and discussion to
 take out, and the engine decides what may go. A paper still over is delivered as
 written, and QUALITY.md says so.
@@ -393,7 +390,7 @@ When a check fails the quest stops with an *Action needed* message that names wh
 - with `pauses.review: ask`, a file in `code/` you edited that FI would now change: resume to keep your version, or delete the file first to get FI's.
 - a redesign that asks to change the frozen protocol: read the request, then `@fi /approve-amendment <quest_id>` (a bare resume keeps the protocol).
 
-A known-answer check never stops the quest to ask you whether the simulation or the check is wrong: FI works that out itself. It corrects a check only when two independent workings agree on its expected value (the plan's own arithmetic and another model that never saw the result), repairs the simulation when that is what is wrong, and otherwise goes on with the check marked *unconfirmed*, so the result counts as exploratory and the paper says so. A check that does not say where its expected value comes from is marked *source not confirmed* the same way. One line in the chat says what FI did; the numbers are in `needs/ORACLE_CHECK.json`.
+A known-answer check never stops the quest to ask you whether the simulation or the check is wrong: FI works that out itself. It corrects a check only when two independent workings agree on its expected value (the plan's own arithmetic and another model that never saw the result), repairs the simulation when that is what is wrong, and otherwise goes on with the check marked *unconfirmed*, so the result counts as exploratory and the paper's closing sentence points to the quality report that lists it. A check that does not say where its expected value comes from is marked *source not confirmed* the same way. One line in the chat says what FI did; the numbers are in `needs/ORACLE_CHECK.json`.
 
 A finished quest ends with a plain sentence, `[FI] evidence: <what was shown>`, and what stands between it and the next level; the underlying six levels (`executed` through `publication_ready`) are in [docs/rigor.md](../docs/rigor.md); the record is `needs/EVIDENCE.json`. How the checks work is in [docs/rigor.md](../docs/rigor.md).
 

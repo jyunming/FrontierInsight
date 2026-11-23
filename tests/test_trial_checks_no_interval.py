@@ -81,7 +81,7 @@ def test_the_count_over_every_trial_is_kept_apart_and_never_a_fault() -> None:
     assert sum(frame_table.hits(m, ["rate_lo", "rate_hi"], TRUE, estimate=m["rate_hat"])) == 130.0
 
 
-def test_the_paper_and_quality_report_state_the_count_over_every_trial(tmp_path: Path) -> None:
+def test_fis_record_and_the_quality_report_state_the_count_over_every_trial(tmp_path: Path) -> None:
     root = tmp_path / "q"
     (root / ".fi").mkdir(parents=True)
     frozen_protocol.freeze(root, {"metrics": [_spec()], "runs_per_setting": N}, approved_by="test", source="test")
@@ -93,7 +93,6 @@ def test_the_paper_and_quality_report_state_the_count_over_every_trial(tmp_path:
         "true value in far fewer trials than 95% in 2 of 6 settings (s=0: 0.65, 130 of 200 trials, 1.00 of those that "
         "gave an estimate; s=1: 0.65, 130 of 200 trials, 1.00 of those that gave an estimate). FI judged the intervals on "
         "the trials that gave an estimate; the trials that gave none are stated apart."]
-    assert said[0] in paper_facts.limitations_text(root)  # the Limitations block FI writes into the paper
     summary = quality_report._trial_checks_summary(SimpleNamespace(trial_checks=tc.read_record(root)))  # type: ignore[arg-type]
     assert summary is not None and summary["faults"] == 0
     assert any(line.startswith("counting each trial with no interval as a miss, grossly low at: s=0: 0.650 from 200 trials "

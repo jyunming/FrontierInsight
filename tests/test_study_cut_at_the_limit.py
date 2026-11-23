@@ -338,10 +338,10 @@ async def test_a_grid_of_more_settings_than_fi_lists_is_never_planned_whole_befo
 
 
 
-def test_the_write_node_puts_the_cut_sentence_in_the_limitations_of_a_paper_that_left_it_out(
+def test_the_cut_sentence_is_listed_in_the_quality_report_and_the_paper_carries_none(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A real run's record (a saved quest with its ledger) that was cut at the limit: the writer's paper does not mention it,
-    the written paper.md does, in its Limitations, with FI's own counts."""
+    and FI adds nothing to it; the cut is one of the things QUALITY.md lists from FI's records, with FI's own counts."""
     from tests.test_paper_record import WRITTEN, _engine, _quest
 
     root, topic = _quest(tmp_path, "fdr_e1")
@@ -358,6 +358,7 @@ def test_the_write_node_puts_the_cut_sentence_in_the_limitations_of_a_paper_that
     out = asyncio.run(eng._node_write({"topic": topic, "title": "t", "iteration": 0,  # type: ignore[arg-type]
                                        "exec_result": {"returncode": 0, "duration_s": 7.4}}))
     paper = paper_facts.without_marks(Path(out["paper_md"]).read_text(encoding="utf-8"))
-    limitations = paper[paper.index("## Limitations"):]
-    assert "FI estimated that the plan's study would take about 18 h, more than the 8 h allowed" in limitations
-    assert "the results cover only what ran" in limitations and "settings" in limitations
+    assert "FI estimated" not in paper and "the results cover only what ran" not in paper
+    [said] = [i.sentence for i in paper_facts.required_items(root) if "FI estimated that the plan's study" in i.sentence]
+    assert "would take about 18 h, more than the 8 h allowed" in said
+    assert "the results cover only what ran" in said and "settings" in said

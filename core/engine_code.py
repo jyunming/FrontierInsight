@@ -3683,8 +3683,8 @@ class CodeStageMixin:
         ``engine.exec_reflect_max_iterations`` times, each repair after one failed run of this gate). Only when those repairs
         are spent and the plan, asked about the example, gave no new one, the study goes on with the equation **not
         confirmed**: the record says so (``unconfirmed``, and a ``not_tested`` sentence that QUALITY.md and the paper's
-        Limitations repeat) and every number of the plan's quantities that the equation's function may reach is marked
-        (unconfirmed) in the paper (:func:`core.equation_tests.unconfirmed_marks`). Never so for an example that FI computed
+        Limitations repeat) and the quantities of the plan that the equation's function may reach are listed in the quality report
+        (:func:`core.equation_tests.unconfirmed_marks`). Never so for an example that FI computed
         from the equation as written and found equal to the example (the code is wrong), an example the plan reworked (two
         derivations of the plan disagree with the code), or a failure that is not a wrong number (the function cannot be
         called, or raises). Written to ``record``; a run that passes writes none, so the mark clears."""
@@ -3715,9 +3715,9 @@ class CodeStageMixin:
             if eid not in held:
                 self._log.warning("[equations] %s still fails its worked example after the code was repaired %d time(s) and the "
                                   "plan was asked about the example; FI cannot tell whether the code or the example is wrong, so "
-                                  "the study goes on with %s not confirmed and %s (unconfirmed) in the paper",
+                                  "the study goes on with %s not confirmed and %s",
                                   eid, limit, eid,
-                                  "its results marked" if entry.get("marked") else "no result marked (its function is never run)")
+                                  "its results listed as resting on it" if entry.get("marked") else "no result resting on it (its function is never run)")
         record["passes"] = {eid: n for eid, n in passes.items() if eid not in unconfirmed}
         record[key] = unconfirmed
         record["not_tested"] = notes

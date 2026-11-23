@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -199,9 +198,6 @@ def left_out_by_record(quest_root: Path | str) -> dict[str, str]:
 #: ``Found.kind`` of a quantity left out because a value of it breaks the bound the plan flags as physical (``range`` with
 #: ``physical: true``) after the repairs ran out (:func:`bound_breaks`).
 PHYSICAL_KIND = "physical_bound"
-#: The words FI prints beside each number of a quantity whose value breaks a bound the plan only expected (one not flagged
-#: physical): the value is kept, and a reader is told where it stands (core/paper_values.py, core/results_by_setting.py).
-BOUND_MARK = "(unconfirmed)"
 #: Where the kept quantities of :func:`bound_breaks` are recorded in ``needs/RESULT_CHECK.json``.
 KEPT_BREAKS = "kept_bound_breaks"
 
@@ -336,10 +332,11 @@ def figures_on_axis(quest_root: Path | str, quantities: set[str] | list[str]) ->
 
 
 def marked_quantities(quest_root: Path | str) -> dict[str, dict[str, Any]]:
-    """Every quantity whose printed numbers carry :data:`BOUND_MARK`: the ones kept although they break a range the plan
-    expected (:func:`kept_bound_breaks`) and the ones an equation FI could not confirm may reach
-    (:func:`core.equation_tests.unconfirmed_marks`). The one place the paper's values, its tables, its figure captions and
-    its note under the title read."""
+    """Every quantity FI holds a qualification for: the ones kept although they break a range the plan expected
+    (:func:`kept_bound_breaks`), the ones an equation FI could not confirm may reach
+    (:func:`core.equation_tests.unconfirmed_marks`) and the ones a run with fewer runs than the plan's minimum gave
+    (:func:`fewer_runs_marks`). Nothing is printed beside a value for them: the quality report lists them, and the
+    paper's closing sentence (core/quality_pointer.py) points there for the first kind."""
     from . import equation_tests as _equation_tests
 
     return {**fewer_runs_marks(quest_root), **_equation_tests.unconfirmed_marks(quest_root), **kept_bound_breaks(quest_root)}
@@ -403,77 +400,6 @@ def fewer_runs_marks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
     to = (reduced.get("to") or {}).get("runs_per_setting") if isinstance(reduced.get("to"), dict) else None
     note = f"the run has {to} runs per setting, fewer than the plan's minimum" if to else "the run has fewer runs per setting than the plan's minimum"
     return {q: {"quantity": q, "note": note} for q in dict.fromkeys(ids) if q not in gone}
-
-
-def marked_figures(quest_root: Path | str) -> list[str]:
-    """The saved figures (file names in ``figures/``) whose caption carries :data:`BOUND_MARK`: those that draw a marked
-    quantity by FI's record of the drawing (:func:`figures_on_axis`), and, so that nothing is presented unmarked when FI
-    cannot tell, every figure of the results with no such record, or with a part the record calls ``neutral``. FI's
-    set-up figures (the schematic and the flow) draw no result and are never marked."""
-    root = Path(quest_root)
-    quantities = set(marked_quantities(root))
-    folder = root / "figures"
-    if not quantities or not folder.is_dir():
-        return []
-    from . import setup_flow as _setup
-
-    out = set(figures_on_axis(root, quantities))
-    records = root / ".fi" / "figure_records"
-    setups = set(_setup.figures(str(root)))
-    for f in folder.iterdir():
-        if not f.is_file() or f.suffix.lower() not in (".png", ".pdf", ".svg", ".jpg", ".jpeg") or f.name in setups:
-            continue
-        record = _read_json(records / f"{f.stem}.calls.json") if records.is_dir() else {}
-        panels = record.get("panels") if isinstance(record, dict) else None
-        unknown = not isinstance(panels, list) or any(
-            isinstance(p, dict) and (any(isinstance(s, dict) and s.get("neutral") for s in p.get("series") or [])
-                                     or (isinstance(p.get("y"), dict) and p["y"].get("neutral")))
-            for p in panels)
-        if unknown:
-            out.add(f.name)
-    return sorted(out)
-
-
-_NOTE_BLOCK = re.compile(r"<!-- fi:marks-note -->.*?<!-- /fi:marks-note -->", re.S)
-#: FI's marker around the mark the claim check puts beside a sentence it could not confirm (core/paper_facts.py).
-_SENTENCE_MARKER = "<!-- fi:unconfirmed -->"
-
-
-def marks_stated(paper_text: str) -> bool:
-    """Whether ``paper_text`` carries FI's marker beside a sentence the claim check could not confirm (not the note FI put
-    under the title). Only the marker counts: the words alone also stand in a draft the writer typed them in, and in a
-    quantity's own mark."""
-    return _SENTENCE_MARKER in _NOTE_BLOCK.sub("", paper_text or "")
-
-
-def marked_note(quest_root: Path | str, paper_text: str | None = None) -> str:
-    """The sentence FI itself puts under the paper's title, on the title slide and in the poster header when the paper
-    carries the mark, ``""`` when nothing is marked. One text for all three. A number the writer typed instead of letting
-    FI fill it cannot be placed on a result, so the note says the paper may hold such a number that carries no mark.
-    ``paper_text``: the paper with FI's markers, which holds the marks of the claim check (sentences, no record of their
-    own); without it only the quantities FI's records name are covered."""
-    names = sorted(marked_quantities(quest_root))
-    sentences = paper_text is not None and marks_stated(paper_text)
-    if not names and not sentences:
-        return ""
-    if not names:
-        return ("**Not confirmed.** FI could not confirm some statements of this study (the paper's Limitations list them); "
-                "each is marked " + BOUND_MARK + " in the paper.")
-    text = ("**Not confirmed.** FI could not confirm everything behind some results (the paper's Limitations say what). "
-            "Numbers of " + ", ".join(f"`{n}`" for n in names[:4]) + (" and others" if len(names) > 4 else "")
-            + " are marked " + BOUND_MARK + "; a number written by hand carries no mark, so read it as unconfirmed too.")
-    return text + (" Statements FI could not confirm are marked too." if sentences else "")
-
-
-def marked_note_of_deliverables(quest_root: Path | str, delivered: str) -> str:
-    """:func:`marked_note` for the slides and the poster: the delivered ``paper.md`` has FI's markers taken out, while
-    ``paper/paper.md`` (when the quest has one) still holds them, so both are read; a quest with neither gets the note of its
-    quantities only."""
-    try:
-        own = (Path(quest_root) / "paper" / "paper.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        own = ""
-    return marked_note(quest_root, (delivered or "") + "\n" + own)
 
 
 def kept_bound_breaks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
@@ -1012,8 +938,7 @@ class ResultChecksMixin:
         kept_say = [f"A value of `{b.quantity}` is outside the range the plan expected for it ({b.bound_text()}): "
                     f"{b.value_text()}. The repairs did not change it, and FI did not establish whether the value or the plan's "
                     f"expected range is wrong, so the value stays in the results. Report it as it is; do not call it confirmed "
-                    f"and do not explain the difference away. FI marks each number of `{b.quantity}` it fills in as "
-                    "unconfirmed, and the Limitations say why." for b in kept]
+                    f"and do not explain the difference away." for b in kept]
         record.update({
             "removed_quantities": keys,
             "removed_figures": sorted({*(record.get("removed_figures") or []), *gone_figures}),
@@ -1033,7 +958,7 @@ class ResultChecksMixin:
             self._log.warning(  # type: ignore[attr-defined]
                 "[execute_reflect] %s; %s", b.note(),
                 "it is left out of the results and the paper says so" if b.leave_out
-                else "it is kept, marked unconfirmed where the paper prints it, and the paper says why")
+                else "it is kept as it is, and the quality report lists it")
 
     def _kept_say(self) -> list[str]:
         """For the writer: the flat quantities the plan does not say are estimated from the data, kept and stated."""

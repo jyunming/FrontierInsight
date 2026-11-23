@@ -105,7 +105,7 @@ def test_an_explore_then_confirm_quest_says_which_run_the_time_is(tmp_path: Path
 
 def test_kinetics_placeholders_are_filled_with_the_true_values(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
-    draft = ("# Kinetics\n\n## Methods\nRandom numbers were drawn from {{seed}}; the experiment ran {{trials_per_setting}} "
+    draft = ("# Kinetics\n\n## Methods\nThe experiment ran {{trials_per_setting}} "
              "trials in each of {{settings}} settings and took {{run_time}}, {{time_limit_met}} the topic's limit of "
              "{{time_limit}}.\n")
     out = paper_facts.render(draft, root, topic=topic)
@@ -115,15 +115,13 @@ def test_kinetics_placeholders_are_filled_with_the_true_values(tmp_path: Path) -
     # one-after-another run takes is under the limit, so the limit is neither shown met nor shown missed
     assert "took 223.2 s (about 3.7 minutes)" in plain and "at least 32.6 s" in plain, plain
     assert "not shown to be within or over the topic's limit of 60 s" in plain, plain
-    assert "derived from base seed 0" in plain
     assert "2.3 s" not in plain
 
 
-def test_e1_placeholders_are_filled_with_the_code_s_seed_and_the_measured_time(tmp_path: Path) -> None:
+def test_e1_placeholders_are_filled_with_the_measured_time(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "fdr_e1")
-    draft = "# FDR\n\n## Methods\nWe used {{seed}}. The run took {{run_time}}, {{time_limit_met}} the {{time_limit}} limit.\n"
+    draft = "# Study\n\n## Methods\nThe run took {{run_time}}, {{time_limit_met}} the {{time_limit}} limit.\n"
     plain = paper_facts.without_marks(paper_facts.render(draft, root, topic=topic, fallback_s=7.4).text)
-    assert "We used a seed fixed in the code (20261015, at code/simulate.py:106)." in plain
     assert "The run took 121.3 s" in plain and "at least 78.9 s), over the 60 s limit." in plain
     assert "base seed" not in plain and "7.4" not in plain and "17" not in plain
 
@@ -154,10 +152,11 @@ def test_a_placeholder_fi_cannot_fill_reads_not_recorded_and_is_listed(tmp_path:
 # Second review (P1-5): no {{...}} the writer typed reaches paper.md raw. A known name in extra braces is filled; any other
 # name is "not recorded" between markers, so QUALITY.md lists it and the check asks for one of FI's names instead.
 ODD_PLACEHOLDERS = {
-    "nested 4 braces": ("Seed: {{{{seed}}}}.", "seed"),
-    "triple": ("Seed: {{{seed}}}.", "seed"),
-    "brace inside": ("Seed: {{ {seed} }}.", "seed"),
-    "spaces": ("Seed: {{ seed }} and {{ run time }}.", "seed"),
+    "nested 4 braces": ("Level: {{{{interval_level}}}}.", "interval_level"),
+    "triple": ("Level: {{{interval_level}}}.", "interval_level"),
+    "brace inside": ("Level: {{ {interval_level} }}.", "interval_level"),
+    "spaces": ("Level: {{ interval level }} and {{ run time }}.", "interval_level"),
+    "seed": ("Seed: {{seed}}.", None),
     "dot": ("It took {{run.time}}.", "run_time"),
     "duration": ("The experiment took {{duration}}.", None),
     "time": ("It took {{time}}.", None),
@@ -215,7 +214,7 @@ def test_the_quality_report_lists_an_invented_name(tmp_path: Path) -> None:
 
 
 # Second review (P1-6): a placeholder in math or code gets the plain value, never FI's markers.
-@pytest.mark.parametrize("snippet", ["```\nseed = {{seed}}\n```", "Run with `--seed {{seed}}`.",
+@pytest.mark.parametrize("snippet", ["```\nlevel = {{interval_level}}\n```", "Run with `--level {{interval_level}}`.",
                                      "The run used $N = {{trials_per_setting}}$ trials.", "$$T = {{run_time}}$$",
                                      "\\(T = {{run_time}}\\)", "<!-- the run took {{run_time}} -->"])
 def test_a_placeholder_in_math_code_or_a_comment_gets_the_plain_value(tmp_path: Path, snippet: str) -> None:
@@ -230,9 +229,9 @@ def test_a_placeholder_in_math_code_or_a_comment_gets_the_plain_value(tmp_path: 
 # Second review (P2-2) asked that a required placeholder count only where a reader sees it. Nothing is required of the
 # writer any more (FI writes the run's facts, tests/test_run_facts_block.py), so a fact placeholder hidden in code or a
 # comment is no fault.
-@pytest.mark.parametrize("where", ["```\n{{seed}} {{run_time}} {{time_limit_met}}\n```",
-                                   "<!-- {{seed}} {{run_time}} {{time_limit_met}} -->",
-                                   "`{{seed}} {{run_time}} {{time_limit_met}}`"])
+@pytest.mark.parametrize("where", ["```\n{{interval_level}} {{run_time}} {{time_limit_met}}\n```",
+                                   "<!-- {{interval_level}} {{run_time}} {{time_limit_met}} -->",
+                                   "`{{interval_level}} {{run_time}} {{time_limit_met}}`"])
 def test_a_fact_placeholder_hidden_in_code_or_a_comment_is_no_fault(tmp_path: Path, where: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     out = paper_facts.render(f"# S\n\n## Methods\n{where}\n\n## Limitations\nNone.\n", root, topic=topic).text
@@ -242,22 +241,21 @@ def test_a_fact_placeholder_hidden_in_code_or_a_comment_is_no_fault(tmp_path: Pa
 def test_a_placeholder_between_two_dollar_amounts_is_prose(tmp_path: Path) -> None:
     """Pandoc's rule: a closing ``$`` right before a digit is no math, so a cost sentence is read as prose."""
     root, topic = _quest(tmp_path, "kinetics_s1")
-    out = paper_facts.render("# S\n\n## Methods\nA trial cost $5 and {{seed}} was used, $20 in all; it took "
-                             "{{run_time}}, {{time_limit_met}} the limit.\n", root, topic=topic).text
-    assert "<!-- fi:fact-seed -->" in out
+    out = paper_facts.render("# S\n\n## Methods\nA trial cost $5 and {{interval_level}}% was used, $20 in all; it "
+                             "took {{run_time}}, {{time_limit_met}} the limit.\n", root, topic=topic).text
+    assert "<!-- fi:fact-interval_level -->" in out
     assert paper_facts.placement_hits(out, root, topic=topic) == []
 
 
 @pytest.mark.parametrize("lim", ["<!-- {{not_done:topic-temperature}} -->",
                                  "```\n{{not_done:topic-temperature}}\n```"])
-def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: str) -> None:
+def test_an_item_hidden_in_a_comment_or_code_is_no_fault_and_fi_adds_no_block(tmp_path: Path, lim: str) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
     draft = LIMITS_OK.replace("{{not_done:topic-temperature}} We could not.", lim)
     out = paper_facts.render(paper_facts.place_blocks(draft, root), root, topic=topic).text
     assert paper_facts.placement_hits(out, root, topic=topic) == []
-    # FI writes the whole section: what the writer hid in it is gone, and the item is in FI's block
-    assert lim not in out and "- The topic asks to vary temperature" in out
+    assert "\n- The topic asks to vary temperature" not in out and "fi:fact-limitations" not in out
 
 
 # ---- what the writer is given --------------------------------------------------------------------------------------------
@@ -265,8 +263,8 @@ def test_an_item_hidden_in_the_limitations_is_put_in_by_fi(tmp_path: Path, lim: 
 
 def test_the_writer_gets_the_run_facts_paragraph_and_no_placeholders_for_them(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "fdr_e1")
-    text = paper_facts.writer_section(root, topic=topic, fallback_s=7.4)
-    assert "20261015, at code/simulate.py:106" in text and "121.3 s" in text
+    text = paper_facts.writer_section(root, fallback_s=7.4)
+    assert "121.3 s" in text
     assert "Do not state these facts yourself" in text and "the run facts in the Methods" not in text and "do not refer to the paragraph" in text
     for name in ("{{seed}}", "{{run_time}}", "{{time_limit}}", "{{time_limit_met}}", "{{trials_per_setting}}",
                  "{{settings}}", "{{trials_failed}}"):
@@ -313,12 +311,10 @@ def test_every_required_item_has_an_id_and_one_plain_sentence(tmp_path: Path) ->
     assert kinds.count("not_done") == 2, "a plain sentence of an older record is an item too"
     assert "weighted_temperature_law" not in json.dumps([i.sentence for i in paper_facts.required_items(root)]), \
         "a second version that could not be compared is in the quality report only"
-    section = paper_facts.writer_section(root, topic="t")
+    section = paper_facts.writer_section(root)
     for i in paper_facts.required_items(root):
-        # the writer is shown the Limitations FI writes (the sentences, no placeholder to place); an open problem in the
-        # code is in QUALITY.md only
-        assert (i.sentence in section) == (i.kind != paper_facts.CODE_FINDING)
-    assert "{{not_done:" not in section and "see Limitations" in section
+        assert i.sentence not in section, "QUALITY.md lists the items; the writer is not given them"
+    assert "{{not_done:" not in section
     # A plain sentence of an older record: its id is cut after a whole word, and its sentence does not say "the topic"
     # twice.
     older = [i for i in paper_facts.required_items(root) if i.kind == "not_done" and i.id != "topic-temperature"][0]
@@ -341,11 +337,11 @@ def test_an_open_code_finding_that_changes_a_result_is_an_item(tmp_path: Path, m
     assert "the variance of k uses n instead of n - 1" in items[0].sentence
 
 
-LIMITS_OK = ("# Kinetics\n\n## Methods\nWe used {{seed}}; the run took {{run_time}}, {{time_limit_met}} the limit.\n\n"
+LIMITS_OK = ("# Kinetics\n\n## Methods\nThe run took {{run_time}}, {{time_limit_met}} the limit.\n\n"
              "## Limitations\n{{not_done:topic-temperature}} We could not.\n")
 
 
-def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path: Path) -> None:
+def test_no_fact_placeholder_is_required_and_fi_places_no_item_in_the_paper(tmp_path: Path) -> None:
     root, topic = _quest(tmp_path, "kinetics_s1")
     (root / ".fi" / "topic_covered.json").write_text(json.dumps({"left": [{"kind": "factor", "name": "temperature"}]}))
 
@@ -353,31 +349,24 @@ def test_a_required_fact_must_be_placed_and_fi_places_the_items_itself(tmp_path:
         return paper_facts.placement_hits(paper_facts.render(draft, root, topic=topic).text, root, topic=topic)
 
     def placed(draft: str) -> str:
-        return paper_facts.render(paper_facts.place_blocks(draft, root, topic=topic), root, topic=topic).text
+        return paper_facts.render(paper_facts.place_blocks(draft, root), root, topic=topic).text
 
     item = "- The topic asks to vary temperature"
     assert hits(LIMITS_OK) == []
-    # FI adds its block at the end of the writer's own Limitations section: the writer's words stay.
-    named = ("# Temperature dependence\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n"
+    # The writer's own Limitations section stays as written; FI adds nothing to it.
+    named = ("# Temperature dependence\n\n## Methods\n{{run_time}} {{time_limit_met}}\n\n"
              "## Limitations\nWe varied the temperature.\n")
     out = placed(named)
-    assert out.index("## Limitations") < out.index(item) and hits(out) == []
-    assert out.index("We varied the temperature") < out.index(item) and out.count("## Limitations") == 1
-    # A placeholder the writer put in the Results is still filled (an older draft); the Limitations are FI's all the same.
+    assert item not in out and hits(out) == [] and "We varied the temperature" in out and out.count("## Limitations") == 1
+    # A placeholder the writer put in the Results is still filled (an older draft).
     elsewhere = LIMITS_OK.replace("## Limitations\n{{not_done:topic-temperature}}", "## Results\n{{not_done:topic-temperature}}")
     assert placed(elsewhere).count("fi:fact-not_done-topic-temperature -->") == 2 and hits(elsewhere) == []
-    assert item in placed(elsewhere)
-    # Not in the title, though: the title does not hold it.
-    title = "# {{not_done:topic-temperature}}\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n"
-    assert "## Limitations" in placed(title)
-    # A paper with no Limitations section gets one, before the sources.
-    no_section = "# T\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
-    out = placed(no_section)
-    assert out.index("## Limitations") < out.index(item) < out.index("## References")
-    # A Limitations that is a bold run-in paragraph inside the Discussion (a graded run): FI's block follows that paragraph.
-    bold = "# T\n\n## Methods\n{{seed}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
+    # A paper with no Limitations section gets none.
+    no_section = "# T\n\n## Methods\n{{run_time}} {{time_limit_met}}\n\n## References\n1. A.\n"
+    assert "## Limitations" not in placed(no_section) and item not in placed(no_section)
+    bold = "# T\n\n## Methods\n{{run_time}}\n\n## Discussion\n**Limitations.** Few settings.\n\n## References\n1. A.\n"
     out = placed(bold)
-    assert "## Limitations" not in out and out.index("**Limitations.** Few settings.") < out.index(item) < out.index("## References")
+    assert item not in out and "**Limitations.** Few settings." in out
     assert placed(out) == out  # a second pass adds nothing
     no_time = LIMITS_OK.replace("{{run_time}}", "223 s")
     assert hits(no_time) == [], "a run time typed in place of the placeholder is the typed-number check's, not this one's"
@@ -409,17 +398,12 @@ def test_the_check_is_kept_for_the_quality_report(tmp_path: Path) -> None:
     bare = paper_facts.render("# P\n\n## Methods\nIt took {{bogus_thing}}.\n\n## Limitations\nThe grid is coarse.\n",
                               root).text
     paper_facts.keep_check(root, paper_facts.check(bare, root), bare)
-    kept = paper_facts.kept_check(root)
-    assert {i["id"] for i in kept["unmet_items"]} >= {"topic-temperature", "left-out-coverage-ea"}
+    assert "unmet_items" not in paper_facts.kept_check(root), "the paper is not held to carry the items"
     text = quality_report.render(quality_report.build(root, running=False))
     assert "## What FI recorded that the paper does not carry" in text
-    assert "Where the paper still disagrees with these records" in text and "temperature" in text
-    good = paper_facts.render(paper_facts.place_blocks(
-        "# P\n\n## Methods\n{{seed}} {{run_time}} {{time_limit_met}}\n\n## Limitations\nThe grid is coarse.\n", root),
-        root).text
-    paper_facts.keep_check(root, paper_facts.check(good, root), good)
-    # with FI's block in the paper nothing is missing from it (an open problem in the code is in QUALITY.md only)
-    assert {i["kind"] for i in paper_facts.kept_check(root).get("unmet_items", [])} <= {paper_facts.CODE_FINDING}
+    assert "Where the paper still disagrees with these records" in text
+    did_not = text.split("### What the study did not do")[1].split("###")[0]
+    assert "temperature" in did_not and "The topic asks to vary temperature" in did_not
 
 
 def test_the_quality_report_lists_a_placeholder_that_reads_not_recorded(tmp_path: Path) -> None:
@@ -478,7 +462,7 @@ def _engine(root: Path, **engine: Any) -> Any:
     return eng
 
 
-WRITTEN = ("# FDR\n\n## Methods\nRandom numbers were drawn from {{seed}}; the run had {{settings}} settings with "
+WRITTEN = ("# Study\n\n## Methods\nThe run had {{settings}} settings with "
            "{{trials_per_setting}} trials per setting and took {{run_time}}, {{time_limit_met}} the topic's limit of "
            "{{time_limit}}.\n\n## Limitations\nThe grid is coarse.\n")
 
@@ -505,7 +489,6 @@ def test_the_paper_gets_none_of_the_three_blocks_and_holds_the_filled_values(tmp
         assert marker not in paper, marker
     plain_paper = paper_facts.without_marks(paper)
     assert "took 121.3 s" in plain_paper and "at least 78.9 s), over the topic's limit of 60 s" in plain_paper
-    assert "a seed fixed in the code (20261015, at code/simulate.py:106)" in paper
     assert any("FI'S RECORD OF THIS RUN" in s and "Run facts:" in s and "121.3 s" in s for s in seen)
     assert run_facts.read(root)["seed"]["verdict"] == "does_not_reach", "the write step keeps the seed verdict on record"
 
@@ -523,10 +506,10 @@ def test_the_review_adds_the_records_check_and_rewrites_the_text(tmp_path: Path,
         return json.dumps({"verdict": "accept", "score": 5, "suggestions": [], "must_flag_hits": []})
 
     eng._chat = accepting  # type: ignore[assignment]
-    # A name that is none of FI's placeholders; the old single placeholders ({{seed}}) are still filled.
+    # A name that is none of FI's placeholders; the old single placeholders ({{run_time}}) are still filled.
     paper = root / "paper" / "paper.md"
     paper.parent.mkdir(exist_ok=True)
-    paper.write_text("# T\n\n## Methods\nRandom numbers were drawn from {{seed}}; the run took {{bogus_time}}.\n",
+    paper.write_text("# T\n\n## Methods\nIt ran {{run_time}}; the run took {{bogus_time}}.\n",
                      encoding="utf-8")
     patch = asyncio.run(eng._node_review({  # type: ignore[arg-type]
         "topic": topic, "iteration": 0, "review": {}, "paper_md": str(paper),
@@ -536,7 +519,7 @@ def test_the_review_adds_the_records_check_and_rewrites_the_text(tmp_path: Path,
     assert patch["iteration"] == 1
     route = eng._route_after_review({"review": patch["review"], "iteration": 1, "code": "x"})  # type: ignore[arg-type]
     assert route == "rewrite"
-    assert "{{seed}}" not in paper.read_text(encoding="utf-8"), "the review re-rendered the paper before reading it"
+    assert "{{run_time}}" not in paper.read_text(encoding="utf-8"), "the review re-rendered the paper before reading it"
 
 
 def test_a_failed_records_check_never_goes_to_the_design_or_a_stop(tmp_path: Path) -> None:

@@ -54,9 +54,9 @@ SIM = SIM_TRIAL_BY_HAND.replace('float(draw < cell["R0"] / 4)', 'float(4 * draw 
 # The fixture's prose states no number of its own: since 8fec6355 a number the writer typed that FI cannot trace stays in the
 # paper and is only listed in QUALITY.md, so R1 (one number of the paper changed) can only be put right, as FI refills its
 # own tables from its records, where the number is in a block FI fills.
-PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
+PAPER = ("# Final size of a toy epidemic\n\nWe ran 300 outbreaks per setting; the run took {{run_time}}.\n\n## Results\n\n"
          "The headline score rose with R0 across the settings. ![r](figures/result.png)\n\n## References\n1. Smith 2020.\n")
-CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting, using {{seed}}; the run took {{run_time}}.\n\n## Results\n\n"
+CITING = ("# What earlier work says\n\nWe ran 300 outbreaks per setting; the run took {{run_time}}.\n\n## Results\n\n"
           "The headline score rose with R0 across the settings. ![r](figures/result.png)\n\n"
           "Earlier work reports on the exposure and the outcome in children [1].\n\n## References\n1. The source.\n")
 TASK = {

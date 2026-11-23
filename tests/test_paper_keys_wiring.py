@@ -50,16 +50,16 @@ def test_a_raw_key_reaching_the_fact_renderer_never_becomes_a_fact_marker() -> N
 
 
 def test_the_marker_round_trips_to_the_writers_key_and_to_plain_text() -> None:
-    marked = f"SD <!-- fi:v {KEY_SD} -->1.22% (95% chi-square interval 1.13% to 1.33%, 300 trials)<!-- /fi:v --> here."
+    marked = f"SD <!-- fi:v {KEY_SD} -->1.22% (95% chi-square CI 1.13% to 1.33%; 300 trials)<!-- /fi:v --> here."
     assert paper_facts.to_placeholders(marked) == f"SD {KEY_SD} here."
-    assert paper_facts.without_marks(marked) == "SD 1.22% (95% chi-square interval 1.13% to 1.33%, 300 trials) here."
+    assert paper_facts.without_marks(marked) == "SD 1.22% (95% chi-square CI 1.13% to 1.33%; 300 trials) here."
 
 
 def test_fi_fills_a_key_from_the_record_and_a_typed_value_is_a_hit(tmp_path: Path) -> None:
     root = _quest(tmp_path)
     rec = paper_values.records_of(root, PROTOCOL)
     filled, _values = paper_values.fill_values(f"SD was {KEY_SD}, bias {TYPED}.", rec, None)
-    assert "1.22% (95% chi-square interval" in filled and "fi:v" in filled
+    assert "1.22% (95% chi-square CI" in filled and "fi:v" in filled
     hits = paper_facts.check(f"SD was {KEY_SD}, bias {TYPED}.", root, topic="t", keyed=True, protocol=PROTOCOL)
     assert any(h.startswith("paper_record_mismatch") and TYPED in h for h in hits)
     assert not any("1.22" in h for h in hits)
@@ -135,9 +135,9 @@ def test_fi_fills_the_keys_sends_a_typed_result_back_once_and_then_keeps_it_list
     assert any(n == "write" and "Results you can place" in p for n, p in calls)
     state.update(out)
     values = json.loads((root / ".fi" / "paper_values.json").read_text(encoding="utf-8"))
-    assert KEY_SD[4:-2] in json.dumps(values) and "1.22% (95% chi-square interval" in json.dumps(values)
+    assert KEY_SD[4:-2] in json.dumps(values) and "1.22% (95% chi-square CI" in json.dumps(values)
     shown = Path(out["paper_md"]).read_text(encoding="utf-8")
-    assert "1.22% (95% chi-square interval" in paper_facts.without_marks(shown) and TYPED in shown
+    assert "1.22% (95% chi-square CI" in paper_facts.without_marks(shown) and TYPED in shown
     review = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
     hits = [h for h in review["review"]["must_flag_hits"] if h.startswith("paper_record_mismatch")]
     assert hits and any(TYPED in h for h in hits)
@@ -150,7 +150,7 @@ def test_fi_fills_the_keys_sends_a_typed_result_back_once_and_then_keeps_it_list
     review = asyncio.run(eng._node_review(state))  # type: ignore[arg-type]
     final = Path(state["paper_md"]).read_text(encoding="utf-8")
     assert "[number removed]" not in final and TYPED in final and "{{v:" not in paper_facts.without_marks(final)
-    assert "1.22% (95% chi-square interval" in paper_facts.without_marks(final)
+    assert "1.22% (95% chi-square CI" in paper_facts.without_marks(final)
     kept = paper_facts.kept_check(root)
     assert any(r["number"] == TYPED for r in kept["untraced_numbers"])
     state.update(review)

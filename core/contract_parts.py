@@ -17,7 +17,7 @@ cannot be used (at most :data:`MAX_ASKS` asks of a part in all):
   the study's own code computes it;
 * ``answers``, only when FI is given the topic's main quantities (``topic_quantities``) and the plan's own map does not yet
   place them: which result (or equation) of the study answers each quantity, and at which setting when the topic asks
-  for it at one. A quantity the plan cannot map stays unmapped and the paper's answers block says so.
+  for it at one. A quantity the plan cannot map stays unmapped (QUALITY.md says so).
 * ``figures``, only when FI works out the analysis itself and the plan names a figure only by file name: what each figure
   shows, along which setting, in how many panels (or that it cannot be drawn from the study's numbers). FI draws only the
   figures the contract declares, so a figure named only by file name would be drawn by nobody.
@@ -651,8 +651,7 @@ def _check_answers(value: Any, asked: dict[str, dict[str, Any]], design: dict[st
     result or derived id as ``metric:<id>``, an equation as ``equation:<id>``, or ``none``; not needed where the plan already
     maps it) and, only if the topic asks for it at one setting, ``at``: a setting of the study with one of its values. Two
     quantities may not end on one number (the paper would print it for both); at the last ask (``same`` given) the ones that
-    still do are put in ``same`` and kept as answered (the paper gives the number once for them, saying it can answer only
-    one: :func:`core.paper_facts.answers_text`), not a reason to refuse the rest."""
+    still do are put in ``same`` and kept as answered, not a reason to refuse the rest."""
     if not isinstance(value, dict):
         return ["the answer for `answers` must be a mapping"]
     lines, _settings, _single = _figure_holds(design)

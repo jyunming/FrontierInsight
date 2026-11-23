@@ -377,7 +377,7 @@ async def test_a_secondary_item_still_missing_is_said_in_the_limitations_and_the
     assert seen == [] and "lid_material" in patch["design"]["protocol"]["grid"]
     note = tr.write_note(eng.quest_root)
     assert "FI's check of the plan against the topic did not find all it asks for" in note and "heat lost per minute" in note
-    assert "through the not_done placeholders" in note and "do not write a result for them" in note
+    assert "not_done" not in note and "do not write a result for them" in note  # FI offers the writer no placeholder for it
     assert tr.write_note(tmp_path / "nowhere") == ""
 
 

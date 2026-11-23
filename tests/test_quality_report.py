@@ -533,3 +533,51 @@ def test_every_figure_fully_drawn_gets_no_line_and_a_missing_or_empty_folder_is_
     _w(root / "figures" / "fig1.png", "x")
     _w(root / "figures" / "fig2.png", "x")
     assert _figure_rows(root) == []
+
+
+def test_what_the_study_did_not_do_is_listed_from_fis_records(tmp_path: Path) -> None:
+    """The paper carries no list of FI's of what the study did not do: QUALITY.md lists each item, one plain sentence each.
+    A quest with no such item has no such section (the known negative)."""
+    root = _finished(tmp_path / "q-items")
+    _w(root / ".fi" / "topic_covered.json", {"left": [{"kind": "factor", "name": "humidity"}]})
+    text = qr.render(qr.build(root))
+    part = text.split("### What the study did not do")[1].split("###")[0]
+    assert "- The topic asks to vary humidity; FI's check did not find a setting of the study's plan that varies it." in part
+    bare = _finished(tmp_path / "q-none")
+    assert "### What the study did not do" not in qr.render(qr.build(bare))
+
+
+def test_each_unsupported_claim_that_stays_in_the_paper_is_a_row_of_its_own(tmp_path: Path) -> None:
+    """A claim the claim check found unsupported stays in the paper as written, unmarked: QUALITY.md lists it, once."""
+    root = _finished(tmp_path / "q-claims")
+    _w(root / ".fi" / "unsupported_claims.json", {"claims": [
+        {"claim": "The lamp dims faster in the cold", "evidence": "no result compares temperatures"},
+        {"claim": "Every bulb lasts a year", "evidence": "no source says so"}]})
+    report = qr.build(root)
+    rows = [p for p in _stage(report, "paper")["problems"]["items"] if "stays as written" in p["text"]]
+    assert len(rows) == 2 and all(p["status"] == "not fixed" for p in rows)
+    assert "The lamp dims faster in the cold" in rows[0]["text"] and "no result compares temperatures" in rows[0]["text"]
+    text = qr.render(report)
+    assert "### What the study did not do" not in text, "listed in its own section, not again under what was not done"
+    _w(root / ".fi" / "unsupported_claims.json", {"claims": []})
+    assert not [p for p in _stage(qr.build(root), "paper")["problems"]["items"] if "stays as written" in p["text"]]
+
+
+def test_every_unsupported_claim_left_in_the_paper_is_listed_in_full_with_its_reason(tmp_path: Path) -> None:
+    """The paper marks none of them, and the paper's problems are shown three at a time and cut short: QUALITY.md lists
+    every one of them in one section, whole, with why it was not found supported (replay of 14 stored papers: 54 of 61
+    such sentences could be read nowhere)."""
+    root = _finished(tmp_path / "q-five")
+    long_tail = " across every setting of the study, whatever the size of the sample and the level of noise in the readings"
+    claims = [{"claim": f"Claim {n}: the lamp dims faster in the cold{long_tail} ({n})",
+               "evidence": f"Reason {n}: no result of the run compares temperatures, and no cited source reports it{long_tail}"}
+              for n in range(1, 6)]
+    _w(root / ".fi" / "unsupported_claims.json", {"claims": claims})
+    text = qr.render(qr.build(root))
+    part = text.split("### Sentences the claim check found unsupported, left in the paper as written")[1].split("\n#")[0]
+    for c in claims:
+        assert f"- {c['claim']} (why: {c['evidence']})" in part, c["claim"][:20]
+        assert text.count(c["claim"]) == 1, "once, in full"
+    _w(root / ".fi" / "unsupported_claims.json", {"claims": []})
+    assert "### Sentences the claim check found unsupported" not in qr.render(qr.build(root)), "none: no section"
+

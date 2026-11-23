@@ -75,7 +75,7 @@ def test_an_sd_is_written_with_its_95_percent_interval_like_a_mean() -> None:
     sd = pv.resolve("Ea_hat:sd @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
     ci = pv.resolve("Ea_hat:sd_ci @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
     assert sd.filled and sd.text == ci.text
-    assert "95% chi-square interval" in sd.text and " trials)" in sd.text and " to " in sd.text
+    assert "95% chi-square CI" in sd.text and " trials)" in sd.text and " to " in sd.text
     value, _dof = pv._sd_of(rec, pv._matching(rec, pv.parse("Ea_hat:sd @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all").where, "Ea_hat"),
                                 "Ea_hat")
     lo, hi = sd.numbers[1], sd.numbers[2]
@@ -83,7 +83,7 @@ def test_an_sd_is_written_with_its_95_percent_interval_like_a_mean() -> None:
     mixed = pv.resolve("Ea_hat:sd @ sigma=0.005, n_points=all, temperature_K=all, interval_type=all", rec)
     assert not mixed.filled and "different settings" in mixed.hit.reason  # one SD over settings that differ is not filled
     mean = pv.resolve("Ea_hat:mean_ci @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec)
-    assert "t interval of the mean" in mean.text  # the way a mean is written is unchanged
+    assert "95% CI" in mean.text  # a mean's interval is named plainly
     assert "chi-square" not in pv.resolve("Ea_hat:mean @ sigma=0.005, n_points=5, temperature_K=all, interval_type=all", rec).text
 
 

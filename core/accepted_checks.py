@@ -493,7 +493,7 @@ def gap(entry: dict[str, Any]) -> str:
 
 def failing_disclosure(record: Any) -> str:
     """What the writer is told about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``:
-    FI states each of them in the paper itself, so the writer does not.
+    the paper's closing sentence points to them and the quality report lists each, so the writer does not.
     A check its trials could not decide is said as not decided and not validated against, in neutral words."""
     if not isinstance(record, dict) or record.get("status") != WENT_ON:
         return ""
@@ -516,8 +516,8 @@ def failing_disclosure(record: Any) -> str:
         out.append(f"These known-answer checks could not be decided at the precision their tolerance needs, and the run "
                    f"went on: {'; '.join(gap(e) for e in undecided)}. Each check was "
                    "not decided, so the result is not validated against it.")
-    # FI states each check itself, with its numbers, in the limitations: the writer does not word the status.
-    out.append("FI states each of these checks itself in the limitations, with its numbers. Do not write, in your own "
+    # FI lists each check itself, with its numbers, in its quality report: the writer does not word the status.
+    out.append("FI lists each of these checks itself in its quality report, with its numbers. Do not write, in your own "
                "sentence anywhere (abstract, methods, results, conclusions), that the results or the code were validated, "
                "verified or confirmed against known answers, and do not describe these checks yourself.")
     return " ".join(out)

@@ -37,8 +37,8 @@ def test_a_sentence_with_a_real_body_is_still_handled_as_before() -> None:
 def test_fi_name_after_underscore_caret_or_brace_is_filled(tmp_path: Path) -> None:
     (tmp_path / ".fi").mkdir()
     for before in ("snake_case_", "x^", "{{trials_per_setting}}"):
-        out = pf.render(f"See {before}{{{{seed}}}} here.", tmp_path)
-        assert "{{seed}}" not in out.text and "fi:fact-seed" in out.text
+        out = pf.render(f"See {before}{{{{interval_level}}}} here.", tmp_path)
+        assert "{{interval_level}}" not in out.text and "fi:fact-interval_level" in out.text
 
 
 def test_a_command_or_a_name_not_fi_s_stays_latex(tmp_path: Path) -> None:

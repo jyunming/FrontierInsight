@@ -1,6 +1,6 @@
 """The statements FI can make about a figure from its own record of what the figure draws.
 
-A writer who describes a figure in words says what the picture "should" show. The root fix is the one ``{{seed}}`` uses:
+A writer who describes a figure in words says what the picture "should" show. The root fix is the one ``{{run_time}}`` uses:
 the fact comes from FI's records. Every figure drawn through FI's drawing calls leaves a *call record*
 (``<stem>.calls.json`` beside the recorder files, written by ``core/frame_figure.py``) holding, per panel, the axes, each
 drawn series with its points, bands, reference lines and notes. This module holds the catalogue of claims over that record.

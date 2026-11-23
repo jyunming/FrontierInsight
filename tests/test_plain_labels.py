@@ -6,9 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
-from core import paper_facts as pf
 from core import paper_values as pv
 from core import results_by_setting as rbs
 from core import trend as tr  # noqa: F401 -- registers the trend: keys
@@ -133,11 +131,6 @@ def test_plain_label_falls_back(tmp_path: Path) -> None:
     text, changed = rbs.plain_formula({"labels": {"m": "Tests"}}, "1 - 0.05/m")
     assert (text, changed) == ("1 - 0.05/Tests", True)
     assert rbs.plain_formula({"labels": {}}, "1 - 0.05/m") == ("1 - 0.05/m", False)
-
-
-@pytest.mark.parametrize("name", ["score_pct"])
-def test_pf_is_importable(name: str) -> None:
-    assert pf.answers_text  # the answers lines are tested in test_answers_block.py
 
 
 def test_a_formula_changes_only_whole_names_not_numbers_commands_or_longer_names() -> None:

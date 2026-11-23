@@ -250,15 +250,14 @@ def notes(topic: str, scripts: list[str], result: Any = None, figure_count: int 
     return out
 
 
-def unplaced_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None, held: set[str],
-                     placed: set[str]) -> list[dict[str, str]]:
-    """The quantities the topic asks for, that FI holds a value for and the paper never places.
+def asked_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None, held: set[str]) -> list[dict[str, str]]:
+    """The quantities the topic asks for that FI holds a value for, each with the metric that answers it.
 
     All from FI's own records, no wording compared: ``req`` is what the topic asks for (``.fi/topic_requirements.json``),
-    the plan's own ``protocol.topic_map`` names the metric that answers each quantity, ``held`` is the metrics FI has a
-    value for (the trials' and the analysis's recorded ones, by name), and ``placed`` is the metrics the paper places with a
-    key FI filled (:func:`core.paper_values.placed_metrics`). Only a quantity the topic's reading marks as main is held to
-    this. One ``{"name", "metric", "sentence"}`` per quantity, in the topic's order."""
+    the plan's own ``protocol.topic_map`` names the metric that answers each quantity, and ``held`` is the metrics FI has a
+    value for (the trials' and the analysis's recorded ones, by name). Only a quantity the topic's reading marks as main
+    is asked. One ``{"name", "metric", "label"}`` per quantity, in the topic's order: what the writer is given before every
+    draft (:func:`core.paper_values.asked_lines`) and what :func:`unplaced_answers` holds the paper to."""
     from . import topic_requirements as _topic_req
 
     if not isinstance(req, dict) or not isinstance(protocol, dict):
@@ -273,10 +272,25 @@ def unplaced_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None
         if mapped is None or mapped[0] not in ("ok", "judge"):
             continue
         metric = mapped[1]
-        if metric not in held or metric in placed:
+        if metric not in held:
             continue
-        name = str(item.get("name") or metric)
-        what = f" ({labels[metric]})" if labels.get(metric) else ""
-        out.append({"name": name, "metric": metric, "sentence": (
-            f"The topic asks for {name}; FI has a value for it (`{metric}`{what}) and the paper never gives it.")})
+        out.append({"name": str(item.get("name") or metric), "metric": metric, "label": labels.get(metric, "")})
+    return out
+
+
+def unplaced_answers(req: dict[str, Any] | None, protocol: dict[str, Any] | None, held: set[str],
+                     placed: set[str], *, sources: dict[str, set[str]] | None = None) -> list[dict[str, str]]:
+    """The quantities the topic asks for (:func:`asked_answers`) that the paper never places: ``placed`` is the metrics
+    the paper places with a key FI filled (:func:`core.paper_values.placed_metrics`), and a quantity is placed too when
+    the paper places the per-trial quantity it is the mean of at every setting (``sources``,
+    :meth:`core.paper_values.Records.mean_sources`: the same number). One ``{"name", "metric", "sentence"}`` per
+    quantity, in the topic's order."""
+    out: list[dict[str, str]] = []
+    for a in asked_answers(req, protocol, held):
+        metric = a["metric"]
+        if metric in placed or (sources or {}).get(metric, set()) & placed:
+            continue
+        what = f" ({a['label']})" if a.get("label") else ""
+        out.append({"name": a["name"], "metric": metric, "sentence": (
+            f"The topic asks for {a['name']}; FI has a value for it (`{metric}`{what}) and the paper never gives it.")})
     return out

@@ -963,38 +963,11 @@ def from_quest(quest_root: Path, protocol: dict[str, Any] | None,
     return _trial_table.rows_of(summarised, _diagnostics(protocol)), built
 
 
-def _mark_bound_breaks(built: Built | None, protocol: dict[str, Any] | None, quest_root: Path) -> None:
-    """The table of a quantity FI kept although its values break a bound the plan only expected
-    (:func:`core.result_checks.kept_bound_breaks`) carries FI's mark in its title, as each number of it the paper prints does
-    (core/paper_values.py), and its caption says which range they are outside. Changed in place; nothing else changes."""
-    kept = dict(_result_checks.marked_quantities(quest_root))
-    for m in (protocol.get("metrics") if isinstance(protocol, dict) and kept else None) or []:
-        if isinstance(m, dict) and str(m.get("id") or "").strip() in kept:
-            kept.setdefault(_refs.value_name(m), kept[str(m["id"]).strip()])  # the name the trials return it under
-    for t in (built.tables if built is not None else []):
-        record = kept.get(t.value)
-        if record is None:
-            continue
-        why = (f" Its values are outside the range the plan expected ({record.get('bound')}), so they are marked "
-               f"{_result_checks.BOUND_MARK}." if record.get("bound") else "")
-        if not why and record.get("unconfirmed_by"):
-            ids = ", ".join(record["unconfirmed_by"])
-            why = (f" Equation{'s' if len(record['unconfirmed_by']) > 1 else ''} {ids} could not be confirmed before the run, "
-                   f"so the values it may reach are marked {_result_checks.BOUND_MARK}.")
-        if not why and record.get("note"):
-            why = f" {str(record['note'])[:1].upper()}{str(record['note'])[1:]}, so the values are marked {_result_checks.BOUND_MARK}."
-        t.name = f"{t.name or t.value} {_result_checks.BOUND_MARK}"
-        t.caption += why
-        if t.paper_caption:
-            t.paper_caption += why
-
-
 def write(quest_root: Path, protocol: dict[str, Any] | None, judged: list[dict[str, Any]] | None = None,
           labels: set[str] | None = None) -> Built | None:
     """Build from the quest's records and write ``paper/results_by_setting.md`` / ``.tex`` / ``.csv`` and
     ``paper/reference_values.json``; ``None`` without a trial record."""
     _rows, built = from_quest(quest_root, protocol, judged, labels)
-    _mark_bound_breaks(built, protocol, Path(quest_root))
     block_path = Path(quest_root) / PAPER_BLOCK
     block = paper_block(built)
     if block:

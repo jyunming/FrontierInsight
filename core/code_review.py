@@ -36,8 +36,8 @@ can change a reported result as an item FI fills in and checks is there, :mod:`c
   converged. A version that a repair of the run itself (a crash, a result the protocol's contract refuses) changed after
   that reading is read again before its results are used, within :data:`RUN_REPAIR_READS` more readings.
 * What is still open afterwards is said in the paper's limitations by the writer (:func:`write_note`); an open finding that
-  can change a reported result is also an item FI fills into the Limitations itself and checks is there
-  (:mod:`core.paper_facts`, ``{{not_done:<id>}}``). A high-severity finding about
+  can change a reported result is also an item of FI's own record, listed in QUALITY.md (:mod:`core.paper_facts`,
+  ``CODE_FINDING``). A high-severity finding about
   a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
   final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
   contradict it (a quantity the reviewer calls missing that the results hold, one it calls constant that they show
@@ -2138,54 +2138,6 @@ def flagged_checks(quest_root: Path, code_dir: Path, names: list[str]) -> dict[s
         for name in names:
             if name not in out and _names_check(f"{v.get('text') or ''}", str(name)):
                 out[name] = text
-    return out
-
-
-def touched_results(quest_root: Path, code_dir: Path, places: Any, declared: Any = None) -> dict[str, list[str]]:
-    """``{finding id: the declared results it changes}`` for each unresolved finding that can change a reported result: the
-    set the paper's required items hold for an open code finding (:func:`open_findings` with ``changes_result`` not false and
-    no gate outcome of its own, plus a shown fault whose test errored at the evidence gate). Which results a finding changes
-    is FI's own fact: ``places(file, function)`` (:meth:`core.shown_reach.Reach.touched_by`, from the call graph of the study's
-    code) for the function the finding records. A finding with no file or function that FI wrote down against a metric of the
-    plan (a problem of kind ``metric`` linked to it, whose ``name`` is the id of one of the ``declared`` results) marks that
-    result; one linked only to a dependent variable (the plan's prose), or one FI cannot place, marks nothing.
-    The words of the finding are never read. Reads the records only."""
-    from . import code_findings as _code_findings
-
-    record = load(quest_root)
-    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
-    found = open_findings(quest_root, code_dir)
-    gated = {str(f) for f, x in issues.items() if isinstance(x, dict) and isinstance(x.get("at_gate"), dict)
-             and _code_findings.flagged_now(x) and x["at_gate"].get("outcome") in ("left_out", "not_computed")}
-    cands: list[tuple[str, dict[str, Any]]] = []
-    for fid, x in issues.items():
-        if (isinstance(x, dict) and isinstance(x.get("gate_error"), dict) and str(fid) not in gated
-                and x.get("changes_result") is True and _code_findings.flagged_now(x) and _code_findings.shown_by_assertion(x)):
-            cands.append((str(fid), x))
-    for v in [*found["missing"], *found["different"], *found["flagged"], *found["unshown"], *found["not_rechecked"]]:
-        fid = str(v.get("fid") or "")
-        issue = issues.get(fid) if fid else None
-        if not fid or fid in gated:
-            continue
-        changes = (issue.get("changes_result") if isinstance(issue, dict) and issue.get("changes_result") is not None
-                   else _code_findings.changes_result(v))
-        if changes and fid not in {c[0] for c in cands}:
-            cands.append((fid, {**(issue if isinstance(issue, dict) else {}), **{k: x for k, x in v.items() if x}}))
-    ids = {str(i) for i in declared or []}
-    metric_of: dict[str, list[str]] = {}
-    for p in record.get("problems") or []:
-        if isinstance(p, dict) and p.get("kind") == "metric" and str(p.get("name") or "") in ids and p.get("fid"):
-            metric_of.setdefault(str(p["fid"]), [])
-            if str(p["name"]) not in metric_of[str(p["fid"])]:
-                metric_of[str(p["fid"])].append(str(p["name"]))
-    out: dict[str, list[str]] = {}
-    for fid, x in cands:
-        file, function = str(x.get("file_rel") or x.get("file") or "").strip(), str(x.get("function") or "").strip()
-        got = places(file, function) if file and function else None
-        if not got and not file and not function:
-            got = metric_of.get(fid)  # the plan's own metric id, written against the finding by FI (not read from its words)
-        if got:
-            out[fid] = list(got)
     return out
 
 

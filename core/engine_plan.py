@@ -1615,9 +1615,9 @@ class PlanStageMixin:
     async def _ask_plan_for_the_answers(self, design: Any, plan_sha: str, req: dict[str, Any]) -> tuple[Any, str]:
         """The main quantities of the topic that the plan's own map (``protocol.topic_map``) does not yet place are asked of the
         plan's model in one question (:func:`core.contract_parts.ask_parts`, the ``answers`` part, at most ``MAX_ASKS`` asks):
-        which result answers each, and at which value of a setting where the topic asks for it at one. The answers block of the
-        paper is built from this map. A quantity the plan cannot map stays unmapped (the block says so). Never a stop. Returns
-        the design to use and its plan's hash."""
+        which result answers each, and at which value of a setting where the topic asks for it at one. The review holds the
+        paper to this map (a main quantity FI holds a value for must be placed). A quantity the plan cannot map stays
+        unmapped. Never a stop. Returns the design to use and its plan's hash."""
         protocol = design.get("protocol") if isinstance(design, dict) else None
         asked = _topic_req.quantities_to_place(req, protocol) if isinstance(protocol, dict) else {}
         if (not asked or self._client is None or _frozen.load(self.quest_root) is not None

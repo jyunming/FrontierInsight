@@ -693,8 +693,9 @@ def test_pointer_rule_runs_in_write_post_processing(tmp_path: Path) -> None:
     kept = paper_facts.kept_check(eng.quest_root)
     left_out = [d for d in kept["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
     assert {d["key"].split(":")[1] for d in left_out} == {"error_vs_step"} and {d["figure"] for d in left_out} == {"1"}
-    # one disclosure for the figure, in the Limitations of the same write
-    assert after.count("some statements about this figure could not be checked") == 1
+    # one item for the figure in the record QUALITY.md lists, none in the paper
+    assert "some statements about this figure could not be checked" not in after
+    assert _listed(eng.quest_root, "some statements about this figure could not be checked") == 1
     assert not hits or all("figure" not in h.lower() for h in hits)
 
 
@@ -720,6 +721,13 @@ WRITER_DRAFT = (
     "## Discussion\nIt is small.\n"
 )
 DISCLOSURE = "some statements about this figure could not be checked"
+
+
+def _listed(root, said: str) -> int:
+    """How many of the things the study did not do (QUALITY.md's list, from FI's records) say ``said``."""
+    from core import paper_facts
+
+    return sum(said in item.sentence for item in paper_facts.required_items(root))
 
 
 def _write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drafts: list[str], calls: dict | None, *,
@@ -769,7 +777,7 @@ def test_an_unkept_figure_sentence_is_gone_after_the_first_write_with_rounds_lef
     assert "falls steeply" not in paper and "three orders" not in paper
     assert "scheme A is drawn" in paper and "(Figure 1)." in paper, "FI's own sentence is there"
     assert "Figure 2 shows the time each size took." in paper, "a figure with no call record is left as it was"
-    assert paper.count(DISCLOSURE) == 1, "the Limitations say so in the same write"
+    assert DISCLOSURE not in paper and _listed(tmp_path, DISCLOSURE) == 1, "QUALITY.md's list says so, the paper does not"
     # one line per figure: the count and the first 80 characters of each removed sentence
     lines = [ln for ln in eng.said if "statements about Figure 1" in ln]
     assert len(lines) == 1 and "left out (1)" in lines[0]
@@ -782,10 +790,8 @@ def test_the_disclosure_survives_the_review_that_follows_and_a_clean_rewrite_cle
 
     eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
     eng._paper_record_hits(_paper(state), state)  # type: ignore[arg-type]  # the review's record check, rounds left
-    assert _paper(state).count(DISCLOSURE) == 1
+    assert _listed(tmp_path, DISCLOSURE) == 1 and DISCLOSURE not in _paper(state)
     assert any(str(d.get("key")).startswith("figure:") for d in paper_facts.kept_check(tmp_path)["taken_out_values"])
-    eng._restate_limitations(state, "again")  # type: ignore[arg-type]
-    assert _paper(state).count(DISCLOSURE) == 1, "a later restatement of the Limitations still says it"
     # the paper written again with nothing to take out says nothing older
     clean = WRITER_DRAFT.replace(FREE, "The error is compared across the schemes.")
 
@@ -793,8 +799,8 @@ def test_the_disclosure_survives_the_review_that_follows_and_a_clean_rewrite_cle
         return clean
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-    out = asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
-    assert DISCLOSURE not in Path(out["paper_md"]).read_text(encoding="utf-8")
+    asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
+    assert _listed(tmp_path, DISCLOSURE) == 0
     assert not any(str(d.get("key")).startswith("figure:")
                    for d in (paper_facts.kept_check(tmp_path).get("taken_out_values") or []))
 
@@ -802,7 +808,7 @@ def test_the_disclosure_survives_the_review_that_follows_and_a_clean_rewrite_cle
 def test_a_rewrite_after_a_first_write_is_taken_out_too(tmp_path, monkeypatch) -> None:
     again = WRITER_DRAFT.replace("**Cost.**", "**Cost.** Figure 1 also shows a clear bend.")
     eng, state, outs = _write(tmp_path, monkeypatch, [WRITER_DRAFT, again], _record(_panel()), max_iterations=5)
-    assert "bend" not in _paper(outs[1]) and _paper(outs[1]).count(DISCLOSURE) == 1
+    assert "bend" not in _paper(outs[1]) and _listed(tmp_path, DISCLOSURE) == 1
     # the last round, or not, paper_keys or not: the record check finds nothing left to take out
     assert eng._paper_record_hits(_paper(outs[1]), outs[1]) is not None  # type: ignore[arg-type]
     assert "bend" not in _paper(outs[1])
@@ -838,7 +844,7 @@ def test_a_sentence_naming_a_legacy_and_a_checked_figure_is_a_left_out_statement
     eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
     paper = _paper(state)
     assert "the error falls" not in paper and "Figure 2 shows the time each size took." in paper
-    assert paper.count(DISCLOSURE) == 1
+    assert _listed(tmp_path, DISCLOSURE) == 1
     assert any("statements about Figure 1 (error_vs_step)" in m for m in eng.said)  # type: ignore[attr-defined]
 
 
@@ -848,7 +854,7 @@ def test_a_sentence_with_fis_statement_and_unsupported_words_keeps_only_fis_stat
     _eng, state, _ = _write(tmp_path, monkeypatch, [draft], _record(_panel()))
     paper = _paper(state)
     assert "proves the method" not in paper and "scheme A decreases over the drawn points" in paper
-    assert paper.count(DISCLOSURE) == 1
+    assert _listed(tmp_path, DISCLOSURE) == 1
 
 
 def test_a_result_key_removed_with_a_figure_sentence_at_write_is_kept_for_the_quality_report(tmp_path) -> None:
@@ -948,24 +954,11 @@ def _break_rule(monkeypatch) -> None:
     monkeypatch.setattr("core.figure_claims.apply_pointer_rule", broken)
 
 
-def test_a_first_round_paper_whose_figure_pass_raised_says_so_in_its_limitations(tmp_path, monkeypatch) -> None:
+def test_a_first_round_paper_whose_figure_pass_raised_is_listed_in_quality_not_in_the_paper(tmp_path, monkeypatch) -> None:
     _break_rule(monkeypatch)
     _eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
-    assert _paper(state).count(FIGURE_PASS_SAID) == 1, "no model call and no later round needed"
-
-
-def test_a_failure_to_say_the_figure_pass_fault_never_fails_the_write_node(tmp_path, monkeypatch) -> None:
-    from core.engine import Engine
-
-    _break_rule(monkeypatch)
-
-    def broken_restate(self, *a, **k):  # noqa: ANN001
-        raise RuntimeError("planted restate")
-
-    monkeypatch.setattr(Engine, "_restate_limitations", broken_restate)
-    eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
-    assert "falls steeply" in _paper(state), "the paper stays as it was written"
-    assert [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"], "the record stays"
+    assert _listed(tmp_path, FIGURE_PASS_SAID) == 1, "no model call and no later round needed"
+    assert FIGURE_PASS_SAID not in _paper(state)
 
 
 def test_a_later_clean_write_clears_the_figure_pass_fault(tmp_path, monkeypatch) -> None:
@@ -973,15 +966,15 @@ def test_a_later_clean_write_clears_the_figure_pass_fault(tmp_path, monkeypatch)
 
     _break_rule(monkeypatch)
     eng, state, _ = _write(tmp_path, monkeypatch, [WRITER_DRAFT], _record(_panel()), max_iterations=3)
-    assert FIGURE_PASS_SAID in _paper(state) and (tmp_path / paper_facts.FIGURE_PASS_RECORD).is_file()
+    assert _listed(tmp_path, FIGURE_PASS_SAID) == 1 and (tmp_path / paper_facts.FIGURE_PASS_RECORD).is_file()
     monkeypatch.undo()  # the rule works again (the fake model is put back below)
 
     async def same(self, messages, **kw):  # noqa: ANN001
         return WRITER_DRAFT
 
     monkeypatch.setattr("core.engine.LLMClient.chat", same)
-    out = asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
-    assert FIGURE_PASS_SAID not in Path(out["paper_md"]).read_text(encoding="utf-8")
+    asyncio.run(eng._node_write({**state, "iteration": 1}))  # type: ignore[arg-type]
+    assert _listed(tmp_path, FIGURE_PASS_SAID) == 0
     assert not (tmp_path / paper_facts.FIGURE_PASS_RECORD).exists()
     assert not [p for p in eng._cannot_repair_problems() if p.get("check") == "figure_pass_fault"]
 

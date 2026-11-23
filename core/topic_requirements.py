@@ -465,7 +465,7 @@ def map_entries(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict
 def answer_key(entry: dict[str, Any]) -> tuple[str, str, str] | None:
     """What one map entry makes the paper print: the result, the setting it is read at and the statistic, ``None`` for an
     entry that names no result. Two quantities with the same key are given the same number (a setting's value ``10`` and
-    ``10.0`` are one value, as in the paper's own check, ``core.paper_facts._number_place``)."""
+    ``10.0`` are one value)."""
     by = str(entry.get("by") or "").strip()
     if not by or by == "none":
         return None
@@ -1283,8 +1283,7 @@ def write_note(quest_root: Any) -> str:
     if left:
         sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
         parts.append(f"FI's check of the plan against the topic did not find all it asks for: {sentences}. Say so in the "
-                     "limitations, through the not_done placeholders listed under FI's record of this run (below); do not "
-                     "write a result for them.")
+                     "limitations, in your own words; do not write a result for them.")
     if unjudged:
         parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
                      "plainly in the limitations that this was not checked.")
