@@ -947,7 +947,10 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
     base = int(_phased.seed_env(quest_root, {"FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}, record=False)
                .get("FI_REPLICATE_SEED") or 0)
     cells: dict[str, dict[str, Any]] = {}
-    for listed, cell in enumerate(_search.iter_grid_cells(grid)):
+    # A study cut at the time limit planned the first settings of the order it ran in (core/run_checks.py records it).
+    sized = _estimate.read_record(quest_root).get("truncated")
+    spread = isinstance(sized, dict) and sized.get("order") == _tr.ORDER_SPREAD
+    for listed, cell in enumerate(_search.iter_spread_cells(grid) if spread else _search.iter_grid_cells(grid)):
         key = _tr.cell_key(cell)
         if key in ledger.planned:
             cells.setdefault(key, cell)
@@ -990,7 +993,8 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
         executor, python, root, f"code/{SIMULATE_NAME}", grid, runs_per_setting=runs, base_seed=base,
         deterministic=deterministic, timeout_s=max(1, int(timeout_s)), env=env, thresholds=thresholds, paired=paired,
         on_plan=seen.append, in_each_run=inside, at_once=max(1, int(at_once)), per_process=shared or 1, groups=groups,
-        group_allowance_s=allowance, cell_list=[cells[k] for k in ledger.planned if k not in cut]))
+        # in the order the delivered run queued them (``cells`` was filled in that order: the spread-out one of a cut)
+        group_allowance_s=allowance, cell_list=[cell for k, cell in cells.items() if k not in cut]))
     if say is not None:
         run = await _say_while(task, lambda elapsed: _plan_progress(root, seen, elapsed), say, finding)
     else:

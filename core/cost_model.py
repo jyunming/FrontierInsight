@@ -353,8 +353,8 @@ def from_legacy_record(quest_root: Path | str) -> CostModel | None:
 
 def verdict(model: CostModel, limit_s: float | None = None) -> str:
     """What the record says of a study against the time allowed (``limit_s``, else the record's own): ``fits`` (the padded
-    estimate is within it), ``run_to_limit`` (over it, but one setting fits: FI runs the plan's order up to the limit and
-    says so) or ``stop`` (not even one setting fits). ``unknown`` when the record holds no estimate."""
+    estimate is within it), ``run_to_limit`` (over it, but one setting fits: FI runs the study up to the limit and says so;
+    a grid in an order spread over the plan's values, and first asked of the plan once when fewer than one in ten fit) or ``stop`` (not even one setting fits). ``unknown`` when the record holds no estimate."""
     limit = float(limit_s if limit_s is not None else (model.limit_s or 0.0))
     total = model.printed_s
     if not total or limit <= 0:

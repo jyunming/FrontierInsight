@@ -263,17 +263,22 @@ async def test_a_grid_of_more_settings_than_fi_lists_is_planned_lazily_and_run_u
         SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), quest_root=eng.quest_root,
         protocol=lambda: protocol, deterministic=False,
         simulate=code / "simulate.py", analysis=code / "experiment.py", log=eng._log)
-    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    # far fewer than one in ten fit: the plan is asked once for a study that fits (tests/test_too_big_to_fit.py); asked
+    # already, the study is cut
+    assert await eng._size_the_run({"iteration": 0, "evidence_fit_redesigns": 1}, runner, sys.executable, None) is None
     cut = _cut(eng)
     assert cut["settings"] == 640000 and 1 <= cut["planned_settings"] < 500000 and runner.first_cells == cut["planned_settings"]
+    assert cut["order"] == "spread" and runner.order == trial_runner.ORDER_SPREAD
     result = await runner.execute([sys.executable, str(code / "experiment.py")], cwd=eng.quest_root, timeout_s=12, env={})
     assert result.returncode == 0, result.stderr
     rows = trial_runner.read_ledger(eng.quest_root)
     planned = {r["cell"] for r in rows}
-    assert 1 <= len(planned) <= cut["planned_settings"] and "n=0,m=0" in planned, "the first settings of the plan, in its order"
+    assert 1 <= len(planned) <= cut["planned_settings"] and "n=0,m=0" in planned
+    spread = {trial_runner.cell_key(c) for c in itertools.islice(optimise_search.iter_spread_cells(big), len(planned))}
+    assert planned == spread, "the first settings of the spread-out order, not the plan's first few"
     assert any(r["status"] == "ok" for r in rows)
     said = disclosure.cut_short_text(eng.quest_root)
-    assert "640,000 settings" in said and "only as far as the time limit allowed" in said
+    assert "640,000 settings" in said and "only as far as the time limit allowed" in said and "spread-out order" in said
     # the record of the run is not rejected for the settings that were never planned
     manifest, row_problems = run_manifest.manifest_from_ledger(protocol, rows, {})
     assert not row_problems

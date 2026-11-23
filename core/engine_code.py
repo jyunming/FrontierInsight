@@ -1116,12 +1116,14 @@ class CodeStageMixin:
             grid_cut = (isinstance(cut, dict) and isinstance(cut.get("planned_settings"), int)
                         and cut["planned_settings"] < int(cut.get("settings") or 0))
             if grid_cut:
-                # More settings than FI lists: only the first of the plan's settings were planned and run (the paper says
-                # so, core/disclosure.py::cut_short_text). The run cannot cover the whole grid, so it is not compared with
-                # it (the manifest's coverage of the grid is left out); every value the analysis reports is still held to
-                # the trials FI ran, one by one, below.
-                self._manifest_note = (f"only the first {cut['planned_settings']:,} of the plan's {int(cut['settings']):,} "
-                                       "settings were planned, so the run was not compared with the whole grid")
+                # More settings than FI lists: only some of the plan's settings were planned and run (the paper says so,
+                # core/disclosure.py::cut_short_text). The run cannot cover the whole grid, so it is not compared with it
+                # (the manifest's coverage of the grid is left out); every value the analysis reports is still held to the
+                # trials FI ran, one by one, below.
+                which = ("" if cut.get("order") == "spread" else "the first ")
+                self._manifest_note = (f"only {which}{cut['planned_settings']:,} of the plan's {int(cut['settings']):,} "
+                                       "settings were planned" + (", spread over the plan's values" if not which else "")
+                                       + ", so the run was not compared with the whole grid")
             # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
             # value by value, not only counted.
             per_cell, altered = _trial_runner.recorded_values_by_cell(self.quest_root)

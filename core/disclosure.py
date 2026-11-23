@@ -932,7 +932,8 @@ def _setting_counts(quest_root: Path, run_id: str = "") -> tuple[int, int, int, 
 def cut_short_text(quest_root: Path) -> str:
     """What the paper and the quality report must say of a study FI ran only up to the time limit because its own timing
     said the whole study would not fit (``.fi/run_estimate.json`` ``truncated``, written by the run's sizing): the time it
-    estimated against the time allowed, that the plan's own order was kept, and, from FI's trial ledger and its record of
+    estimated against the time allowed, the order the settings ran in (spread over the plan's values for a grid FI cut,
+    ``order: spread``; the plan's own for a search and for an older record), and, from FI's trial ledger and its record of
     the search, how much of the plan ran and how much did not. ``""`` when the study was not cut. Nothing is asked of a
     model: every number is FI's own record."""
     from .run_estimate import plain_duration
@@ -945,14 +946,18 @@ def cut_short_text(quest_root: Path) -> str:
     est, limit = cut.get("estimate_s"), cut.get("limit_s")
     if not (isinstance(est, (int, float)) and isinstance(limit, (int, float))):
         return ""
+    spread = cut.get("order") == "spread" and cut.get("kind") != "search"
     said = (f"FI estimated that the plan's study would take {'at least ' if cut.get('at_least') else 'about '}"
             f"{plain_duration(float(est))}, more than the {plain_duration(float(limit))} allowed, so it ran the plan's "
-            "settings in the plan's order until the time limit; the results cover only what ran")
+            + ("settings in an order spread over the plan's values instead of the plan's order" if spread
+               else "settings in the plan's order")
+            + " until the time limit; the results cover only what ran")
     parts: list[str] = []
     listed, total_settings = _whole(cut.get("planned_settings")), _whole(cut.get("settings"))
     if listed and total_settings and listed < total_settings:
-        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so it planned them in the plan's order, "
-                     "a few at a time, and only as far as the time limit allowed")
+        parts.append(f"the plan has {total_settings:,} settings, more than FI lists, so it planned them "
+                     + ("in that spread-out order" if spread else "in the plan's order")
+                     + ", a few at a time, and only as far as the time limit allowed")
     run_id = str(cut.get("run_id") or "")
     counts = _setting_counts(root, run_id)
     if counts is not None:
