@@ -1433,7 +1433,7 @@ def test_an_fi_line_whose_data_the_body_changed_is_a_custom_drawing(tmp_path, fr
     assert _raw_after(tmp_path, frame5, change) == [True, False]
     reasons = [p["raw_reason"] for p in json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))["panels"]]
     assert reasons == ["drawing changed after FI's call", None]
-    assert _raw_after(tmp_path, frame5, lambda fig: (fig.line(1, "slow", [1, 2], [2.0, 1.0], "growth"), fig.axes[1].lines[0].remove()))         == [False, True]
+    assert _raw_after(tmp_path, frame5, lambda fig: (fig.line(1, "slow", [1, 2], [1.0, 2.0], "growth"), fig.axes[1].lines[0].remove()))         == [False, True]
 
 
 def test_categories_numeric_strings_and_large_arrays_are_verified_without_a_fault(tmp_path, frame5):
@@ -1443,7 +1443,7 @@ def test_categories_numeric_strings_and_large_arrays_are_verified_without_a_faul
         table.mean("growth", "size=1")
         fig.line(0, "fast", ["a", "b"], [1.0, 2.0], "growth")
         fig.line(1, "fast", ["1", "2"], [1.0, 2.0], "growth")
-        fig.bars(1, "slow", ["1", "2"], [3.0, 4.0], "growth")
+        fig.bars(1, "slow", ["1", "2"], [1.0, 2.0], "growth")
 
     out = _calls_run(tmp_path, body)
     assert out["status"] == "ok" and out["declared"]["raw_panels"] == []
@@ -1455,7 +1455,7 @@ def test_categories_numeric_strings_and_large_arrays_are_verified_without_a_faul
 def test_a_body_using_only_fi_calls_stays_verified(tmp_path, frame5):
     def body(fig, table):
         _drawn(fig, table, 0)
-        fig.line(0, "slow", [1, 2], [2.0, 1.0], "growth", yerr=[0.1, 0.2])
+        fig.line(0, "slow", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2])  # the table's values: drawn
         fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
         fig.ref(0, "limit")
         fig.note(0, what="mean growth: {growth}", key="size=1")
@@ -1941,14 +1941,59 @@ def test_a_one_panel_figure_holds_a_setting_and_its_line_is_named_from_the_table
     assert "computed value" not in json.dumps(record)
 
 
-def test_a_held_one_panel_line_that_is_not_the_tables_value_there_is_still_named_neutrally(tmp_path, frame5):
+def test_a_held_one_panel_line_that_is_not_the_tables_value_there_is_left_out(tmp_path, frame5):
     def body(fig, table):  # mode b's values drawn on a panel that says mode a
         fig.panel(0, mode="a")
         fig.line(0, "growth", [1, 2], [5.0, 7.0], "growth")
 
     out = _one_panel_hold_run(tmp_path, body)
-    record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
-    assert out["status"] == "ok" and "computed value" in json.dumps(record), (out, record)
+    # the only line is left out, so the figure draws nothing: it is not drawn, and FI says why (the repair is told)
+    assert out["status"] == "failed", out
+    assert "drew nothing on panel 1. FI left out what it drew there: the drawn values are not FI's record of" in out["said"], out
+
+
+class _TwoResultTable(_TwoSettingTable):
+    """The two modes of :class:`_TwoSettingTable` with a second result, spread, of its own values."""
+
+    declared = ["growth", "spread"]
+
+    def mean(self, ident, key):
+        self.gave_values.add(ident)
+        base = super().mean("growth", key)
+        return base if ident == "growth" else 10.0 * base
+
+
+def _panels_run(tmp_path, body, panels):
+    ns = types.SimpleNamespace(figure_g=body, COMPARED={})
+    spec = {"id": "g", "file": "g.png", "panels": panels, "x": "size", "series": None, "shows": ["growth", "spread"],
+            "settings": {"size": [1, 2], "mode": ["a", "b"]},
+            "labels": {"size": "Colony size", "mode": "Mode", "growth": "Growth", "spread": "Spread"}}
+    return af.run_figures([spec], ns, _TwoResultTable(), str(tmp_path / "figures"))[0]
+
+
+def test_a_one_panel_figure_whose_only_curve_is_left_out_names_the_reason(tmp_path, frame5):
+    # The panel numbers of the record and of the empty panels agree (both from 1): the repair is told why the panel is empty.
+    out = _panels_run(tmp_path, lambda fig, t: (fig.panel(0, mode="a"), fig.line(0, "growth", [1, 2], [5.0, 7.0], "growth")), 1)
+    assert out["status"] == "failed", out
+    assert "drew nothing on panel 1. FI left out what it drew there: the drawn values are not FI's record of Growth." \
+        in out["said"], out
+
+
+def test_the_reason_of_an_emptied_panel_is_that_panels_own(tmp_path, frame5):
+    # Panel 1 keeps its growth curve and loses a spread curve; panel 2 loses its only curve, a growth curve. The figure fails
+    # on panel 2 alone, with panel 2's reason, never panel 1's.
+    def body(fig, t):
+        fig.panel(0, mode="a")
+        fig.line(0, "growth", [1, 2], [1.0, 2.0], "growth")  # FI's record at mode a: drawn
+        fig.line(0, "spread", [1, 2], [50.0, 70.0], "spread")  # mode b's spread on the mode a panel: left out
+        fig.panel(1, mode="b")
+        fig.line(1, "growth", [1, 2], [1.0, 2.0], "growth")  # mode a's growth on the mode b panel: left out
+
+    out = _panels_run(tmp_path, body, 2)
+    assert out["status"] == "failed", out
+    assert "drew nothing on panel 2. FI left out what it drew there: the drawn values are not FI's record of Growth." \
+        in out["said"], out
+    assert "Spread" not in out["said"] and "panel 1" not in out["said"], out
 
 
 def test_a_one_panel_hold_of_a_value_the_plan_does_not_have_is_refused(tmp_path, frame5):

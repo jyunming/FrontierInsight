@@ -322,7 +322,34 @@ def _not_drawn(calls, panel, a, fmt, ctx):
             if s.get("id") == a["series"] or (merged is not None and (
                     not isinstance(merged, list) or a["series"] in merged)):
                 return None
-    return f"{plan_ids[a['series']] or a['series']} is not drawn in this figure", {}
+    return f"{plan_ids[a['series']] or _plan_words(calls, a['series']) or a['series']} is not drawn in this figure", {}
+
+
+def _plan_words(calls, sid):
+    """The plan's words for a series the plan names and the figure does not draw, from the figure's record: one FI left out
+    (``left_out`` of a panel) by the name it was left out under; a level curve (FI's id ``<result>@<setting>:<level>``) by its
+    result's label and its setting's label, read from another curve of that result and setting in the record, and the level.
+    ``""`` when the record holds neither."""
+    panels = [p for p in calls.get("panels") or [] if isinstance(p, dict)]
+    for p in panels:
+        for e in p.get("left_out") or []:
+            if isinstance(e, dict) and e.get("id") == sid and isinstance(e.get("name"), str) and e["name"]:
+                return e["name"]
+    result, at, rest = sid.partition("@")
+    setting, colon, level = rest.partition(":")
+    if not (result and at and setting and colon and level):
+        return ""
+    for p in panels:
+        for s in p.get("series") or []:
+            lv = s.get("level") if isinstance(s, dict) else None
+            if isinstance(lv, dict) and lv.get("result") == result and lv.get("setting") == setting \
+                    and lv.get("result_label") and lv.get("setting_label"):
+                return f"{lv['result_label']} at {lv['setting_label']} = {level}"
+        for e in p.get("left_out") or []:
+            if isinstance(e, dict) and e.get("declared") == result and str(e.get("id", "")).startswith(f"{result}@{setting}:") \
+                    and e.get("label") and e.get("setting_label"):
+                return f"{e['label']} at {e['setting_label']} = {level}"
+    return ""
 
 
 def _range(calls, panel, a, fmt, ctx):

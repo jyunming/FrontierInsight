@@ -241,7 +241,7 @@ def test_a_figure_axis_fi_could_not_tie_to_the_quantity_does_not_drop_the_figure
     (tmp_path / "figures").mkdir()
     (tmp_path / ".fi" / "figure_records").mkdir(parents=True)
     for stem, x in (("tied", {"id": "yield_frac", "kind": "result"}),
-                    ("untied", {"id": "yield_frac", "kind": "result", "label": "computed x", "neutral": True}),
+                    ("untied", {"id": "yield_frac", "kind": "result", "label": "Yield fraction", "neutral": True}),
                     ("other", {"id": "load", "kind": "result"})):
         (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
         (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(json.dumps(

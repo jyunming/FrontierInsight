@@ -26,10 +26,13 @@ def _close_figures():
 
 
 class _Table:
+    """One setting, at a size no test draws a line at: FI has no value to compare a typed line with (``not compared``), so the
+    line is drawn as typed under its plan name. A test of the comparison uses a table of its own."""
+
     declared = ["growth", "load"]
 
     def keys(self):
-        return ["size=1"]
+        return ["size=17"]
 
     def mean(self, name, key):
         return 2.5
@@ -73,7 +76,7 @@ def test_line_records_series_x_y_what():
     p = h.record()["panels"][0]
     assert p["panel"] == 1 and p["raw"] is False and p["raw_reason"] is None
     assert p["x"] == {"id": "size", "kind": "setting", "label": "Size", "scale": "linear"}
-    assert p["y"] == {"what": "growth", "label": "Growth", "scale": "linear"}
+    assert p["y"] == {"what": "growth", "shown": "growth", "label": "Growth", "scale": "linear"}
     s = p["series"][0]
     assert (s["id"], s["label"], s["kind"], s["step"]) == ("fast", "Fast colony", "line", False)
     assert s["x"] == [1.0, 2.0, 3.0] and s["y"] == [1.0, 2.0, 3.0] and s["yerr"] is None and s["merged_with"] == []
@@ -89,12 +92,12 @@ def test_series_must_be_a_plan_id():
         h.line(0, "fast", [1, 2], [1, 2], "speed")
     assert "growth" in str(e.value) and "other" in str(e.value)
     h.line(0, "fast", [1, 2], [1, 2], "other")
-    assert h.record()["panels"][0]["y"]["label"] == "computed value"
+    assert h.record()["panels"][0]["y"]["label"] == "value"
 
 
 def test_x_may_be_a_result_id():
     h = _Host()
-    h.points(0, "fast", ("load", [0.5, 1.5]), [1.0, 2.0], "growth")
+    h.points(0, "fast", ("load", [0.5, 1.5]), [1.0, 2.0], "other")
     x = h.record()["panels"][0]["x"]
     assert x["id"] == "load" and x["kind"] == "result"
     with pytest.raises(ValueError) as e:
@@ -159,7 +162,7 @@ def test_a_curve_the_body_computes_is_refused_before_and_after_the_data():
 
 def test_image_is_recorded_with_its_grid():
     h = _Host()
-    h.image(0, [[1, 2, 3], [4, 5, 6]], x=[0, 1, 2], y=[10, 20], what="growth")
+    h.image(0, [[1, 2, 3], [4, 5, 6]], x=[0, 1, 2], y=[10, 20])
     s = h.record()["panels"][0]["series"][0]
     assert s["kind"] == "image" and s["x"] == [0.0, 1.0, 2.0] and s["y"] == [10.0, 20.0] and s["z"][1] == [4.0, 5.0, 6.0]
     assert h.axes[0].images[0].get_gid().startswith("fi:")
@@ -201,7 +204,7 @@ def test_missing_values_are_null_gaps_never_text():
     h = _Host()
     h.line(0, "fast", [1, 2, 3], [1, None, 3], "growth")
     h.bars(1, "fast", [1, 2], [1.0, None], "growth", yerr=[None, 0.2])
-    h.image(1, [[1, None], [3, 4]], what="growth")
+    h.image(1, [[1, None], [3, 4]])
     r = h.record()["panels"]
     assert r[0]["series"][0]["y"] == [1.0, None, 3.0]
     assert r[1]["series"][0]["y"] == [1.0, None] and r[1]["series"][0]["yerr"] == [None, 0.2]
@@ -349,7 +352,7 @@ def test_two_results_and_other_quantity_labels():
     h.line(1, "fast", [1, 2], [1.0, 2.0], "other")
     h.finish(SPEC, INFO)
     assert h.axes[0].get_ylabel() == "Growth (1/h) / Load carried by the colony at the end"
-    assert h.axes[1].get_ylabel() == "computed value"
+    assert h.axes[1].get_ylabel() == "value"
 
 
 def test_legend_has_no_empty_entry():
@@ -524,12 +527,25 @@ def test_image_panel_labels():
 def test_image_keeps_its_quantity_only_when_every_cell_is_the_tables():
     honest = _grid_host([[13.0, 23.0], [14.0, 24.0]]).record()["panels"][0]
     assert honest["series"][0]["what"] == "growth" and honest["y"]["what"] == "growth"
-    for z in ([[13.0, 23.0], [14.0, 24.5]], [[14.0, 24.0], [13.0, 23.0]]):  # one cell off; rows swapped
+    # one cell off; rows swapped: FI could not confirm the map is its record of growth, so it is left out, never drawn
+    # under the plan's name (nor under any other)
+    for z in ([[13.0, 23.0], [14.0, 24.5]], [[14.0, 24.0], [13.0, 23.0]]):
         bad = _grid_host(z).record()["panels"][0]
-        assert bad["series"][0]["what"] == "other" and bad["y"]["what"] == "other"
+        assert bad["series"] == [] and bad["y"] is None
+        assert bad["left_out"] == [{"id": "growth", "kind": "image", "declared": "growth", "label": "Growth", "name": "Growth",
+                                    "setting": None, "setting_label": None,
+                                    "reason": "FI could not confirm the drawn map is its record of Growth"}]
     unknown = _Host(panels=1)  # no ids: the rows cannot be tied to a setting of this table
-    unknown.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth")
-    assert unknown.record()["panels"][0]["series"][0]["what"] == "other"
+    assert unknown.image(0, [[1.0, 2.0], [3.0, 4.0]], what="growth") is None
+    assert unknown.record()["panels"][0]["series"] == [] and not unknown.axes[0].images
+    assert [e["kind"] for e in unknown.record()["panels"][0]["left_out"]] == ["image"]
+
+
+def test_a_map_of_no_declared_result_is_drawn_as_value_and_never_left_out():
+    h = _Host(panels=1)
+    h.image(0, [[1.0, 2.0], [3.0, 4.0]], x=[0, 1], y=[0, 1])
+    p = h.record()["panels"][0]
+    assert p["series"][0]["what"] == "other" and p["series"][0]["label"] == "value" and "left_out" not in p
 
 
 class _OneKey(_Table):
@@ -551,11 +567,17 @@ class _OneKey(_Table):
 def test_band_and_bars_compare_their_edges_with_the_table_not_only_their_widths():
     h = _Host(panels=1)
     h.table = _OneKey()
-    h.line(0, "fast", [1], [12.0], "growth")  # a y that is not the table's mean
-    h.band(0, "fast", [1], [11.0], [13.0], "growth", "ci95")  # the table's width, around the wrong centre
-    h.points(0, "slow", [1], [12.0], "growth", yerr=[1.0], yerr_meaning="sd")
+    # the table's widths around a centre that is not the table's mean: the meaning check alone calls them nothing
+    assert h._checked_meaning("ci95", "growth", "size", [1], [12.0], [1.0], [1.0]) == "other"
+    assert h._checked_meaning("sd", "growth", "size", [1], [12.0], [1.0], [1.0]) == "other"
+    drawn = [{"x": [1.0], "y": [12.0]}]
+    assert h._checked_band_meaning("ci95", "growth", "size", [1.0], [11.0], [13.0], drawn) == "other"
+    # drawn: a line at that centre is not FI's record of the result, so it, its band and its bars are left out
+    assert h.line(0, "fast", [1], [12.0], "growth") == []
+    assert h.band(0, "fast", [1], [11.0], [13.0], "growth", "ci95") is None
+    assert h.points(0, "slow", [1], [12.0], "growth", yerr=[1.0], yerr_meaning="sd") == []
     r = h.record()["panels"][0]
-    assert r["bands"][0]["meaning"] == "other" and r["series"][1]["yerr_meaning"] == "other"
+    assert r["series"] == [] and r["bands"] == [] and [e["id"] for e in r["left_out"]] == ["fast", "slow"]
     g = _Host(panels=1)
     g.table = _OneKey()
     g.line(0, "fast", [1], [10.0], "growth")
@@ -581,17 +603,18 @@ def _arm_host(z, x=("size", [1, 2]), y=("step", [3, 4])):
     h.settings = ["size", "step", "arm"]
     h.table = _ThreeSettings()
     h.image(0, z, x=x, y=y, what="growth")
-    return h.record()["panels"][0]["series"][0]["what"]
+    p = h.record()["panels"][0]
+    return p["series"][0]["what"] if p["series"] else "left out"
 
 
 def test_image_needs_one_slice_two_different_settings_and_placed_coordinates():
     assert _arm_host([[13.0, 23.0], [14.0, 24.0]]) == "growth"  # arm 0 throughout
     assert _arm_host([[113.0, 123.0], [114.0, 124.0]]) == "growth"  # arm 1 throughout
-    assert _arm_host([[13.0, 123.0], [14.0, 24.0]]) == "other"  # a patchwork of two slices
-    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], y=("size", [3, 4])) == "other"  # both ids name one setting
-    assert _arm_host([[23.0, 13.0], [24.0, 14.0]], x=("size", [2, 1])) == "other"  # descending columns
-    assert _arm_host([[13.0, 23.0, 33.0], [14.0, 24.0, 34.0]], x=("size", [1, 2, 4])) == "other"  # uneven columns
-    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], x=[1, 2]) == "other"  # no ids
+    assert _arm_host([[13.0, 123.0], [14.0, 24.0]]) == "left out"  # a patchwork of two slices
+    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], y=("size", [3, 4])) == "left out"  # both ids name one setting
+    assert _arm_host([[23.0, 13.0], [24.0, 14.0]], x=("size", [2, 1])) == "left out"  # descending columns
+    assert _arm_host([[13.0, 23.0, 33.0], [14.0, 24.0, 34.0]], x=("size", [1, 2, 4])) == "left out"  # uneven columns
+    assert _arm_host([[13.0, 23.0], [14.0, 24.0]], x=[1, 2]) == "left out"  # no ids
 
 
 def test_band_keeps_ci95_or_sd_only_when_it_is_the_tables_own():
@@ -701,7 +724,7 @@ def test_ref_has_two_sources_and_a_typed_constant_is_never_bound_to_a_plan_refer
 
 def test_note_without_a_position_goes_to_a_free_corner_away_from_the_legend():
     h = _host_by_x(1)
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 4.0], "growth")  # data runs from the lower left to the upper right
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 5.0], "growth")  # data runs from the lower left to the upper right
     h.note(0, what="mean growth: {growth}", key="size=1")
     h.note(0, "runs: {growth}", form="n", key="size=1")
     n = h.record()["panels"][0]["notes"]
@@ -721,8 +744,8 @@ def test_note_without_a_position_goes_to_a_free_corner_away_from_the_legend():
 
 def test_band_around_a_step_line_follows_the_steps():
     h = _host_by_x(1)
-    h.line(0, "fast", [1, 2, 3], [1.0, 2.0, 3.0], "growth", step=True)
-    h.line(0, "slow", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, "fast", [1, 2, 3], [2.0, 4.0, 5.0], "growth", step=True)
+    h.line(0, "slow", [1, 2, 3], [2.0, 4.0, 5.0], "growth")
     stepped = h.band(0, "fast", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "sd")
     plain = h.band(0, "slow", [1, 2, 3], [0.0, 1.0, 2.0], [2.0, 3.0, 4.0], "growth", "sd")
     assert any(abs(x - 2.0) < 1e-9 and abs(y - 0.0) < 1e-9 for x, y in stepped.get_paths()[0].vertices)  # the lo of x=1 holds up to x=2
@@ -768,7 +791,7 @@ def test_sd_without_an_sd_read_is_the_sample_sd_of_the_values():
 
     h = _host_by_x(1)
     h.table = _NoSd()
-    h.line(0, "fast", [1, 2], [2.0, 4.0], "growth", yerr="sd")
+    h.line(0, "fast", [1, 2], [2.5, 2.5], "growth", yerr="sd")
     s = h.record()["panels"][0]["series"][0]
     assert s["yerr_lo"] == pytest.approx([math.sqrt(2.0), 2.0]) and s["yerr_meaning"] == "sd"
 
@@ -794,10 +817,10 @@ def test_bars_are_checked_against_the_key_whose_mean_is_the_plotted_point():
 def test_y_check_skips_gaps_and_flags_a_wrong_point():
     h = _Host(panels=2, identity=True)
     h.line(0, "fast", [1, 2, 3], [1.0, None, float("nan")], "growth")  # gaps are not compared
-    h.line(1, "fast", [1, 2, 3], [1.0, 2.5, 3.0], "growth")
+    assert h.line(1, "fast", [1, 2, 3], [1.0, 2.5, 3.0], "growth") == []  # 2.5 is not the table's 2: left out
     p0, p1 = h.record()["panels"]
-    assert p0["series"][0]["what"] == "growth" and p1["series"][0]["what"] == "other"
-    assert p1["y"]["what"] == "other"
+    assert p0["series"][0]["what"] == "growth" and p1["series"] == []
+    assert p1["left_out"][0]["id"] == "fast" and p1["y"] is None
 
 
 def test_y_form_names_the_statistic_drawn():

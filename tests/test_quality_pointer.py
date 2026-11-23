@@ -183,3 +183,90 @@ def test_a_check_that_passed_or_was_not_gone_on_with_names_nothing(tmp_path: Pat
     assert qp.text(root) == "Results whose check against a known answer did not pass are listed in the accompanying quality report."
     (root / "needs" / "ORACLE_CHECK.json").unlink()
     assert qp.text(root) == ""
+
+
+# --- a curve or map FI left out of a figure the paper places ----------------------------------------------------------------
+
+LEFT_OUT = "Curves left out of a figure because their values did not match the study's results are listed in the accompanying quality report."
+
+
+def _figure(root: Path, draw, *, placed: bool = True) -> Path:
+    """A quest whose figure ``g.png`` is drawn by ``draw(host)`` (FI's frame on a made-up table) and placed in the paper."""
+    from tests.test_frame_figure_labels_plan import _Host
+
+    h = _Host()
+    draw(h)
+    _root(root)
+    (root / "paper").mkdir(exist_ok=True)
+    h.write(root / ".fi" / "figure_records" / "g.png")
+    import matplotlib.pyplot as plt
+
+    plt.close(h.fig)
+    (root / "paper" / "paper.md").write_text("# T\n\n" + ("![A figure.](figures/g.png)\n" if placed else "No figure.\n"),
+                                             encoding="utf-8")
+    return root
+
+
+def test_a_curve_left_out_of_a_placed_figure_is_named_once(tmp_path: Path) -> None:
+    def wrong(h):  # FI's record of growth is 3, 5, 7: neither curve is it
+        h.line(0, "growth", [1, 2, 3], [9.0, 9.5, 9.9], "growth")
+        h.line(0, "uptake", [1, 2, 3], [9.0, 9.5, 9.9], "uptake")
+    root = _figure(tmp_path / "a", wrong)
+    assert qp.has_left_out_figure(root) == "curves"
+    said = qp.text(root)
+    assert said == LEFT_OUT and said.count("left out") == 1
+    for word in FORBIDDEN:
+        assert not re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", said, 0 if word == "FI" else re.I), (word, said)
+    assert qp.sentence(True, False, left_out="curves") == (
+        "Values that fell outside the range the study expected, and curves left out of a figure because their values did not "
+        "match the study's results, are listed in the accompanying quality report.")
+
+
+def test_no_curve_left_out_or_none_in_a_placed_figure_names_nothing(tmp_path: Path) -> None:
+    root = _figure(tmp_path / "a", lambda h: h.line(0, "growth", [1, 2, 3], [3.0, 5.0, 7.0], "growth"))  # FI's record
+    assert qp.has_left_out_figure(root) == "" and qp.text(root) == ""
+    hidden = _figure(tmp_path / "b", lambda h: h.line(0, "growth", [1, 2, 3], [9.0, 9.5, 9.9], "growth"), placed=False)
+    assert qp.has_left_out_figure(hidden) == "" and qp.text(hidden) == ""
+
+
+def test_the_draft_being_written_decides_which_figures_count(tmp_path: Path) -> None:
+    # A write round places the sentence before the draft is saved: the draft's figures count, not the saved paper's.
+    import logging
+    from types import SimpleNamespace
+
+    from core import engine as E
+
+    root = _figure(tmp_path, lambda h: h.line(0, "growth", [1, 2, 3], [9.0, 9.5, 9.9], "growth"), placed=False)
+    draft = "# T\n\n![A figure.](figures/g.png)\n"
+    assert qp.text(root, draft) == LEFT_OUT and qp.text(root, "# T\n\nNo figure.\n") == ""
+    me = SimpleNamespace(quest_root=root, _log=logging.getLogger("t"))
+    E.Engine._write_quality_pointer(me, draft)
+    assert (root / qp.FILE).read_text(encoding="utf-8").strip() == LEFT_OUT
+    E.Engine._write_quality_pointer(me, "# T\n\nNo figure.\n")
+    assert not (root / qp.FILE).exists()
+
+
+def test_a_map_left_out_is_named_as_a_map(tmp_path: Path) -> None:
+    root = _figure(tmp_path, lambda h: h.image(0, [[1.0, 2.0], [3.0, 4.0]], ("dose", [1, 2]), ("feed", [1, 2]), "uptake"))
+    assert qp.has_left_out_figure(root) == "maps"
+    assert qp.text(root) == ("Maps left out of a figure because their values could not be confirmed as the study's results are "
+                             "listed in the accompanying quality report.")
+
+
+def test_a_curve_and_a_map_of_one_result_and_two_results_of_one_label_each_get_a_row(tmp_path: Path) -> None:
+    # One panel loses a curve of growth, a map of growth and a curve of uptake, which the plan labels like growth: three
+    # omissions, three rows, and the closing sentence names both curves and maps.
+    from core import quality_report
+
+    def draw(h):
+        h.labels["uptake"] = h.labels["growth"]
+        h.line(0, "growth", [1, 2, 3], [9.0, 9.5, 9.9], "growth")  # FI's record of growth is 3, 5, 7
+        h.image(0, [[1.0, 2.0], [3.0, 4.0]], [1, 2], [1, 2], "growth")  # plain coordinates: FI cannot confirm the map
+        h.line(0, "uptake", [1, 2, 3], [9.0, 9.5, 9.9], "uptake")  # FI's record of uptake is 1, 2, 3
+    root = _figure(tmp_path, draw)
+    rows = [p["text"] for p in quality_report._paper_problems(quality_report._Quest(root)) if "declared as" in p["text"]]
+    assert rows == ["Figure 1: a series declared as Growth (1/h) does not match FI's record of that result; it is left out of the figure.",
+                    "Figure 1: a map declared as Growth (1/h) could not be confirmed as FI's record of that result; it is left out "
+                    "of the figure.",
+                    "Figure 1: a series declared as Growth (1/h) does not match FI's record of that result; it is left out of the figure."]
+    assert qp.has_left_out_figure(root) == "curves and maps"

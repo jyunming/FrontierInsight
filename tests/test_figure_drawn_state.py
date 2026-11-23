@@ -144,7 +144,7 @@ def test_an_untouched_body_of_every_call_kind_stays_verified(tmp_path, frame5):
     """Bars grouped side by side (FI moves them twice), error bars, a band, a reference, an image and notes, one at a bar."""
     def body(fig, table):
         _drawn(fig, table, 0)
-        fig.line(0, "slow", [1, 2], [2.0, 1.0], "growth", yerr=[0.1, 0.2])
+        fig.line(0, "slow", [1, 2], [1.0, 2.0], "growth", yerr=[0.1, 0.2])  # the table's values: drawn
         fig.band(0, "fast", [1, 2], [0.5, 1.5], [1.5, 2.5], "growth", "other")
         fig.ref(0, "limit")
         fig.note(0, what="mean growth: {growth}", key="size=1")

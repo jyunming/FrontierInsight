@@ -1058,14 +1058,18 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
     for f in _ftc.quest_findings(q.root):
         out.append(_problem("paper", f"{f.get('file')}: {f.get('said')}", "FI's check of the figure's legend and caption "
                             "against its record of what it draws", "not fixed", str(f.get("record") or "")))
-    # A series the figure's code declared as a result of the plan but whose values are not FI's record of it: it is drawn
-    # and described as a computed value, and this line says so.
+    # A series the figure's code declared as a result of the plan whose values FI did not find to be its record of it: one
+    # FI compared and found different is left out of the figure; one FI could not compare is drawn under the plan's name.
     for f in _ftc.quest_neutral_declared(q.root):
-        said = ("does not match FI's record of that result" if f["checked"] == "differs"
+        said = ("could not be confirmed as FI's record of that result" if f.get("kind") == "image"
+                else "does not match FI's record of that result" if f["checked"] == "differs"
                 else "could not be checked against FI's record of that result")
-        out.append(_problem("paper", f"Figure {f['number']}: a series declared as {_one(f['label'], 80)} {said}; "
-                            "it is drawn as a computed value.", "FI's check of the figure's values against "
-                            "its record", "left out", str(f.get("record") or "")))
+        shown = ("it is left out of the figure" if not f.get("drawn", True)
+                 else "it is drawn under another name" if f["checked"] == "differs" else "it is drawn under that name")
+        what = "a map" if f.get("kind") == "image" else "a series"
+        out.append(_problem("paper", f"Figure {f['number']}: {what} declared as {_one(f['label'], 80)} {said}; {shown}.",
+                            "FI's check of the figure's values against its record",
+                            "left out" if not f.get("drawn", True) else "disclosed", str(f.get("record") or "")))
     # A reference the plan gives for a result a figure draws, and the figure does not draw (the paper says so in its Limitations).
     from . import paper_facts as _pf
 

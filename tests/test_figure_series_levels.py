@@ -94,14 +94,14 @@ def test_many_levels_are_named_by_the_lowest_and_the_highest_and_the_caption_say
 
 def test_a_band_names_its_curve_by_the_level_too():
     h = _Host()
-    h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.band(0, 10, [1, 2, 3], [0.5, 1.5, 2.5], [1.5, 2.5, 3.5], "growth", "other")
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")
+    h.band(0, 10, [1, 2, 3], [9.5, 10.5, 11.5], [10.5, 11.5, 12.5], "growth", "other")
     assert len(h.record()["panels"][0]["bands"]) == 1
 
 
 def test_the_same_level_twice_on_one_panel_is_an_error():
     h = _Host()
-    h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")
     with pytest.raises(ValueError, match="a second time on panel 0 with the same name"):
         h.line(0, 10, [1, 2, 3], [2.0, 3.0, 4.0], "growth")
 
@@ -128,7 +128,7 @@ def test_fi_default_figure_is_held_to_the_series_setting_like_a_body():
     h = _Host(fallback=True)
     with pytest.raises(ValueError, match="names a result, not a curve"):
         h.line(0, "growth", [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")
     assert h.record()["panels"][0]["series"][0]["level"]["value"] == 10
 
 
@@ -169,9 +169,9 @@ def test_the_line_markers_error_bars_and_band_of_one_level_share_a_colour():
     from matplotlib.colors import to_rgb
     h = _Host()
     for t in (10, 20):
-        h.line(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth", yerr=[0.1, 0.1, 0.1])
-        h.points(0, t, [1, 2, 3], [float(t), 2.0, 3.0], "growth")
-        h.band(0, t, [1, 2, 3], [t - 1.0, 1.0, 2.0], [t + 1.0, 3.0, 4.0], "growth", "other")
+        h.line(0, t, [1, 2, 3], [float(t), t + 1.0, t + 2.0], "growth", yerr=[0.1, 0.1, 0.1])
+        h.points(0, t, [1, 2, 3], [float(t), t + 1.0, t + 2.0], "growth")
+        h.band(0, t, [1, 2, 3], [t - 1.0, float(t), t + 1.0], [t + 1.0, t + 2.0, t + 3.0], "growth", "other")
     h.finish({}, {})
     extra = h._fc_extra[0]
     rec = h.record()["panels"][0]["series"]
@@ -189,9 +189,9 @@ def test_the_line_markers_error_bars_and_band_of_one_level_share_a_colour():
 
 def test_numpy_integer_and_float_levels_are_levels():
     h = _Host()
-    h.line(0, np.int64(10), [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.line(0, np.float64(20.0), [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.line(0, np.int32(30), [1, 2, 3], [1.0, 2.0, 5.0], "growth")
+    h.line(0, np.int64(10), [1, 2, 3], [10.0, 11.0, 12.0], "growth")
+    h.line(0, np.float64(20.0), [1, 2, 3], [20.0, 21.0, 22.0], "growth")
+    h.line(0, np.int32(30), [1, 2, 3], [30.0, 31.0, 32.0], "growth")
     series = h.record()["panels"][0]["series"]
     assert [s["level"]["text"] for s in series] == ["10", "20", "30"]
     assert [s["label"] for s in series] == ["Temperature (K) = 10", "Temperature (K) = 20", "Temperature (K) = 30"]
@@ -205,7 +205,7 @@ def test_a_bool_is_no_level():
 
 def test_a_level_that_is_the_sum_of_floats_matches_the_table_level():
     h = _Host((0.3, 0.5))
-    h.line(0, 0.1 + 0.2, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, 0.1 + 0.2, [1, 2, 3], [0.3, 1.3, 2.3], "growth")
     assert h.record()["panels"][0]["series"][0]["level"]["text"] == "0.3"
 
 
@@ -214,7 +214,7 @@ def test_tiny_levels_are_matched_by_their_own_scale_not_a_fixed_absolute_toleran
     with pytest.raises(ValueError, match="is not a value of Temperature"):
         _Host((1e-12, 3e-12)).line(0, 4e-12, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     h = _Host((1e-12, 3e-12))
-    h.line(0, 1e-12, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
+    h.line(0, 1e-12, [1, 2, 3], [1e-12 + s - 1 for s in (1, 2, 3)], "growth")
     assert h.record()["panels"][0]["series"][0]["level"]["text"] == "1e-12"
     assert h._keys_at("temp", 1e-12) == ["size=1,temp=1e-12", "size=2,temp=1e-12", "size=3,temp=1e-12"]
     assert h._keys_at("temp", 0.0) == []
@@ -222,15 +222,24 @@ def test_tiny_levels_are_matched_by_their_own_scale_not_a_fixed_absolute_toleran
 
 def test_the_level_curve_id_has_no_comma_or_equals_sign():
     h = _Host()
-    h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
-    h.line(0, 20, [1, 2, 3], [1.0, 2.0, 4.0], "growth")
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")
+    h.line(0, 20, [1, 2, 3], [20.0, 21.0, 22.0], "growth")
     ids = [s["id"] for s in h.record()["panels"][0]["series"]]
     assert ids == ["growth@temp:10", "growth@temp:20"]
     assert all("," not in i and "=" not in i for i in ids)
 
 
+class _SameAbove(_Grid):
+    """growth is size at temp 10 and twice the size above it: two levels whose curves are the same numbers."""
+
+    def mean(self, name, key):
+        size, temp = (float(part.split("=")[1]) for part in key.split(","))
+        return size if temp < 20 else 2 * size
+
+
 def _claim_calls():
     h = _Host()
+    h.table = _SameAbove((10, 20, 30))
     h.line(0, 10, [1, 2, 3], [1.0, 2.0, 3.0], "growth")
     h.line(0, 20, [1, 2, 3], [2.0, 4.0, 6.0], "growth")
     h.line(0, 30, [1, 2, 3], [2.0, 4.0, 6.0], "growth")
@@ -269,24 +278,26 @@ def test_a_claim_about_a_level_curve_in_the_paper_is_filled_and_a_false_one_is_n
     assert bad.unfilled == ("figure:gr:identical",)
 
 
-# ---- a curve whose values are not the table's is named for what it is ---------------------------------------------------------
+# ---- a curve whose values are not the table's is left out ------------------------------------------------------------------
 
-def test_curves_whose_values_are_not_the_tables_are_captioned_and_legended_as_a_computed_value():
+def test_curves_whose_values_are_not_the_tables_are_left_out_and_each_level_is_named():
     h = _Host()
-    for t in (10, 20, 30):
-        h.line(0, t, [1, 2, 3], [1.0 + t, 2.0, 3.0], "growth")  # not the table's value of the result
-    series = h.record()["panels"][0]["series"]
-    assert "3 curves of computed value, one per Temperature (K)" in _caption(h)
-    assert "Growth" not in _caption(h)
+    h.line(0, 10, [1, 2, 3], [10.0, 11.0, 12.0], "growth")  # the table's: drawn (the known positive)
+    for t in (20, 30):
+        assert h.line(0, t, [1, 2, 3], [1.0 + t, 2.0, 3.0], "growth") == []  # not the table's value of the result
+    rec = h.record()["panels"][0]
+    assert [s["level"]["text"] for s in rec["series"]] == ["10"]
+    assert [(e["id"], e["setting"], e["label"]) for e in rec["left_out"]] == [
+        ("growth@temp:20", "20", "Growth"), ("growth@temp:30", "30", "Growth")]
+    assert "Growth at Temperature (K) = 10" in _caption(h)
     h.finish({}, {})
-    assert _legend_texts(h) == [s["label"] for s in series] == ["Temperature (K) = %d" % t for t in (10, 20, 30)]
+    assert _legend_texts(h) == ["Temperature (K) = 10"]
 
 
-def test_many_curves_that_are_not_the_tables_values_say_the_range_of_a_computed_value():
+def test_many_curves_that_are_not_the_tables_values_are_all_left_out():
     temps = tuple(range(1, 21))
     h = _Host(temps)
     for t in temps:
         h.line(0, t, [1, 2, 3], [t * 1e-10, 2e-10, 3e-10], "growth")  # no value of the table's
-    h.finish({}, {})
-    assert _legend_texts(h) == ["Temperature (K) = 1", "Temperature (K) = 20"]
-    assert "20 curves of computed value, one per Temperature (K) (from 1 to 20" in _caption(h)
+    rec = h.record()["panels"][0]
+    assert rec["series"] == [] and [e["setting"] for e in rec["left_out"]] == [str(t) for t in temps]

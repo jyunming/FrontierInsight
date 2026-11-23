@@ -52,7 +52,7 @@ def _engine(root: Path):
     if not hasattr(me, "_write_asked_results"):
         me._write_asked_results = lambda st: None
     if not hasattr(me, "_write_quality_pointer"):
-        me._write_quality_pointer = lambda: None
+        me._write_quality_pointer = lambda paper_md=None: None
     return me
 
 

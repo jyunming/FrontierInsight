@@ -156,7 +156,7 @@ def test_a_nominal_level_the_plan_declares_is_a_reference_by_its_id_and_a_typed_
     assert plan["references"]["growth_nominal"]["value"] == 0.95
 
     def body(fig, table):
-        fig.line(0, "growth", [1, 2, 3], [2.0, 3.0, 4.0], "growth")
+        fig.line(0, "growth", [1, 2, 3], [2.1, 3.1, 4.1], "growth")  # the table's values
         fig.ref(0, "growth_nominal")
         fig.ref(0, value=0.95)  # equal to the plan's level, but a typed number is never bound by its value
         fig.ref(0, value=0.77)  # a constant the plan does not hold
@@ -227,8 +227,8 @@ class _Many(frame_figure.FigureCalls):
         class T:
             declared = list(results)
 
-            def keys(_self):
-                return ["size=%d,m=%s" % (s, m) for m in levels for s in (1, 2)]
+            def keys(_self):  # at sizes no test draws at: FI has no value to compare a typed line with, so it is drawn as typed
+                return ["size=%d,m=%s" % (s, m) for m in levels for s in (5, 6)]
 
             def mean(_self, ident, key):
                 return 1.0
@@ -279,7 +279,7 @@ def test_a_text_put_at_a_bar_moves_with_it_when_another_series_joins_the_slot():
 
 def test_bars_over_a_setting_stay_a_drawing_FI_checked(tmp_path, frame5):
     def body(fig, table):
-        fig.bars(0, "growth", [1, 2], [2.0, 3.0], "growth")
+        fig.bars(0, "growth", [1, 2], [2.1, 3.1], "growth")  # the table's values
 
     out = af.run_figures([{"id": "g", "file": "g.png", "shows": ["growth"], "x": "size"}], {"figure_g": body}, _Grid([1]), str(tmp_path))
     record = json.loads((frame5 / "g.calls.json").read_text(encoding="utf-8"))
