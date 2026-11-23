@@ -684,16 +684,11 @@ def _quoted_point(point: str, cap: int | None) -> str:
     return chr(34) + one + chr(34)
 
 
-def last_review_sentence(points: list[str], shown: int | None = None) -> str:
-    """The sentence for the quality report (every point, whole, quoted: they are the reviewer's, FI does not say they are
-    right) and, when ``shown`` is given, for the paper's Limitations (how many points, not the points: a reader of the paper
-    is not handed the reviewer's working notes)."""
+def last_review_sentence(points: list[str]) -> str:
+    """The sentence for the quality report: every point, whole, quoted (they are the reviewer's, FI does not say they are
+    right)."""
     if not points:
         return ""
-    if shown is not None:  # in the paper: how many, in a reader's words; the reviewer's own words are in QUALITY.md
-        many = len(points) > 1
-        return (f"The final review of this paper did not accept it and raised {len(points)} point{'s' if many else ''} "
-                f"that the last rewrite did not resolve (QUALITY.md lists {'them' if many else 'it'})")
     return ("The final review raised these points, which no later round addressed: "
             + "; ".join(_quoted_point(p, None) for p in points) + ".")
 

@@ -31,7 +31,7 @@ over inventing a new one, and prefer a plain question over a technical field nam
   move its source, rather than adding a rule for that case. A check that guesses after the fact from free text or
   free code (which result a typed number belongs to, which setting a piece of code reads, what a caption's words
   mean) gets a new exception for every new wording and keeps failing on the next real input; the root fix is that
-  FI produces the fact itself from its own records (as `{{seed}}`, `{{run_time}}` and `{{not_done:<id>}}` do in
+  FI produces the fact itself from its own records (as `{{run_time}}` and `{{not_done:<id>}}` do in
   `core/paper_facts.py`), or that the heuristic is removed. If a fix is an added exception, say so plainly.
 - **Decide trade-offs with a test, not by judgement.** Before choosing between approaches (stop vs go on, strict vs
   lenient, model-typed vs FI-filled), run them on the same cases: real inputs whose verdict is known (good) and the

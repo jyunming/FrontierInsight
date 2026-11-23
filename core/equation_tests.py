@@ -1093,7 +1093,7 @@ def unconfirmed_note(eid: str, reason: str) -> str:
     code or the example is wrong, because FI could not tell."""
     return (f"equation {eid} is not confirmed before the run: its test still failed after the code was repaired and the plan "
             f"was asked about the worked example ({reason}); FI could not tell whether the code or the example is wrong, so "
-            "the results it can reach are marked (unconfirmed)")
+            "the results it can reach are not confirmed")
 
 
 def read_record(quest_root: Path | str) -> dict[str, Any]:
@@ -1108,8 +1108,7 @@ def read_record(quest_root: Path | str) -> dict[str, Any]:
 def unconfirmed_marks(quest_root: Path | str) -> dict[str, dict[str, Any]]:
     """``{quantity: {"quantity", "note", "unconfirmed_by": [equation ids]}}`` for each quantity of the plan that an equation
     the test could not confirm may reach (``unconfirmed`` of ``.fi/equation_tests.json``, written by the engine when it let
-    the study go on). The paper marks each number of such a quantity ``(unconfirmed)`` (core/paper_values.py) and its
-    table says why (core/results_by_setting.py). Never a quantity FI left out."""
+    the study go on). The quality report lists them; nothing is printed beside their numbers in the paper. Never a quantity FI left out."""
     from . import result_checks as _checks
 
     out: dict[str, dict[str, Any]] = {}

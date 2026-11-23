@@ -110,11 +110,37 @@ def test_a_sentence_that_only_carries_unfilled_keys_is_dropped_and_the_rest_kept
     assert "0.0582" in text
 
 
-def test_a_key_among_filled_ones_or_in_a_table_is_replaced_by_the_marker_and_nothing_else_is_lost() -> None:
+def test_a_key_among_filled_ones_takes_its_whole_sentence_and_a_table_left_with_no_row_goes_whole() -> None:
+    """Before: the number was replaced by "[number removed]" and the sentence or the table row stayed around it."""
     text, taken = pf.take_out_unfilled(PAPER)
-    assert "Both together: " in text and "[number removed] in one sentence." in text and "0.1" in text
-    assert "| m=20 | [number removed] |" in text
-    assert text.count("\n|") == 3  # the table keeps its three rows
+    assert "Both together" not in text and "in one sentence" not in text and "[number removed]" not in text
+    assert "| setting | value |" not in text and "|---|" not in text and "| m=20 |" not in text
+    assert "**Unresolved discrepancy at pi1 = 0.** At m=2000 the BH estimate was" in text, "the rest is kept"
+
+
+def test_a_key_in_a_table_row_takes_that_row_and_the_other_rows_stay() -> None:
+    table = ("Intro.\n\n| setting | value |\n|---|---|\n| m=20 | " + _mark("c:mean @ m=20") + " |\n"
+             "| m=200 | " + _filled("c:mean @ m=200", "0.4") + " |\n\nAfter.\n")
+    text, taken = pf.take_out_unfilled(table)
+    assert "| m=20 |" not in text and "| m=200 | " in text and "0.4" in text
+    assert "| setting | value |" in text and "|---|---|" in text and "Intro." in text and "After." in text
+    assert [t["how"] for t in taken] == ["table row removed"]
+
+
+def test_a_key_in_a_tables_header_takes_the_whole_table() -> None:
+    table = ("Intro.\n\n| setting | " + _mark("c:mean @ m=20") + " |\n|---|---|\n| m=200 | 0.4 |\n\nAfter.\n")
+    text, taken = pf.take_out_unfilled(table)
+    assert "|" not in text and "Intro." in text and "After." in text
+    assert [t["how"] for t in taken] == ["table removed"]
+
+
+def test_a_key_in_a_list_item_or_a_heading_takes_that_line_only() -> None:
+    listed = ("## Results\n\n- first point.\n- the value is " + _mark("c:mean @ m=20") + " here\n- third point.\n\n"
+              "### At " + _mark("d:mean @ m=20") + "\n\nText.\n")
+    text, taken = pf.take_out_unfilled(listed)
+    assert "- first point." in text and "- third point." in text and "the value is" not in text
+    assert "### At" not in text and "Text." in text and "## Results" in text
+    assert [t["how"] for t in taken] == ["line removed", "line removed"]
 
 
 def test_what_was_taken_out_is_listed_with_how() -> None:
@@ -123,7 +149,8 @@ def test_what_was_taken_out_is_listed_with_how() -> None:
     assert set(by_key) == {"fdr_bh:mean @ m=each, pi1=0.2 | vs ref", "anyfd_bonf:mean @ m=each, pi1=0 | vs ref",
                            "b:mean @ m=20", "c:mean @ m=20"}
     assert by_key["fdr_bh:mean @ m=each, pi1=0.2 | vs ref"]["how"] == "sentence removed"
-    assert by_key["b:mean @ m=20"]["how"] == "replaced by [number removed]"
+    assert by_key["b:mean @ m=20"]["how"] == "sentence removed"
+    assert by_key["c:mean @ m=20"]["how"] == "table removed"
     assert "BH against pi0x0.05" in by_key["fdr_bh:mean @ m=each, pi1=0.2 | vs ref"]["sentence"]
 
 

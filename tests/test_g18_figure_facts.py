@@ -267,12 +267,9 @@ def test_one_disclosure_per_figure_not_per_sentence(tmp_path):
     text, taken = paper_facts.take_out_unfilled(out.text)
     assert len(taken) == 2 and {t["figure"] for t in taken} == {"2"}
     paper_facts.keep_check(root, [], text, dropped=taken)
-    kept = paper_facts.kept_check(root)
-    unmet = [u for u in kept["unmet_items"] if u["kind"] == paper_facts.FIGURE_LEFT_OUT]
-    assert [u["text"] for u in unmet] == ["Figure 2: some statements about this figure could not be checked against "
-                                          "what it draws and were left out."]
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.FIGURE_LEFT_OUT]
-    assert len(items) == 1 and items[0].sentence == unmet[0]["text"]
+    assert [i.sentence for i in items] == ["Figure 2: some statements about this figure could not be checked against "
+                                           "what it draws and were left out."]
 
 
 def test_taken_out_figure_sentence_keeps_bold_run_in_heading(tmp_path):
@@ -319,12 +316,3 @@ def test_plan_reaches_the_claim(tmp_path, monkeypatch):
     root = _with_calls(tmp_path, _calls())
     out = paper_facts.render("{{figure:fig1:not_drawn @ series=b}}", root, plan={"series": ["a"]})
     assert seen["plan"] == {"series": ["a"]} and out.unfilled == ()
-
-
-def test_limitations_carrying_the_figure_sentence_is_not_listed_unmet(tmp_path):
-    root = _with_calls(tmp_path, _calls())
-    out = paper_facts.render("![c](figures/fig1.png)\n\nA. {{figure:fig1:sparkle @ series=a}}\n", root)
-    text, taken = paper_facts.take_out_unfilled(out.text)
-    said = paper_facts.figure_left_out_sentence("1")
-    paper_facts.keep_check(root, [], text + "\n" + said, dropped=taken)
-    assert not [u for u in paper_facts.kept_check(root).get("unmet_items", []) if u["kind"] == paper_facts.FIGURE_LEFT_OUT]

@@ -376,7 +376,7 @@ def _record_of_trials() -> dict[str, Any]:
     return {"schema": "fi.trials/v1", "cells": cells}
 
 
-def test_a_quantity_not_worked_out_is_in_the_papers_limitations_and_in_quality_md(tmp_path: Path) -> None:
+def test_a_quantity_not_worked_out_is_an_item_of_fis_record_and_in_quality_md(tmp_path: Path) -> None:
     design = json.loads(json.dumps(DESIGN))
     design["protocol"]["derived"][0]["role"] = "diagnostic"  # a stub of a diagnostic: the run goes on, and says so
     quest = tmp_path / "quest"
@@ -388,7 +388,6 @@ def test_a_quantity_not_worked_out_is_in_the_papers_limitations_and_in_quality_m
     assert [i["id"] for i in af.not_computed(af.read_record(quest))] == ["peak"]
     items = [i for i in paper_facts.required_items(quest) if i.kind == paper_facts.NOT_COMPUTED]
     assert [i.name for i in items] == ["peak"] and "was not written" in items[0].text
-    assert "was not written" in paper_facts.limitations_text(quest)
     report = quality_report.build(quest, running=False)
     analysis = next(s for s in report["stages"] if s["stage"] == "analysis")
     rows = [p for p in analysis["problems"]["items"] if "peak was not computed" in p["text"]]

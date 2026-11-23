@@ -138,31 +138,8 @@ def test_e1_the_seed_that_drives_the_trials_is_the_one_in_run_trial_not_the_self
     assert 17 in {s["value"] for s in got["code_seeds"]}
 
 
-def test_partly_names_fi_s_seed_and_the_fixed_one_in_the_paper(tmp_path: Path) -> None:
-    from core import paper_facts
-
-    src, extra, _v, _d = CASES["model_ignores_the_rng_it_is_given"]
-    _verdict(tmp_path, src, extra)
-    text = paper_facts._seed_text(tmp_path / "q")
-    assert "FI's own seed for each trial" in text and "7, at code/model.py:3" in text, text
-    assert "derived from base seed" not in text or "fixed in the code" in text
-
-
 def test_kinetics_seed_reaches(tmp_path: Path) -> None:
     root = tmp_path / "kinetics_s1"
     shutil.copytree(FIXTURES / "kinetics_s1", root)
     got = run_facts.seed_verdict(root)
     assert got["verdict"] == "reaches" and got["fi_seed_reaches"] is True, got
-
-
-def test_an_unknown_verdict_still_states_the_base_seed_fi_recorded(tmp_path: Path, monkeypatch) -> None:
-    """Before: with the verdict unknown the sentence left out the base seed although the run's own record holds it."""
-    from core import disclosure, paper_facts
-
-    monkeypatch.setattr(run_facts, "seed_verdict", lambda root: {"verdict": run_facts.UNKNOWN})
-    monkeypatch.setattr(disclosure, "recorded_seeds", lambda root: (0, frozenset()))
-    assert paper_facts._seed_text(tmp_path) == (
-        "a seed passed to each trial, derived from base seed 0 (FI could not tell from the code whether the simulation uses it)")
-    monkeypatch.setattr(disclosure, "recorded_seeds", lambda root: (None, frozenset()))
-    assert paper_facts._seed_text(tmp_path) == (
-        "a seed passed to each trial (FI could not tell from the code whether the simulation uses it)")

@@ -61,7 +61,7 @@ def test_the_paper_s_interval_follows_the_plan_s_kind(tmp_path: Path) -> None:
     assert (lo, hi) == stats.wilson_interval(3, 5) and how == "95% Wilson interval"
     for protocol in (MEAN, None):
         rec = paper_values.Records(cells=cells, protocol=protocol)
-        mean, lo, hi, how, n, _symmetric, _se = paper_values._interval(rec, cells, "sprouted")
+        mean, lo, hi, how, n, _symmetric, _se, _draws = paper_values._interval(rec, cells, "sprouted")
         assert how.startswith("95% t interval of the mean") and "does not declare" in how and n == 5
         assert lo < mean < hi and (lo, hi) != stats.wilson_interval(3, 5)
 

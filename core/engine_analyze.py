@@ -15,7 +15,7 @@ from .engine_base import (  # noqa: F401
     _function_steps, _gate_inputs, _is_degenerate_result, _is_preliminary_memory, _load_persona_prefix,
     _numeric, _one_line, _oracle, _pairs, _parse_json_lenient, _pick_up_user_dropped_datasets, _plan, _receipts,
     _replicate_assertions, _replicate_metric_kinds, _rerun_check, _rerun_from, _run_manifest,
-    _shown_reach, _split_figure_readings, _stop_power, _topic_req, _write_personas, asyncio, copy, derive_protocol,
+    _shown_reach, _split_figure_readings, _stop_power, _topic_req, asyncio, copy, derive_protocol,
     functools, json, scrub_secrets, shutil, tempfile, time,
 )
 
@@ -626,10 +626,6 @@ class AnalyzeStageMixin:
         if isinstance(answers, dict):
             venue = str(answers.get("paper_venue") or "").strip().lower()
         return venue or self.config.output.paper_format or ""
-
-    def _limitations_heading(self, state: QuestState) -> bool:
-        """Whether FI may put a ``## Limitations`` heading in this paper: not in a format whose persona forbids it."""
-        return not _write_personas.forbids_limitations(self._write_venue(state))
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question

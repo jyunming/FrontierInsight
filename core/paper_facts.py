@@ -9,36 +9,41 @@ state the facts in its own words and parsed the prose to check them; any sentenc
 flagged. So the writer no longer types these facts at all:
 
 * **The run's facts** are one paragraph FI writes and places itself, ``{{run_facts}}`` (:func:`run_facts_text`): the
-  number of settings and trials, the seed the code actually used (:func:`core.run_facts.seed_verdict`), the measured
-  run time and the topic's time limit with the verdict. FI puts it at the end of the Methods (:func:`place_blocks`); the
-  writer does not state these facts. The single placeholders of older drafts (:data:`FACT_NAMES`: ``{{seed}}``,
+  number of settings and trials and the measured run time. FI puts it at the end of the Methods (:func:`place_blocks`);
+  the writer does not state these facts. The seed the code used, the delivered code's run time and the verdict against
+  the topic's time limit are in the quality report only. The single placeholders of older drafts (:data:`FACT_NAMES`:
   ``{{run_time}}``, ``{{time_limit}}``, ``{{time_limit_met}}``, ``{{trials_per_setting}}``, ``{{settings}}``,
   ``{{trials_failed}}``) are still filled, but no longer offered or asked for. One is offered: ``{{interval_level}}``, the
   percent level of every interval FI computes ("95"), so a method sentence that names the level ("a {{interval_level}}%
   interval") types no 95 of its own (:func:`core.typed_numbers.allowed` no longer lets a typed 95% pass).
 * **Placeholders.** Each thing the study did not do is one item (:func:`required_items`) with one plain sentence from
-  FI's record; they are the bullets of the Limitations block. A ``{{not_done:<id>}}`` of an older draft is still filled.
+  FI's record; the quality report lists them, the paper carries none. A ``{{not_done:<id>}}`` of an older draft is still
+  filled.
 * **Blocks.** ``{{results_table}}`` (:data:`BLOCK_NAMES`) is a whole block FI writes: its tables of every setting with
   each value's interval and reference (core/results_by_setting.py, saved in ``.fi/results_table.md``). The writer puts
   it on a line of its own in the Results; when it does not, FI places it before the discussion (:func:`place_blocks`).
   The checks of the writer's own text leave it out (:func:`without_blocks`, :func:`mask`).
+* **The table of the asked results.** ``{{asked_results}}`` (core/asked_results.py, saved in ``.fi/asked_results.md`` by
+  ``Engine._place_blocks``) lists the quantities the topic asks for that FI holds a value for, each value a ``{{v:...}}`` key.
+  :func:`place_blocks` puts it at the end of the section that reports the results after every write round, once.
+* **The closing sentence.** ``{{quality_pointer}}`` (core/quality_pointer.py, saved in ``.fi/quality_pointer.md`` by
+  ``Engine._place_blocks``) is one plain sentence at the end of the body, before the reference list, that points to the
+  quality report. It is there only when a value outside the range the plan expected, or a sentence the final claim check found
+  unsupported, stands in the paper; it names only the kinds that occur, and is put in once and gone when the last case is.
 * **Rendering.** :func:`render` fills each placeholder from the records when the paper is saved, between markers
   (``<!-- fi:fact-run_time -->223.2 s<!-- /fi:fact-run_time -->``), so ``paper.md`` and every check that reads it hold the
   values, never a raw placeholder. The markers let FI put the values back after any step that edits the text (the passage
   editor gets placeholders again, :func:`to_placeholders`; the page trim never offers a sentence holding one; a resumed
   quest re-renders), and they are dropped wherever text leaves FI (:func:`without_marks`). A placeholder FI cannot fill
   reads "not recorded", is said in the run log and is listed in the quality report; it is never left raw and never guessed.
-* **The Limitations section** is a block FI writes itself, ``{{limitations}}`` (:func:`limitations_text`): one bullet for
-  each thing the study did not do (:func:`required_items`), or one sentence saying FI recorded none. It takes the place of
-  the body of the writer's own Limitations section, or becomes a section of its own (:func:`place_blocks`); the writer does
-  not write that section. The paper's page count against the topic's limit is one of the items: FI states it from its own
-  measurement of the finished paper (:data:`PAGE_RECORD`, written by the review), never from the writer. So are the points
-  of the last review when no round is left to answer them (:func:`core.disclosure.last_review_points`).
+* **No block of FI's audit records.** FI writes no Limitations block, no answers block and no mark beside a sentence
+  into the paper: what the study did not do, the sentences the claim check could not confirm and the points of the last
+  review are in the quality report only. A draft an older FI wrote with such a block (``{{answers}}``,
+  ``{{limitations}}``, :data:`_RETIRED_BLOCKS`) loses it, with nothing in its place.
 * **The check** (:func:`check`, no model) is then simple: no name between double braces is unknown to FI
   (:func:`placement_hits`); a run time typed as a number or a claim that the run kept to the topic's limit when it did
   not is left to the typed-number rule and the claim check, which receive FI's record (the seed in it comes from
-  :func:`core.run_facts.seed_verdict`).
-  A failure is a must-fix hit named :data:`HIT`; it sends the paper back to be written again (the text route; never the
+  :func:`core.run_facts.seed_verdict`). A failure is a must-fix hit named :data:`HIT`; it sends the paper back to be written again (the text route; never the
   design, never a stop). What is still unmet when the review rounds are used up is kept in ``.fi/paper_record_check.json``,
   which the quality report prints, and is said in the run log.
 """
@@ -59,6 +64,8 @@ from . import figure_facts as _figures
 from . import frozen_protocol as _frozen
 from . import math_safe_cut as _math_safe
 from . import supplement as _supplement
+from . import asked_results as _asked
+from . import quality_pointer as _pointer
 from . import paper_values as _values
 from . import run_facts as _run_facts
 from . import run_manifest as _run_manifest
@@ -71,13 +78,18 @@ RECORD = Path(".fi") / "paper_record_check.json"
 NOT_RECORDED = "not recorded"
 
 #: The single placeholders of older drafts: still filled, no longer offered (the paragraph ``{{run_facts}}`` replaces them).
-FACT_NAMES = ("seed", "run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed",
+FACT_NAMES = ("run_time", "time_limit", "time_limit_met", "trials_per_setting", "settings", "trials_failed",
               "interval_level")
 #: FI's blocks a placeholder can name: a whole block of the paper FI writes from its records, on a line of its own.
 #: Not a fact: its numbers are accounted for setting by setting (core/results_by_setting.py), never as FI's record.
 #: ``run_facts`` has no file: its paragraph is composed from :func:`facts` (:func:`run_facts_text`).
-BLOCK_NAMES = ("results_table", "answers", "run_facts", "limitations")
-_BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.results_by_setting.PAPER_BLOCK
+BLOCK_NAMES = ("results_table", "run_facts", "asked_results", "quality_pointer")
+#: Blocks an older FI wrote into the paper: a draft that still holds one loses it, with nothing in its place
+#: (:func:`render`, :func:`place_blocks`).
+_RETIRED_BLOCKS = ("answers", "limitations")
+_BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md",  # = core.results_by_setting.PAPER_BLOCK
+                "asked_results": Path(".fi") / "asked_results.md",  # = core.asked_results.FILE
+                "quality_pointer": Path(".fi") / "quality_pointer.md"}  # = core.quality_pointer.FILE
 #: ``{{figure:<file stem>:layout}}`` and ``{{figure:<file stem>:lines}}``: what a saved figure draws, from the recorder's
 #: files (:mod:`core.figure_facts`), not from the writer. The marker key is ``figure-<kind>-<stem>``.
 #: ``{{figure:<file stem>:<claim> @ <args>}}``: a statement about what the figure draws (:mod:`core.figure_claims`), worded
@@ -86,7 +98,7 @@ _BLOCK_FILES = {"results_table": Path(".fi") / "results_table.md"}  # = core.res
 _FIGURE_KEY = "figure-"
 _ALIASES = {"runtime": "run_time", "wall_time": "run_time", "run_seconds": "run_time", "limit": "time_limit",
             "runtime_limit": "time_limit", "limit_met": "time_limit_met", "within_limit": "time_limit_met",
-            "trials_each_setting": "trials_per_setting", "failed_trials": "trials_failed", "random_seed": "seed"}
+            "trials_each_setting": "trials_per_setting", "failed_trials": "trials_failed"}
 
 NOT_DONE, LEFT_OUT, NOT_COMPUTED, PRECISION = "not_done", "left_out", "not_computed", "precision"
 SECOND_VERSION, UNTESTED, CODE_FINDING, FAILED_TRIALS = "second_version", "untested", "code_finding", "failed_trials"
@@ -326,7 +338,8 @@ def second_version_text(root: Path, function: str) -> str:
 
 
 def required_items(quest_root: Path | str) -> list[Item]:
-    """Every item the Limitations must place, from FI's records. A missing or unreadable record gives none."""
+    """Every thing the study did not do, from FI's records (QUALITY.md lists them). A missing or unreadable record gives
+    none."""
     root = Path(quest_root)
     items: list[Item] = []
     ids: set[str] = set()
@@ -442,8 +455,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
                 continue
             add(LEFT_OUT, q, _sentence(f"{_said(root, q)} is not reported: a check of the results showed the value is wrong"
                                        + (f" ({note})" if note else "")))
-    # A quantity kept although its values break a range the plan only expected: reported, marked where it is printed
-    # (core/paper_values.py), and said here with the range and the furthest value, from FI's record.
+    # A quantity kept although its values break a range the plan only expected: reported as it came out, and said here with the range and the furthest value, from FI's record.
     for q, r in _result_checks.kept_bound_breaks(root).items():
         try:
             count, furthest = int(r.get("count") or 1), f"{float(r['value']):g}"
@@ -453,7 +465,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(OUT_OF_RANGE, q, _sentence(
             f"For {_said(root, q)}, {many} outside the range the plan expected for it ({_one(r.get('bound'))}); the furthest is "
             f"{furthest}. FI did not establish whether the value or the plan's expected range is wrong, so the value is "
-            f"reported and marked {_result_checks.BOUND_MARK} where it is printed"))
+            f"reported as it came out"))
     # A name the plan appears to define two ways (a comparison of the plan's text: core/code_review.py::plan_defines_twice), said as
     # that. Which definition the reported value follows is said only when FI holds a check it measured, that passed and that reads
     # the quantity; a name that is left out already has its one sentence (above), and is not given a second one.
@@ -600,7 +612,7 @@ def required_items(quest_root: Path | str) -> list[Item]:
         add(FIGURE_REFERENCE, name, said, key=key)
     points = _disclosure.last_review_points(root)
     if points:
-        add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points, _MAX_LAST_REVIEW_LISTED), key="points")
+        add(LAST_REVIEW, "final review points", _disclosure.last_review_sentence(points), key="points")
     return items
 
 
@@ -679,7 +691,7 @@ def known_answer_items(root: Path) -> list[tuple[str, str, str]]:
 
 
 def shared_seeds_text(root: Path) -> str:
-    """The sentence FI puts in the Limitations when its own trial record shows the settings sharing seeds: trial ``t`` of
+    """The sentence FI's record gives when its own trial record shows the settings sharing seeds: trial ``t`` of
     every setting ran on one seed (``paired: true``, common random numbers; ``core/trial_runner.py::trial_seed`` with an
     empty key). ``""`` when the ledger shows the settings drew different seeds, or there is one setting only.
     Only a plan that states ``protocol.shared_draws`` has the settings share
@@ -709,13 +721,12 @@ def shared_seeds_text(root: Path) -> str:
 
 
 _MAX_UNSUPPORTED_LISTED = 8
-_MAX_LAST_REVIEW_LISTED = 8
 _MAX_UNSUPPORTED_CHARS = 300
 _CITE_MARK = re.compile(r"\s*\[(?:W?\d+(?:\s*[,;–-]\s*W?\d+)*)\]")
 
 
 def _quoted_claim(text: Any) -> str:
-    """One claim as it is quoted in the Limitations: on one line, without the reference numbers it carried (they point at
+    """One claim as FI's record quotes it: on one line, without the reference numbers it carried (they point at
     the paper's list, not at a source of this sentence), without double braces (no placeholder), cut after a whole word
     when long."""
     one = _one(_CITE_MARK.sub("", str(text or ""))).replace("{{", "").replace("}}", "").replace('"', "'")
@@ -726,12 +737,11 @@ def _quoted_claim(text: Any) -> str:
 
 
 def unsupported_claims_text(record: Any) -> str:
-    """What the Limitations tell a reader about the sentences FI's last claim check found supported by neither the run's
-    results nor a cited source (:data:`UNSUPPORTED_RECORD`): how many, that QUALITY.md lists them, and each one quoted (at
-    most :data:`_MAX_UNSUPPORTED_LISTED`, and how many more there are) to be read as unconfirmed. The sentences stay in the
-    paper; the check's own lists stay in QUALITY.md. Sentences of the writer's whose claim the check found wrong against the
-    record were taken out of the paper (``removed`` in the record): that is said too, without quoting them (what they said
-    is what was not supported). ``""`` when the record holds neither."""
+    """What the quality report says of the sentences FI's last claim check found supported by neither the run's results
+    nor a cited source (:data:`UNSUPPORTED_RECORD`): how many, and each one quoted (at most :data:`_MAX_UNSUPPORTED_LISTED`,
+    and how many more there are). The sentences stay in the paper as written. Sentences of the writer's whose claim the
+    check found wrong against the record were taken out of the paper (``removed`` in the record): that is said too,
+    without quoting them (what they said is what was not supported). ``""`` when the record holds neither."""
     rows = record.get("claims") if isinstance(record, dict) else None
     quoted: list[str] = []
     for row in rows or []:
@@ -744,8 +754,7 @@ def unsupported_claims_text(record: Any) -> str:
         more = len(quoted) - len(shown)
         n = len(quoted)
         said = (("One sentence of this paper was" if n == 1 else f"{n} sentences of this paper were")
-                + " not found supported by the run's results or a cited source (QUALITY.md lists them); read "
-                + ("it" if n == 1 else "them") + " as unconfirmed: "
+                + " not found supported by the run's results or a cited source: "
                 + "; ".join(f'"{q}"' for q in shown) + (f"; and {more} more" if more else ""))
     gone = [r for r in (record.get("removed") if isinstance(record, dict) else None) or [] if isinstance(r, dict)]
     if gone:
@@ -753,7 +762,7 @@ def unsupported_claims_text(record: Any) -> str:
         out = (("One sentence" if n == 1 else f"{n} sentences") + " of the draft that FI's check of the claims could not "
                "confirm against the run's results or its sources (a number not in the results, a true value under the "
                "wrong setting, a source that backs nothing, or a verdict FI could not read) " + ("was" if n == 1 else "were")
-               + " taken out of this paper (QUALITY.md lists " + ("it" if n == 1 else "them") + ")")
+               + " taken out of this paper")
         said = f"{said}. {out}" if said else out
     return said
 
@@ -761,7 +770,7 @@ def unsupported_claims_text(record: Any) -> str:
 def write_unsupported_record(quest_root: Path | str, claims: list[dict[str, Any]],
                              removed: list[dict[str, Any]] | None = None) -> bool:
     """Keep the claims the last claim check judged unsupported, with its evidence words (:data:`UNSUPPORTED_RECORD`); an
-    empty list empties the record, so a sentence an earlier pass stated is gone when the Limitations block is written again.
+    empty list empties the record, so a sentence an earlier pass listed is gone from the quality report.
     ``removed``: the claims whose sentence FI took out of the paper (``claim``, ``evidence``, ``sentence``, and why it went:
     the claim check's ``fault`` and the ``keys`` of FI's values it is about, when given), added to those an earlier pass
     took out of this draft, never replaced. Returns whether the record could be written."""
@@ -816,7 +825,7 @@ _MAX_DIFFERENCE_CHARS = 500
 
 
 def run_difference_text(record: dict[str, Any]) -> str:
-    """The sentence FI puts in the Limitations for a difference it recorded and went on with
+    """The sentence FI's record gives for a difference it recorded and went on with
     (``needs/RUN_MANIFEST_CHECK.json``), for a reader of the paper: that the numbers the analysis reports do not all match
     the trials that were run, how many places, and that the results rest on the analysis. ``""`` when the record holds no
     such difference: a finding that only says the analysis printed no per-trial list is not one (it is in QUALITY.md and
@@ -1304,51 +1313,6 @@ def _drew_record(root: Path) -> bool | None:
     return seen.pop() if seen else None
 
 
-def _seed_text(root: Path) -> str:
-    """What ``{{seed}}`` says: the seed the code used, from the code's own reading (:func:`core.run_facts.seed_verdict`)."""
-    study = _read(root, "code/study.json")
-    if isinstance(study, dict) and study.get("entry") == "run_cell":
-        # FI ran the study through the code's deterministic entry: one run for each setting, and no seed passed to it.
-        return "none (each setting ran once with no random numbers; FI passed no seed)"
-    verdict = _run_facts.seed_verdict(root)
-    state = verdict.get("verdict")
-    if state == _run_facts.NO_ENTRY:
-        return ""
-    if state == _run_facts.REACHES:
-        base, _trial = _disclosure.recorded_seeds(root)
-        return (f"a separate seed for each trial, derived from base seed {base}" if base is not None
-                else "a separate seed for each trial, passed to the simulation by FI")
-    if state == _run_facts.UNKNOWN:
-        base, _trial = _disclosure.recorded_seeds(root)
-        drew = _drew_record(root)  # measured by the frame, so the code need not be read to tell
-        if drew is False:
-            return "none: no trial drew random numbers (each setting's result does not depend on a seed)"
-        if drew is True:
-            return ("each trial drew its random numbers from its own seed, derived from base seed " + str(base) if base is not None
-                    else "each trial drew its random numbers from its own seed, passed by FI")
-        said = f"a seed passed to each trial, derived from base seed {base}" if base is not None else "a seed passed to each trial"
-        return f"{said} (FI could not tell from the code whether the simulation uses it)"
-    driving = [d for d in verdict.get("driving_seeds") or [] if isinstance(d, dict)]
-    if state == _run_facts.PARTLY:
-        # Both are true and both drive the trials: FI's per-trial seed and a number typed into the code.
-        base, _trial = _disclosure.recorded_seeds(root)
-        listed = "; ".join(f"{d['value']}, at {d['where']}" for d in driving[:3])
-        return ("FI's own seed for each trial" + (f" (derived from base seed {base})" if base is not None else "")
-                + (", and a seed fixed in the code" if len(driving) == 1 else ", and seeds fixed in the code")
-                + f" ({listed})")
-    unseeded = [str(u).split(" (", 1)[0] for u in verdict.get("unseeded") or []]
-    if driving:
-        listed = "; ".join(f"{d['value']}, at {d['where']}" for d in driving[:3])
-        text = f"a seed fixed in the code ({listed})" if len(driving) == 1 else f"seeds fixed in the code ({listed})"
-        if unseeded:
-            text += f", and no seed at {', '.join(unseeded[:2])}"
-        return text
-    if unseeded:
-        return f"no fixed seed for part of its random numbers (the code draws them without one at {', '.join(unseeded[:2])})"
-    return ("no seed FI can name (the simulation does not use the seed FI passes each trial, and FI found none written "
-            f"into the code that runs a trial, {verdict.get('entry') or 'code/simulate.py'})")
-
-
 def seed_meaning_text(root: Path) -> str:
     """What the seed record means for the intervals, said to the writer as FI's fact (``""`` when the records do not show
     it): trials that each drew from their own seed make the interval over trials include the variation between seeds, and
@@ -1427,14 +1391,11 @@ def interval_level_percent() -> str:
 
 def facts(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> dict[str, Fact]:
     """The run's facts FI holds, by placeholder name (a fact FI does not hold is not in it). The paper gets them as one
-    paragraph FI writes itself (:func:`run_facts_text`); these are what an older draft's ``{{seed}}`` and the like are
+    paragraph FI writes itself (:func:`run_facts_text`); these are what an older draft's ``{{run_time}}`` and the like are
     filled with."""
     root = Path(quest_root)
     out: dict[str, Fact] = {}
     out["interval_level"] = Fact("interval_level", interval_level_percent())
-    seed = _seed_text(root)
-    if seed:
-        out["seed"] = Fact("seed", seed)
     wall, least = measured_run_time(root, fallback_s)
     reader_known = _run_facts.reader_run(root)
     stage, others = _run_facts.run_stage(root)
@@ -1500,33 +1461,17 @@ def _cells_run(root: Path) -> str:
     return f"{n:,}" if isinstance(n, int) and not isinstance(n, bool) and n > 0 else ""
 
 
-def _delivered_sentence(reader: dict[str, Any]) -> str:
-    """What a run of the delivered code, which runs the settings one after another, takes by FI's measurements: the time
-    of FI's own run of it when FI timed one, else the least the settings' own times give."""
-    plain = _disclosure._plain_seconds
-    if reader.get("timed") is not None:
-        return (f"The delivered code runs the settings one after another; FI ran it once in a clean environment and it "
-                f"took {plain(reader['timed'])}.")
-    if reader["least"] is None:
-        return ("The delivered code runs the settings one after another and was not timed as a whole, and the trials' own "
-                "times were not recorded.")
-    return ("The delivered code runs the settings one after another and was not timed as a whole; from the settings' own "
-            f"times such a run takes at least {plain(reader['least'])}.")
-
-
 def _run_time_sentences(root: Path, wall: float | None, least: float | None,
                         reader: dict[str, Any] | None, settings: str) -> list[str]:
-    """The run time as whole short sentences, from the same records as the ``{{run_time}}`` fact."""
+    """The measured run time as whole short sentences, from the same records as the ``{{run_time}}`` fact."""
     stage, others = _run_facts.run_stage(root)
-    plain = _disclosure._plain_seconds
-    timed = [_delivered_sentence(reader)] if reader is not None and reader.get("timed") is not None else []
     if wall is None:
         if least is None:
-            return timed
+            return []
         if _search_seconds(root):
             return [f"The settings run, the search and its check at finer settings took at least {_plain(least)}.",
-                    "The rest of FI's run was not timed."] + timed
-        return [f"The trials alone took at least {_plain(least)}.", "FI's whole run was not timed."] + timed
+                    "The rest of FI's run was not timed."]
+        return [f"The trials alone took at least {_plain(least)}.", "FI's whole run was not timed."]
     took = {"confirm": "the confirming run, whose results are reported, took",
             "explore": "the exploring run, whose results are reported, took"}.get(stage or "", "the run took")
     n = settings or _cells_run(root)
@@ -1546,483 +1491,11 @@ def _run_time_sentences(root: Path, wall: float | None, least: float | None,
         explore = (others.get("explore") or {}).get("wall_s")
         if isinstance(explore, (int, float)) and not isinstance(explore, bool):
             out.append(f"The exploring run took {_plain(float(explore))}.")
-    if reader is not None and reader["at_once"] == 1 and reader.get("timed") is not None:
-        out.append(_delivered_sentence(reader))
-    elif reader is not None and reader["at_once"] == 1:
-        out.append(f"Run one after another, as the delivered code does, the settings and the search take "
-                   f"{plain(reader['most'])}.")
-    elif reader is not None:
-        if reader["least"] is not None:
-            sum_said = ("The trials and the search add up to" if _search_seconds(root)
-                        else "The trials' own computation adds up to")
-            out.append(f"{sum_said} {plain(reader['least'])}.")
-        out.append(_delivered_sentence(reader))
+    if reader is not None and reader["at_once"] != 1 and reader["least"] is not None:
+        sum_said = ("The trials and the search add up to" if _search_seconds(root)
+                    else "The trials' own computation adds up to")
+        out.append(f"{sum_said} {_disclosure._plain_seconds(reader['least'])}.")
     return out
-
-
-def _verdict_sentence(met: str, limit: float, subject: str) -> str:
-    said = _plain(limit)
-    if met == "within":
-        return f"{subject} keeps to the topic's limit of {said}."
-    if met == "over":
-        return f"{subject} goes over the topic's limit of {said}."
-    return f"Whether {subject[:1].lower()}{subject[1:]} keeps to the topic's limit of {said} is not shown."
-
-
-def limitations_text(quest_root: Path | str) -> str:
-    """The Limitations section ``{{limitations}}`` stands for, written from FI's records: one bullet for each thing the study
-    did not do (:func:`required_items`; an open problem in the code is in QUALITY.md only). ``""`` when there is none."""
-    sentences = [i.sentence for i in required_items(quest_root) if i.kind != CODE_FINDING]
-    return "\n".join(f"- {s}" for s in sentences)
-
-
-def _known_estimates(protocol: dict[str, Any]) -> dict[str, bool]:
-    """``{name: has a true value}`` for the results the plan declares with a true value (``known_value``), under each
-    result's id and under the name of its estimate. The flag says whether the plan's true value is one number FI computes
-    (:func:`core.paper_values.known_truth`): the bias of the estimate is measured from it, and without it FI states no bias."""
-    names: dict[str, bool] = {}
-    for m in protocol.get("metrics") or []:
-        known = m.get("known_value") if isinstance(m, dict) else None
-        if not isinstance(known, dict) or not known.get("true_value") or not m.get("id"):
-            continue
-        has_truth = _values.known_truth(protocol, str(m["id"])) is not None
-        for key in (m["id"], known.get("estimate")):
-            if key:
-                names[str(key)] = has_truth
-    return names
-
-
-def _plain_in(protocol: dict[str, Any], root: Path) -> Any:
-    """A function from a result's code name to what the paper calls it: the label of the plan's metric, else the name
-    :func:`_said` finds. A line that says a quantity is not answered never shows a code identifier."""
-    labels = {str(m.get("id")): _one(m.get("label")) for m in protocol.get("metrics") or [] if isinstance(m, dict)}
-
-    def plain(metric: str) -> str:
-        return labels.get(metric) or _said(root, metric).strip('"')
-    return plain
-
-
-def _answer_parts(rec: Any, metric: str, tries: list[tuple[str, str]], plain: Any = None, how: str = "",
-                  brief: bool = False) -> tuple[str, str, str, bool]:
-    """The parts of an answer: the words in brackets (``how``, else the result's name), the key FI fills, the words after its
-    value, and whether FI could fill one of ``tries``. When it could not, the key is "not answered (why)" and the rest is
-    empty; ``brief`` (the paper's body) leaves the why out: the full line, in the supplement, says it."""
-    got = [(k, note, _values.resolve(k, rec)) for k, note in tries]
-    done = next(((k, note) for k, note, v in got if v.filled), None)
-    shown = rec.label(metric)
-    lead = how or "measured as: " + (shown if shown != metric else "`" + metric + "`")
-    if done is None:
-        why = got[-1][2].hit.reason if got[-1][2].hit else "no record"
-        said = shown if plain is None else f"\"{plain(metric)}\""
-        if brief:
-            return lead, f"not answered (FI cannot state {said})", "", False
-        if plain is None:
-            return lead, f"not answered (FI cannot state {shown}: {why})", "", False
-        return lead, f"not answered (FI cannot state {said}: {why.replace(metric, plain(metric))})", "", False
-    return lead, done[0], done[1], True
-
-
-def _answer_line(rec: Any, name: str, metric: str, tries: list[tuple[str, str]], plain: Any = None,
-                 how: str = "", brief: bool = False) -> str:
-    """One line of the answers block: the first of ``tries`` (a key and the words after its value) that FI can fill, else
-    ``name`` said as not answered, with why (``brief``: without it). ``how`` replaces the words in brackets (the plan's map
-    and its result) when FI worked the number out itself."""
-    lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how, brief)
-    return f"- {name} ({lead}): {body}{note}" if ok else f"- {name}: {body}"
-
-
-#: What a question that no result is linked to says. It claims nothing about the run: a quantity the analysis computed under
-#: a name the plan's map does not give is in the Results, and the line points there.
-NO_LINK = "the plan links no result of the study to it here; see the Results for what the run measured"
-#: The same for a question the plan's map points at something the study does not return as a result (an equation, a name that
-#: is none of the study's results): the plan does link something, and the line says so.
-NO_RESULT = "the plan's map for it names no result the study returns; see the Results for what the run measured"
-
-
-def _pins_not_in(name: str, rec: Any, at: dict[str, Any]) -> list[str]:
-    """``label = value`` for each setting the plan's map pins, except one the question's own words already state as
-    ``<setting> = <number>`` with the same number (``0`` and ``0.0`` are one value). This reads the person's words for a
-    condition they typed, only to avoid saying it twice; the pin itself is FI's record."""
-    out = []
-    for a, v in at.items():
-        stated = False
-        try:
-            want = float(v)
-        except (TypeError, ValueError):
-            want = None
-        if want is not None:
-            for word in {a, rec.label(a), rec.short(a)}:
-                for m in re.finditer(r"(?<![\w.])" + re.escape(word) + r"\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?![\w/-]|\.\d)", name):
-                    stated = stated or float(m.group(1)) == want
-        if not stated:
-            out.append(f"{rec.label(a)} = {v}")
-    return out
-
-
-def _levels_with_trials(rec: Any, metric: str, split: str, levels: list[Any], others: list[str], at: dict[str, Any]) -> list[Any]:
-    """The values of the compared axis ``split`` at which ``metric`` has a trial at every combination of the question's other
-    axes ``others`` (taken over the whole record) that the pinned settings ``at`` allow. A value with a combination missing
-    would only give a line FI cannot fill ("no trials at that combination"); the sub-studies of a plan do not cross every
-    axis, so a part measured at one value of ``split`` only has trials there. Empty when no value has them all."""
-    cells = [c for c in rec.carrying(metric)
-             if all(a not in c["cell"] or _values._same(c["cell"][a], v) for a, v in at.items())]
-    combos = {tuple(json.dumps(c["cell"].get(a), default=str) for a in others) for c in cells}
-    have: dict[str, set[tuple[str, ...]]] = {}
-    for c in cells:
-        if split in c["cell"]:
-            have.setdefault(json.dumps(c["cell"][split], default=str), set()).add(
-                tuple(json.dumps(c["cell"].get(a), default=str) for a in others))
-    return [lv for lv in levels if combos <= have.get(json.dumps(lv, default=str), set())]
-
-
-def _no_value_reason(root: Path, rec: Any, metric: str, plain: Any) -> tuple[str, str]:
-    """Why FI states no value for ``metric``, from FI's own records: the check that took the quantity out of the results
-    (``rec.left_out``: FI holds a value and withholds it, with the check's note), else the analysis's record of a quantity
-    it could not work out (``derived.json``: its ``why``), else that no record holds one. ``(the one phrase the paper's
-    body says, the reason in full)``: the record's own words follow the phrase in the full one only."""
-    if metric in rec.left_out:
-        head = f"FI left \"{plain(metric)}\" out of the results"
-        return head, f"{head}: {str(rec.left_out[metric]).strip() or 'a check of FI removed it'}"
-    record = _read(root, "data/results/derived.json")
-    items = record.get("derived") if isinstance(record, dict) else None
-    item = items.get(metric) if isinstance(items, dict) else None
-    if isinstance(item, dict) and item.get("status") not in (None, "ok") and str(item.get("why") or "").strip():
-        head = f"FI could not work out \"{plain(metric)}\""
-        return head, f"{head}: {str(item['why']).strip()}"
-    said = f"FI holds no value for \"{plain(metric)}\""
-    return said, said
-
-
-#: The most of FI's own words a line of the answers block in the paper's body has (:func:`_brief_words`: every word of it
-#: but the names in it: the question's, the person's words, and the plan's labels of results and settings). Chosen on the
-#: 102 questions of 23 stored papers: every brief line with one value fits within 30 with its interval and its notes,
-#: except a line that also says its unit is not the one asked (31) or that one number answers several questions (36),
-#: which keep that; at 25, four lines of a bias or a spread (27 and 28 words) would go over. A longer line (an answer
-#: for each value of a compared setting) gives its values without their intervals, which stay in the supplement; one
-#: still over is kept whole, never cut or pooled (:func:`_within_cap`).
-BRIEF_WORDS = 30
-
-
-def _differs_with(labels: list[str]) -> str:
-    """The settings a brief answer differs with: each by name when there are one or two, else how many."""
-    if len(labels) <= 2:
-        return " and ".join(labels)
-    return f"{len(labels)} parameters"
-
-
-def _brief_words(line: str, names: list[str], rec: Any) -> int:
-    """How many of FI's own words ``line`` (a brief answers line, keys unfilled) has once filled: the words of the line, its
-    keys filled from ``rec``, less the names in it: the questions' (``names``, the person's words) and the plan's labels of
-    its results and settings (each one name, however many words or symbols the plan gave it)."""
-    filled = _values.without_marks(_values.fill(line, rec)[0])
-    labels = {*names, *(rec.label(m) for m in rec.metrics()), *(rec.label(a) for a in rec.axes())}
-    for name in sorted((n for n in labels if n), key=len, reverse=True):
-        # a whole name only: a setting called ``n`` takes no letter out of FI's words
-        filled = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", " ", filled)
-    return len(filled.replace("- ", " ", 1).split())
-
-
-def _within_cap(candidates: list[str], names: list[str], rec: Any) -> str:
-    """The first of ``candidates`` (brief forms of one line, most said first) whose own words are at most
-    :data:`BRIEF_WORDS`, else the last: a line is never cut, and a compared setting's values are never pooled to fit."""
-    return next((c for c in candidates if _brief_words(c, names, rec) <= BRIEF_WORDS), candidates[-1])
-
-
-#: What a brief value says when its interval is in the supplement only.
-_INTERVAL_THERE = " (interval in the supplement)"
-
-
-def answers_text(quest_root: Path | str, *, brief: bool = False) -> str:
-    """The block ``{{answers}}`` stands for: one line for each quantity the topic asks for and marks main, with FI's value
-    and its interval (a key FI fills), from the plan's own ``protocol.topic_map`` entry (``metric:<id>``). A quantity the
-    plan maps to nothing FI holds is said as not answered, and why. ``""`` when the topic asks for no main quantity or FI
-    holds no trial record. Every key in it is tried here, so a line never asks the writer to fix a key it did not write.
-
-    ``brief``: the block as the paper's body carries it (the full one is in the supplement, core/supplement.py ``ANSWERS``):
-    the same answers in fewer words: a range counts the settings that gave no number (``| range:brief``) and names the
-    parameters it differs with only when they are one or two, and a question not answered says the one phrase of why. A
-    line over :data:`BRIEF_WORDS` of FI's own words gives its values without their intervals; one still over is kept whole
-    (never cut, a compared setting's values never pooled). The numbers are the same keys over the same settings."""
-    full, short = answers_forms(quest_root)
-    return short if brief else full
-
-
-def answers_forms(quest_root: Path | str) -> tuple[str, str]:
-    """:func:`answers_text` in full and brief, from one walk over the questions (``("", "")`` with no block)."""
-    full, short = _answer_lines(Path(quest_root))
-    head = "**Answers to the questions asked.**" + chr(10) * 2
-    return (head + chr(10).join(full), head + chr(10).join(short)) if full else ("", "")
-
-
-def _answer_lines(root: Path) -> tuple[list[str], list[str]]:
-    """The lines of :func:`answers_text`: in full, and brief (one for one, question by question)."""
-    from . import topic_requirements as _topic_req
-
-    req = _read(root, f".fi/{_topic_req.FILE}")
-    protocol = plan_protocol(root)
-    asked = [q for q in (req.get("quantities") if isinstance(req, dict) else None) or [] if isinstance(q, dict) and q.get("main") is True]
-    if not asked or not isinstance(protocol, dict):
-        return [], []
-    rec = _values.records_of(root, protocol)
-    if rec is None or not rec.cells:
-        return [], []
-    plan = _topic_req.view({}, protocol)
-    varied = rec.varied()
-    estimates = _known_estimates(protocol)
-    plain = _plain_in(protocol, root)
-    lines: list[str] = []
-    # the brief forms of each line of ``lines``, at the same place, most said first (:func:`_within_cap` keeps one)
-    short: list[list[str]] = []
-
-    def add(line: str, *briefs: str) -> None:
-        lines.append(line)
-        short.append(list(briefs) or [line])
-    starts: list[int] = []  # the first line of each question, to find where one question's lines end
-    said_names: list[str] = []  # the question each start is
-    unit_spans: list[tuple[int, Any, Any]] = []  # (the question's place in starts, its unit_conflict, its map): the unit sentence
-    for item in asked:
-        name = " ".join(str(item.get("name") or "").split())
-        if not name:
-            continue
-        starts.append(len(lines))
-        said_names.append(name)
-        # An entry whose result is in another unit than the question asks in (``unit_conflict``, written by the answers part)
-        # is still answered by that result: the line states both units, and FI converts nothing.
-        conflict = next((m["unit_conflict"] for m in _topic_req.map_entries(req, plan, "quantities", item)
-                         if m.get("unit_conflict")), None)
-        mapped = _topic_req.mapping_of(req, plan, "quantities", item)
-        if isinstance(conflict, str):  # a plan written before the units were kept as a pair: read as it always was
-            add(f"- {name}: not answered ({conflict})",
-                f"- {name}: not answered (its result is in another unit than the question asks in)")
-            continue
-        if conflict:
-            unit_spans.append((len(starts) - 1, conflict, mapped))
-        # The plan's explicit map to a metric that exists is the fact; the line names that metric, so a wrong map is
-        # disclosed, never hidden. Whether the metric's name resembles the quantity's is not asked here.
-        metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
-        if not metric:
-            add(f"- {name}: {NO_RESULT if mapped is not None else NO_LINK}")
-            continue
-        if metric in rec.by_run:
-            add(f"- {name}: not answered (the analysis worked it out once for each replicate and the values differ, "
-                "so no single value stands for the study)")
-            continue
-        if metric not in rec.metrics() and metric not in rec.answers:
-            phrase, reason = _no_value_reason(root, rec, metric, plain)
-            add(f"- {name}: not answered ({reason})", f"- {name}: not answered ({phrase})")
-            continue
-        if metric in rec.answers:
-            one = [(f"{{{{v:{metric}}}}}", " (one value worked out by the analysis; no interval is recorded for it)")]
-            add(_answer_line(rec, name, metric, one),
-                _answer_line(rec, name, metric, [(one[0][0], " (one value from the analysis; no interval)")], brief=True))
-            continue
-        # The plan's own map may pin the quantity to one value of a setting (``at``); a setting the study compares (the plan's
-        # ``comparisons``) is answered once for each of its values, never as one range across them.
-        # The statistic the plan's map types for the question (``value`` when it says none: the result as it is).
-        stat = next((str(m["statistic"]) for m in _topic_req.map_entries(req, plan, "quantities", item)
-                     if m.get("statistic") in ("bias", "sd")), "")
-        entry_at = next((m["at"] for m in _topic_req.map_entries(req, plan, "quantities", item)
-                         if isinstance(m.get("at"), dict) and m["at"]), {})
-        at = {a: v for a, v in entry_at.items() if a in rec.axes()}
-        # Only a comparison of a reported result makes each value of its setting an alternative with an answer of its own. A
-        # comparison of a quantity worked out from results (an observed order across step sizes) compares the study's
-        # numerical settings, not alternatives: its setting is not split into a line for each value.
-        reported = {m.get("id") for m in protocol.get("metrics") or [] if isinstance(m, dict)}
-        compared = {c.get("across") for c in protocol.get("comparisons") or []
-                    if isinstance(c, dict) and c.get("result") in reported}
-        # An axis the study compares inside each run is read from the per-value records the run kept; a quantity that
-        # is one number per run has no record under it, so that axis is pooled whole (``=all``) for it, never looked
-        # up as a value of its own (a lookup by it finds no trial at all).
-        held = {c_axis for c in rec.carrying(metric) for c_axis in c["cell"]}
-        per_run = [a for a in varied if a in rec.in_run_axes() and a not in held and a not in at]
-        each = [a for a in varied if a not in per_run and a not in at]
-        split = next((a for a in each if a in compared), None)
-        # A result the compared setting does not enter has the same values at each of its values (FI's record): one line, not
-        # one for each value. It is read at the first value of that setting (the numbers are the same at all of them, and no
-        # trial is counted twice).
-        same = split is not None and rec.same_across(metric, split, reference=(stat == "bias"))
-        same_at: list[str] = []
-        same_note = ""
-        if same:
-            first = rec.values_of(metric, split)[0]
-            same_at = [f"{rec.short(split)}={first}"]
-            same_note = f" (the same at every value of {rec.label(split)}; read at {rec.label(split)} = {first})"
-            each = [a for a in each if a != split]
-            split = None
-        pinned = [f"{rec.short(a)}={v}" for a, v in at.items()]
-        fixed = pinned + [f"{rec.short(a)}=all" for a in per_run] + same_at
-        levels = [None] if split is None else list(rec.axes().get(split) or [None])
-        only_at = False
-        if split is not None and None not in levels:
-            has_trials = _levels_with_trials(rec, metric, split, levels, [a for a in each if a != split], at)
-            if has_trials and len(has_trials) < len(levels):
-                only_at, levels = len(has_trials) == 1, has_trials
-        pieces: list[tuple[Any, str, str, str]] = []
-        brief_pieces: list[tuple[Any, str, str, str]] = []  # the same, brief
-        bare_pieces: list[tuple[Any, str, str, str]] = []  # the same, brief, each value without its interval
-        for level in levels:
-            here = [a for a in each if a != split] if level is not None else each
-            said = [f"{rec.short(a)}=each" for a in here]
-            unsaid = _pins_not_in(name, rec, at)
-            label = name + (f" (when {', '.join(unsaid)})" if unsaid and level is None else "")
-            label += same_note
-            if level is not None:
-                fixed_here = fixed + [f"{rec.short(split)}={level}"]
-                label = (f"{name} (measured at {rec.label(split)} = {level} only)" if only_at else
-                         f"{name} ({rec.label(split)} = {level})") + (f" ({', '.join(_pins_not_in(name, rec, at))})" if _pins_not_in(name, rec, at) else "")
-            else:
-                fixed_here = fixed
-            # A bias or a standard deviation the plan's map types for the question is that statistic of the result's trials, which
-            # FI works out itself from its keys; the result's own mean is neither.
-            how = ""
-            if stat:
-                made = "the mean estimate minus the true value" if stat == "bias" else "the standard deviation over the trials"
-                shown = rec.label(metric)
-                how = f"measured as: {shown if shown != metric else '`' + metric + '`'}, here worked out as {made}"
-            if stat == "bias" and not estimates.get(metric):
-                gap = f"not answered (the plan gives no one true value of \"{plain(metric)}\" to measure the bias from)"
-                if len(levels) > 1:
-                    pieces.append((level, how, gap, ""))
-                    brief_pieces.append((level, how, gap, ""))
-                    bare_pieces.append((level, how, gap, ""))
-                else:
-                    add(f"- {label}: {gap}")
-                continue
-            brief_tries: list[tuple[str, str]] | None = None
-            bare_tries: list[tuple[str, str]] | None = None  # brief, no interval: used when a line is over the cap
-            if said:
-                where = ", ".join([*said, *fixed_here])
-                over = f" (no single value: it differs with {', '.join(rec.label(a) for a in here)}; this is the "
-                end = ", lowest to highest, and the tables give every setting)"
-                # brief: the settings with no number counted (``range:brief``), the parameters named only when one or two,
-                # and a statistic the words in brackets already name ("here worked out as ...") not named again
-                short_end = f", lowest to highest; it differs with {_differs_with([rec.label(a) for a in here])})"
-                if stat == "bias":
-                    tries = [(f"{{{{v:{metric} @ {where} | diff ref | range}}}}", over + "mean estimate minus the true value in each setting" + end)]
-                    brief_tries = [(f"{{{{v:{metric} @ {where} | diff ref | range:brief}}}}", " (one per setting" + short_end)]
-                elif stat == "sd":
-                    tries = [(f"{{{{v:{metric}:sd @ {where} | range}}}}", over + "standard deviation over the trials in each setting" + end)]
-                    brief_tries = [(f"{{{{v:{metric}:sd @ {where} | range:brief}}}}", " (one per setting" + short_end)]
-                else:
-                    tries = [(f"{{{{v:{metric} @ {where} | range}}}}", over + "mean in each setting" + end)]
-                    brief_tries = [(f"{{{{v:{metric} @ {where} | range:brief}}}}", " (mean of each setting" + short_end)]
-            else:
-                where = ", ".join(fixed_here)
-                if stat == "bias":
-                    tries = [(f"{{{{v:{metric} @ {where} | diff ref}}}}", " (the mean estimate minus the true value)")]
-                elif stat == "sd":
-                    tries = [(f"{{{{v:{metric}:sd_ci @ {where}}}}}", " (the standard deviation over the trials)"),
-                             (f"{{{{v:{metric}:sd @ {where}}}}}", " (the standard deviation over the trials)")]
-                    bare_tries = [(tries[1][0], " (the standard deviation over the trials; " + _INTERVAL_THERE[2:])]
-                else:
-                    tries = [(f"{{{{v:{metric}:mean_ci @ {where}}}}}", ""), (f"{{{{v:{metric} @ {where}}}}}", " (no interval: the trials give none)")]
-                    bare_tries = [(tries[1][0], _INTERVAL_THERE)]
-                # the value alone says its interval is in the supplement only when there is one (else the key with its
-                # interval did not fill, and the line already says why it has none)
-                if bare_tries is not None and not _values.resolve(tries[0][0], rec).filled:
-                    bare_tries = None
-            brief_tries = brief_tries or tries
-            bare_tries = bare_tries or brief_tries
-            if len(levels) > 1:
-                lead, body, note, ok = _answer_parts(rec, metric, tries, plain, how)
-                pieces.append((level, lead, body, note if ok else ""))
-                lead, body, note, ok = _answer_parts(rec, metric, brief_tries, plain, how, brief=True)
-                brief_pieces.append((level, lead, body, note if ok else ""))
-                lead, body, note, ok = _answer_parts(rec, metric, bare_tries, plain, how, brief=True)
-                bare_pieces.append((level, lead, body, note if ok else ""))
-            else:
-                add(_answer_line(rec, label, metric, tries, plain, how),
-                    _answer_line(rec, label, metric, brief_tries, plain, how, brief=True),
-                    _answer_line(rec, label, metric, bare_tries, plain, how, brief=True))
-        if pieces:
-            pins = _pins_not_in(name, rec, at)
-            head = name + (f" (when {', '.join(pins)})" if pins else "")
-            add(_by_value_line(head, rec.label(split), pieces), _by_value_line(head, rec.label(split), brief_pieces),
-                _by_value_line(head, rec.label(split), bare_pieces))
-    for place, conflict, mapped in unit_spans:
-        start, end = starts[place], starts[place + 1] if place + 1 < len(starts) else len(lines)
-        # Only a line with a value of FI's: a question the result gives no value for is already said as not answered, for that.
-        if start < end and "{{" in lines[end - 1]:
-            metric = mapped[1] if mapped is not None and mapped[0] in ("ok", "judge") else ""
-            lines[end - 1] += _unit_sentence(conflict, metric, rec, plain)
-            short[end - 1] = [c + _unit_sentence(conflict, metric, rec, plain, brief=True) for c in short[end - 1]]
-    lines, short = _shared_numbers_once(lines, short, starts, said_names)
-    return lines, [_within_cap(list(dict.fromkeys(c)), said_names, rec) for c in short]
-
-
-def _by_value_line(head: str, setting: str, pieces: list[tuple[Any, str, str, str]]) -> str:
-    """One bullet for a question answered at each value of the compared ``setting``: each value keeps its own answer, in
-    order, joined here (a note that every value carries is said once at the end; otherwise each keeps its own, so a note
-    never ends up beside a value it was not said of)."""
-    notes = {n for _, _, _, n in pieces if n}
-    shared = notes.pop() if len(notes) == 1 and all(n for _, _, _, n in pieces) else ""
-    lead = next((ld for _, ld, _, _ in pieces if ld), "")
-    each_value = "; ".join(f"{lv}: {b}{'' if shared else n}" for lv, _, b, n in pieces)
-    return f"- {head} ({lead}), by {setting}: {each_value}{shared}"
-
-
-_VALUE_KEY = re.compile(r"\{\{v:[^{}]*\}\}")
-
-
-def _same_value(value: Any) -> Any:
-    """A setting's value as one number where it is one (``1`` and ``1.0`` are the same setting)."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return str(value).strip()
-
-
-def _number_place(key_text: str) -> Any:
-    """Where the number a key prints is read from: the result, its statistic (with or without an interval, the same
-    number), the settings in any order, and what is done with it. A key FI cannot read is its own text."""
-    try:
-        key = _values.parse(key_text)
-    except Exception:  # noqa: BLE001 - an unreadable key is compared as written
-        return key_text
-    where = lambda w: tuple(sorted((a, p.kind, _same_value(p.value)) for a, p in (w or {}).items()))  # noqa: E731
-    return (key.metric, _values.FORM_STATISTIC.get(key.form, key.form), where(key.where), key.op, key.operand,
-            where(key.operand_where), key.operand_metric, key.reducer, key.word, key.percent, key.form_arg)
-
-
-def _shared_numbers_once(lines: list[str], short: list[list[str]], starts: list[int],
-                         names: list[str]) -> tuple[list[str], list[list[str]]]:
-    """``lines`` with the questions that print exactly the same numbers (the same places FI reads, :func:`_number_place`)
-    given them once, together: the first one's line names every one of them and says the plan gives these different
-    questions one number, so it can be the answer to only one of them. Neither the number (it may be the right answer to
-    one of them) nor the fact that it cannot answer both is lost. The places are the ones the lines print, so it holds
-    whatever led two questions there (a map with several entries, a result the analysis worked out once whatever the
-    setting, a setting the record does not have). A question whose numbers are only some of another's (one setting of a
-    result the other gives for each setting) keeps its own line: in 244 stored studies that case never occurred.
-
-    ``short`` (the brief forms of each of ``lines``) is grouped as ``lines`` are, and says the same in fewer words."""
-    spans = [(s, starts[i + 1] if i + 1 < len(starts) else len(lines)) for i, s in enumerate(starts)]
-    keys = [frozenset(_number_place(k) for k in _VALUE_KEY.findall(chr(10).join(lines[s:e]))) for s, e in spans]
-    out: list[str] = []
-    out_short: list[list[str]] = []
-    for i, (s, e) in enumerate(spans):
-        group = [j for j in range(len(spans)) if keys[i] and keys[j] == keys[i]]
-        if len(group) < 2:
-            out.extend(lines[s:e])
-            out_short.extend(short[s:e])
-        elif group[0] == i:
-            head = "- " + names[i]
-            together = "; ".join(names[j] for j in group)
-
-            def joined(here: list[str], note: str) -> list[str]:
-                here = list(here)
-                here[0] = "- " + together + here[0][len(head):] if here[0].startswith(head) else here[0]
-                here[-1] += note
-                return here
-            out.extend(joined(lines[s:e], " (the plan gives these different questions one number, so it can be the "
-                                          "answer to only one of them)"))
-            brief_note = " (one number for these questions: it can answer only one)"
-            # each brief form of the first line and of the last takes the names and the note, as the full lines do
-            forms = [list(c) for c in short[s:e]]
-            for k in range(len(forms)):
-                forms[k] = [joined([c], "")[0] if k == 0 else c for c in forms[k]]
-            forms[-1] = [c + brief_note for c in forms[-1]]
-            out_short.extend(forms)
-    return out, out_short
 
 
 def _unit_words(conflict: dict[str, Any]) -> list[str]:
@@ -2034,8 +1507,8 @@ def _unit_words(conflict: dict[str, Any]) -> list[str]:
 def unit_conflicts(quest_root: Path | str) -> list[dict[str, Any]]:
     """The questions the plan answers with a result in another unit than the question asks in, from the plan's own
     ``topic_map`` (``unit_conflict``): ``{"name", "conflict", "metric", "valued"}``. ``conflict`` is the record (a pair of units, or
-    the old text of a plan written before the pair); ``valued``: FI holds a value for the result, so the Answers block prints it with
-    both units. This one record is what the Answers block, the writers' facts and the quality report each read."""
+    the old text of a plan written before the pair); ``valued``: FI holds a value for the result. The quality report reads
+    it."""
     from . import topic_requirements as _topic_req
 
     root = Path(quest_root)
@@ -2082,67 +1555,6 @@ def other_candidates(quest_root: Path | str) -> list[dict[str, str]]:
     return out
 
 
-def unit_notes(quest_root: Path | str) -> list[str]:
-    """One sentence for each answer given in another unit than the question asks in, for a writer of the paper, the slides or
-    the poster: the result's own unit and that FI did not convert it (from :func:`unit_conflicts`, the record the Answers block reads)."""
-    root = Path(quest_root)
-    protocol = plan_protocol(root)
-    plain = _plain_in(protocol, root) if isinstance(protocol, dict) else (lambda m: m)
-    out = []
-    for u in unit_conflicts(root):
-        if u["valued"]:
-            said = _unit_words(u["conflict"])
-            out.append(f"The answer to \"{u['name']}\" is the result \"{plain(u['metric'])}\", which is in {said[0]}; the question asks "
-                       f"in {said[1]}, and FI did not convert it. Wherever you give this answer, give it in the result's own unit, "
-                       "never in the unit the question asks in.")
-    return out
-
-
-def _unit_sentence(conflict: Any, metric: str, rec: Any, plain: Any, brief: bool = False) -> str:
-    """The sentence after an answer whose result is in another unit than the question asks in: the result, its unit (the plan's
-    own where the plan declares one, else the unit the plan states for it) and the unit asked; FI converts nothing.
-    ``brief``: the two units only (the paper's body; the line names the result already)."""
-    said = _unit_words(conflict)
-    if brief:
-        return f" (in {said[0]}; the question asks in {said[1]}, not converted)"
-    result = f"\"{plain(metric)}\"" if metric else "this result"
-    lead = "the result used" if conflict.get("declared") else "the plan states that the result used"
-    return f" ({lead}, {result}, is in {said[0]}; the question asks in {said[1]}, and FI did not convert it)"
-
-
-def _reach(root: Path) -> Any:
-    """FI's reading of the quest's plan and code (:class:`core.shown_reach.Reach`); ``None`` when it cannot be made."""
-    from . import shown_reach as _shown_reach
-
-    try:
-        protocol = plan_protocol(root)
-        if not protocol:
-            return None
-        return _shown_reach.Reach(root, protocol, [], _declared_results(root, protocol))
-    except Exception as exc:  # noqa: BLE001 -- no result is placed; the paper still renders
-        _LOG.warning("[paper_facts] FI could not read the plan and code to place open code findings (%s: %s)",
-                     type(exc).__name__, exc)
-        return None
-
-
-def _declared_results(root: Path, protocol: dict[str, Any]) -> list[str]:
-    """The results the plan declares, as the evidence gate named them (``.fi/declared_results.json``, written by
-    :func:`core.code_review.write_declared_results`: the plan's metrics and the design's dependent variables). A quest
-    from before that record has the result ids of the plan's contract only."""
-    from . import code_review as _code_review
-    from . import contract as _contract
-
-    names = _code_review.read_declared_results(root)
-    if names is not None:
-        return names
-    _LOG.debug("[paper_facts] no record of the declared results; the plan's contract results are used")
-    try:
-        return [r.id for r in _contract.from_design({"protocol": protocol}).results]
-    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences
-        _LOG.warning("[paper_facts] FI could not read the plan's results from its contract (%s: %s)", type(exc).__name__, exc)
-        return []
-
-
 def printed_result_ids(paper_md: str) -> list[str]:
     """The ids of the plan's results the paper prints, in order of first use: the first word of each ``{{v:...}}`` key (a
     ``calc``, ``trend`` or ``comparison`` key names no result)."""
@@ -2154,62 +1566,14 @@ def printed_result_ids(paper_md: str) -> list[str]:
     return out
 
 
-def touched_sentences(quest_root: Path | str, paper_md: str) -> dict[str, str]:
-    """``{finding id: FI's sentence}`` for each open code finding that names a result the paper prints
-    (:func:`core.code_review.touched_results`): the results it names and that the paper prints, and that they come from code a
-    review flagged and nobody settled. Written from FI's records and the paper's own keys, never from the paper's words; a
-    finding that names no printed result has none. Never raises."""
-    root = Path(quest_root)
-    printed = printed_result_ids(paper_md)
-    if not printed:
-        return {}
-    try:
-        from . import code_review as _code_review
-
-        reach = _reach(root)
-        touched = (_code_review.touched_results(root, root / "code", reach.touched_by, reach.ids)
-                   if reach is not None else {})
-        record = _read(root, ".fi/code_review.json")
-        issues = record.get("issues") if isinstance(record, dict) and isinstance(record.get("issues"), dict) else {}
-        names = {fid: _code_review._plain_text((issues.get(fid) or {}).get("text")) for fid in touched}
-    except Exception as exc:  # noqa: BLE001 -- the paper still renders, without the sentences; the failure is on the log
-        _LOG.warning("[paper_facts] FI could not place the open code findings on the results (%s: %s)", type(exc).__name__, exc)
-        return {}
-    out: dict[str, str] = {}
-    for fid, ids in touched.items():
-        hit = [i for i in ids if i in printed]
-        if not hit:
-            continue
-        said = [_said(root, i) for i in hit]
-        what = (said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and " + said[-1])
-        finding = _whole(names.get(fid), 160)
-        out[fid] = _sentence(f"{what} {'comes' if len(said) == 1 else 'come'} from code a review flagged as possibly changing "
-                             f"{'it' if len(said) == 1 else 'them'}" + (f" ({finding})" if finding else "")
-                             + "; the problem was not resolved")
-    return out
-
-
-def run_facts_text(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "") -> str:
-    """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, the seed, the
-    run time, and the topic's time limit with the verdict, each only when FI holds it, and, given the paper's text
-    (``paper_md``), a sentence for each result it prints that an open code finding names (:func:`touched_sentences`).
-    ``""`` when it holds none."""
+def run_facts_text(quest_root: Path | str, *, fallback_s: Any = None) -> str:
+    """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, and the
+    measured run time, each only when FI holds it. ``""`` when it holds none."""
     root = Path(quest_root)
     parts = _counts_sentences(root)
-    seed = _seed_text(root)
-    if seed:
-        parts.append(f"Seed: {seed}.")
     wall, least = measured_run_time(root, fallback_s)
-    reader = _run_facts.reader_run(root)
     _each, settings, _failed = _trial_counts(root)
-    parts += _run_time_sentences(root, wall, least, reader, settings)
-    limit, met = _limit_and_met(root, topic, wall, least, reader)
-    if limit is not None:
-        met = met if met in ("within", "over") else ""
-        # "It" is the delivered code, only when the sentence just before is the one about it
-        delivered = wall is not None and reader is not None and reader["at_once"] != 1
-        parts.append(_verdict_sentence(met, limit, "It" if delivered else "The run"))
-    parts += list(touched_sentences(root, paper_md).values())
+    parts += _run_time_sentences(root, wall, least, _run_facts.reader_run(root), settings)
     return "**Run.** " + " ".join(parts) if parts else ""
 
 
@@ -2226,12 +1590,8 @@ _MARK_TAIL = re.compile(r"(<!-- /fi:fact-figure-[\w-]+ -->)[^\s{}<][^\n{}<]*\}\}
 _STRAY_PARTS = re.compile(r"\s*([\w-]+)(?:\.\w+)?\s*:\s*([\w-]+)\s*(?:@(.*))?\Z", re.S)
 _MARK = re.compile(r"<!-- fi:fact-([\w-]+) -->(.*?)<!-- /fi:fact-\1 -->", re.S)
 _TAG = re.compile(r"<!-- /?fi:fact-[\w-]+ -->|<!-- fi:limitations-heading -->[ \t]*\n?|<!-- /?fi:unconfirmed -->")
-#: FI's mark beside a sentence of the writer's that its last claim check found supported by neither the run's results nor
-#: a cited source (Engine._state_unsupported_claims places it from its record, at the last step before delivery): the
-#: sentence stays where it is and a reader is told, where it stands, that it is unconfirmed (the Limitations list it). Its own
-#: marker, not a placeholder: render() keeps it as written, the writer is never given it (:func:`to_placeholders`) and no
-#: check of the writer's text reads it (:func:`without_blocks`).
-UNCONFIRMED_MARK = "<!-- fi:unconfirmed --> (unconfirmed)<!-- /fi:unconfirmed -->"
+#: FI's mark beside a sentence its claim check could not confirm, as an older FI placed it: FI places none now (the
+#: quality report lists such sentences), and every view of a paper takes an old one out (:func:`without_unconfirmed`).
 _UNCONFIRMED = re.compile(r"<!-- fi:unconfirmed -->.*?<!-- /fi:unconfirmed -->", re.S)
 _MARKS_NOTE = re.compile(r"<!-- fi:marks-note -->.*?<!-- /fi:marks-note -->(?:\r?\n)*", re.S)
 _ITEM_KEY = "not_done-"
@@ -2323,37 +1683,21 @@ def _is_item(name: str) -> bool:
 
 
 def without_unconfirmed(markdown: str) -> str:
-    """``markdown`` without FI's marks beside unconfirmed sentences (:data:`UNCONFIRMED_MARK`), exactly as it was before
-    they were placed."""
+    """``markdown`` without the marks an older FI put beside unconfirmed sentences, exactly as it was before they were
+    placed."""
     return _UNCONFIRMED.sub("", markdown or "")
 
 
-def mark_unconfirmed(markdown: str, spans: list[tuple[int, int]]) -> str:
-    """``markdown`` (with no mark in it) with :data:`UNCONFIRMED_MARK` placed in each sentence of ``spans`` (``(start, end)``
-    of the sentence in ``markdown``; the same sentence twice is marked once): before the full stop that ends it, or right
-    after its last character when something closes it after the stop (a quote, emphasis) or it has none, so a quotation
-    is never changed."""
-    at: set[int] = set()
-    for start, end in spans:
-        seg = markdown[start:end].rstrip()
-        at.add(start + (len(seg) - 1 if seg[-1:] in (".", "!", "?") else len(seg)))
-    out = markdown
-    for pos in sorted(at, reverse=True):
-        out = out[:pos] + UNCONFIRMED_MARK + out[pos:]
-    return out
-
-
 def without_marks_note(markdown: str) -> str:
-    """``markdown`` without FI's note under the title (``<!-- fi:marks-note -->`` block, :func:`core.engine_base._mark_unconfirmed_results`),
-    with the blank lines after it: FI's words, never the writer's. The delivered paper keeps it; every view the writer or a
-    check of the writer's text reads takes it out (:func:`to_placeholders`, :func:`without_blocks`)."""
+    """``markdown`` without the note an older FI put under the title (``<!-- fi:marks-note -->`` block), with the blank
+    lines after it: FI's words, never the writer's. FI places none now; a paper that still carries one loses it."""
     return _MARKS_NOTE.sub("", markdown or "")
 
 
 def to_placeholders(markdown: str) -> str:
     """``markdown`` with every value FI filled in (between its markers) turned back into its placeholder: what the passage
     editor is given, so its edits are made on the placeholders and FI fills them again. FI's marks beside unconfirmed
-    sentences and its note under the title are taken out: the writer never keeps one (FI places them again from its record)."""
+    sentences and its note under the title, which an older FI placed, are taken out: FI places none now."""
     return _placeholders(without_marks_note(without_unconfirmed(markdown)))
 
 
@@ -2377,35 +1721,14 @@ def without_marks(markdown: str) -> str:
     return _TAG.sub("", _values.without_marks(markdown or ""))
 
 
-def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s: Any = None, paper_md: str = "",
-               full: bool = False) -> str:
+def block_text(quest_root: Path | str, name: str, *, fallback_s: Any = None, full: bool = False) -> str:
     """FI's block ``name`` (:data:`BLOCK_NAMES`) as it goes into the paper, from its file (``run_facts``: composed from
-    FI's records, :func:`run_facts_text`); ``""`` when there is none. A block FI sent to the supplement
-    (core/supplement.py: the tables always, the Limitations for a page limit) is its pointer there, unless ``full``
-    (what the supplement holds); the answers in full, sent there always, leave their short lines and a pointer."""
-    if not full and name in (_supplement.TABLES, _supplement.LIMITATIONS) and name in _supplement.moved(quest_root):
-        if not block_text(quest_root, name, full=True):
-            return ""
-        if name == _supplement.TABLES:
-            return _supplement.table_pointer()
-        items = [i for i in required_items(quest_root) if i.kind != CODE_FINDING]
-        went_on = went_on_checks(Path(quest_root))
-        return _supplement.limitations_pointer(len(items), [i.name for i in items if i.kind == NOT_DONE],
-                                               discussion=bool(_supplement.writer_text(quest_root)),
-                                               known_answers=sum(1 for e in went_on if e.get("name")),
-                                               none_judged=any(not e.get("name") for e in went_on),
-                                               moved_sentences=_supplement.sentence_count(quest_root))
+    FI's records, :func:`run_facts_text`); ``""`` when there is none. The tables, which FI sends to the supplement
+    (core/supplement.py), are their pointer there, unless ``full`` (what the supplement holds)."""
+    if not full and name == _supplement.TABLES and name in _supplement.moved(quest_root):
+        return _supplement.table_pointer() if block_text(quest_root, name, full=True) else ""
     if name == "run_facts":
-        return run_facts_text(quest_root, topic=topic, fallback_s=fallback_s, paper_md=paper_md)
-    if name == "limitations":
-        # the paper's own Limitations also say where the sentences the page trim moved are (not the supplement's copy)
-        moved = "" if full else _supplement.moved_sentences_line(_supplement.sentence_count(quest_root))
-        return "\n".join(x for x in (limitations_text(quest_root), f"- {moved}" if moved else "") if x)
-    if name == "answers":
-        whole, short = answers_forms(quest_root)
-        if not full and whole and _supplement.ANSWERS in _supplement.moved(quest_root):
-            return short + chr(10) * 2 + _supplement.answers_pointer()
-        return whole
+        return run_facts_text(quest_root, fallback_s=fallback_s)
     rel = _BLOCK_FILES.get(name)
     if rel is None:
         return ""
@@ -2415,28 +1738,13 @@ def block_text(quest_root: Path | str, name: str, *, topic: str = "", fallback_s
         return ""
 
 
-_NUM = _disclosure._SECTION_NUMBER
-#: A paragraph that opens with a bold run-in ``**Limitations.**`` or ``**Limitations:**``.
-_LIMITATIONS_RUN_IN = re.compile(r"^[ \t]*\*\*Limitations?(?:[.:]\*\*|\*\*[.:])", re.I)
-_CONCLUSION_HEADING = re.compile(r"^#{1,6}[ \t]+" + _NUM + r"conclusions?\b", re.I)
-RUN_IN = "**Limitations.**"
-#: A line above the heading (or run-in line) FI itself adds for its Limitations, so FI never has to guess which is its own.
+#: The line an older FI put above the heading (or run-in line) of its Limitations block, so the heading goes with it.
 HEADING_MARK = "<!-- fi:limitations-heading -->"
 _CUT = "\x00cut\x00"
 
 
-def _title(line: str) -> str:
-    """The words of a heading line, numbering and emphasis taken off, lower case."""
-    m = re.match(r"^#{1,6}[ \t]+" + _NUM + r"(.*)$", line)
-    return re.sub(r"[*_`]+", "", m.group(1) if m else "").strip().rstrip(".:").strip().lower()
-
-
-def _is_limitations_title(title: str) -> bool:
-    return title.startswith("limitations") or title.endswith("and limitations")
-
-
 def _limitations_in(text: str) -> bool:
-    """Whether FI's Limitations block is in ``text``: its marked block, or its placeholder outside code."""
+    """Whether the Limitations block an older FI wrote is in ``text``: its marked block, or its placeholder outside code."""
     if any(m.group(1) == "limitations" for m in _MARK.finditer(text)):
         return True
     hidden = _hidden_spans(text)
@@ -2469,7 +1777,39 @@ def _drop_limitations(text: str) -> str:
             continue
         out.append(lines[i])
         i += 1
-    return _tidy_cuts(out)
+    return _tidy_cuts(_without_emptied_headings(out))
+
+
+_HEADING_LINE = re.compile(r"^(#{1,6})[ \t]")
+
+
+def _without_emptied_headings(lines: list[str]) -> list[str]:
+    """``lines`` without the heading of a section the cut left empty (nothing but the cut and blank lines before the next
+    heading of its level or above, a rule, or the end): a paper never keeps an empty section heading. A section with
+    any other line, or a deeper heading, under it keeps its heading; code blocks are not read."""
+    fenced, heads = False, []
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and (m := _HEADING_LINE.match(ln)):
+            heads.append((i, len(m.group(1))))
+    out = list(lines)
+    for i, level in heads:
+        cut = False
+        for ln in lines[i + 1:]:
+            rest = ln.replace(_CUT, "").strip()
+            if _CUT in ln:
+                cut = True
+            if not rest:
+                continue
+            m = _HEADING_LINE.match(rest)
+            if (m and len(m.group(1)) <= level) or rest == "---":
+                break
+            cut = False  # a line of text or a deeper heading: the section is not empty
+            break
+        if cut:
+            out[i] = _CUT
+    return out
 
 
 def _tidy_cuts(lines: list[str]) -> str:
@@ -2496,84 +1836,41 @@ def _tidy_cuts(lines: list[str]) -> str:
     return "\n".join(done)
 
 
-def _place_limitations(text: str, quest_root: Path | str, *, heading: bool = True) -> str:
-    """``text`` with FI's Limitations block (the placeholder ``{{limitations}}``, on a line of its own) added to the paper,
-    the writer's own text kept whole. Where the writer put the placeholder it stays. Else it goes at the end of the
-    writer's Limitations section (its own words before the first sub-heading, or at its end); that section is a heading
-    at the paper's main section level whose title, numbering taken off, begins "Limitations" or ends "and Limitations", or
-    a heading of any level that is just "Limitations"; with none, the paragraph that opens with a bold run-in
-    ``**Limitations.**``. A paper with none gets ``## Limitations`` before its Conclusion, else its References, else at
-    the end (``heading=False``, for a paper whose format forbids that heading: a ``**Limitations.**`` paragraph there).
-    With nothing to state there is no block, and no heading for it; sentences the page trim moved to the supplement are
-    something to state (the block says how many and where)."""
-    if not limitations_text(quest_root) and not _supplement.sentence_count(quest_root):
-        return _drop_limitations(text) if _limitations_in(text) else text
-    if _limitations_in(text):
-        return text
-    lines = text.split("\n")
-    heads = _disclosure._headings(lines, 0)
-    title = next((i for i, lv, _t in heads if lv == 1), None)
-    rest = [h for h in heads if h[0] != title]
-    top = min((h[1] for h in rest), default=2)
-    own = [h for h in rest if h[1] == top and _is_limitations_title(_title(h[2]))]
-    if not own:  # a deeper heading that is just "Limitations", only when no main-level one is
-        own = [h for h in rest if _title(h[2]) == "limitations"]
-    block = ["{{limitations}}"]
-    lead: list[str] = []
-    if own:
-        at, lv, _t = own[-1]
-        end = _disclosure._section_end(heads, at, lv, len(lines))
-        inner = next((i for i, _lv, _t2 in rest if at < i < end), None)
-        place = inner if inner is not None else end
-    else:
-        run_in, fenced = None, False
-        for i, line in enumerate(lines):
-            if line.lstrip().startswith(("```", "~~~")):
-                fenced = not fenced
-            elif not fenced and _LIMITATIONS_RUN_IN.match(line):
-                run_in = i
-                break
-        if run_in is not None:
-            place = next((j for j in range(run_in + 1, len(lines)) if not lines[j].strip()
-                          or re.match(r"^#{1,6}[ \t]", lines[j])), len(lines))
-        else:
-            level = min((lv for i, lv, _t in rest), default=2)
-            top_heads = [h for h in rest if h[1] <= level]
-            anchor = (next((h for h in top_heads if _CONCLUSION_HEADING.match(h[2])), None)
-                      or next((h for h in top_heads if _disclosure._BEFORE_END.match(h[2])), None))
-            place = anchor[0] if anchor else len(lines)
-            lead = [HEADING_MARK, ("#" * level + " Limitations") if heading else RUN_IN, ""]
-    if place < len(lines):
-        while place > 0 and not lines[place - 1].strip():
-            place -= 1
-        if place > 0 and lines[place - 1].strip() == "---":  # the engine's references follow a rule line
-            place -= 1
-    head = lines[:place]
-    while head and not head[-1].strip():
-        head.pop()
-    tail = lines[place:]
-    while tail and not tail[0].strip():
-        tail.pop(0)
-    return "\n".join([*head, *([""] if head else []), *lead, *block, *([""] if tail else []), *tail]) + (
-        "" if tail else "\n")
+#: The blocks only FI places: a draft's placeholder or filled block of one of these is taken out wherever it stands (a table
+#: cell, the reference list, a second copy) and FI puts exactly one in its own place (:func:`place_blocks`).
+FI_PLACED = ("asked_results", "quality_pointer")
 
 
-def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None,
-                 limitations_heading: bool = True) -> str:
+def strip_block(markdown: str, name: str) -> str:
+    """``markdown`` without any placeholder ``{{name}}`` and any filled block of ``name``, wherever they stand; a placeholder
+    or block that fills a line of its own goes with that line and the blank line after it."""
+    mark = r"<!-- fi:fact-" + re.escape(name) + r" -->.*?<!-- /fi:fact-" + re.escape(name) + r" -->"
+    holder = r"\{\{[\s{]*" + re.escape(name) + r"[\s}]*\}\}"
+    out = markdown or ""
+    for pat in (mark, holder):
+        out = re.sub(r"(?m)^[ \t]*(?:" + pat + r")[ \t]*\r?\n(?:[ \t]*\r?\n)?", "", out, flags=re.S)
+        out = re.sub(pat, "", out, flags=re.S)
+    return out
+
+
+def place_blocks(markdown: str, quest_root: Path | str, *, fallback_s: Any = None) -> str:
     """``markdown`` with the placeholder of each of FI's blocks that has text and that the writer did not place put in
     on a line of its own. The tables go before the discussion that follows the results (else the conclusions, the
     limitations, the references; else at the end); the run's facts go at the end of the Methods (else before the
     Results, else after the abstract, else at the top). A block already in the draft, as a placeholder or filled in
     (the review sends FI's own text back), is not put in twice; a line that opens like FI's run paragraph
     (``**Run.** ``) but has lost its markers is replaced by the placeholder, so the paragraph is always FI's current
-    one. The Limitations block, when FI has items to state, is added to the writer's own Limitations section after its
-    text (:func:`_place_limitations`). :func:`render` then fills it."""
+    one. The Limitations block an older FI wrote is taken out, with the heading FI put above it
+    (:func:`_drop_limitations`). :func:`render` then fills the rest."""
     text = markdown or ""
+    if _limitations_in(text):
+        # the writer's own paragraphs an older FI moved to the supplement with this block come back first: they are the
+        # writer's text, not FI's, and the block alone is what goes
+        text = _drop_limitations(_supplement.with_writer_paragraphs(text, quest_root))
     for name in BLOCK_NAMES:
-        if name == "limitations":
-            text = _place_limitations(text, quest_root, heading=limitations_heading)
-            continue
-        if not block_text(quest_root, name, topic=topic, fallback_s=fallback_s, paper_md=text):
+        if name in FI_PLACED:  # FI's own place only: every earlier one, wherever it stands, goes first
+            text = strip_block(text, name)
+        if not block_text(quest_root, name, fallback_s=fallback_s):
             continue
         if any(_norm_name(m.group(1)) == name for m in _PLACEHOLDER.finditer(text)) or any(
                 m.group(1) == name for m in _MARK.finditer(text)):
@@ -2594,6 +1891,12 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
             text = "\n".join([*head, *([""] if head else []), "{{run_facts}}", *([""] if tail else []), *tail]) + (
                 "" if tail else "\n")
             continue
+        if name == "asked_results":  # at the end of the section that reports the results
+            text = _asked.with_block(text)
+            continue
+        if name == "quality_pointer":  # the one closing sentence, at the end of the body, before the reference list
+            text = _pointer.with_block(text)
+            continue
         from . import best_design_report as _best
 
         text = _best.insert_before_discussion(text, ["{{" + name + "}}"])
@@ -2602,8 +1905,9 @@ def place_blocks(markdown: str, quest_root: Path | str, *, topic: str = "", fall
 
 def page_limit_text(quest_root: Path | str) -> str:
     """The sentence for the quality report when the finished paper is longer than the topic's page limit, and the ones
-    that say which of FI's own parts are in the supplement (core/supplement.py): its tables of every setting, its answers
-    in full and its Further reading always, its Limitations for the page limit; ``""`` with neither. The limit is a guideline: the
+    that say which of FI's own parts are in the supplement (core/supplement.py): its tables of every setting and its
+    Further reading always (and, in a record an older FI wrote, the paper's Limitations paragraphs for the page limit);
+    ``""`` with neither. The limit is a guideline: the
     paper does not carry these sentences (QUALITY.md and run.log do)."""
     pages = _read(Path(quest_root), str(PAGE_RECORD))
     over = ""
@@ -2613,9 +1917,8 @@ def page_limit_text(quest_root: Path | str) -> str:
     moved = _supplement.moved(quest_root)
     if not moved or not (Path(quest_root) / _supplement.FILE).is_file():
         return over
-    names = {_supplement.TABLES: "its tables of every setting", _supplement.ANSWERS: "its answers to the questions "
-             "asked in full (a short line for each stays in the paper)", _supplement.LIMITATIONS: "its Limitations (one "
-             "line stays in the paper)", _supplement.FURTHER_READING: "its Further reading"}
+    names = {_supplement.TABLES: "its tables of every setting", _supplement.LIMITATIONS: "the paper's own Limitations "
+             "paragraphs", _supplement.FURTHER_READING: "its Further reading"}
 
     def listed(parts: list[str]) -> str:
         said = [names[m] for m in parts]
@@ -2643,10 +1946,10 @@ def write_page_record(quest_root: Path | str, pages: int, limit: int, *, final: 
 
 
 def without_blocks(markdown: str) -> str:
-    """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`) taken out, markers and all: what the checks of the
-    writer's own text read (the block is FI's record, printed, not a claim of the writer's). FI's marks beside unconfirmed
-    sentences and its note under the title are taken out too: they are FI's words, not the writer's."""
-    names = "|".join(re.escape(n) for n in BLOCK_NAMES)
+    """``markdown`` with each of FI's blocks (:data:`BLOCK_NAMES`, and those an older FI wrote) taken out, markers and
+    all: what the checks of the writer's own text read (the block is FI's record, printed, not a claim of the writer's).
+    The marks and the note an older FI put in are taken out too: they are FI's words, not the writer's."""
+    names = "|".join(re.escape(n) for n in (*BLOCK_NAMES, *_RETIRED_BLOCKS))
     return re.sub(r"\n?<!-- fi:fact-(" + names + r") -->.*?<!-- /fi:fact-\1 -->\n?", "\n",
                   without_marks_note(without_unconfirmed(markdown)), flags=re.S)
 
@@ -2686,7 +1989,7 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         plain = _inside(m.start(), hidden)
         before = text[max(0, m.start() - 40):m.start()]
         mine = (_is_item(name) or arg is not None and name.startswith("not") or name in BLOCK_NAMES
-                or name in FACT_NAMES or name == "figure" and arg is not None)
+                or name in _RETIRED_BLOCKS or name in FACT_NAMES or name == "figure" and arg is not None)
         if _LATEX_COMMAND_BEFORE.search(before) if mine else _LATEX_BEFORE.search(before):
             return m.group(0)
         if _is_item(name) or arg is not None and name.startswith("not"):
@@ -2725,13 +2028,19 @@ def render(markdown: str, quest_root: Path | str, *, topic: str = "", fallback_s
         if name in BLOCK_NAMES:
             if plain:
                 return m.group(0)
-            block = block_text(root, name, topic=topic, fallback_s=fallback_s, paper_md=text)
-            if not block and name == "limitations":
-                return ""  # nothing to state: no block, and no "not recorded"
+            block = block_text(root, name, fallback_s=fallback_s)
+            if name == "asked_results":  # a table of FI's with no row left leaves no trace; its number fits the paper's
+                if not block:
+                    return ""
+                block = block.replace(_asked.NUMBER, str(_asked.number_at(text, m.start())))
+            if not block and name == "quality_pointer":  # no case, no sentence, and no trace of one a round put in before
+                return ""
             if not block:
                 unfilled.append(name)
                 return f"<!-- fi:fact-{name} -->{NOT_RECORDED}<!-- /fi:fact-{name} -->"
             return f"<!-- fi:fact-{name} -->\n{block}\n<!-- /fi:fact-{name} -->"
+        if name in _RETIRED_BLOCKS:
+            return m.group(0) if plain else ""  # an older FI's block: nothing in its place, and no "not recorded"
         if name in FACT_NAMES:
             fact = known.get(name)
             if fact is None:
@@ -2788,12 +2097,11 @@ def unfilled_in(markdown: str) -> list[str]:
 # ---- what the writer is given ---------------------------------------------------------------------------------------
 
 
-def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> str:
+def writer_section(quest_root: Path | str, *, fallback_s: Any = None) -> str:
     """The record section of the write prompt: the paragraph of the run's facts FI puts into the Methods (what it reads
-    now), and the Limitations section FI writes (what it reads now). ``""`` when FI holds nothing."""
+    now), the tables FI writes, and what FI's records say the writer must not claim. ``""`` when FI holds nothing."""
     root = Path(quest_root)
-    run_text = run_facts_text(root, topic=topic, fallback_s=fallback_s)
-    items = required_items(root)
+    run_text = run_facts_text(root, fallback_s=fallback_s)
     lines: list[str] = []
     estimate = _read(root, ".fi/run_estimate.json")
     reduced = estimate.get("reduced") if isinstance(estimate, dict) else None
@@ -2803,18 +2111,17 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
     over = estimate.get("over_topic_limit") if isinstance(estimate, dict) else None
     over_note = _one(over["note"]) if isinstance(over, dict) and isinstance(over.get("note"), str) and over["note"].strip() else ""
     figure_known = _figure_facts(root)
-    real = [i for i in items if i.kind != CODE_FINDING]
-    has_answers = bool(answers_text(root))
-    if not run_text and not real and not reduced_note and not over_note and not has_table and not figure_known and not has_answers:
+    known_answer = any(i.kind == KNOWN_ANSWER for i in required_items(root))
+    if not run_text and not reduced_note and not over_note and not has_table and not figure_known and not known_answer:
         return ""
     lines.append("FI'S RECORD OF THIS RUN. The facts below come from FI's own records. FI fills them in; do not type "
                  "them yourself.")
     if run_text:
         lines.append("Run facts: FI puts a paragraph of the run's facts into the Methods when the paper is saved. It "
                      f"reads now: \"{run_text}\" Do not state these facts yourself (the number of settings and trials, "
-                     "the seed, the run time, the topic's time limit), and do not refer to the paragraph: it is part of "
-                     "the Methods, in FI's own words. A seed, a run time or a count of settings or trials typed as a number is sent "
-                     "back to you, and so is a claim about the topic's time limit that the record contradicts.")
+                     "the run time), and do not refer to the paragraph: it is part of the Methods, in FI's own words. A "
+                     "run time or a count of settings or trials typed as a number is sent back to you, and so is a claim "
+                     "about the topic's time limit that the record contradicts.")
     if (seed_meaning := seed_meaning_text(root)):
         lines.append(f"Seed: {seed_meaning}")
     if figure_known:
@@ -2829,22 +2136,9 @@ def writer_section(quest_root: Path | str, *, topic: str = "", fallback_s: Any =
                      "the tables, but do not copy them into a table of your own.")
     if over_note:
         lines.append(f"Time limit: {over_note} Say this in the paper.")
-    if has_answers:
-        lines.append("{{answers}}: FI's list of the quantities the topic asks for, each with its value from FI's records "
-                     "(and its interval where one exists) or said as not answered. FI puts it before the discussion when the "
-                     "paper is saved. The block carries its own heading: do not type these values and do not refer to the block.")
-        lines.extend(unit_notes(root))
-    if real:
-        lines.append("Limitations: FI adds the list below to the end of your Limitations section when the paper is saved "
-                     "(or where you put {{limitations}} on a line of its own), from its records. It reads now:")
-        lines += [f"- {i.sentence}" for i in real]
-        lines.append("Do not restate these points. You may write a Limitations section about the method's scope and "
-                     "assumptions (what the method cannot show, what it assumes); say \"see Limitations\" where your text "
-                     "needs the list.")
-        if any(i.kind == KNOWN_ANSWER for i in real):
-            lines.append("Known answers: FI states in that list which checks of the code against a known answer did not "
-                         "pass. Do not state in your own sentence that the results or the code were validated, verified "
-                         "or confirmed against known answers.")
+    if known_answer:
+        lines.append("Known answers: a check of the code against a known answer did not pass. Do not state in your own "
+                     "sentence that the results or the code were validated, verified or confirmed against known answers.")
     lines.append("A placeholder FI cannot fill is printed as \"not recorded\", so use only the ones listed here.")
     return "\n".join(lines)
 
@@ -2871,7 +2165,7 @@ def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
                 hits.append(f"{HIT}: {{{{figure:{ref}}}}} is not a figure FI has a record of, so the paper reads "
                             "\"not recorded\" there. Name a figure file as listed in FI's record, or describe "
                             "the figure without a placeholder.")
-        elif key not in FACT_NAMES and key not in BLOCK_NAMES:
+        elif key not in FACT_NAMES and key not in BLOCK_NAMES and key not in _RETIRED_BLOCKS:
             hits.append(f"{HIT}: {{{{{key}}}}} is not one of FI's placeholders, so the paper reads \"not recorded\" there. "
                         "Write it in your own words without double braces.")
     return hits
@@ -2879,8 +2173,8 @@ def _unknown_hits(markdown: str, quest_root: Path | str) -> list[str]:
 
 def placement_hits(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s: Any = None) -> list[str]:
     """Must-fix hits for a name between double braces that is none of FI's. The run's facts are not asked of the writer
-    any more: FI writes them as one paragraph in the Methods (:func:`run_facts_text`), so a missing ``{{seed}}`` is no
-    fault of the paper."""
+    any more: FI writes them as one paragraph in the Methods (:func:`run_facts_text`), so a missing one is no fault of the
+    paper."""
     return _unknown_hits(_disclosure.without_block(paper_md), quest_root)
 
 
@@ -2904,7 +2198,6 @@ def value_hits(paper_md: str, quest_root: Path | str) -> list[str]:
 _RUN_IN = re.compile(r"\A\s*\*\*[^*\n]+\*\*")
 #: A line that is not running prose (a table row, heading, figure, list item, quote): a sentence in it is never cut out.
 _NOT_PROSE = re.compile(r"^\s*(\||#|!\[|[-+*]\s|\d+[.)]\s|>)")
-REPLACED = _typed.REMOVED
 _TOKEN = re.compile(r"\x00\d+\x00")
 
 
@@ -2974,11 +2267,11 @@ def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str
     """``markdown`` without the result keys FI could not fill (they read "not recorded"), for a paper no round is left to
     rewrite: ``(text, taken_out)``, ``taken_out`` having ``key``, ``sentence`` (as it read) and ``how`` for each.
 
-    A running sentence whose every result key is unfilled states nothing FI can stand behind, so the sentence is removed (a
-    bold run-in heading before it stays). Any other place (a key beside filled ones, a table row, a figure caption, a list, a
-    clause that does not read as a sentence by itself) keeps its text and the key is replaced by the same visible marker
-    that replaces a number the writer typed. Nothing is filled with a guess, and no filled key is touched. With
-    ``figures_only`` only the figure statements are looked at (the result keys are left for the round that takes them out)."""
+    The whole unit that holds an unfilled result key goes, so no stub is left where a number stood: in running text its
+    sentence (a bold run-in heading before it stays; its filled values go with it), anywhere else its line (a table row, a
+    list item, a heading, a caption). A table left with no row of values goes whole, and so does one whose header or rule
+    held the key. Nothing is filled with a guess. With ``figures_only`` only the figure statements are looked at (the
+    result keys are left for the round that takes them out)."""
     # A figure statement is a mark of the second shape (<!-- fi:fact-figure-... -->): a whole sentence FI wrote or, unfilled, none.
     marks = sorted([*([] if figures_only else _values._MARK.finditer(markdown or "")),
                     *(m for m in _MARK.finditer(markdown or "") if _figure_parts(m.group(1)) is not None)],
@@ -3015,7 +2308,9 @@ def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str
     for i, m in enumerate(marks):
         if m.group(2).strip() == _values.NOT_RECORDED:
             groups.setdefault(_typed._sentence(flat, spans[i][0], spans[i][1] - full_stop[i]), []).append(i)
-    edits: list[tuple[int, int, str]] = []
+    edits: list[tuple[int, int]] = []
+    gone_rows: set[int] = set()  # the lines that go whole (by number)
+    rows_of: list[tuple[dict[str, str], int]] = []  # each result key's entry and the line that went with it (-1: none)
     taken: list[dict[str, str]] = []
     for (a, b), idx in groups.items():
         if b > a and flat[b - 1] == "\n":
@@ -3033,20 +2328,31 @@ def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str
         stand_in = lambda t: "X" if is_figure[int(t.group(0).strip("\x00"))] else "x"  # noqa: E731
         drop = (all(i in idx for i in inside if spans[i][0] >= body_at) and not _NOT_PROSE.match(line)
                 and (key_only or _whole_sentence(_TOKEN.sub(stand_in, flat[body_at:b]))))
+        # A result key FI could not fill that is not the whole of a sentence still goes with its unit: the sentence in
+        # running text, the line anywhere else (a table row, a list item, a heading).
+        unit = "sentence removed" if drop else ""
+        row = -1
+        if not drop and any(not is_figure[i] for i in idx):
+            if _NOT_PROSE.match(line):
+                row = markdown.count(chr(10), 0, marks[idx[0]].start())
+                gone_rows.add(row)
+                unit = "table row removed" if line.lstrip().startswith("|") else "line removed"
+            else:
+                unit = "sentence removed"
         if drop and key_only and not flat[b:line_end if line_end != -1 else len(flat)].strip():
             # Nothing else on its line: the heading goes with it (a heading over nothing reads as a gap).
             start, end = original(a), original(b)
             if flat[line_start:a].strip() == "":
                 start, end = original(line_start), min(end + 1, len(markdown))
-            edits.append((start, end, ""))
-        elif drop:
+            edits.append((start, end))
+        elif unit == "sentence removed":
             start, end = original(body_at), original(b)
             if flat[line_start:body_at].strip() == "":  # it opened its line: the space it leaves goes with it
                 while end < len(markdown) and markdown[end] in " \t":
                     end += 1
                 if not lead and (line_end == -1 or end >= original(line_end)):  # nothing is left of the line
                     start, end = original(line_start), min(end + 1, len(markdown))
-            edits.append((start, end, ""))
+            edits.append((start, end))
         if figures_only and drop:  # a result key FI could not fill goes with the sentence: it is listed like any other
             for v in _values._MARK.finditer(markdown, original(a), original(b)):
                 if v.group(2).strip() == _values.NOT_RECORDED:
@@ -3055,18 +2361,43 @@ def take_out_unfilled(markdown: str, *, figures_only: bool = False) -> tuple[str
         for i in idx:
             if is_figure[i]:
                 stem, kind, args = _figure_parts(marks[i].group(1))  # type: ignore[misc]
-                if not drop:
-                    edits.append((marks[i].start(), marks[i].end(), ""))
+                if not unit:
+                    edits.append((marks[i].start(), marks[i].end()))
                 taken.append({"key": f"figure:{stem}:{kind}" + (f" @ {args}" if args else ""), "sentence": sentence,
-                              "how": "sentence removed" if drop else "removed", "figure": _figure_number(markdown, stem)})
+                              "how": unit or "removed", "figure": _figure_number(markdown, stem)})
                 continue
-            if not drop:
-                edits.append((marks[i].start(), marks[i].end(), REPLACED))
-            taken.append({"key": marks[i].group(1).strip(), "sentence": sentence,
-                          "how": "sentence removed" if drop else f"replaced by {REPLACED}"})
+            taken.append({"key": marks[i].group(1).strip(), "sentence": sentence, "how": unit})
+            rows_of.append((taken[-1], row))
+    lines = markdown.split(chr(10))
+    at = [0]
+    for ln in lines:
+        at.append(at[-1] + len(ln) + 1)
+    tables_gone: set[int] = set()
+    for row in sorted(gone_rows):
+        first = last_row = row
+        while first > 0 and lines[first - 1].lstrip().startswith("|"):
+            first -= 1
+        while last_row + 1 < len(lines) and lines[last_row + 1].lstrip().startswith("|"):
+            last_row += 1
+        table = range(first, last_row + 1)
+        if lines[row].lstrip().startswith("|") and (row < first + 2 or all(r in gone_rows for r in table[2:])):
+            # its header or rule, or every row of values: the table goes whole
+            tables_gone.update(table)
+    for t, row in rows_of:
+        if row in tables_gone:
+            t["how"] = "table removed"
+    for row in gone_rows | tables_gone:
+        edits.append((at[row], min(at[row + 1], len(markdown))))
+    # every edit takes text out: overlapping ones are one cut
+    cuts: list[list[int]] = []
+    for start, end in sorted(edits):
+        if cuts and start <= cuts[-1][1]:
+            cuts[-1][1] = max(cuts[-1][1], end)
+        else:
+            cuts.append([start, end])
     out = markdown
-    for start, end, text in sorted(edits, reverse=True):
-        out = out[:start] + text + out[end:]
+    for start, end in reversed(cuts):
+        out = out[:start] + out[end:]
     return out, taken
 
 
@@ -3156,45 +2487,24 @@ def check(paper_md: str, quest_root: Path | str, *, topic: str = "", fallback_s:
 
 def keep_check(quest_root: Path | str, hits: list[str], paper_md: str, *, untraced: list[tuple[str, str]] | None = None,
                not_filled: str = "", dropped: list[dict[str, str]] | None = None) -> None:
-    """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the required items the paper does
-    not hold, the placeholders that read "not recorded", the typed numbers FI cannot trace that stay in the paper when the rewrite rounds are used
-    up (``untraced``: ``(number, sentence)``), the result keys FI could not fill that were taken out the same way (``dropped``:
-    ``key``, ``sentence``, ``how``), and why the paper is not held to the rule that FI fills every result number
-    (``not_filled``: ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up is on record."""
+    """Keep what the last review found (``.fi/paper_record_check.json``): the hits, the placeholders that read "not
+    recorded", the typed numbers FI cannot trace that stay in the paper when the rewrite rounds are used up (``untraced``:
+    ``(number, sentence)``), the result keys FI could not fill that were taken out the same way (``dropped``: ``key``,
+    ``sentence``, ``how``), and why the paper is not held to the rule that FI fills every result number (``not_filled``:
+    ``no_records`` or ``older_paper``). The quality report prints it, so what is still unmet when the rounds are used up
+    is on record. What the study did not do (:func:`required_items`) is no fault of the paper: the paper does not carry it,
+    and the quality report lists it from the records themselves."""
     path = Path(quest_root) / RECORD
     try:
-        # FI writes the Limitations block itself: an item is missing from the paper only when the block is not in it (an
-        # open problem in the code is never in the block, it is in QUALITY.md only)
-        in_paper = any(m.group(1) == "limitations" for m in _MARK.finditer(paper_md or ""))
-        # what the paper states, with the Limitations it sent to the supplement (core/supplement.py)
-        # (FI's list, and the paper's own paragraphs of that section that went with it)
-        stated = (paper_md or "") + ("\n" + limitations_text(quest_root) + "\n" + _supplement.writer_text(quest_root)
-                                     if _supplement.LIMITATIONS in _supplement.moved(quest_root) else "")
-        # an open problem in the code is met when the paper carries FI's sentence for it (:func:`touched_sentences`)
-        said = touched_sentences(quest_root, paper_md)
-        block = chr(10).join(m.group(2) for m in _MARK.finditer(paper_md or "") if m.group(1) == "run_facts")
-        # ``named``: whether FI could name a result the paper prints that the finding changes (else no sentence can be written)
-        unmet = [{"kind": i.kind, "id": i.id, "name": i.name, "text": i.sentence,
-                  **({"named": i.key in said} if i.kind == CODE_FINDING else {})}
-                 for i in required_items(quest_root)
-                 if i.kind == CODE_FINDING and not (i.key in said and said[i.key] in block)
-                 or i.kind != CODE_FINDING and (not in_paper or i.kind == FIGURE_LEFT_OUT and i.sentence not in stated)]
-        # The statements taken out just now are not in the kept record yet: one item per figure, never per sentence.
-        have = {u["id"] for u in unmet}
-        for stem, number in _figure_left_out_items(dropped):
-            ident = f"{_ID_PREFIX[FIGURE_LEFT_OUT]}-{_slug(stem)}"
-            if ident not in have and figure_left_out_sentence(number) not in stated:
-                unmet.append({"kind": FIGURE_LEFT_OUT, "id": ident, "name": f"figure {number} statements",
-                              "text": figure_left_out_sentence(number)})
         unfilled = unfilled_in(paper_md)
         if not any(_is_figure_entry(d) for d in dropped or []):
             # statements about a figure were left out when the paper was written: they stay on record until it is written again
             dropped = list(dropped or []) + [d for d in _kept_figure_entries(kept_check(quest_root))]
-        if not hits and not unmet and not unfilled and not untraced and not not_filled and not dropped:
+        if not hits and not unfilled and not untraced and not not_filled and not dropped:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unmet_items": unmet, "unfilled": unfilled}
+        record: dict[str, Any] = {"at": time.time(), "hits": list(hits), "unfilled": unfilled}
         if untraced:
             record["untraced_numbers"] = [{"number": n, "sentence": sent} for n, sent in untraced]
         if dropped:
@@ -3219,7 +2529,7 @@ def _kept_figure_entries(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def keep_figure_left_out(quest_root: Path | str, entries: list[dict[str, str]]) -> bool:
     """Record, for the paper just written, the statements about a figure that were left out of it (``entries`` as
-    ``take_out_unfilled`` and the pointer rule list them): they replace those of the paper before, so the Limitations say
+    ``take_out_unfilled`` and the pointer rule list them): they replace those of the paper before, so QUALITY.md says
     what this paper left out and nothing older. Returns whether the record changed. Never raises."""
     path = Path(quest_root) / RECORD
     try:
@@ -3229,12 +2539,12 @@ def keep_figure_left_out(quest_root: Path | str, entries: list[dict[str, str]]) 
         if before == new:
             return False
         others = [d for d in (data.get("taken_out_values") or []) if not _is_figure_entry(d)]
-        record = dict(data) if data else {"at": time.time(), "hits": [], "unmet_items": [], "unfilled": []}
+        record = dict(data) if data else {"at": time.time(), "hits": [], "unfilled": []}
         if others + new:
             record["taken_out_values"] = others + new
         else:
             record.pop("taken_out_values", None)
-        if not any(record.get(k) for k in ("hits", "unmet_items", "unfilled", "untraced_numbers", "taken_out_values",
+        if not any(record.get(k) for k in ("hits", "unfilled", "untraced_numbers", "taken_out_values",
                                            "not_filled_by_fi")):
             path.unlink(missing_ok=True)
         else:

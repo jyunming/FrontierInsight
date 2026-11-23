@@ -48,7 +48,6 @@ import string
 from pathlib import Path
 
 from core import paper_facts as _paper_facts
-from core import result_checks as _result_checks
 from generation._figure_captions import without_number
 from core.config import Config
 from core.proc_tree import AsyncProcessTree
@@ -206,7 +205,7 @@ class SlideGenerator:
             slides_md = await self._redo_flagged(art, out_dir, feedback, supervisor=supervisor)
         else:
             slides_md = await self._author_marp(art, out_dir, supervisor=supervisor, feedback=feedback)
-        _place_marks_note(slides_md, art)
+        _take_out_marks_note(slides_md)
         result: dict[str, Path] = {"slides_md": slides_md}
         diag_path = out_dir / "slides_skipped.md"
         # Will be set to a (reason_code, summary, how_to_fix) triple
@@ -527,31 +526,16 @@ def _without_marks_note(text: str) -> str:
     return _NOTE_BLOCK_RE.sub(lambda m: "\n\n" if len(m.group(1)) >= 2 else ("\n" if m.group(1) else ""), text)
 
 
-def _marks_note(art) -> str:
-    """FI's note that the paper carries a mark ``(unconfirmed)``, the same text the paper holds under its title
-    (:func:`core.result_checks.marked_note`); ``""`` when nothing is marked."""
-    try:
-        paper = art.paper_md.read_text(encoding="utf-8") if art.paper_md else ""
-    except OSError:
-        paper = ""
-    return _result_checks.marked_note_of_deliverables(art.quest_root, paper) if art.quest_root else ""
-
-
-def _place_marks_note(slides_md: Path, art) -> None:
-    """Make FI's note the deck on disk carries the current one: every block FI placed before is taken out, and, when the
-    paper carries a mark, the current note is placed on the title slide between FI's own markers (as the paper's note is).
-    It runs after everything the model wrote, on every pass (a new deck, one slide written again, a deck kept), so a note
-    that went stale (the marks cleared, or the quantities named changed) is taken out or replaced, never doubled. A deck
-    that holds no note and needs none is not touched."""
-    note = _marks_note(art)
+def _take_out_marks_note(slides_md: Path) -> None:
+    """Take out of the deck on disk the note an older FI put on the title slide (that the paper carries a mark): FI
+    places none now. A deck that holds no note is not touched."""
     try:
         text = slides_md.read_text(encoding="utf-8")
         bare = _without_marks_note(text)
-        placed = _under_title(bare, f"{_NOTE_BEGIN}\n{note}\n{_NOTE_END}") if note else bare
-        if placed != text:
-            slides_md.write_text(placed, encoding="utf-8")
+        if bare != text:
+            slides_md.write_text(bare, encoding="utf-8")
     except OSError as e:
-        _log.warning("slides: the note on unconfirmed results could not be placed on the title slide (%s)", e)
+        _log.warning("slides: the old note on unconfirmed results could not be taken off the title slide (%s)", e)
 
 
 # Markdown / Marp image reference: ``![alt](path ...)`` — captures the

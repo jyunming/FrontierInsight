@@ -144,16 +144,16 @@ DRAFT = ("The drift is {{v:drift_rate:mean_ci @ bed=1}} at the first bed. The lo
          "- range: {{v:drift_rate @ bed=each | range}}\n")
 
 
-def test_each_number_of_a_kept_quantity_carries_the_mark_and_a_round_trip_keeps_one(tmp_path: Path) -> None:
+def test_a_number_of_a_kept_quantity_is_printed_as_it_is_with_no_mark_and_a_round_trip_keeps_it(tmp_path: Path) -> None:
     q = _paper_quest(tmp_path, kept=True)
     rec = pv.records_of(q, None)
     once = pf.render(DRAFT, q, records=rec).text
     reader = pf.without_marks(once)
-    assert reader.count(MARK) == 2  # the sentence and the list item; the load is not marked
-    assert "The load is 1.000" in reader and "1.000 (unconfirmed)" not in reader
+    assert MARK not in reader  # the reader's text carries no mark; the bound is in the records and the quality report
+    assert "The load is 1.000" in reader
     again = pf.render(pf.to_placeholders(once), q, records=pv.records_of(q, None)).text
-    assert again == once and again.count(MARK) == 2
-    assert pv.verify_marks(once, rec).repaired == []  # FI's own check of its values agrees with the mark
+    assert again == once
+    assert pv.verify_marks(once, rec).repaired == []  # FI's own check of its values agrees
     assert MARK not in pf.to_placeholders(once)  # the writer gets the key back, never the mark
 
 
@@ -167,15 +167,16 @@ def test_a_quantity_inside_its_bound_renders_byte_identical(tmp_path: Path) -> N
     assert pf.render(DRAFT, other, records=pv.records_of(other, None)).text == plain
 
 
-def test_the_table_of_a_kept_quantity_is_marked_in_its_title(tmp_path: Path) -> None:
+def test_the_table_of_a_kept_quantity_carries_no_mark_in_its_title_or_caption(tmp_path: Path) -> None:
     from core import results_by_setting as rbs
 
     q = _paper_quest(tmp_path, kept=True)
     protocol = {"metrics": [{"id": "drift_rate", "label": "Drift rate"}, {"id": "load", "label": "Load"}]}
     rbs.write(q, protocol)
     block = (q / rbs.PAPER_BLOCK).read_text(encoding="utf-8")
-    marked = [line for line in block.splitlines() if line.startswith("**Table (") and MARK in line]
-    assert len(marked) == 1 and "Drift rate" in marked[0] and "outside the range the plan expected (0 to 5)" in marked[0]
+    assert "Drift rate" in block, "the quantity's table is still there"
+    for text in (block, (q / "paper" / "results_by_setting.md").read_text(encoding="utf-8")):
+        assert MARK not in text and "outside the range the plan expected" not in text
 
 
 # --- rules 3 and 4, and the decision itself -----------------------------------------------------------------------
@@ -225,7 +226,7 @@ def test_a_value_on_a_cap_of_the_script_is_said_once_per_quantity_in_the_run_rec
 # --- what the review of the first version found -------------------------------------------------------------------
 
 
-def test_a_count_a_reference_or_a_setting_of_a_kept_quantity_is_not_marked(tmp_path: Path) -> None:
+def test_no_number_of_a_kept_quantity_carries_a_mark(tmp_path: Path) -> None:
     """Only a number computed from the quantity's values is unconfirmed: its trial count, the plan's reference for it and the
     setting where it peaks are not."""
     q = _paper_quest(tmp_path, kept=True)
@@ -233,7 +234,7 @@ def test_a_count_a_reference_or_a_setting_of_a_kept_quantity_is_not_marked(tmp_p
     for key in ("{{v:drift_rate:n @ bed=1}}", "{{v:drift_rate @ bed=each | argmax}}"):
         got = pv.resolve(key, rec)
         assert got.filled and MARK not in got.text, key
-    assert MARK in pv.resolve("{{v:drift_rate:sd @ bed=1}}", rec).text  # a spread of its values is
+    assert MARK not in pv.resolve("{{v:drift_rate:sd @ bed=1}}", rec).text  # nor a spread of its values
 
 
 def test_a_figure_axis_fi_could_not_tie_to_the_quantity_does_not_drop_the_figure(tmp_path: Path) -> None:

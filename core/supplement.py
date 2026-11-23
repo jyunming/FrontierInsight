@@ -1,18 +1,15 @@
 """The supplement FI's own parts go to, out of the paper's body.
 
-Every paper sends three of FI's own parts here, with or without a page limit and without a model call
+Every paper sends two of FI's own parts here, with or without a page limit and without a model call
 (``Engine._supplement_always``): its tables of every setting (:data:`TABLES`; the paper keeps one sentence that points
-here, :func:`table_pointer`) when the block holds a table, its answers to the questions asked in full (:data:`ANSWERS`;
-the paper keeps one short line for each question, core/paper_facts.py::answers_text with ``brief``, and a line that
-points here, :func:`answers_pointer`) when that makes the paper shorter, and its Further reading
-(:data:`FURTHER_READING`; the References keep one line that says how many pages it lists and where,
-:func:`further_pointer`) when the text cites none of its pages. These are :data:`ALWAYS`.
+here, :func:`table_pointer`) when the block holds a table, and its Further reading (:data:`FURTHER_READING`; the
+References keep one line that says how many pages it lists and where, :func:`further_pointer`) when the text cites none
+of its pages. These are :data:`ALWAYS`. What moved is written, unchanged, to ``paper/supplement.md`` (:data:`FILE`),
+which ships with the paper.
 
-A paper rendered over the topic's page limit then loses its Limitations too (:data:`LIMITATIONS`, after the parts
-above: ``Engine._fit_with_supplement``): the section keeps one line that says how many things FI recorded, names each
-part of the topic the study did not do, and points here; the paper's own paragraphs of that section go with it, see
-:func:`take_writer_limitations`. The References stay. What moved is written, unchanged, to ``paper/supplement.md``
-(:data:`FILE`), which ships with the paper.
+An older FI also moved its Limitations block here for a page limit (:data:`LIMITATIONS`), with the paper's own
+paragraphs of that section; FI writes no such block now, so that part never moves, and a record that holds those
+paragraphs gives them back to the draft they came from (:func:`put_back_writer_limitations`).
 
 Sentences the page trim takes out of the paper's background and discussion (core/paper_trim.py, after FI's parts)
 move here too, under :data:`SENTENCES`, each with the section it came from; their own record (:data:`TRIM_RECORD`)
@@ -37,23 +34,21 @@ FILE = Path("paper") / "supplement.md"
 SHOWN = "paper/supplement.md"
 TRIM_RECORD = Path(".fi") / "supplement_trim.json"
 TABLES, LIMITATIONS, FURTHER_READING = "results_table", "limitations", "further_reading"
-ANSWERS = "answers"
 SENTENCES = "moved_sentences"
-ORDER = (TABLES, ANSWERS, LIMITATIONS, FURTHER_READING)
+ORDER = (TABLES, LIMITATIONS, FURTHER_READING)
 #: The parts every paper sends here, with or without a page limit; the others move only for a page limit.
-ALWAYS = (TABLES, ANSWERS, FURTHER_READING)
-_TITLES = {TABLES: "Results for every setting", ANSWERS: "Answers to the questions asked, in full",
-           LIMITATIONS: "Limitations", FURTHER_READING: "Further reading", SENTENCES: "Sentences moved for length"}
+ALWAYS = (TABLES, FURTHER_READING)
+_TITLES = {TABLES: "Results for every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading",
+           SENTENCES: "Sentences moved for length"}
 #: How much of the text on each side of a moved sentence its record keeps, to find its place again (never past the
 #: paragraph it stood in).
 _ANCHOR = 60
 BLANK = chr(10) * 2
 #: What the supplement's first lines call each part.
-_WHY = {TABLES: "tables of every setting", ANSWERS: "answers to the questions asked in full",
-        FURTHER_READING: "Further reading", LIMITATIONS: "the Limitations in full", SENTENCES: "some sentences of its text"}
+_WHY = {TABLES: "tables of every setting", FURTHER_READING: "Further reading", LIMITATIONS: "the Limitations in full",
+        SENTENCES: "some sentences of its text"}
 #: What the run log calls each part.
-NAMES = {TABLES: "tables of every setting", ANSWERS: "answers in full", LIMITATIONS: "Limitations",
-         FURTHER_READING: "Further reading"}
+NAMES = {TABLES: "tables of every setting", LIMITATIONS: "Limitations", FURTHER_READING: "Further reading"}
 
 
 def read(quest_root: Path | str) -> dict[str, Any]:
@@ -90,8 +85,8 @@ def further_text(quest_root: Path | str) -> str:
 
 
 def writer_text(quest_root: Path | str) -> str:
-    """The paper's own paragraphs of its Limitations section that moved with FI's Limitations (``""`` when none did):
-    the supplement shows them before FI's list."""
+    """The paper's own paragraphs of its Limitations section that moved with an older FI's Limitations (``""`` when none
+    did): the supplement shows them until they go back."""
     rec = read(quest_root)
     return str(rec.get("limitations_writer") or "") if LIMITATIONS in (rec.get("moved") or []) else ""
 
@@ -105,9 +100,27 @@ def writer_section(quest_root: Path | str) -> tuple[str, str] | None:
     return str(rec.get("limitations_before") or ""), str(rec.get("limitations_after") or "")
 
 
+def with_writer_paragraphs(text: str, quest_root: Path | str) -> str:
+    """``text`` with the paper's own Limitations paragraphs that an older FI moved to the supplement with its block put
+    back where they stood, while the section is still as that move left it (:func:`put_back_writer_limitations`): they
+    are the writer's text, so taking FI's old block out of a resumed paper never takes them with it. ``text`` unchanged
+    when no paragraphs moved or the section changed."""
+    section = writer_section(quest_root)
+    if section is None:
+        return text
+    back = put_back_writer_limitations(text, *section)
+    return text if back is None else back
+
+
+def writer_text_shown(quest_root: Path | str, paper: str) -> str:
+    """The writer's moved Limitations paragraphs the supplement still shows (:func:`writer_text`): ``""`` once ``paper``
+    holds them again, so they are never in both."""
+    own = writer_text(quest_root).strip()
+    return "" if not own or own in paper else own
+
+
 _MARKED = re.compile(r"<!-- fi:fact-([\w-]+) -->.*?<!-- /fi:fact-\1 -->", re.S)
 _HEADING = re.compile(r"^#{1,6}[ \t]+(.*)$")
-_CITES = re.compile(r"\[W?\d")
 _TOKEN = re.compile(r"\x00(\d+)\x00")
 
 
@@ -146,25 +159,22 @@ def _limitations_section(lines: list[str], blocks: list[str]) -> tuple[int, int]
     return head, end
 
 
-def _paragraphs(lines: list[str]) -> list[list[str]]:
-    out: list[list[str]] = [[]]
-    for ln in lines:
-        if ln.strip():
-            out[-1].append(ln)
-        elif out[-1]:
-            out.append([])
-    return [p for p in out if p]
-
-
 def _name_of(block: str) -> str:
     m = _MARKED.match(block)
     return m.group(1) if m else ""
 
 
 def _body(lines: list[str], blocks: list[str], head: int, end: int) -> str:
-    """The section's text below its heading, FI's blocks as their names only (FI writes them again from its records)."""
-    text = "\n".join(lines[head + 1:end]).strip()
+    """The section's text below its heading, FI's blocks as their names only (FI writes them again from its records),
+    without FI's line pointing to the Further reading (:func:`_pointers`): it follows the last section of the paper,
+    whichever that is, and is no part of it."""
+    text = "\n".join(ln for ln in lines[head + 1:end] if not FURTHER_POINTER.match(ln)).strip()
     return _TOKEN.sub(lambda m: "\x00" + _name_of(blocks[int(m.group(1))]) + "\x00", text)
+
+
+def _pointers(lines: list[str], head: int, end: int) -> list[str]:
+    """FI's line pointing to the supplement's Further reading, where it stands after the section's own text."""
+    return [ln for ln in lines[head + 1:end] if FURTHER_POINTER.match(ln)]
 
 
 def section_body(text: str) -> str | None:
@@ -174,34 +184,6 @@ def section_body(text: str) -> str | None:
     lines = masked.split("\n")
     span = _limitations_section(lines, blocks)
     return None if span is None else _body(lines, blocks, *span)
-
-
-def _movable(par: list[str]) -> bool:
-    """A paragraph of the writer's own prose: no FI block or mark, no figure, table, code or placeholder, and no
-    citation (moving one would leave a source in the References that the paper no longer cites)."""
-    body = "\n".join(par)
-    first = par[0].lstrip()
-    return not (_TOKEN.search(body) or "<!--" in body or "![" in body or "{{" in body or _CITES.search(body)
-                or first.startswith(("|", "```", "~~~", "<", "$$", "\\[")))
-
-
-def take_writer_limitations(text: str) -> tuple[str, str]:
-    """``text`` without the writer's own paragraphs of its Limitations section, and those paragraphs as they were
-    (``""``, and ``text`` unchanged, when there are none or the section is not the paper's Limitations). The heading,
-    FI's block, figures, tables and any paragraph that cites a source stay."""
-    masked, blocks = _masked(text)
-    lines = masked.split("\n")
-    span = _limitations_section(lines, blocks)
-    if span is None:
-        return text, ""
-    head, end = span
-    pars = _paragraphs(lines[head + 1:end])
-    moved = [p for p in pars if _movable(p)]
-    if not moved:
-        return text, ""
-    kept = "\n\n".join("\n".join(p) for p in pars if not _movable(p))
-    new = [*lines[:head + 1], "", *([kept, ""] if kept else []), *lines[end:]]
-    return _unmasked("\n".join(new), blocks), "\n\n".join("\n".join(p) for p in moved)
 
 
 def put_back_writer_limitations(text: str, before: str, after: str) -> str | None:
@@ -223,8 +205,9 @@ def put_back_writer_limitations(text: str, before: str, after: str) -> str | Non
     if any(n not in now for n in names):
         return None
     body = re.sub(r"\x00([\w-]+)\x00", lambda m: now[m.group(1)], before)
-    return _unmasked("\n".join([*lines[:head + 1], "", body, *([""] if end < len(lines) else []), *lines[end:]]),
-                     blocks)
+    pointers = _pointers(lines, head, end)
+    return _unmasked("\n".join([*lines[:head + 1], "", body, *(["", *pointers] if pointers else []),
+                                *([""] if end < len(lines) else []), *lines[end:]]), blocks)
 
 
 def save(quest_root: Path | str, parts: list[str], *, limit: int | None, further: list[str] | None = None,
@@ -262,11 +245,6 @@ def sentences(quest_root: Path | str) -> list[dict[str, Any]]:
 def anything(quest_root: Path | str) -> bool:
     """Whether the supplement holds anything: a part FI moved, or sentences the page trim moved."""
     return bool(read(quest_root)) or bool(sentences(quest_root))
-
-
-def sentence_count(quest_root: Path | str) -> int:
-    """How many sentences the page trim moved to the supplement."""
-    return sum(1 for r in sentences(quest_root) for x in r.get("sentences") or [] if isinstance(x, dict) and x.get("text"))
 
 
 def save_sentences(quest_root: Path | str, places: list[dict[str, Any]]) -> None:
@@ -349,15 +327,6 @@ def sentences_text(quest_root: Path | str) -> str:
     return "\n\n".join(out)
 
 
-def moved_sentences_line(n: int) -> str:
-    """The line the paper's Limitations carry when the trim moved ``n`` sentences (``""`` for none)."""
-    if n <= 0:
-        return ""
-    return (f"FI moved {n} sentence{'s' if n != 1 else ''} of the paper's text to the supplement "
-            f"(`{SHOWN}`) to keep the paper within its page limit; {'each stands' if n != 1 else 'it stands'} there as "
-            "written.")
-
-
 def _listed(names: list[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
@@ -415,39 +384,7 @@ FURTHER_POINTER = re.compile(r"^Further reading: \d+ web pages? the text does no
                              r"supplement \(`" + re.escape(SHOWN) + r"`\)\.[ \t]*$", re.M)
 
 
-def answers_pointer() -> str:
-    """The line after the paper's short answers when the answers in full are here."""
-    return (f"Each answer in full, with every setting that gave no number and every reason a question is not answered, is "
-            f"in the supplement (`{SHOWN}`).")
-
-
 def table_pointer() -> str:
     """What the paper keeps where its tables of every setting were."""
     return (f"FI's tables of every setting the study computed, each value with its interval and reference, are in the "
             f"supplement (`{SHOWN}`; every number also in `paper/results_by_setting.csv`).")
-
-
-def limitations_pointer(n_items: int, topic_parts: list[str], *, discussion: bool = False, known_answers: int = 0,
-                        none_judged: bool = False, moved_sentences: int = 0) -> str:
-    """The one line the Limitations keep: how many things FI recorded, each part of the topic the study did not do by
-    name and how many checks of the code against a known answer did not confirm the results (``known_answers``: a reader
-    is told in the paper itself what it leaves out and what is not validated), and where they all are; ``discussion``: the
-    paper's own paragraphs of that section are there too; ``none_judged``: no such check could be judged at all;
-    ``moved_sentences``: how many sentences of the paper's text the page trim moved there too."""
-    if n_items <= 0:
-        return moved_sentences_line(moved_sentences)
-    line = f"FI recorded {n_items} limitation{'s' if n_items != 1 else ''} of this study"
-    if topic_parts:
-        shown = "; ".join(topic_parts)  # every one by name: a reader is told in the paper what the study leaves out
-        k = len(topic_parts)
-        line += f", among them {k} part{'s' if k != 1 else ''} of the topic it did not do ({shown})"
-    if known_answers > 0:
-        checks = (f"{known_answers} check{'s' if known_answers != 1 else ''} of the code against a known answer that did "
-                  "not confirm the results")
-        line += f" and {checks}" if topic_parts else f", among them {checks}"
-    if none_judged:
-        line += "; no check of the code against a known answer could be judged"
-    where = f"the supplement (`{SHOWN}`)" + (", with the paper's own discussion of them" if discussion else "")
-    also = (f" The supplement also holds {moved_sentences} sentence{'s' if moved_sentences != 1 else ''} of the paper's "
-            "text, moved there for length.") if moved_sentences > 0 else ""
-    return line + f"; each is stated in full in {where}.{also}"

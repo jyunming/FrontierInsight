@@ -60,7 +60,7 @@ async def test_a_plan_whose_runs_are_below_its_own_minimum_runs_the_minimum(tmp_
 async def test_a_minimum_that_does_not_fit_the_time_runs_the_most_runs_that_fit_disclosed_and_marked(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The plan's minimum does not fit: FI does not stop. It runs the most runs per setting that fit (at least two), records its
-    own reduction (the paper's fewer-runs item) and marks every result of the plan ``(unconfirmed)``."""
+    own reduction (the paper's fewer-runs item) and lists every result of the plan that rests on those runs in the quality report."""
     from core import paper_facts, run_estimate
     from tests.test_run_checks import _sizing
 
@@ -77,7 +77,7 @@ async def test_a_minimum_that_does_not_fit_the_time_runs_the_most_runs_that_fit_
     reduced = record["reduced"]
     assert reduced["marked_unconfirmed"] and reduced["below_plan_minimum"] and reduced["plan_minimum"] == 200
     assert reduced["from"]["runs_per_setting"] == 200 and reduced["to"]["runs_per_setting"] == runs
-    assert "the time allowed asked for it" in reduced["note"] and "marked (unconfirmed)" in reduced["note"]
+    assert "the time allowed asked for it" in reduced["note"] and "listed in the quality report" in reduced["note"]
     assert "below the plan's minimum of 200" in paper_facts.fewer_runs_text(reduced)
     # a resume does not raise them again or cut again
     assert eng._raise_runs_to_the_minimum({"iteration": 0}) is None
@@ -144,7 +144,6 @@ def test_every_result_of_the_plan_is_marked_when_the_run_has_fewer_runs_than_the
     marked = result_checks.marked_quantities(tmp_path)
     assert set(marked) == {"y", "slope"}, json.dumps(marked)
     assert "12 runs per setting, fewer than the plan's minimum" in marked["y"]["note"]
-    assert "`y`" in result_checks.marked_note(tmp_path)
 
 
 # --- the first external review of the one-trial-per-cell change ----------------------------------------------------------------

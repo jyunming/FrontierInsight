@@ -84,15 +84,13 @@ async def test_still_unusable_after_one_ask_is_a_requirement_not_done_and_the_pa
     assert "no comparison of those values inside each run was recorded" in left["sentence"]
     assert "no run compares" not in left["sentence"]
     assert "still not readable (the experiment goes on without it)" in _text(eng)
-    # An item the paper must name, checked, and said in the run record (QUALITY.md).
+    # An item QUALITY.md lists from FI's records (the paper is not given it), and said in the run record.
     from core import disclosure, paper_facts
 
     items = paper_facts.required_items(eng.quest_root)
     (item,) = [i for i in items if i.kind == paper_facts.NOT_DONE]
     assert item.name == "comparison inside each run" and "has one value" in item.sentence
-    # The writer is shown the Limitations FI writes, with that sentence in them.
-    section = paper_facts.writer_section(eng.quest_root)
-    assert item.sentence in section
+    assert item.sentence not in paper_facts.writer_section(eng.quest_root)
     assert "has one value" in disclosure.run_record(eng.quest_root)
     # A resume asks no more.
     design, sha = eng._design_from_plan()

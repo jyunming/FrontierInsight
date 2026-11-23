@@ -68,9 +68,9 @@ def test_a_repeated_reason_keeps_revise_and_is_stated_as_unresolved(tmp_path: Pa
     assert "one damping value" in item.sentence and "not resolved" in item.sentence
 
 
-def test_the_delivered_paper_carries_the_unresolved_reason(tmp_path: Path) -> None:
-    """Review finding: the item was built but nothing placed it after the last review, so paper.md lacked the sentence.
-    Old code: the saved paper after the repeated-reason review had no such sentence."""
+def test_the_delivered_paper_leaves_the_unresolved_reason_to_the_quality_report(tmp_path: Path) -> None:
+    """The paper carries no list of FI's: after the last step before delivery the writer's Limitations stand as written,
+    and the unresolved reason is one of the things QUALITY.md lists from FI's records."""
     from core import frozen_protocol
 
     frozen_protocol.freeze(tmp_path, {"grid": {"n": [5]}, "runs_per_setting": 2}, approved_by="test", source="test")
@@ -88,10 +88,11 @@ def test_the_delivered_paper_carries_the_unresolved_reason(tmp_path: Path) -> No
         return {"citation_next": "done"}
 
     eng._check_citations = citations  # type: ignore[method-assign]
-    asyncio.run(eng._node_citation_check(state))  # the last step before delivery writes the Limitations from the records
+    asyncio.run(eng._node_citation_check(state))  # the last step before delivery
     text = paper.read_text(encoding="utf-8")
-    assert "one damping value" in text and "not resolved" in text and "{{" not in text
-    assert text.index("One limit.") < text.index("one damping value")  # the writer's words stay, FI's point follows
+    assert "damping value" not in text and "{{" not in text and "## Limitations\n\nOne limit." in text
+    [item] = [i for i in paper_facts.required_items(tmp_path) if i.kind == paper_facts.UNRESOLVED_REVIEW]
+    assert "one damping value" in item.sentence and "not resolved" in item.sentence
 
 
 def test_a_new_reason_or_a_measured_hit_still_costs_a_rewrite(tmp_path: Path) -> None:

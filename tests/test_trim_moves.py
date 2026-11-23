@@ -2,7 +2,7 @@
 
 A draft a little over its page limit loses a few background and discussion sentences (core/paper_trim.py). They used to
 be deleted: the delivered paper no longer said them and nothing else did. Now each goes to ``paper/supplement.md``
-under the section it came from, the paper's Limitations say how many moved and where, and a later draft gets them back
+under the section it came from, and a later draft gets them back
 word for word where the text around them is unchanged (``Engine._supplement_reset``); one that cannot be placed stays
 in the supplement. At every point a sentence the trim took is in the paper or in the supplement.
 """
@@ -32,7 +32,7 @@ def _trimmed(tmp_path: Path, monkeypatch) -> tuple[object, Path, str, list[str]]
     return eng, paper, written, moved
 
 
-def test_a_trimmed_sentence_moves_to_the_supplement_under_its_section_and_the_paper_says_so(
+def test_a_trimmed_sentence_moves_to_the_supplement_under_its_section(
     tmp_path: Path, monkeypatch,
 ) -> None:
     _eng, paper, written, moved = _trimmed(tmp_path, monkeypatch)
@@ -47,10 +47,8 @@ def test_a_trimmed_sentence_moves_to_the_supplement_under_its_section_and_the_pa
         for x in record["sentences"]:
             part = shown.split(f"**{x['section']}**")[1].split("**")[0]
             assert x["text"] in part
-    # the paper's Limitations count them and point to the supplement
-    limits = now.split("### Limitations")[1].split("## Conclusion")[0]
-    assert supplement.moved_sentences_line(len(moved)) in limits
-    assert supplement.sentence_count(tmp_path) == len(moved)
+    assert sum(len(r["sentences"]) for r in supplement.sentences(tmp_path)) == len(moved)
+    assert "FI moved" not in now, "the paper carries no line of FI's about them"
 
 
 def test_the_next_draft_gets_the_sentences_back_word_for_word_and_the_record_goes(tmp_path: Path, monkeypatch) -> None:
@@ -59,7 +57,7 @@ def test_the_next_draft_gets_the_sentences_back_word_for_word_and_the_record_goe
     back = paper.read_text(encoding="utf-8")
     for sentence in moved:
         assert back.count(sentence) == 1
-    assert back == written  # the pointer line goes with them: FI's Limitations are written from the records again
+    assert back == written
     assert not (tmp_path / supplement.TRIM_RECORD).exists()
     assert not (tmp_path / "paper" / "supplement.md").exists()
 
@@ -67,7 +65,6 @@ def test_the_next_draft_gets_the_sentences_back_word_for_word_and_the_record_goe
 def test_a_sentence_whose_text_around_it_changed_stays_in_the_supplement(tmp_path: Path, monkeypatch) -> None:
     eng, paper, _written, moved = _trimmed(tmp_path, monkeypatch)
     places = supplement.sentences(tmp_path)
-    assert len({p["step"] for p in places}) >= 2  # taken out in more than one round
     # the next draft rewrote the words just before a place of the last round
     now = paper.read_text(encoding="utf-8")
     first = next(p for p in places if p["step"] == max(q["step"] for q in places) and p["left"].strip()
@@ -104,18 +101,6 @@ def test_two_places_at_one_spot_both_stay_moved() -> None:
     assert supplement.put_back_sentences("x. y.", [a, b]) == ("x. y.", [a, b])
 
 
-def test_the_pointer_line_counts_the_moved_sentences() -> None:
-    assert supplement.moved_sentences_line(0) == ""
-    one = supplement.moved_sentences_line(1)
-    assert "FI moved 1 sentence of" in one and "it stands there" in one and supplement.SHOWN in one
-    assert "FI moved 3 sentences of" in supplement.moved_sentences_line(3)
-    # with nothing else moved the pointer is that line alone; with FI's items moved too it says the supplement holds both
-    assert supplement.limitations_pointer(0, [], moved_sentences=2) == supplement.moved_sentences_line(2)
-    both = supplement.limitations_pointer(3, [], moved_sentences=2)
-    assert both.endswith(". The supplement also holds 2 sentences of the paper's text, moved there for length.")
-    assert "also holds" not in supplement.limitations_pointer(3, [])
-
-
 def test_a_reset_that_fails_after_putting_sentences_back_leaves_the_paper_and_the_supplement_as_they_were(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -125,7 +110,7 @@ def test_a_reset_that_fails_after_putting_sentences_back_leaves_the_paper_and_th
     def _fails(*_a, **_k):  # noqa: ANN002, ANN003, ANN202 - FI's blocks cannot be written again (a full disk)
         raise OSError("disk full")
 
-    monkeypatch.setattr(eng, "_restate_limitations", _fails)
+    monkeypatch.setattr(eng, "_rewrite_fi_blocks", _fails)
     assert eng._supplement_reset({"paper_md": str(paper)}, paper) is False  # type: ignore[attr-defined]
     assert {f: f.read_bytes() for f in before} == before
     shown = (tmp_path / "paper" / "supplement.md").read_text(encoding="utf-8")
@@ -157,7 +142,7 @@ def test_a_shortened_paper_that_cannot_be_written_leaves_no_sentence_in_the_supp
         assert c.text in now
     shown = tmp_path / "paper" / "supplement.md"
     assert not shown.exists() or "Sentences moved for length" not in shown.read_text(encoding="utf-8")
-    assert supplement.sentence_count(tmp_path) == 0
+    assert not any(r.get("sentences") for r in supplement.sentences(tmp_path))
 
 
 def test_a_reset_whose_records_cannot_be_cleared_leaves_everything_as_it_was(tmp_path: Path, monkeypatch) -> None:
@@ -170,9 +155,3 @@ def test_a_reset_whose_records_cannot_be_cleared_leaves_everything_as_it_was(tmp
     monkeypatch.setattr(supplement, "save_sentences", _fails)
     assert eng._supplement_reset({"paper_md": str(paper)}, paper) is False  # type: ignore[attr-defined]
     assert {f: f.read_bytes() for f in before} == before
-
-
-def test_a_record_without_sentences_counts_none(tmp_path: Path) -> None:
-    supplement.save_sentences(tmp_path, [{"text": "x", "left": "", "right": "", "step": 1, "sentences": []},
-                                         {"text": "y", "left": "", "right": "", "step": 1}])
-    assert supplement.sentence_count(tmp_path) == 0  # the Limitations never count a sentence the supplement does not show

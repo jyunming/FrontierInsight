@@ -17,7 +17,7 @@ def _text(cells: list[dict], key: str) -> str:
 def test_one_run_per_setting_gives_the_mean_and_no_interval():
     cells = [_cell(a, [0.1 * a]) for a in range(1, 6)]
     out = _text(cells, "y:mean_ci @ a=all")
-    assert "mean over 5 settings, one run each; no interval" in out
+    assert "mean over 5 settings, one run each" in out
     assert "trials" not in out and " to " not in out
 
 
@@ -30,12 +30,12 @@ def test_one_run_per_setting_gives_no_ci_or_se():
 def test_repeated_runs_keep_their_interval():
     cells = [_cell(a, [0.1 + 0.001 * a + d for d in (0.0, 0.02, -0.02, 0.01)]) for a in range(1, 4)]  # the settings' intervals overlap
     out = _text(cells, "y:mean_ci @ a=all")
-    assert "95% t interval" in out and "12 trials" in out
+    assert "95% CI" in out and "12 trials" in out
 
 
 def test_a_setting_that_gave_no_value_is_not_counted_as_a_run():
     cells = [_cell(a, [0.1 * a] if a <= 3 else []) for a in range(1, 6)]
-    assert "mean over 3 settings, one run each; no interval" in _text(cells, "y:mean_ci @ a=all")
+    assert "mean over 3 settings, one run each" in _text(cells, "y:mean_ci @ a=all")
 
 
 def test_a_comparison_with_the_reference_over_settings_that_each_ran_once_is_left_unfilled_not_raised():
@@ -60,4 +60,4 @@ def test_settings_that_each_ran_once_and_gave_one_value_print_that_value_not_a_m
 
 def test_values_that_differ_at_the_printed_places_keep_the_mean_over_settings_wording():
     cells = [_cell(a, [2.5 + 0.01 * a]) for a in range(1, 6)]
-    assert "mean over 5 settings, one run each; no interval" in _text(cells, "y:mean_ci @ a=all")
+    assert "mean over 5 settings, one run each" in _text(cells, "y:mean_ci @ a=all")

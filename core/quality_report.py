@@ -194,7 +194,9 @@ class _Quest:
         self.paper_check = _dict(_json(root / ".fi" / "paper_record_check.json"))
         self.record_words = _record_words(root, self.oracle_check)
         self.citations_removed = _list(_dict(_json(root / ".fi" / "citations_removed.json")).get("removed"))
-        self.unsupported_removed = _list(_dict(_json(root / ".fi" / "unsupported_claims.json")).get("removed"))
+        unsupported = _dict(_json(root / ".fi" / "unsupported_claims.json"))
+        self.unsupported_removed = _list(unsupported.get("removed"))
+        self.unsupported_standing = _list(unsupported.get("claims"))
         self.numeric_warnings = _dict(_json(root / "needs" / "NUMERIC_WARNINGS.json"))
         self.receipts = {p.stem: _dict(_json(p)) for p in sorted((root / "needs" / "receipts").glob("*.json"))} \
             if (root / "needs" / "receipts").is_dir() else {}
@@ -420,7 +422,7 @@ def _checks_problems(q: _Quest) -> list[dict[str, str]]:
         n = _int(repairs.get(eid))
         if held:  # the study went on with it (core/engine_code.py _settle_unconfirmed)
             out.append(_problem("checks", f"equation {eid} could not be confirmed before the run ({item.get('reason') or ''}); "
-                                f"the study went on with it, and every result it may reach is marked (unconfirmed)",
+                                f"the study went on with it, and every result it may reach rests on an equation FI did not confirm",
                                 "FI's equation test", "went on, not confirmed", ".fi/equation_tests.json"))
             continue
         out.append(_problem("checks", f"equation {eid}: its function {item.get('function') or ''} failed its test"
@@ -1113,6 +1115,12 @@ def _paper_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("paper", f"a sentence {_TAKEN_OUT_BECAUSE.get(str(r.get('fault') or ''), _TAKEN_OUT_BECAUSE[''])} "
                             f"was taken out of the paper: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
                             "FI's claim check", "left out", ".fi/unsupported_claims.json"))
+    # A sentence the claim check found unsupported that stays in the paper as written (the paper carries no mark of it).
+    for r in q.unsupported_standing:
+        r = _dict(r)
+        out.append(_problem("paper", f"a sentence of the paper was not found supported by the run's results or a cited "
+                            f"source and stays as written: {_one(r.get('claim'), 200)} (why: {_one(r.get('evidence'), 300)})",
+                            "FI's claim check", "not fixed", ".fi/unsupported_claims.json"))
     if q.stuck and _stuck_stage(q) == "paper":
         out.append(_problem("paper", q.stuck.get("problem") or "the paper contradicts FI's records",
                             "FI's records", "not fixed", "needs/STUCK.json"))
@@ -1620,7 +1628,13 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
     engine = _dict(q.config.get("engine"))
     topic = str(q.config.get("topic") or "")
     out: dict[str, Any] = {"how_reached": "", "run_record": "", "code_findings": "", "page_limit": "", "paper_check": {},
-                           "unchecked_words": list(q.record_words)}
+                           "unchecked_words": list(q.record_words), "not_done": [],
+                           # every sentence the claim check found unsupported that stays in the paper, in full with
+                           # its reason: the paper carries no mark of them, so this is where a reader finds them
+                           "unsupported_standing": [{"claim": " ".join(str(_dict(r).get("claim") or "").split()),
+                                                     "why": " ".join(str(_dict(r).get("evidence") or "").split())}
+                                                    for r in q.unsupported_standing
+                                                    if str(_dict(r).get("claim") or "").strip()]}
     # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
     # not say so): the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
@@ -1636,9 +1650,12 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
         out["code_findings"] = _cr.findings_block(root, root / "code").replace(
             "**Open points in the code that produced these results.** ", "")
         out["page_limit"] = _pf.page_limit_text(root)
+        # what the study did not do, from FI's records (the paper carries none of it): an open point in the code is in
+        # the code section and each unsupported claim has a row of its own among the paper's problems
+        out["not_done"] = [i.sentence for i in _pf.required_items(root)
+                           if i.kind not in (_pf.CODE_FINDING, _pf.UNSUPPORTED_CLAIMS)]
         kept = _pf.kept_check(root)
         out["paper_check"] = {"hits": [str(h) for h in _list(kept.get("hits"))],
-                              "unmet_items": [_dict(i) for i in _list(kept.get("unmet_items"))],
                               "unfilled": [str(u) for u in _list(kept.get("unfilled"))],
                               "untraced": [_dict(r) for r in _list(kept.get("untraced_numbers"))],
                               "removed": [_dict(r) for r in _list(kept.get("removed_numbers"))],
@@ -1821,18 +1838,6 @@ def _citations_line(c: dict[str, Any]) -> str:
             + (f", {n.get('unchecked')} could not be checked" if n.get("unchecked") else "") + "." + who)
 
 
-def _unmet_lead(item: dict[str, Any]) -> str:
-    """What FI checked for a required item the paper does not hold. An open problem in the code is never in the Limitations;
-    FI looks for its own sentence on the results the problem may change, in the paragraph of the run's facts."""
-    if item.get("kind") != "code_finding":
-        return "Not in the paper's Limitations"
-    if item.get("named") is False:
-        return "FI could not name a printed result this finding changes"
-    if item.get("named") is True:
-        return "FI's sentence on the results it may change is not in the paper"
-    return "Not settled in the paper"  # a record kept before FI noted which of the two it was
-
-
 def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     """The section of what FI recorded about the run that the paper does not carry, and what its check of the paper found."""
     labels = (("how_reached", "How this result was reached"), ("run_record", "What FI recorded about the run"),
@@ -1840,7 +1845,6 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
               ("page_limit", "Page limit and supplement"))
     parts = [(title, records.get(key)) for key, title in labels if records.get(key)]
     check = records.get("paper_check") or {}
-    unmet = [i for i in check.get("unmet_items") or [] if isinstance(i, dict)]
     hits = [h for h in check.get("hits") or [] if h]
     unfilled = [u for u in check.get("unfilled") or [] if u]
     untraced = [r for r in check.get("untraced") or [] if isinstance(r, dict)]
@@ -1848,22 +1852,29 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     taken_out = [r for r in check.get("taken_out") or [] if isinstance(r, dict)]
     not_filled = str(check.get("not_filled") or "")
     unchecked = [str(x) for x in records.get("unchecked_words") or [] if x]
-    if (not parts and not unmet and not hits and not unfilled and not untraced and not removed and not taken_out
-            and not not_filled and not unchecked):
+    not_done = [str(x) for x in records.get("not_done") or [] if x]
+    standing = [_dict(c) for c in records.get("unsupported_standing") or [] if _dict(c).get("claim")]
+    if (not parts and not hits and not unfilled and not untraced and not removed and not taken_out
+            and not not_filled and not unchecked and not not_done and not standing):
         return []
     lines = ["", "## What FI recorded that the paper does not carry", "",
-             "These are FI's records of the run. The paper's seed, measured run time, time limit, trial counts and the "
-             "parts the study did not do are filled in by FI from these records; the full records are kept here, not "
-             "pasted into the paper.", ""]
+             "These are FI's records of the run. The paper's measured run time and trial counts are filled in by FI from "
+             "these records; the rest is kept here, not put into the paper.", ""]
     for title, text in parts:
         lines += [f"### {title}", "", str(text).strip(), ""]
-    if unmet or hits:
+    if not_done:
+        lines += ["### What the study did not do", "", *[f"- {_cell(x)}" for x in not_done], ""]
+    if standing:
+        lines += ["### Sentences the claim check found unsupported, left in the paper as written", "",
+                  "The run's results and the cited sources were not found to support these sentences; the paper "
+                  "has no mark beside them, and its body ends with one sentence that points to this report.", ""]
+        lines += [f"- {_cell(str(c['claim']))}" + (f" (why: {_cell(str(c['why']))})" if c.get("why") else "")
+                  for c in standing]
+        lines.append("")
+    if hits:
         lines += ["### Where the paper still disagrees with these records", "",
                   "FI sent the paper back to be rewritten for these and the review rounds ended before they were settled:", ""]
-        lines += [f"- {_unmet_lead(i)}: {_cell(str(i.get('text') or i.get('name') or ''))} "
-                  f"(record `{_cell(str(i.get('id') or i.get('kind') or ''))}`)" for i in unmet]
-        ids = {str(i.get("id")) for i in unmet}
-        lines += [f"- {_cell(_one(h, 300))}" for h in hits if not any(i and i in h for i in ids)]
+        lines += [f"- {_cell(_one(h, 300))}" for h in hits]
         lines.append("")
     if untraced:
         lines += ["### Numbers not traced to the plan or FI's records", "",
@@ -1882,8 +1893,8 @@ def _paper_record_lines(records: dict[str, Any]) -> list[str]:
     if taken_out:
         lines += ["### Values taken out of the paper", "",
                   "The paper asked for these values, but FI has no record that fills them and the review rounds ended before "
-                  "the writer fixed the key. FI put no number in their place: where a sentence carried only such values it "
-                  "is removed, and anywhere else the value is replaced by \"[number removed]\":", ""]
+                  "the writer fixed the key. FI put no number in their place: the sentence, table row or line that held "
+                  "each is removed (a record an older FI wrote may say a value was replaced by \"[number removed]\"):", ""]
         lines += [f"- {_cell(str(r.get('how')))}: {_cell(_one(r.get('sentence'), 240))} (`{_cell(str(r.get('key')))}`)"
                   for r in taken_out]
         lines.append("")
@@ -2006,7 +2017,7 @@ def render(report: dict[str, Any]) -> str:
     if report.get("kept_outside_range"):
         lines += ["", "## Kept outside the plan's expected range", "",
                   "These values stayed beyond the range the plan expected after the repairs; FI did not establish whether the "
-                  "value or the range is wrong. They are reported and marked (unconfirmed) where the paper prints them:", ""]
+                  "value or the range is wrong. They are printed as they are; the paper's closing sentence points here:", ""]
         lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['note'])}" for x in report["kept_outside_range"]]
     lines += _paper_record_lines(report.get("paper_records") or {})
     lines += ["", "## What to try", ""]

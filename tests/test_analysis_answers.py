@@ -206,3 +206,79 @@ def test_only_a_key_that_renders_the_value_places_the_quantity():
                        "{{v:decay_rate:ref @ dose=2}}", "{{v:decay_rate:count @ dose=2}}",
                        "{{v:decay_rate @ dose=each | argmax}}", "{{v:decay_rate @ dose=2 | ratio ref}}"):
         assert pv.placed_metrics(not_placed) == set(), not_placed
+
+
+def test_a_paper_that_places_the_per_trial_quantity_a_result_is_the_mean_of_has_placed_it(tmp_path):
+    """The analysis worked the topic's quantity out as the mean of one per-trial quantity at every setting (FI's record of
+    what it read, ``inputs``, and its values equal at every setting): a paper that places that per-trial quantity has
+    placed the answer, so no flag. Known positive: a paper that places neither is still flagged."""
+    from core import paper_values as pv
+
+    req = {"quantities": [{"name": "share of false alarms", "main": True}]}
+    protocol = {"metrics": [{"id": "alarm_rate", "label": "Share of false alarms", "returned": "afterwards"},
+                            {"id": "alarm_each", "returned": "each_run"}],
+                "topic_map": [{"item": "Q1", "by": "metric:alarm_rate"}]}
+    cells = [{"cell": {"n": n}, "key": f"n={n}", "planned": 4, "ok": 4, "failed": 0,
+              "metrics": {"alarm_each": {"values": [0.0, 1.0, 0.0, 0.0] if n == 10 else [1.0, 1.0, 0.0, 0.0]}}}
+             for n in (10, 20)]
+    (tmp_path / "data" / "results").mkdir(parents=True)
+    (tmp_path / pv.DERIVED).write_text(json.dumps({"derived": {"alarm_rate": {
+        "status": "ok", "by_setting": {"n=10": 0.25, "n=20": 0.5}, "inputs": ["alarm_each"]}}}), encoding="utf-8")
+    rec = pv.from_cells(pv._with_derived(cells, tmp_path), protocol)
+    assert rec.mean_sources() == {"alarm_rate": {"alarm_each"}}
+    held = rec.fillable()
+    assert gc.unplaced_answers(req, protocol, held, {"alarm_each"}, sources=rec.mean_sources()) == []
+    flagged = gc.unplaced_answers(req, protocol, held, set(), sources=rec.mean_sources())
+    assert [f["metric"] for f in flagged] == ["alarm_rate"]
+    # a result that reads the per-trial quantity but is not its mean (here: twice it) is not the same number
+    (tmp_path / pv.DERIVED).write_text(json.dumps({"derived": {"alarm_rate": {
+        "status": "ok", "by_setting": {"n=10": 0.5, "n=20": 1.0}, "inputs": ["alarm_each"]}}}), encoding="utf-8")
+    other = pv.from_cells(pv._with_derived(cells, tmp_path), protocol)
+    assert other.mean_sources() == {}
+
+
+def test_the_first_drafts_prompt_lists_every_asked_result_with_a_key_that_fills(tmp_path, monkeypatch):
+    """The writer is given, before the first draft, one line per result the topic asks for: the quantity in the topic's
+    words, its metric and a key FI checked fills (a live writer A/B: without them, first drafts placed 1 of 12). A
+    quantity the topic does not mark as main is not listed."""
+    import asyncio
+
+    from core import frozen_protocol
+    from tests.test_disclosure import _engine as make
+
+    names = {"decay_rate": "decay rate", "settling_time": "settling time", "peak_height": "peak height",
+             "noise_floor": "noise floor"}
+    protocol = {"grid": {"dose": [1, 2]}, "runs_per_setting": 3,
+                "metrics": [{"id": m, "label": w.capitalize(), "kind": "mean"} for m, w in names.items()]
+                + [{"id": "fit_slope", "label": "Fit slope", "kind": "mean"}],
+                "topic_map": [{"item": f"Q{i}", "by": f"metric:{m}"} for i, m in enumerate([*names, "fit_slope"], 1)]}
+    req = {"quantities": [{"name": w, "stated": f"report the {w}", "main": True} for w in names.values()]
+           + [{"name": "slope of the fit", "stated": "the slope of the fit", "main": False}]}
+    cells = [{"cell": {"dose": d}, "key": f"dose={d}", "planned": 3, "ok": 3, "failed": 0,
+              "metrics": {m: {"values": [d + i * 0.1 + k for k in (0.0, 0.01, 0.02)], "trials": [0, 1, 2]}
+                          for i, m in enumerate([*names, "fit_slope"])}} for d in (1, 2)]
+    (tmp_path / "raw").mkdir(parents=True)
+    (tmp_path / "raw" / "trials.json").write_text(json.dumps({"cells": cells}), encoding="utf-8")
+    (tmp_path / ".fi").mkdir(exist_ok=True)
+    (tmp_path / ".fi" / "topic_requirements.json").write_text(json.dumps(req), encoding="utf-8")
+    frozen_protocol.freeze(tmp_path, protocol, approved_by="test", source="test")
+    eng = make(tmp_path)
+    prompts: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompts.append("\n".join(str(m.get("content")) for m in messages))
+        return "# T\n\n## Results\n\nText.\n"
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    asyncio.run(eng._node_write({"topic": "t", "title": "t", "iteration": 0,  # type: ignore[arg-type]
+                                 "exec_result": {"returncode": 0, "duration_s": 3.0}}))
+    first = prompts[0]
+    block = first.split("The results the topic asks for")[1].split("\n\n")[0]
+    lines = [ln for ln in block.split("\n") if ln.startswith("- ")]
+    assert len(lines) == 4 and "slope of the fit" not in block, block
+    rec = pv.records_of(tmp_path, protocol)
+    for (metric, words), line in zip(names.items(), lines):
+        assert line.startswith(f"- {words}: `{metric}`"), line
+        key = line.split("e.g. ")[1].split(" -> ")[0]
+        assert pv.resolve(key, rec).filled and "not recorded" not in line, line
+

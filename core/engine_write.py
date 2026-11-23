@@ -20,7 +20,7 @@ from .engine_base import (  # noqa: F401
     _finalize_paper_sources, _finalize_with_numbering, _format_clarify, _format_cross_check, _format_evidence_note,
     _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, _foundational_sources,
     _foundational_write_block, _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
-    _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _mark_unconfirmed_results, _metric_spec,
+    _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
     _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
     _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders, _figure_numbers, _keep_figure_numbers,
@@ -37,6 +37,8 @@ from .engine_base import (  # noqa: F401
 )
 
 
+from . import asked_results as _asked_results
+from . import quality_pointer as _quality_pointer
 from . import supplement as _supplement
 
 
@@ -311,8 +313,7 @@ class WriteStageMixin:
                               type(e).__name__, str(e)[:200])
         try:
             section = _paper_facts.writer_section(
-                self.quest_root, topic=str(self.config.topic or ""),
-                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+                self.quest_root, fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
             self._log.warning("[write] FI's record of the run could not be given to the writer (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -337,7 +338,14 @@ class WriteStageMixin:
         """The "Results you can place" block the writer is given (the rule in plain words and the sheet of keys,
         core/paper_values.py), and the note that this draft is written under it (``self._sheet_given``). ``""`` for a study
         with no trial record: its paper is not held to the rule."""
-        sheet = _paper_values.writer_block(self._paper_records(state))
+        rec = self._paper_records(state)
+        try:  # the results the topic asks for, with a key for each, from the same records the review's flag reads
+            asked = goal_coverage.asked_answers(_disclosure._read_json(self.fi_dir / _topic_req.FILE),
+                                                self._protocol_block(state), rec.fillable()) if rec is not None else []
+        except Exception as e:  # noqa: BLE001 -- the sheet is given without them; the review still flags what is missing
+            self._log.warning("[write] the results the topic asks for could not be listed for the writer (%s)", e)
+            asked = []
+        sheet = _paper_values.writer_block(rec, asked)
         self._sheet_given = bool(sheet)
         if not sheet:
             self._log.info("[write] this study has no per-setting trial record, so FI fills in no result number and the "
@@ -365,12 +373,12 @@ class WriteStageMixin:
                 self._log.warning("[write] %s", v.hit.text())
         return out.text
 
-    def _restate_limitations(self, state: QuestState, why: str, *, strict: bool = False,
-                             path: Path | None = None) -> bool:
-        """The paper's Limitations are FI's block (``{{limitations}}``, core/paper_facts.py), written from its records as
-        they are now: called after a step that changed one of them, so the paper that is delivered says what the records
-        say. FI's own text and no claim of its own, so the claim check's and the citation check's receipts move to the
-        paper that carries it (``why`` is the reason they keep). No model call; best-effort. Returns whether the paper changed.
+    def _rewrite_fi_blocks(self, state: QuestState, why: str, *, strict: bool = False,
+                           path: Path | None = None) -> bool:
+        """FI's blocks (core/paper_facts.py ``BLOCK_NAMES``) written into the paper again from its records as they are
+        now: called after a move to or from the supplement, so a moved block is its pointer and one brought back is whole.
+        FI's own text and no claim of its own, so the claim check's and the citation check's receipts move to the paper
+        that carries it (``why`` is the reason they keep). No model call; best-effort. Returns whether the paper changed.
         ``path``: the paper to write, when it is not the state's (the page check is given its draft's path)."""
         path = path or _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         if not path or not Path(path).is_file():
@@ -380,7 +388,7 @@ class WriteStageMixin:
             after = self._with_fi_blocks(before, state)
             if _supplement.anything(self.quest_root):
                 # the supplement says what the records say now, as the pointer in the paper does
-                self._write_supplement(state, _supplement.read(self.quest_root).get("limit"))
+                self._write_supplement(state, _supplement.read(self.quest_root).get("limit"), paper=after)
             if after == before:
                 return False
             checked = Path(path).read_bytes()
@@ -391,16 +399,63 @@ class WriteStageMixin:
         except (OSError, UnicodeDecodeError) as e:
             if strict:
                 raise
-            self._log.warning("[review] the paper's Limitations could not be written again from FI's records (%s)", e)
+            self._log.warning("[review] FI's blocks could not be written into the paper again from its records (%s)", e)
             return False
 
     def _with_fi_blocks(self, text: str, state: QuestState) -> str:
-        """``text`` with FI's blocks written into it from its records as they are now (the Limitations among them)."""
-        return self._render_paper_facts(
-            _paper_facts.place_blocks(_disclosure.without_block(text), self.quest_root,
-                                      topic=str(self.config.topic or ""),
-                                      fallback_s=(state.get("exec_result") or {}).get("duration_s"),
-                                      limitations_heading=self._limitations_heading(state)), state)
+        """``text`` with FI's blocks written into it from its records as they are now."""
+        return self._render_paper_facts(self._place_blocks(_disclosure.without_block(text), state), state)
+
+    def _place_blocks(self, text: str, state: QuestState) -> str:
+        """``text`` with FI's blocks that the writer did not place put in (core/paper_facts.py ``place_blocks``), after the
+        table of the results the topic asks for (core/asked_results.py) is written from the records as they are now: the
+        one place every write round, rewrite and edit goes through, so a rewrite never leaves the table out. The closing
+        sentence that points to the quality report (core/quality_pointer.py) is written from the records the same way."""
+        self._write_asked_results(state)
+        self._write_quality_pointer()
+        return _paper_facts.place_blocks(text, self.quest_root, fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+
+    def _write_quality_pointer(self) -> None:
+        """Save (or take away, when no case stands) the closing sentence that points to the quality report, from the records
+        as they are now. Never raises: the paper then has no such sentence."""
+        path = self.quest_root / _quality_pointer.FILE
+        try:
+            said = _quality_pointer.text(self.quest_root)
+            if said:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(said + "\n", encoding="utf-8")
+            else:
+                path.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            self._log.warning("[write] the closing sentence of the paper could not be made (%s: %s)", type(e).__name__, str(e)[:200])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _write_asked_results(self, state: QuestState) -> None:
+        """Save (or take away, when FI holds a value for none of them) the text of the table of the results the topic asks
+        for, from the same list and keys the writer is given (:meth:`_values_sheet`). Never raises: the paper then has no
+        such table, and the quality report still lists a quantity it never gives."""
+        path = self.quest_root / _asked_results.FILE
+        try:
+            rec = self._paper_records(state)
+            protocol = self._protocol_block(state)
+            asked = goal_coverage.asked_answers(_disclosure._read_json(self.fi_dir / _topic_req.FILE), protocol,
+                                                rec.fillable()) if rec is not None else []
+            text = _asked_results.table(rec, asked, protocol)
+            if text:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text + "\n", encoding="utf-8")
+            else:
+                path.unlink(missing_ok=True)
+        except Exception as e:  # noqa: BLE001
+            self._log.warning("[write] the table of the results the topic asks for could not be made (%s: %s)",
+                              type(e).__name__, str(e)[:200])
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _verify_value_marks(self, markdown: str, state: QuestState) -> str:
         """``markdown`` with every FI value mark worked out again from FI's record (core/paper_values.py::verify_marks): a
@@ -433,10 +488,7 @@ class WriteStageMixin:
         try:
             before = Path(path).read_text(encoding="utf-8")
             before = self._verify_value_marks(before, state)
-            placed = _paper_facts.place_blocks(
-                _disclosure.without_block(before), self.quest_root, topic=str(self.config.topic or ""),
-                fallback_s=(state.get("exec_result") or {}).get("duration_s"),
-                limitations_heading=self._limitations_heading(state))
+            placed = self._place_blocks(_disclosure.without_block(before), state)
             after = self._render_paper_facts(placed, state)
             if before.rstrip() != after.rstrip() and (
                     _disclosure.without_block(before) != before or "{{" in before or "fi:fact-" in before
@@ -448,8 +500,7 @@ class WriteStageMixin:
             self._log.warning("[review] the paper's facts of the run could not be filled again (%s)", e)
 
     def _paper_record_hits(self, paper_md: str, state: QuestState) -> list[str]:
-        """Must-fix hits for the paper against FI's records (core/paper_facts.py): a required placeholder missing (the seed,
-        the run time, whether the run kept to the topic's limit; each thing the study did not do, in the Limitations) and,
+        """Must-fix hits for the paper against FI's records (core/paper_facts.py): a placeholder that is none of FI's and,
         for a paper written under the rule that FI fills every result number, a result key FI could not fill and a number
         the writer typed that is not a number of the plan or the topic (core/typed_numbers.py). Text-only: the paper is
         written again, the design is not touched and the quest is not stopped.
@@ -496,13 +547,6 @@ class WriteStageMixin:
         not_filled = "" if keyed else (
             "older_paper" if (self.quest_root / "raw" / "trials.json").is_file() else "no_records")
         _paper_facts.keep_check(self.quest_root, hits, paper_md, untraced=untraced, not_filled=not_filled, dropped=dropped)
-        if any(str(d.get("key", "")).startswith("figure:") for d in dropped) and self._restate_limitations(
-                state, "FI said in the Limitations that statements about a figure were left out and added no claim"):
-            # The Limitations are written before the take-out: the figure's disclosure reaches the paper in this same write.
-            paper_md = Path(_rerun_from.in_quest(state.get("paper_md"), self.quest_root)).read_text(encoding="utf-8")
-            hits = _paper_facts.check(paper_md, self.quest_root, topic=topic, fallback_s=fallback, keyed=keyed,
-                                      protocol=protocol)
-            _paper_facts.keep_check(self.quest_root, hits, paper_md, untraced=untraced, not_filled=not_filled, dropped=dropped)
         for hit in hits:
             self._log.warning("[record_check] %s", hit)
         if hits and left <= 0 and deferred:
@@ -572,41 +616,36 @@ class WriteStageMixin:
             return []
         if not figures_only:
             self._log.warning("[record_check] no round is left to write the paper again, so %d value(s) FI could not fill were "
-                              "taken out (%d sentence(s) removed, the rest replaced by \"%s\") and are listed in QUALITY.md",
-                              len(taken), sum(1 for t in taken if t["how"] == "sentence removed"), _paper_facts.REPLACED)
+                              "taken out with the sentence, row or line that held them, and are listed in QUALITY.md",
+                              len(taken))
         for stem, number in _paper_facts._figure_left_out_items(taken):
             gone = [str(t.get("sentence") or "") for t in taken
                     if str(t.get("key", "")).startswith(f"figure:{stem}:") or t.get("figure") == number]
             self._log.warning("[record_check] statements about Figure %s (%s) could not be checked against what it draws and "
-                              "were left out (%d): %s; the Limitations say so", number, stem, len(gone),
+                              "were left out (%d): %s; QUALITY.md lists them", number, stem, len(gone),
                               "; ".join('"' + g[:80] + '"' for g in gone))
         return taken
 
     def _take_out_figure_statements(self, state: QuestState, paper_path: Path) -> None:
         """Every paper the write node writes (the first draft, a review's rewrite, a person's refine) has the sentences about
         a figure FI cannot stand behind taken out before anything reads it, whatever round it is: the review, the slides and
-        the poster all read the paper as it is left here. What was left out is kept for the Limitations, which are written
-        again in the same write (the record of an earlier paper is replaced, so nothing older is said)."""
+        the poster all read the paper as it is left here. What was left out is kept for QUALITY.md (the record of an earlier
+        paper is replaced, so nothing older is said)."""
         self.__dict__.pop("_figure_pass_error", None)
         at = {**state, "paper_md": str(paper_path)}
         try:
             taken = self._take_out_unfilled_keys(at, figures_only=True)
-            if _paper_facts.keep_figure_left_out(self.quest_root, taken):
-                self._restate_limitations(at, "FI said in the Limitations which statements about a figure were left out and "
-                                              "added no claim")
+            _paper_facts.keep_figure_left_out(self.quest_root, taken)
         except Exception as e:  # noqa: BLE001 -- the figure pass never fails the write node: the paper stays as written
             self._figure_pass_failed(e)
         # The record describes the paper as finally written: a fault of an earlier write's pass is gone when this one ran clean.
         failed = self.__dict__.get("_figure_pass_error") is not None
         try:
-            if failed or _paper_facts.keep_figure_pass_fault(self.quest_root, False):
-                if not failed:
-                    self._clear_cannot_repair("figure_pass_fault")
-                self._restate_limitations(at, "FI said in the Limitations whether the sentences about the figures were "
-                                              "checked and added no claim")
-        except Exception as e:  # noqa: BLE001 -- nor does saying so: the record stays for QUALITY.md and the next write
-            self._log.warning("[record_check] the Limitations could not be written again to say whether the sentences about "
-                              "the figures were checked (%s: %s)", type(e).__name__, e)
+            if not failed and _paper_facts.keep_figure_pass_fault(self.quest_root, False):
+                self._clear_cannot_repair("figure_pass_fault")
+        except Exception as e:  # noqa: BLE001 -- nor does keeping the record: QUALITY.md and the next write read it
+            self._log.warning("[record_check] FI could not record whether the sentences about the figures were checked "
+                              "(%s: %s)", type(e).__name__, e)
 
     def _figures_drawn_safely(self, state: QuestState) -> dict[int, set[str]]:
         """:func:`_figures_drawn` for the write node; an error in it is the figure pass's fault, never the node's."""
@@ -618,7 +657,7 @@ class WriteStageMixin:
 
     def _figure_pass_failed(self, error: BaseException) -> None:
         """The check of the sentences about the figures stopped with an error of FI's own: the paper stays as it was written,
-        run.log has the error, and QUALITY.md and the next Limitations say once, plainly, that those sentences were not checked."""
+        run.log has the error, and QUALITY.md says once, plainly, that those sentences were not checked."""
         self._log.warning("[write] the check of the sentences about the figures stopped (%r); the paper stays as written", error)
         self.__dict__["_figure_pass_error"] = repr(error)
         _paper_facts.keep_figure_pass_fault(self.quest_root, True)
@@ -803,7 +842,7 @@ class WriteStageMixin:
                                      if before.get(name) != k))
         markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
-        markdown = _mark_unconfirmed_results(markdown, self.quest_root)
+        markdown = _paper_facts.without_marks_note(markdown)  # the note an older FI put under the title
         if _phased.enabled(self.config):
             markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
         # The design history, the run record and the code's open findings are not in the paper: the writer places what the
@@ -813,10 +852,7 @@ class WriteStageMixin:
         markdown = self._mark_best_design(state, markdown)
         # FI's tables of every setting (core/results_by_setting.py): where the writer put {{results_table}}, else before
         # the discussion; filled from FI's records with the facts below, so no number of them is typed by a model.
-        markdown = _paper_facts.place_blocks(
-            markdown, self.quest_root, topic=str(self.config.topic or ""),
-            fallback_s=(state.get("exec_result") or {}).get("duration_s"),
-            limitations_heading=self._limitations_heading(state))
+        markdown = self._place_blocks(markdown, state)
         # A new draft is not yet measured against the page limit: an earlier draft's measurement is not this one's.
         (self.quest_root / _paper_facts.PAGE_RECORD).unlink(missing_ok=True)
         # The new draft exists (the writer answered): what was taken out of the earlier draft is not stated about this one.
@@ -996,8 +1032,7 @@ class WriteStageMixin:
         can be put back through FI's own placeholder instead of being worded away."""
         try:
             section = _paper_facts.writer_section(
-                self.quest_root, topic=str(self.config.topic or ""),
-                fallback_s=(state.get("exec_result") or {}).get("duration_s"))
+                self.quest_root, fallback_s=(state.get("exec_result") or {}).get("duration_s"))
         except Exception as e:  # noqa: BLE001 -- a record FI cannot read is left out, never a reason to stop
             self._log.warning("[write] FI's record of the run could not be given to the editor (%s: %s)",
                               type(e).__name__, str(e)[:200])
@@ -1479,7 +1514,7 @@ class WriteStageMixin:
                 evidence = (f"{evidence} (FI could not read the check's verdict on this claim after asking once: {unread}; "
                             "it counts as unsupported)").strip()
             # FI's own look-up of a citation: a claim it cannot place in a source's text is unsupported, and its sentence
-            # stays and is stated in the Limitations (fault ``wording``): a quote FI cannot find does not show the sentence
+            # stays as written and QUALITY.md lists it (fault ``wording``): a quote FI cannot find does not show the sentence
             # false, only that FI could not confirm it.
             if basis == "citation" and cite_idx is None:
                 basis, fault = "unsupported", "wording"
@@ -1640,17 +1675,11 @@ class WriteStageMixin:
         findings out of rounds), so the delivered paper is measured here, whatever route brought it."""
         out = await self._check_citations(state)
         # The paper goes out as the last review saw it when no round follows (the graph reaches this step only from the
-        # review): the points that review raised and nothing answered are stated in the Limitations and listed in QUALITY.md.
+        # review): the points that review raised and nothing answered are listed in QUALITY.md.
         if out.get("citation_next") == "done" and _disclosure.mark_last_review_final(self.quest_root, state.get("review")):
-            self._log.info("[review] the last review's points that no later round addressed are stated in the paper's "
-                           "Limitations and listed in QUALITY.md")
-        # The Limitations are FI's block, from the records as they stand now (the claim check may have been off, so the
-        # refresh above may not have run): the paper that is delivered says what they say.
-        self._restate_limitations(state, "FI wrote the Limitations from its records again and added no claim")
-        # Before the page count is measured: its sentence is a few lines of the paper's own.
-        # The paper is delivered from here (out, or to a person): each sentence the Limitations list as unconfirmed is
-        # marked where it stands.
-        self._state_unsupported_claims({**state, **out}, mark=True)  # type: ignore[arg-type]
+            self._log.info("[review] the last review's points that no later round addressed are listed in QUALITY.md")
+        # The paper is delivered from here (out, or to a person): the claims still standing are kept for QUALITY.md.
+        self._state_unsupported_claims({**state, **out})  # type: ignore[arg-type]
         limit = resolve_page_limit(self.config)
         paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         checked = Path(paper_path).read_text(encoding="utf-8") if paper_path and Path(paper_path).is_file() else None
@@ -1660,7 +1689,7 @@ class WriteStageMixin:
             self._supplement_always({**state, **out}, Path(paper_path), limit)  # type: ignore[arg-type]
         if limit is not None and paper_path and Path(paper_path).is_file():
             now: QuestState = {**state, **out}  # type: ignore[assignment]
-            # The supplement holds what the records say now (the Limitations were just written again); one that cannot
+            # The supplement holds what the records say now; one that cannot
             # be written is no place to point to, so what moved comes back into the paper.
             if _supplement.anything(self.quest_root) and not self._write_supplement(now, limit):
                 self._supplement_reset(now, Path(paper_path))
@@ -2683,7 +2712,8 @@ class WriteStageMixin:
                 return []
             req = _disclosure._read_json(self.fi_dir / _topic_req.FILE)
             found = goal_coverage.unplaced_answers(
-                req, self._protocol_block(state), rec.fillable(), _paper_values.placed_metrics(paper_md))
+                req, self._protocol_block(state), rec.fillable(), _paper_values.placed_metrics(paper_md),
+                sources=rec.mean_sources())
             path = self.quest_root / "paper" / "goal_coverage.json"
             record = _disclosure._read_json(path) if path.is_file() else {}
             if not isinstance(record, dict):
@@ -2976,49 +3006,38 @@ class WriteStageMixin:
 
     def _supplement_can_move(self, part: str, text: str) -> bool:
         """Whether FI's own ``part`` (core/supplement.py ``ORDER``) is in the paper ``text`` with something to move: its
-        tables of every setting or its Limitations as FI's marked block, or the Further reading list FI wrote when the
-        text cites none of its pages (a citation would name nothing in the paper). The tables move only when the block
-        holds a table: with too many settings for the paper it is one sentence naming the files that hold them, which
-        is already its pointer (the supplement would hold nothing more). The answers move only when the paper is shorter
-        for it: their full lines, filled, are longer than the short ones with the line that points to the supplement
-        (a study whose full lines add only a few words keeps them in the paper)."""
+        tables of every setting as FI's marked block, or the Further reading list FI wrote when the text cites none of
+        its pages (a citation would name nothing in the paper). The tables move only when the block holds a table: with
+        too many settings for the paper it is one sentence naming the files that hold them, which is already its pointer
+        (the supplement would hold nothing more). FI writes no Limitations block, so that part never moves."""
         if part == _supplement.FURTHER_READING:
             block = _further_reading_block(text)
             return block is not None and bool(block.labels) and not set(block.labels) & _web_labels_cited(text)
-        if f"<!-- fi:fact-{part} -->" not in text:
+        if part != _supplement.TABLES or f"<!-- fi:fact-{part} -->" not in text:
             return False
-        if part == _supplement.LIMITATIONS:
-            return bool(_paper_facts.limitations_text(self.quest_root))
-        if part == _supplement.ANSWERS:
-            full, short = _paper_facts.answers_forms(self.quest_root)
-            if not full or short == full:
-                return False
-            rec = self._paper_records({})  # type: ignore[arg-type]
-
-            def words(block: str) -> int:
-                return len(_paper_values.without_marks(_paper_values.fill(block, rec)[0]).split())
-            return words(full) > words(short) + len(_supplement.answers_pointer().split())
         block = _paper_facts.block_text(self.quest_root, part, full=True)
         return any(line.lstrip().startswith("|") for line in block.splitlines())
 
-    def _write_supplement(self, state: QuestState, limit: int | None) -> bool:
+    def _write_supplement(self, state: QuestState, limit: int | None, *, paper: str | None = None) -> bool:
         """Write ``paper/supplement.md`` from FI's records as they are now, for the parts the record says moved: the
-        tables, the answers in full and the Limitations as FI would have put them in the paper (the answers' result
-        numbers filled from the same records as the paper's, without changing the paper's record of them), the Further
-        reading as it was listed. No model call. Returns ``False`` only when the file could not be written."""
+        tables as FI would have put them in the paper, the Further reading as it was listed, and the paper's own
+        Limitations paragraphs an older FI moved there while the paper (``paper``, else the state's paper file) does not
+        hold them again. No model call. Returns ``False`` only when the file could not be written."""
         root = self.quest_root
         moved = _supplement.moved(root)
         parts: dict[str, str] = {}
         if _supplement.TABLES in moved:
             parts[_supplement.TABLES] = _paper_facts.block_text(root, _supplement.TABLES, full=True)
-        if _supplement.ANSWERS in moved:
-            # the lines under the supplement's own heading (the block's bold title is that heading)
-            lines = _paper_facts.block_text(root, _supplement.ANSWERS, full=True).split(chr(10) * 2, 1)[-1]
-            parts[_supplement.ANSWERS] = _paper_values.fill(lines, self._paper_records(state))[0] if lines.strip() else ""
         if _supplement.LIMITATIONS in moved:
-            # the paper's own paragraphs of its Limitations section first, as they stood there, then FI's list
-            parts[_supplement.LIMITATIONS] = (_supplement.writer_text(root) + "\n\n"
-                                              + _paper_facts.limitations_text(root)).strip()
+            # the paper's own paragraphs of its Limitations section, as they stood there (a record an older FI wrote),
+            # until the paper holds them again
+            if paper is None:
+                path = _rerun_from.in_quest(state.get("paper_md"), root)
+                try:
+                    paper = Path(path).read_text(encoding="utf-8") if path and Path(path).is_file() else ""
+                except (OSError, UnicodeDecodeError):
+                    paper = ""
+            parts[_supplement.LIMITATIONS] = _supplement.writer_text_shown(root, paper)
         if _supplement.FURTHER_READING in moved:
             parts[_supplement.FURTHER_READING] = _supplement.further_text(root)
         if _supplement.sentences(root):
@@ -3060,7 +3079,7 @@ class WriteStageMixin:
                 if kept:
                     self._log.info("[page_limit] %d of the sentences moved to the supplement could not be put back into "
                                    "this draft (the text around them changed); they stay in the supplement", len(kept))
-            if section is not None:
+            if section is not None and _supplement.writer_text_shown(root, new):  # not when the draft holds them again
                 back = _supplement.put_back_writer_limitations(new, *section)
                 if back is None:
                     self._log.info("[page_limit] the draft's Limitations section is not the one FI moved paragraphs "
@@ -3088,8 +3107,8 @@ class WriteStageMixin:
         try:
             _supplement.save(root, [], limit=0)
             _supplement.save_sentences(root, kept)
-            return self._restate_limitations(state, "FI wrote its own blocks in full again and added no claim",
-                                             path=paper_path, strict=True) or changed
+            return self._rewrite_fi_blocks(state, "FI wrote its own blocks in full again and added no claim",
+                                           path=paper_path, strict=True) or changed
         except (OSError, UnicodeDecodeError) as e:
             # all goes back as it was before the reset: the paper with FI's pointers, the record and the supplement
             self._restore_files(held)
@@ -3101,8 +3120,7 @@ class WriteStageMixin:
                          limit: int | None) -> None:
         """Move FI's own ``part`` out of the paper ``text`` (at ``paper_path``) to the supplement's record, ``parts``
         being everything moved with it: the Further reading list whole (the References keep one line saying how many
-        pages it lists and where), a block as its pointer (the Limitations with the paper's own paragraphs of that
-        section). FI's text, no claim of its own, so the claim check's and the citation check's receipts move to the
+        pages it lists and where), a block as its pointer. FI's text, no claim of its own, so the claim check's and the citation check's receipts move to the
         paper that carries it. No model call; ``paper/supplement.md`` is written by the caller."""
         root = self.quest_root
         if part == _supplement.FURTHER_READING:
@@ -3122,22 +3140,11 @@ class WriteStageMixin:
                 _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
                                      "FI moved its own Further reading list to the supplement and added no claim")
             return
-        writer, section = _supplement.writer_text(root), _supplement.writer_section(root)
-        if part == _supplement.LIMITATIONS:
-            left, taken = _supplement.take_writer_limitations(text)
-            if taken:
-                section = (_supplement.section_body(text) or "", _supplement.section_body(left) or "")
-                before = paper_path.read_bytes()
-                paper_path.write_text(left, encoding="utf-8")
-                for check in ("claim_check", "citation_check"):
-                    _receipts.carry_over(root, check, "paper", before, paper_path.read_bytes(),
-                                         "FI moved the paper's own Limitations paragraphs to the supplement "
-                                         "unchanged and added no claim")
-                writer = taken
         _supplement.save(root, parts, limit=limit, further=_supplement.further_labels(root),
-                         further_lines=_supplement.further_text(root), writer=writer, section=section)
-        self._restate_limitations(state, "FI moved one of its own blocks to the supplement and added no claim",
-                                  path=paper_path)
+                         further_lines=_supplement.further_text(root), writer=_supplement.writer_text(root),
+                         section=_supplement.writer_section(root))
+        self._rewrite_fi_blocks(state, "FI moved one of its own blocks to the supplement and added no claim",
+                                path=paper_path)
 
     def _supplement_always(self, state: QuestState, paper_path: Path, limit: int | None) -> list[str]:
         """Send the parts every paper keeps in its supplement there (core/supplement.py ``ALWAYS``): its tables of every
@@ -3214,17 +3221,11 @@ class WriteStageMixin:
         self, state: QuestState, paper_path: Path, limit: int, measured: dict[str, Any],
     ) -> tuple[dict[str, Any], list[str]] | None:
         """Bring a paper over the page limit toward it by moving FI's own parts to the supplement, in a fixed order and
-        without a model call (core/supplement.py ``ORDER``). Its tables of every setting and its Further reading are
-        already there (every paper sends them: :meth:`_supplement_always`), so what this moves is its Limitations (one
-        line stays: how many things FI recorded, each part of the topic the study did not do by name, and where they
-        are; the paper's own paragraphs of that section go with it, except a figure, a table or a paragraph that cites a
-        source), and either of the other two still in the paper. The References stay. After each part the paper is
-        rendered again, and the move stops as soon as it fits; a paper still over with all of them moved keeps them
-        moved (it is shorter, and the sentence trim that may follow has less to take). What moved goes into
+        without a model call (core/supplement.py ``ORDER``): its tables of every setting or its Further reading, when one
+        is still in the paper (every paper sends them: :meth:`_supplement_always`). The References stay. After each part
+        the paper is rendered again, and the move stops as soon as it fits; a paper still over with all of them moved
+        keeps them moved (it is shorter, and the sentence trim that may follow has less to take). What moved goes into
         ``paper/supplement.md`` unchanged.
-
-        On 16 stored papers (limit 4, all over it, mean 6.9 pages) FI's own parts alone gave mean 4.9 pages and 4 of
-        16 within the limit; with the writer's Limitations paragraphs too, mean 4.75 and 6 of 16.
 
         Returns the measurement after the move and the parts moved by this call, or ``None`` when nothing moved. A
         render that cannot be counted puts the paper, the record and the supplement back as they were."""
@@ -3269,8 +3270,7 @@ class WriteStageMixin:
     ) -> tuple[dict[str, Any], paper_trim.Trimmed] | None:
         """Bring a draft whose body is a little over the page limit within it by
         moving whole sentences of its background and discussion to the supplement
-        (core/supplement.py: each with the section it came from, and the paper's
-        Limitations say how many), when that alone does it, and write the result
+        (core/supplement.py: each with the section it came from), when that alone does it, and write the result
         over ``paper_path``. Nothing is lost: a later draft gets each sentence back
         where the text around it is unchanged, and one that cannot be placed stays
         in the supplement.
@@ -3356,7 +3356,7 @@ class WriteStageMixin:
                 if cut.words < need:
                     need -= cut.words  # the list fell short of the words: ask again on what is left
                     continue
-                # measured as it would go out: the Limitations say how many sentences moved and where
+                # measured as it would go out: the supplement says how many sentences moved and where
                 _supplement.save_sentences(self.quest_root, [*prior, *places])
                 current = self._with_fi_blocks(current, state)
                 trial.write_text(current, encoding="utf-8")
@@ -3387,23 +3387,16 @@ class WriteStageMixin:
         self._log.info("[page_limit] the draft is still over the limit after %d sentences were taken out", len(taken))
         return None
 
-    def _state_unsupported_claims(self, state: QuestState, *, mark: bool = False) -> int:
+    def _state_unsupported_claims(self, state: QuestState) -> int:
         """The paper as delivered: the sentences the last claim check found supported by neither the run's results nor a
-        cited source are kept in ``.fi/unsupported_claims.json`` and stated in the Limitations (core/paper_facts.py
-        ``UNSUPPORTED_CLAIMS``), sentence by sentence, from FI's own record: no model call and nothing taken out of the
-        paper. Until now these findings were only in QUALITY.md, so a reader of the paper was not told. A claim the paper no
-        longer holds is not listed; a record with none empties, and a sentence an earlier pass placed is taken out. A claim
-        check that did not run to an answer leaves the record as it was. The sentence adds no claim, so the claim check's
-        and the citation check's receipts move to the paper that carries it. ``mark``: the paper is delivered from here (the
-        last step before delivery), so each sentence of a claim still standing that FI places exactly also gets FI's mark
-        where it stands (:meth:`_mark_unconfirmed`); every other call takes the marks out. Returns how many claims are
-        stated."""
-        if not mark:
-            # Only the last step before delivery places marks: any other call takes them out first, also when it then
-            # returns early (the claim check off or without an answer).
-            now = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
-            if now and Path(now).is_file():
-                self._mark_unconfirmed(now, [])
+        cited source are kept in ``.fi/unsupported_claims.json`` (QUALITY.md lists them), from FI's own record: no model
+        call. The paper carries nothing of FI's about them; a sentence whose claim's fault takes it out is taken out. A
+        claim the paper no longer holds is not listed; a record with none empties. A claim check that did not run to an
+        answer leaves the record as it was. Marks an older FI put in the paper are taken out first
+        (:meth:`_take_out_old_marks`). Returns how many claims are still standing."""
+        now = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
+        if now and Path(now).is_file():
+            self._take_out_old_marks(now)
         if not self.config.engine.claim_grounding:
             return 0
         grounding = state.get("claim_grounding") or {}
@@ -3412,7 +3405,7 @@ class WriteStageMixin:
             return 0
         try:
             before = Path(paper_path).read_text(encoding="utf-8")
-            # FI's own blocks quote claims too (the Limitations block does): only the writer's text says what the paper holds
+            # FI's own blocks are not the writer's claims: only the writer's text says what the paper holds
             flat = " ".join(_paper_facts.without_blocks(before).split())
             sentences = re.split(r"(?<=[.!?])\s+", flat)
             # The passage the check stored for a claim (``where``) is the exact way to find it again; the claim's own
@@ -3431,12 +3424,12 @@ class WriteStageMixin:
                         and (any(c is b for b in by_wording) or _passage_stands(c, flat, keyed))]
             # A sentence whose claim's fault takes it out (a number not in the record, a true value under a wrong setting or
             # label, a source that backs nothing, a verdict FI could not read) is not delivered (core/record_claims.py): it
-            # is taken out of the paper and the Limitations say so. A ``wording`` claim stays and is stated as unconfirmed.
+            # is taken out of the paper and QUALITY.md lists it. A ``wording`` claim stays as written, unmarked (QUALITY.md lists it).
             # Only the fault decides: what the sentence holds is not read. An unsupported claim with no fault was judged
             # before faults were named (a record an older FI wrote, read when its quest is resumed; this FI's check gives
             # every unsupported claim one): it is decided by the rule that FI applied, so its sentence goes when it states a
             # number, one FI filled in or one the writer typed that FI cannot trace.
-            # The paper, the claim list, the receipt, the record and the Limitations change together: if any write fails,
+            # The paper, the claim list, the receipt and the record change together: if any write fails,
             # every file is put back as it was and nothing is reported as taken out.
             snapshot = self._snapshot_files(paper_path)
             removed: list[dict[str, Any]] = []
@@ -3464,8 +3457,6 @@ class WriteStageMixin:
                     left = standing
                 if not _paper_facts.write_unsupported_record(self.quest_root, left, removed=removed):
                     raise OSError("the record of unsupported claims could not be written")
-                self._restate_limitations(state, "FI stated the claims its own check found unsupported in the Limitations and "
-                                                 "added no claim", strict=bool(removed))
                 standing = left
             except Exception as e:  # noqa: BLE001 -- nothing is taken out unless every part could be written
                 if not removed:
@@ -3475,22 +3466,22 @@ class WriteStageMixin:
                                   "every file was put back as it was", type(e).__name__, str(e)[:200])
                 if not _paper_facts.write_unsupported_record(self.quest_root, standing):
                     return 0
-                self._restate_limitations(state, "FI stated the claims its own check found unsupported in the Limitations and "
-                                                 "added no claim")
                 removed = []
             if removed:
                 self._log.warning("[claim_check] %d sentence(s) that state a number the claim check found unsupported were "
-                                  "taken out of the paper; the Limitations say so and QUALITY.md lists them", len(removed))
+                                  "taken out of the paper; QUALITY.md lists them", len(removed))
         except (OSError, UnicodeDecodeError) as e:
-            self._log.warning("[claim_check] the paper could not be given its sentence on unsupported claims (%s)", e)
+            self._log.warning("[claim_check] the unsupported claims of the paper could not be recorded (%s)", e)
             return 0
-        marked = self._mark_unconfirmed(paper_path, standing if mark else [])
-        if marked:
-            self._log.info("[claim_check] %d sentence(s) the Limitations list as unconfirmed are marked where they stand",
-                           marked)
         if standing:
-            self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; its "
-                              "Limitations say so", len(standing))
+            self._log.warning("[claim_check] %d sentence(s) of the paper as delivered were not found supported; "
+                              "QUALITY.md lists them", len(standing))
+        # The paper's closing sentence says what the records say now (a sentence still unsupported, or the last one gone).
+        try:
+            if _quality_pointer.in_paper(Path(paper_path).read_text(encoding="utf-8")) != _quality_pointer.text(self.quest_root):
+                self._rewrite_fi_blocks(state, "FI wrote its closing sentence again and added no claim", path=Path(paper_path))
+        except (OSError, UnicodeDecodeError) as e:
+            self._log.warning("[claim_check] the closing sentence of the paper could not be brought up to date (%s)", e)
         return len(standing)
 
     def _snapshot_files(self, paper_path: Path | str) -> dict[Path, bytes | None]:
@@ -3520,33 +3511,22 @@ class WriteStageMixin:
         """A sentence of the paper with FI's values as the writer's keys, on one line (how the claim check stores it)."""
         return " ".join(_paper_facts.to_placeholders(raw).split())
 
-    def _mark_unconfirmed(self, paper_path: Path | str, claims: list[dict[str, Any]]) -> int:
-        """Put FI's mark (core/paper_facts.py ``UNCONFIRMED_MARK``) beside each sentence of the paper that one of ``claims``
-        (claims still standing, which the Limitations list as unconfirmed) names exactly, by its stored passage, as the
-        take-out finds a sentence; every earlier mark is taken out first, so a sentence no longer listed loses its mark and
-        ``[]`` only takes the marks out; FI's note under the title follows the marks (it says a sentence is marked, or no longer). A sentence FI cannot place exactly gets none (it stays listed). The mark adds no
-        claim, so the claim check's and the citation check's receipts move to the marked paper. Nothing is written when
-        nothing changes; a paper that cannot be read or written is left as it is. Returns how many sentences are marked."""
+    def _take_out_old_marks(self, paper_path: Path | str) -> None:
+        """Take out of the paper the marks an older FI put beside sentences its claim check could not confirm, and its note
+        under the title (a quest resumed from before FI stopped placing them): FI's words, never the writer's. The claim
+        check's and the citation check's receipts move to the paper without them. Nothing is written when there is none."""
         path = Path(paper_path)
         try:
             raw = path.read_bytes()
             text = raw.decode("utf-8")
-            clean = _paper_facts.without_unconfirmed(text)
-            spans = _record_claims.placed_sentences(clean, claims, plain=self._reader_sentence, keyed=self._keyed_sentence)
-            new = _paper_facts.mark_unconfirmed(clean, spans)
-            new = _mark_unconfirmed_results(new, self.quest_root)  # the note names the sentences too
+            new = _paper_facts.without_marks_note(_paper_facts.without_unconfirmed(text))
             if new != text:
                 path.write_bytes(new.encode("utf-8"))  # bytes back as bytes (CRLF stays as it was)
-                after = path.read_bytes()
-                why = "FI marked the sentences its claim check found unconfirmed where they stand and added no claim"
                 for check in ("claim_check", "citation_check"):
-                    # the receipt is for the paper as it was read, or (a resume) for that paper without its old marks
-                    if not _receipts.carry_over(self.quest_root, check, "paper", raw, after, why):
-                        _receipts.carry_over(self.quest_root, check, "paper", clean.encode("utf-8"), after, why)
-            return len(spans)
+                    _receipts.carry_over(self.quest_root, check, "paper", raw, path.read_bytes(),
+                                         "FI took out the marks an older FI had put in and added no claim")
         except (OSError, UnicodeDecodeError) as e:
-            self._log.warning("[claim_check] the sentences found unconfirmed could not be marked in the paper (%s)", e)
-            return 0
+            self._log.warning("[claim_check] the old marks could not be taken out of the paper (%s)", e)
 
     def _plan_take_out_unsupported_numbers(self, state: QuestState, paper_path: Path | str,
                                            standing: list[dict[str, Any]], *, unnamed: list[dict[str, Any]] | None = None,

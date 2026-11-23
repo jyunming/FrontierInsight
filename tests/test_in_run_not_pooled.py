@@ -98,13 +98,14 @@ def test_the_sheet_of_a_record_per_value_is_built_without_rescanning_it(monkeypa
 
 
 def test_a_lookup_finds_every_record_the_comparison_calls_the_same():
-    """A value is found again as it is compared: a number written as text, minus zero, a number within the comparison's
-    tolerance; a lookup that kept records by a rounded form missed some of them while it found others."""
+    """A value is found again as it is compared (a key's value against the setting the record holds, ``_key_names``): a
+    number written as text, minus zero, a number within the comparison's tolerance; a lookup that kept records by a
+    rounded form missed some of them while it found others."""
     values = [1, "1", 1.0, -0.0, 0.0, 1e-13, 2.0, 2.0 + 1e-10, 0.1234567894999, 0.1234567895001, "Direct", " direct", True,
               float("nan"), float("inf")]
     cells = [{"cell": {"size": v, "route": "a"}, "metrics": {"k": {"values": [float(i)]}}} for i, v in enumerate(values)]
     rec = pv.from_cells(cells, {})
     for q in values + [0.12345678950, "2.0", "true"]:
-        scan = [c for c in rec.carrying("k") if pv._same(q, c["cell"]["size"])]
+        scan = [c for c in rec.carrying("k") if pv._key_names(c["cell"]["size"], q)]
         assert rec.at_value("k", "size", q) == scan, q
         assert rec.at_setting("k", {"size": q, "route": "a"}) == scan, q

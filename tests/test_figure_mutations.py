@@ -26,7 +26,7 @@ import pytest  # noqa: E402
 from core import figure_claims, figure_facts, plot_style, skeleton  # noqa: E402
 from core.engine import _figure_caption_text, _figure_overlap_findings, _place_figures  # noqa: E402
 from tests.test_analysis_figures import _CallTable, _calls_run, frame5  # noqa: E402,F401  (frame5 is a fixture)
-from tests.test_fi_places_figures import DISCLOSURE, _paper, _write  # noqa: E402
+from tests.test_fi_places_figures import DISCLOSURE, _listed, _paper, _write  # noqa: E402
 from tests.test_frame_figure import _Host  # noqa: E402
 
 
@@ -109,7 +109,8 @@ DRAFT_TAIL = "\n## Discussion\nIt is small.\n"
 
 
 def test_mutation_2_a_series_the_figure_does_not_draw_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch, frame5) -> None:
-    """Caught: the sentence is dropped, and the paper carries the disclosure; a true statement of the same figure stays."""
+    """Caught: the sentence is dropped and QUALITY.md's list says so (the paper does not); a true statement of the same figure
+    stays."""
     ghost = "{{figure:error_vs_step:drawn @ series=ghost, panel=1}}"
     real = "{{figure:error_vs_step:drawn @ series=fast, panel=1}}"
     draft = DRAFT_HEAD + f"**Accuracy.** {ghost} (Figure 1).\n\n**Cost.** {real} (Figure 1).\n" + DRAFT_TAIL
@@ -117,7 +118,7 @@ def test_mutation_2_a_series_the_figure_does_not_draw_is_dropped_with_the_disclo
     paper = _paper(state)
     assert "ghost" not in paper and "not recorded" not in paper
     assert "fast is drawn" in paper, "the same claim for a series the figure draws is filled"
-    assert paper.count(DISCLOSURE) == 1
+    assert DISCLOSURE not in paper and _listed(tmp_path / "q", DISCLOSURE) == 1
     from core import paper_facts
 
     gone = [d["key"] for d in paper_facts.kept_check(tmp_path / "q")["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]
@@ -334,14 +335,14 @@ def test_mutation_7_cut_off_error_bars_of_a_custom_panel_are_a_finding(tmp_path:
 
 
 def test_mutation_8_a_writer_sentence_about_the_figure_is_dropped_with_the_disclosure(tmp_path: Path, monkeypatch, frame5) -> None:
-    """Caught: the sentence is gone (the figure draws no such series), the disclosure is in the paper and in the record, and the
-    figure keeps FI's own statement."""
+    """Caught: the sentence is gone (the figure draws no such series), the record and QUALITY.md's list say so (the paper does
+    not), and the figure keeps FI's own statement."""
     draft = (DRAFT_HEAD + "**Accuracy.** Figure 1 shows the paired gain between the two schemes.\n\n"
              "**Cost.** {{figure:error_vs_step:drawn @ series=fast, panel=1}} (Figure 1).\n" + DRAFT_TAIL)
     _eng, state, _ = _write(tmp_path / "q", monkeypatch, [draft], _drawn_record(tmp_path))
     paper = _paper(state)
     assert "paired gain" not in paper and "fast is drawn" in paper
-    assert paper.count(DISCLOSURE) == 1
+    assert DISCLOSURE not in paper and _listed(tmp_path / "q", DISCLOSURE) == 1
     from core import paper_facts
 
     left_out = [d for d in paper_facts.kept_check(tmp_path / "q")["taken_out_values"] if str(d.get("key", "")).startswith("figure:")]

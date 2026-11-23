@@ -4,12 +4,10 @@ two units keeps the plan's result with both units (``unit_conflict``): the paper
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from core import contract_parts as cp
-from core import paper_facts as pf
-from tests.test_answers_map_part import DESIGN, PROTOCOL, REQ, _ask, _quest
+from tests.test_answers_map_part import DESIGN, PROTOCOL, _ask
 
 GAP = {"asked": "m", "result": "1", "declared": False}
 ASKED = {"Q1": {"name": "peak algae", "stated": "report the peak", "by": "metric:algae_peak"}}
@@ -107,20 +105,6 @@ def test_a_new_map_in_another_unit_is_asked_again_and_the_plans_declared_unit_wi
     assert "- algae_peak: peak algae count [count]" in seen[0]
 
 
-def test_the_paper_answers_by_the_result_and_states_both_units(tmp_path, monkeypatch) -> None:
-    root = _quest(tmp_path, monkeypatch, [])
-    rows = [{"item": "Q1", "by": "metric:algae_peak", "at": {}, "unit_conflict": GAP},
-            {"item": "Q2", "by": "metric:bloom", "at": {"nutrient": 1}}]
-    monkeypatch.setattr(pf, "plan_protocol", lambda *a, **k: {**PROTOCOL, "topic_map": rows})
-    (root / ".fi" / "topic_requirements.json").write_text(json.dumps(REQ), encoding="utf-8")
-    text = pf.answers_text(root)
-    first = next(line for line in text.splitlines() if line.startswith("- peak algae"))
-    assert "not answered" not in first and "{{v:algae_peak" in first
-    assert "is in the plan states" not in first and "the plan states that the result used" in first
-    assert "is in a pure number (no unit); the question asks in m, and FI did not convert it)" in first
-    assert "{{v:bloom:mean_ci @ nutrient=1, temp=10}}" in text  # the known positive is unchanged
-
-
 def test_a_replacement_never_replaces_the_plans_map_whatever_its_unit() -> None:
     p = {**PROTOCOL, "metrics": [*PROTOCOL["metrics"], {"id": "depth", "kind": "mean", "estimand": "pond depth", "unit": "one pond run"}],
          "topic_map": [{"item": "peak algae", "by": "metric:bloom"}]}
@@ -132,4 +116,3 @@ def test_a_replacement_never_replaces_the_plans_map_whatever_its_unit() -> None:
     answer["Q1"]["by_unit"] = "m"  # a unit difference alone never moves the plan's map
     row = cp._apply_answers(p, design, answer, asked)["topic_map"][0]
     assert row["by"] == "metric:bloom" and row["unit_conflict"]["asked"] == "m"
-

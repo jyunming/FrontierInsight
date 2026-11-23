@@ -2,7 +2,7 @@
 
 A writer who describes a figure in words gets the layout wrong ("the upper panel" for two panels side by side, "dotted
 baseline curves" in a figure that draws none) because it has not seen the picture. A check that reads the caption's words
-afterwards needs a new exception for every new wording. The root fix is the one ``{{seed}}`` and ``{{run_time}}`` use: the
+afterwards needs a new exception for every new wording. The root fix is the one ``{{run_time}}`` uses: the
 fact comes from FI's records, not from the writer.
 
 The records are the ones the plot-style recorder (``core/plot_style.py::_fi_recording_savefig``) leaves next to each

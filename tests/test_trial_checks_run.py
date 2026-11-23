@@ -88,15 +88,13 @@ def test_replay_r12_most_noisy_trials_fail_sent_back_then_left_out(tmp_path: Pat
     assert runner.left_out_settings == ["noise_std_rel=0.08,n_timepoints=12"]
     kept = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
     assert len(kept["cells"]) == 2
-    # the paper must name the setting left out
+    # QUALITY.md names the setting left out, from FI's records
     items = [i for i in paper_facts.required_items(root) if i.kind == paper_facts.SETTING_LEFT_OUT]
     assert [i.name for i in items] == ["noise_std_rel=0.08,n_timepoints=12"]
     assert items[0].id.startswith("setting-left-out-") and "is left out of the results" in items[0].sentence
-    # a paper that does not hold it gets it from FI; placed in its Limitations, nothing is missing
-    assert items[0].sentence in paper_facts.render(paper_facts.place_blocks("# T\n\n## Limitations\n\nNone.\n", root), root).text
-    placed = paper_facts.placement_hits(
-        paper_facts.render("# T\n\n## Limitations\n\n{{not_done:" + items[0].id + "}}\n", root).text, root)
-    assert not any(items[0].id in h for h in placed), placed
+    # the paper is not given it: FI adds nothing to the writer's Limitations, and a paper without it is no fault
+    assert items[0].sentence not in paper_facts.render(paper_facts.place_blocks("# T\n\n## Limitations\n\nNone.\n", root), root).text
+    assert not paper_facts.placement_hits("# T\n\n## Limitations\n\nNone.\n", root)
     report = quality_report.build(root, running=False)
     assert report["trial_checks"]["left_out"] == ["noise_std_rel=0.08,n_timepoints=12"]
 

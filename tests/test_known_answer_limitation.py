@@ -1,8 +1,7 @@
 """A check of the code against a known answer that the quest went on without (it failed, it could not be run on its case,
-or the trials could not decide it) is said by FI itself in the paper's Limitations, in the plan's words and FI's numbers,
-and the one line the Limitations keep when they move to the supplement names how many there are. Before, saying it rested
-on the writer model alone, and recorded papers left out the checks that were not run or not decided. Neutral made-up
-study: a pond's algae."""
+or the trials could not decide it) is an item of FI's own record, in the plan's words and FI's numbers, that QUALITY.md
+lists. Before, saying it rested on the writer model alone, and recorded papers left out the checks that were not run or
+not decided. Neutral made-up study: a pond's algae."""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ from pathlib import Path
 
 from core import accepted_checks as ac
 from core import paper_facts as pf
-from core import supplement as sup
 
 ORACLES = [
     {"name": "peak_closed_form", "check": "The peak algae count at nutrient 1 equals the logistic closed form. It uses 400 runs."},
@@ -71,38 +69,11 @@ def test_a_check_the_plan_gave_no_words_for_is_named_and_many_are_one_item(tmp_p
     assert len(said) == 1 and said[0].startswith(f"{len(many)} checks of the code against a known answer")
 
 
-def test_the_line_the_limitations_keep_in_the_paper_names_them(tmp_path: Path) -> None:
-    root = _quest(tmp_path, WENT_ON)
-    assert sup.limitations_pointer(5, [], known_answers=4) == (
-        "FI recorded 5 limitations of this study, among them 4 checks of the code against a known answer that did not "
-        "confirm the results; each is stated in full in the supplement (`paper/supplement.md`).")
-    assert " and 1 check of the code against a known answer that did not confirm" in sup.limitations_pointer(
-        3, ["a part"], known_answers=1)
-    assert sup.limitations_pointer(2, ["a part"]) == sup.limitations_pointer(2, ["a part"], known_answers=0)
-    (root / sup.RECORD).parent.mkdir(parents=True, exist_ok=True)
-    (root / sup.RECORD).write_text(json.dumps({"moved": [sup.LIMITATIONS]}), encoding="utf-8")
-    (root / sup.FILE).parent.mkdir(parents=True, exist_ok=True)
-    (root / sup.FILE).write_text("# Supplement\n", encoding="utf-8")
-    line = pf.block_text(root, sup.LIMITATIONS)
-    assert "4 checks of the code against a known answer that did not confirm the results" in line, line
-
-
 def test_a_record_that_no_check_could_be_judged_is_said_too(tmp_path: Path) -> None:
     # The gate writes an entry with no name when no check of the plan could be judged at all.
     said = _said(_quest(tmp_path, [{"name": "", "measured": None, "unmeasured": "no check could be judged"}]))
     assert said == ["No check of the code against a known answer could be judged, so the results are not validated "
                     "against one."]
-
-
-def test_the_line_the_limitations_keep_counts_every_check_when_many_are_one_item(tmp_path: Path) -> None:
-    many = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
-    root = _quest(tmp_path, many, oracles=[])
-    assert len(_said(root)) == 1
-    (root / sup.RECORD).parent.mkdir(parents=True, exist_ok=True)
-    (root / sup.RECORD).write_text(json.dumps({"moved": [sup.LIMITATIONS]}), encoding="utf-8")
-    (root / sup.FILE).parent.mkdir(parents=True, exist_ok=True)
-    (root / sup.FILE).write_text("# Supplement\n", encoding="utf-8")
-    assert f"{len(many)} checks of the code against a known answer" in pf.block_text(root, sup.LIMITATIONS)
 
 
 def test_the_plans_first_sentence_is_kept_whole_through_a_semicolon(tmp_path: Path) -> None:
@@ -116,9 +87,6 @@ def test_no_check_judged_is_never_counted_or_folded_in_as_a_check(tmp_path: Path
     many = [{**WENT_ON[2], "name": f"c{i}"} for i in range(pf._MAX_SETTING_ITEMS + 1)]
     said = _said(_quest(tmp_path, [*many, unnamed], oracles=[]))
     assert len(said) == 2 and said[0].startswith(f"{len(many)} checks") and said[1].startswith("No check of the code")
-    line = sup.limitations_pointer(3, [], none_judged=True)
-    assert line.endswith("; no check of the code against a known answer could be judged; each is stated in full in the "
-                         "supplement (`paper/supplement.md`).") and "1 check" not in line
 
 
 def test_many_checks_folded_into_one_item_never_say_a_check_failed_that_was_not_run(tmp_path: Path) -> None:

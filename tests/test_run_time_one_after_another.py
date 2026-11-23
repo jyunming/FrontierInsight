@@ -132,9 +132,9 @@ def test_the_timed_delivered_run_decides_within(tmp_path: Path) -> None:
     met, said, sentence = _both(tmp_path / "q", least=40.0, most=75.0, timed=18.3)
     assert met == "within" and "18.3 s (FI ran the delivered code once in a clean environment and timed it)" in said
     assert "is within the topic's limit of 60 s" in sentence and "at least" not in sentence
-    paragraph = paper_facts.run_facts_text(tmp_path / "q", topic=TOPIC, fallback_s=12.0)
-    assert "FI ran it once in a clean environment and it took 18.3 s." in paragraph
-    assert "keeps to the topic's limit of 60 s" in paragraph and "not shown" not in paragraph
+    # the paper's run paragraph gives FI's measured time only: the delivered code's run and the verdict are QUALITY.md's
+    paragraph = paper_facts.run_facts_text(tmp_path / "q", fallback_s=12.0)
+    assert "clean environment" not in paragraph and "topic's limit" not in paragraph and "not shown" not in paragraph
 
 
 def test_the_timed_delivered_run_decides_over(tmp_path: Path) -> None:
@@ -231,7 +231,7 @@ def test_settings_run_together_with_no_trial_times_are_never_judged_by_the_wall_
     run_facts.record_trials(root, key="k", wall_s=12.0, trials=10, cells=5, trial_sum_s=None, at_once=4, settings_s=50.0)
     met, said, sentence = _met(root, 12.0)
     assert met == NOT_SHOWN and "None" not in said and "None" not in sentence and "is within" not in sentence
-    assert "None" not in paper_facts.run_facts_text(root, topic=TOPIC)
+    assert "None" not in paper_facts.run_facts_text(root)
 
 
 def test_a_timed_run_decides_a_run_counted_one_setting_at_a_time_too(tmp_path: Path) -> None:
@@ -240,17 +240,17 @@ def test_a_timed_run_decides_a_run_counted_one_setting_at_a_time_too(tmp_path: P
     _timed(root, 80.0)  # the delivered run.py took 80 s: that, not FI's 40 s, is what a reader's run takes
     met, said, sentence = _met(root, 40.0)
     assert met == "over" and "80 s" in said and "is over the topic's limit of 60 s" in sentence
-    paragraph = paper_facts.run_facts_text(root, topic=TOPIC, fallback_s=40.0)
-    assert "FI ran it once in a clean environment and it took 80 s." in paragraph and "take 40 s" not in paragraph
+    paragraph = paper_facts.run_facts_text(root, fallback_s=40.0)
+    assert "clean environment" not in paragraph and "80 s" not in paragraph and "topic's limit" not in paragraph
 
 
-def test_without_a_wall_time_the_paper_names_the_timed_run_that_decides(tmp_path: Path) -> None:
+def test_without_a_wall_time_the_timed_run_decides_and_the_paper_gives_no_verdict(tmp_path: Path) -> None:
     root = tmp_path / "q"
     run_facts.record_trials(root, key="k", wall_s=None, trials=10, cells=5, trial_sum_s=40.0, at_once=4)
     _timed(root, 80.0)
-    paragraph = paper_facts.run_facts_text(root, topic=TOPIC)
-    assert "FI ran it once in a clean environment and it took 80 s." in paragraph
-    assert "goes over the topic's limit of 60 s" in paragraph
+    assert paper_facts.facts(root, topic=TOPIC)["time_limit_met"].text == "over"
+    paragraph = paper_facts.run_facts_text(root)
+    assert "clean environment" not in paragraph and "topic's limit" not in paragraph
 
 
 def test_a_time_just_over_the_limit_is_over(tmp_path: Path) -> None:

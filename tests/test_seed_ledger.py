@@ -45,7 +45,6 @@ def test_different_seeds_with_different_outcomes_decide_it_not_the_code_trace(tm
     root = _quest(tmp_path, [1, 2, 3, 4], ["a", "b", "c", "d"])
     got = run_facts.seed_verdict(root)
     assert got["verdict"] == "reaches" and got["fi_seed_reaches"] is True and got["decided_by"] == "ledger", got
-    assert paper_facts._seed_text(root) == "a separate seed for each trial, derived from base seed 11"
 
 
 def test_the_writer_is_told_the_intervals_include_seed_variation(tmp_path: Path) -> None:

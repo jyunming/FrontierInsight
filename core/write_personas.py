@@ -20,10 +20,6 @@ def forbidden_text(name: str) -> str:
     return ", ".join(f"`## {h}`" for h in FORBIDDEN_HEADINGS.get(name, ()))
 
 
-def forbids_limitations(name: str) -> bool:
-    return "limitations" in {h.lower() for h in FORBIDDEN_HEADINGS.get(name, ())}
-
-
 def fill(name: str, prompt: str) -> str:
     """``prompt`` of persona ``name`` with its forbidden-headings list filled in."""
     return prompt.replace(TOKEN, forbidden_text(name))

@@ -1,7 +1,7 @@
 """A sentence of the writer's that FI's claim check judged unsupported and that states a number is never delivered: it is
-taken out of the paper, leaves the claim list, and the Limitations and QUALITY.md say so (``Engine._state_unsupported_claims``,
+taken out of the paper, leaves the claim list, and QUALITY.md says so from FI's record (``Engine._state_unsupported_claims``,
 ``core/record_claims.py::take_out_unsupported_numbers``). A sentence the check judged supported stays, and so does an
-unsupported one with no number (it is stated as unconfirmed, as before). No model is called."""
+unsupported one with no number (QUALITY.md lists it). No model is called."""
 
 from __future__ import annotations
 
@@ -50,6 +50,12 @@ def _paper(tmp_path: Path):
     return eng, path
 
 
+def _listed(eng) -> str:
+    """What QUALITY.md says of the claims, from FI's record."""
+    path = eng.quest_root / paper_facts.UNSUPPORTED_RECORD
+    return paper_facts.unsupported_claims_text(json.loads(path.read_text(encoding="utf-8"))) if path.is_file() else ""
+
+
 def _run(eng, path):
     return eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
 
@@ -59,11 +65,12 @@ def test_a_sentence_with_an_unsupported_number_does_not_reach_the_final_paper(tm
     eng, path = _paper(tmp_path)
     _run(eng, path)
     text = path.read_text(encoding="utf-8")
-    assert "2.164e-07" not in text.split("## Limitations")[0] and "0.9991" not in text.split("## Limitations")[0]
-    assert "The study measures a period." in text and "Done." in text  # the rest of the abstract is as it was
-    assert "2 sentences of the draft" in text.split("## Limitations")[1] and "were taken out of this paper" in text
-    # the Limitations do not quote the number that was not supported
     assert "2.164e-07" not in text and "0.9991" not in text
+    assert "The study measures a period." in text and "Done." in text  # the rest of the abstract is as it was
+    said = _listed(eng)
+    assert "2 sentences of the draft" in said and "were taken out of this paper" in said
+    # QUALITY.md's sentence does not quote the number that was not supported
+    assert "2.164e-07" not in said and "0.9991" not in said
 
 
 def test_the_taken_out_sentences_are_in_the_record_and_leave_the_claim_list(tmp_path: Path) -> None:
@@ -89,7 +96,7 @@ def test_a_claim_record_written_before_faults_were_named_is_taken_out_as_it_was_
     n = eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
     body = path.read_text(encoding="utf-8").split("## Limitations")[0]
     assert "2.164e-07" not in body and "0.9991" not in body
-    # known positive: an unsupported sentence with no number stays and is stated as unconfirmed, as it was then too
+    # known positive: an unsupported sentence with no number stays (QUALITY.md lists it), as it did then too
     assert n == 1 and f"{SOFT}." in body and GOOD in body
     record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
     assert [r["claim"][:20] for r in record["removed"]] == ["At a step of 0.0025 ", "The fit stays above "]
@@ -112,21 +119,22 @@ def test_a_supported_sentence_stays(tmp_path: Path) -> None:
     assert GOOD in path.read_text(encoding="utf-8")
 
 
-def test_an_unsupported_sentence_without_a_number_stays_and_is_stated_as_unconfirmed(tmp_path: Path) -> None:
+def test_an_unsupported_sentence_without_a_number_stays_unmarked_and_is_listed(tmp_path: Path) -> None:
     eng, path = _paper(tmp_path)
     n = _run(eng, path)
     text = path.read_text(encoding="utf-8")
-    assert n == 1 and f"{SOFT}." in text.split("## Limitations")[0]
-    assert "not found supported" in text.split("## Limitations")[1] and f'"{SOFT}"' in text
+    assert n == 1 and f"{SOFT}." in text and "unconfirmed" not in text
+    assert "not found supported" in _listed(eng) and f'"{SOFT}"' in _listed(eng)
 
 
 def test_a_second_pass_keeps_what_the_first_took_out_and_says_it_once(tmp_path: Path) -> None:
     eng, path = _paper(tmp_path)
     _run(eng, path)
     first = path.read_text(encoding="utf-8")
+    said = _listed(eng)
     _run(eng, path)  # the paper no longer holds the two sentences: nothing more to take out
     again = path.read_text(encoding="utf-8")
-    assert again.count("were taken out of this paper") == 1 and again == first
+    assert _listed(eng) == said and said.count("were taken out of this paper") == 1 and again == first
 
 
 def test_a_claim_check_that_gave_no_answer_takes_nothing_out(tmp_path: Path) -> None:
@@ -135,7 +143,7 @@ def test_a_claim_check_that_gave_no_answer_takes_nothing_out(tmp_path: Path) -> 
     assert path.read_text(encoding="utf-8") == PAPER
 
 
-def test_the_limitations_sentence_and_the_quality_report_name_the_taken_out_claims(tmp_path: Path) -> None:
+def test_the_quality_reports_sentence_counts_the_taken_out_claims(tmp_path: Path) -> None:
     root = tmp_path
     (root / ".fi").mkdir()
     assert paper_facts.write_unsupported_record(root, [], removed=[{"claim": "A number sentence", "evidence": "pooled"}])
@@ -229,7 +237,7 @@ def test_a_failed_write_puts_every_file_back_and_reports_nothing_removed(tmp_pat
 
     monkeypatch.setattr(receipts, "carry_over", boom)
     n = _run(eng, path)
-    assert n == 3  # every unsupported claim is stated as unconfirmed, none as taken out
+    assert n == 3  # every unsupported claim is listed as standing, none as taken out
     text = path.read_text(encoding="utf-8")
     assert "0.9991" in text.split("## Limitations")[0] and "were taken out" not in text and "was taken out" not in text
     assert (eng.quest_root / "paper" / "claims.json").read_bytes() == ledger_before
@@ -273,35 +281,25 @@ def test_a_fence_closes_only_on_a_fence_of_its_own_kind_and_length() -> None:
     assert text.count(sentence) == 1 and len(removed) == 1
 
 
-def test_a_failure_at_the_claim_list_or_the_limitations_puts_every_file_back(tmp_path: Path, monkeypatch) -> None:
-    for what in ("claims_md", "restate"):
-        eng, path = _paper(tmp_path / what)
-        eng._write_claims_ledger({**_grounding(), "grounded": 1})
-        files = [path, eng.quest_root / "paper" / "claims.json", eng.quest_root / "paper" / "CLAIMS.md"]
-        before = [f.read_bytes() for f in files]
-        if what == "claims_md":
-            real = Path.write_text
+def test_a_failure_at_the_claim_list_puts_every_file_back(tmp_path: Path, monkeypatch) -> None:
+    eng, path = _paper(tmp_path)
+    eng._write_claims_ledger({**_grounding(), "grounded": 1})
+    files = [path, eng.quest_root / "paper" / "claims.json", eng.quest_root / "paper" / "CLAIMS.md"]
+    before = [f.read_bytes() for f in files]
+    real = Path.write_text
 
-            def write_text(self, data, *a, **k):
-                if self.name == "CLAIMS.md":
-                    raise OSError("disk full")
-                return real(self, data, *a, **k)
+    def write_text(self, data, *a, **k):
+        if self.name == "CLAIMS.md":
+            raise OSError("disk full")
+        return real(self, data, *a, **k)
 
-            monkeypatch.setattr(Path, "write_text", write_text)
-        else:
-            def restate(state, why, strict=False):
-                if strict:
-                    raise OSError("disk full")
-                return False
-
-            monkeypatch.setattr(eng, "_restate_limitations", restate)
-        eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
-        monkeypatch.undo()
-        assert [f.read_bytes() for f in files[1:]] == before[1:], what
-        kept = path.read_text(encoding="utf-8")  # the paper keeps every sentence and says none was taken out
-        assert "0.9991" in kept.split("## Limitations")[0] and "taken out of this paper" not in kept, what
-        record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
-        assert "removed" not in record, what
+    monkeypatch.setattr(Path, "write_text", write_text)
+    eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": _grounding()})  # type: ignore[arg-type]
+    monkeypatch.undo()
+    assert [f.read_bytes() for f in files[1:]] == before[1:]
+    assert "0.9991" in path.read_text(encoding="utf-8"), "the paper keeps every sentence"
+    record = json.loads((eng.quest_root / ".fi" / "unsupported_claims.json").read_text(encoding="utf-8"))
+    assert "removed" not in record and "taken out of this paper" not in _listed(eng)
 
 
 async def test_a_render_that_fails_leaves_the_earlier_drafts_removed_list(tmp_path: Path) -> None:
@@ -333,14 +331,14 @@ async def test_a_render_that_fails_leaves_the_earlier_drafts_removed_list(tmp_pa
 
 def test_an_older_claim_with_no_fault_kept_only_by_its_stored_passage_is_listed_but_not_cut(tmp_path: Path) -> None:
     """A claim judged before faults were named keeps the rule FI applied then: found by its passage only (its wording is
-    another), it is stated as unconfirmed and its sentence stays in the paper."""
+    another), QUALITY.md lists it and its sentence stays in the paper."""
     eng, path = _paper(tmp_path)
     g = _grounding()
     g["claims"] = [_claim("A fit quality of at least 0.9991 holds throughout", "unsupported", "x", TYPED)]
     n = eng._state_unsupported_claims({"paper_md": str(path), "claim_grounding": g})  # type: ignore[arg-type]
     text = path.read_text(encoding="utf-8")
-    assert n == 1 and TYPED in text.split("## Limitations")[0]
-    assert "A fit quality of at least 0.9991 holds throughout" in text.split("## Limitations")[1]
+    assert n == 1 and TYPED in text
+    assert "A fit quality of at least 0.9991 holds throughout" in _listed(eng)
 
 
 SPLIT = ("The mean spread is <!-- fi:v {{v:spread_mean @ load=all}} -->0.0314<!-- /fi:v -->, and the peak at load 3 is "

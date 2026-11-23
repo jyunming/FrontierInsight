@@ -1,5 +1,5 @@
 """An equation whose test still fails after the code was repaired and the plan was asked about its worked example does not
-stop the study: it goes on with that equation not confirmed, and every quantity it may reach is marked (unconfirmed).
+stop the study: it goes on with that equation not confirmed, and every quantity it may reach is listed in the quality report.
 
 Neutral model: a mass on a damped spring. The equation's text is one FI cannot read (a condition after the formula), so it
 cannot tell a wrong example from a wrong function; the plan is asked once and keeps the example."""
@@ -156,7 +156,7 @@ async def test_a_function_that_is_never_run_marks_no_result(tmp_path: Path) -> N
     assert eqt.unconfirmed_marks(engine.quest_root) == {}
 
 
-# --- everything the mark must reach: the note under the title, the figures, QUALITY.md ----------------------------------------
+# --- what QUALITY.md says, and that no figure caption carries a mark ----------------------------------------
 
 
 def _held_record(root: Path, results: list[str]) -> None:
@@ -169,45 +169,13 @@ def _held_record(root: Path, results: list[str]) -> None:
         "unconfirmed": {"E1": {"formula": FORMULA, "function": "quality", "marked": True, "results": results}}}), encoding="utf-8")
 
 
-def test_a_note_under_the_title_says_a_hand_written_number_is_not_marked_and_clears_with_the_mark(tmp_path: Path) -> None:
-    """A number the writer typed cannot be placed on a result, so FI's own note says the paper may hold one unmarked."""
-    from core import engine_base as eb
-
-    _held_record(tmp_path, ["q_mean"])
-    paper = "# A study\n\n## Abstract\nThe mean q was 12.4.\n"
-    once = eb._mark_unconfirmed_results(paper, tmp_path)
-    assert once.index("fi:marks-note") < once.index("## Abstract") and "(unconfirmed)" in once and "`q_mean`" in once
-    assert "written by hand" in once and eb._mark_unconfirmed_results(once, tmp_path) == once, "placed once, the same again"
-    (tmp_path / ".fi" / "equation_tests.json").write_text(json.dumps({"unconfirmed": {}}), encoding="utf-8")
-    assert eb._mark_unconfirmed_results(once, tmp_path).count("fi:marks-note") == 0, "the mark is gone, so is the note"
-
-
-def test_a_quantity_kept_out_of_range_gets_the_same_note_and_figure_marks(tmp_path: Path) -> None:
+def test_a_quantity_kept_out_of_range_is_among_the_quantities_the_quality_report_lists(tmp_path: Path) -> None:
     """The same hole the existing out-of-range mark had: one place now says which quantities and figures carry the mark."""
     from core import result_checks as rc
 
     (tmp_path / "needs").mkdir()
     (tmp_path / "needs" / rc.RECORD).write_text(json.dumps({rc.KEPT_BREAKS: [{"quantity": "q_mean", "note": "n"}]}), encoding="utf-8")
-    assert set(rc.marked_quantities(tmp_path)) == {"q_mean"} and "`q_mean`" in rc.marked_note(tmp_path)
-
-
-def test_figures_that_may_draw_a_marked_quantity_are_marked_by_fis_record_of_the_drawing(tmp_path: Path) -> None:
-    from core import result_checks as rc
-
-    _held_record(tmp_path, ["q_mean"])
-    (tmp_path / "figures").mkdir()
-    (tmp_path / ".fi" / "figure_records").mkdir()
-    records = {"tied": {"y": {"what": "q_mean"}, "series": [{"id": "q_mean", "what": "q_mean"}]},
-               "apart": {"y": {"what": "load"}, "series": [{"id": "load", "what": "load"}]},
-               "untied": {"y": {"what": "load"}, "series": [{"id": "s", "what": "load", "neutral": True}]}}
-    for stem, p in records.items():
-        (tmp_path / "figures" / f"{stem}.png").write_bytes(b"png")
-        (tmp_path / ".fi" / "figure_records" / f"{stem}.calls.json").write_text(
-            json.dumps({"panels": [{"panel": 1, "x": {"id": "c", "kind": "setting"}, **p}]}), encoding="utf-8")
-    (tmp_path / "figures" / "norecord.png").write_bytes(b"png")  # FI cannot tell what it draws: marked, never presented bare
-    assert rc.marked_figures(tmp_path) == ["norecord.png", "tied.png", "untied.png"]
-    (tmp_path / ".fi" / "equation_tests.json").write_text("{}", encoding="utf-8")
-    assert rc.marked_figures(tmp_path) == []
+    assert set(rc.marked_quantities(tmp_path)) == {"q_mean"}
 
 
 def test_quality_says_the_study_went_on_with_the_equation_not_confirmed(tmp_path: Path) -> None:
@@ -221,7 +189,7 @@ def test_quality_says_the_study_went_on_with_the_equation_not_confirmed(tmp_path
     assert [r["status"] for r in rows] == ["went on, not confirmed"], "one row, not 'not fixed' and not a second sentence"
 
 
-def test_the_caption_of_a_figure_that_may_draw_a_marked_quantity_carries_the_mark(tmp_path: Path) -> None:
+def test_no_figure_caption_carries_a_mark_for_a_quantity_an_equation_could_not_confirm(tmp_path: Path) -> None:
     from core import engine_base as eb
 
     _held_record(tmp_path, ["q_mean"])
@@ -235,5 +203,4 @@ def test_the_caption_of_a_figure_that_may_draw_a_marked_quantity_carries_the_mar
     state = {"quest_root": str(tmp_path), "figures": ["fig_q.png", "fig_load.png"], "figure_records": {}}
     text, placed, _n = eb._place_figures("# T\n\n## Results\nSee Figure 1 and Figure 2.\n", state, root=tmp_path)
     assert set(placed) == {"fig_q.png", "fig_load.png"}
-    by_file = {line.split("figures/")[1].rstrip(")"): line for line in text.split("\n") if "](figures/" in line}
-    assert "(unconfirmed)" in by_file["fig_q.png"] and "(unconfirmed)" not in by_file["fig_load.png"]
+    assert "(unconfirmed)" not in text and "FI could not confirm" not in text

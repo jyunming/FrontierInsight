@@ -125,7 +125,7 @@ def test_a_paper_whose_numbers_fi_did_not_check_is_not_reconciled(tmp_path: Path
     assert not ok and gaps == [f"FI did not check this paper's numbers against its own records ({words})"]
     got = evidence.assess(root, _state(), settings=ON)
     assert got["status"] == "executed" and got["gaps"] == gaps
-    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": [], "unmet_items": []}), encoding="utf-8")
+    (root / ".fi" / "paper_record_check.json").write_text(json.dumps({"hits": []}), encoding="utf-8")
     assert evidence._audit_gaps(root) == (True, [])
     assert evidence.assess(root, _state(), settings=ON)["status"] != "executed"
 

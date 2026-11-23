@@ -198,14 +198,14 @@ def test_the_writer_is_told_fi_states_the_known_answer_status(tmp_path: Path) ->
     entry = {"name": "cooling_curve", "expected": 1.0, "tolerance": 0.05, "measured": 0.5, "by": accepted_checks.AUTOMATIC}
     record = {"status": accepted_checks.WENT_ON, "went_on": [entry]}
     note = accepted_checks.failing_disclosure(record)
-    assert "FI states each of these checks itself in the limitations" in note and "Do not write" in note
+    assert "FI lists each of these checks itself in its quality report" in note and "Do not write" in note
     _write_records(tmp_path, NOT_BETTER, None, record)
     (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps({"protocol": {"oracles": [
         {"name": "cooling_curve", "check": "The cup cools by the known law. Sized by the plan."}]}}), encoding="utf-8")
     items = [i for i in paper_facts.required_items(tmp_path) if i.kind == paper_facts.KNOWN_ANSWER]
     assert items and "did not pass" in items[0].sentence and "not validated against it" in items[0].sentence
     section = paper_facts.writer_section(tmp_path)
-    assert "Known answers: FI states in that list which checks" in section
+    assert "Known answers: a check of the code against a known answer did not pass" in section
     assert "Do not state in your own sentence" in section
 
 
