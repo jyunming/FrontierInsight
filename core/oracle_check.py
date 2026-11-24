@@ -1339,7 +1339,7 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
         return [
             "the protocol declares no oracle, so nothing independent of the script's own numbers checks that they are right "
             "(add `oracles` to the protocol: a special or limiting case with a known answer, an invariant, a symmetry or "
-            "scaling law, a convergence rate, a published benchmark value, or a second implementation)"
+            "scaling law, a convergence rate, or a second implementation)"
         ]
     if timed_out:
         return ["the script did not finish the oracle checks in time (run with FI_ORACLE=1: each check must be small and fast)"]

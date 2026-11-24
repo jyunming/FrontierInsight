@@ -44,13 +44,13 @@ def decisive(value: float) -> bool:
 
 
 def _half_unit(value: float) -> float:
-    """Half a unit of the value's last written digit (1.2571: 0.00005)."""
+    """Half a unit of the value's last written digit (2.3846: 0.00005)."""
     return 0.5 * 10.0 ** int(_decimal(value).as_tuple().exponent)
 
 
-def mask(text: Any, value: float) -> str:
+def withhold(text: Any, value: float) -> str:
     """``text`` with every number that writes ``value`` (to two digits or more, either sign) replaced by
-    :data:`WITHHELD`; unchanged for a value that is not :func:`decisive` (masking 0.5 would blank every 0.5)."""
+    :data:`WITHHELD`; unchanged for a value that is not :func:`decisive` (withholding 0.5 would blank every 0.5)."""
     text = str(text or "")
     if not decisive(value):
         return text
@@ -83,15 +83,15 @@ def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") ->
     """The request for the program (``agents/known_value_program.md``), with the value withheld everywhere in it."""
     value = float(kv["value"])
     return template.substitute(
-        name=mask(kv.get("name"), value), case=mask(kv.get("case"), value), passage=mask(kv.get("passage"), value),
-        title=mask((kv.get("source") or {}).get("title"), value), excerpt=mask(shown, value), line=LINE,
+        name=withhold(kv.get("name"), value), case=withhold(kv.get("case"), value), passage=withhold(kv.get("passage"), value),
+        title=withhold((kv.get("source") or {}).get("title"), value), excerpt=withhold(shown, value), line=LINE,
         again=again or "")
 
 
 def program(reply: Any, value: float, tolerance: float, given: str) -> tuple[str, str]:
     """``(the program, "")`` from the reply, or ``("", why)``: no fenced block, a forbidden call (reading or running
     anything, core/oracle_challenge.py), under 5 or over 400 lines, or a number within the tolerance of a
-    :func:`decisive` value typed in that the request did not give (``given``: the masked text it was shown)."""
+    :func:`decisive` value typed in that the request did not give (``given``: the withheld_text text it was shown)."""
     from .oracle_challenge import numeric_script
 
     script, why = numeric_script(reply)
@@ -182,14 +182,15 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
                    second: bool) -> dict[str, Any]:
     """One program for one value: asked (once more, with the reason, when it cannot be used), run, and judged."""
     value, tolerance = float(kv["value"]), float(kv["tolerance"])
-    given = " ".join(mask(kv.get(k), value) for k in ("case", "passage")) + " " + mask(shown, value)
+    given = " ".join(withhold(kv.get(k), value) for k in ("case", "passage")) + " " + withhold(shown, value)
     note = _SECOND if second else ""
     script, why = "", ""
     for _ in range(2):
         try:
             reply = await ask(prompt(template, kv, shown, again=note), second)
         except Exception as e:  # noqa: BLE001 -- a program that could not be had leaves the value unconfirmed
-            return {"verdict": "cannot_judge", "why": f"the program could not be asked for ({str(e)[:160] or type(e).__name__})"}
+            return {"verdict": "cannot_judge", "unasked": True,
+                    "why": f"the program could not be asked for ({str(e)[:160] or type(e).__name__})"}
         script, why = program(reply, value, tolerance, given)
         if script:
             break
@@ -249,8 +250,9 @@ async def check(data: dict[str, Any], quest_root: Path, *, template: Any, ask: A
     values = [await _one(kv, texts.get(str(kv["source"]["file"]), ""), folder, template=template, ask=ask,
                          execute=execute) for kv in data.get("known_values") or []]
     record = {"commission_sha256": sha, "at": time.time(), "values": values}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
+    if not any(p.get("unasked") for v in values for p in v["programs"]):  # else asked again on the next pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
     return record
 
 

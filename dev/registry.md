@@ -508,7 +508,7 @@ same PR that adds, splits or renames one.
   cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
 - `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
   (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value: `excerpt` of the staged
-  full text (a text whose equations were lost is not judged), `mask` (the value withheld from the request), one program
+  full text (a text whose equations were lost is not judged), `withhold` (the value withheld from the request), one program
   from `agents/known_value_program.md` (`program`: the fenced block, `oracle_challenge._FORBIDDEN`, 5-400 lines, no
   typed-in number near the value), run apart from the quest (`_run_in_env(apart=True)`), read from its `KNOWN_JSON`
   lines (`printed`) and judged (`judge`: two routes within 3x their combined error, each route within the larger of the

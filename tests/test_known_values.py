@@ -243,7 +243,7 @@ F, D = "formula", "definition"
 
 
 @pytest.mark.parametrize("routes,value,tolerance,verdict", [
-    ([(F, 1.25712, 0.0)], 1.2571, 1e-4, "match"),  # one route is enough for a value no program types by chance
+    ([(F, 2.38462, 0.0)], 2.3846, 1e-4, "match"),  # one route is enough for a value no program types by chance
     ([(D, 0.5, 0.0)], 0.5, 0.05, "cannot_judge"),  # ... and is not for a round one
     ([(F, 0.5, 0.0), (D, 0.40, 0.04)], 0.5, 0.05, "match"),  # three of a route's own errors only widen the tolerance
     ([(F, 0.5, 0.0), (D, 0.40, 0.01)], 0.5, 0.05, "no_match"),
@@ -256,7 +256,59 @@ def test_a_route_is_held_to_the_larger_of_the_tolerance_and_three_of_its_errors(
 
 
 def test_the_value_is_masked_however_it_is_written_and_a_round_value_is_left() -> None:
-    text = "it is 1.2571 here, 1.257 there, 1.26 in the abstract, -1.2571 below, 12571 never, and 0.5 as a level"
-    masked = known_values.mask(text, 1.2571)
-    assert masked.count(known_values.WITHHELD) == 4 and "12571" in masked and "0.5" in masked
-    assert known_values.mask("a level of 0.5", 0.5) == "a level of 0.5"
+    text = "it is 2.3846 here, 2.385 there, 2.38 in the abstract, -2.3846 below, 23846 never, and 0.5 as a level"
+    withheld_text = known_values.withhold(text, 2.3846)
+    assert withheld_text.count(known_values.WITHHELD) == 4 and "23846" in withheld_text and "0.5" in withheld_text
+    assert known_values.withhold("a level of 0.5", 0.5) == "a level of 0.5"
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_could_not_be_asked_for_is_not_kept_so_the_next_pass_asks_again(tmp_path: Path) -> None:
+    path = _commission(tmp_path / "order", 0.25, 0.01)
+    quest = tmp_path / "quest"
+    commission.stage(path, quest)
+
+    async def refused(prompt: str, second: bool) -> str:
+        raise RuntimeError("the provider refused the call")
+
+    async def never(program: Path) -> tuple[int, str, str]:
+        raise AssertionError("nothing is run")
+
+    from core.engine_base import _load_prompts
+
+    record = await known_values.check(commission.read(path), quest, template=_load_prompts()["known_value_program"],
+                                      ask=refused, execute=never)
+    assert record["values"][0]["verdict"] == "cannot_judge" and "could not be asked for" in record["values"][0]["why"]
+    assert not (quest / ".fi" / known_values.RECORD).exists(), "a resume asks again instead of reading this back"
+
+
+@pytest.mark.asyncio
+async def test_a_quest_handed_back_at_the_plan_ends_as_a_return_not_a_failure(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+    from tests.test_commission import _engine
+
+    async def nothing(self: Any, state: Any) -> dict[str, Any]:
+        return {}
+
+    async def design(self: Any, state: Any) -> dict[str, Any]:
+        raise AssertionError("the design step ran")
+
+    for name in ("_node_clarify_then_phased", "_node_ideate", "_node_pause_after_literature", "_node_scope",
+                 "_node_select_skills"):
+        monkeypatch.setattr(Engine, name, nothing)
+    monkeypatch.setattr(Engine, "_node_design", design)
+    path = _commission(tmp_path / "order", 0.75, 0.01)
+    eng = _engine(tmp_path, path)
+    model = Model(eng, [RIGHT, RIGHT])
+
+    async def connect(self: Any) -> None:
+        self._client = type("Stub", (), {"chat": AsyncMock(side_effect=model.chat), "aclose": AsyncMock()})()
+
+    monkeypatch.setattr(Engine, "_connect_llm", connect)
+    await eng.run()
+    record = json.loads((eng.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert record["return_reason"] == "known_value_mismatch" and model.other == []
+    assert not (eng.quest_root / "quest_failed.md").exists() and not (eng.quest_root / "plan.md").exists()
+    quality = json.loads((eng.quest_root / ".fi" / "quality.json").read_text(encoding="utf-8"))
+    assert quality["outcome"]["return_reason"] == "known_value_mismatch"
