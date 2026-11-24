@@ -1011,7 +1011,7 @@ class ImproveStageMixin:
                 "kind": "referee", "check": name, "outcome": result["outcome"], "tried": result["text"],
                 **({"points_to": "check"} if result["outcome"] == "corrected" else
                    {"points_to": "script"} if result["outcome"] == "code" else {}),
-                "numeric": {k: numeric.get(k) for k in ("value", "how", "model", "script") if k in numeric}})
+                "numeric": {k: numeric.get(k) for k in ("value", "error", "how", "model", "script") if k in numeric}})
         if changed:
             _oracle_triage.write(self.fi_dir, {**_oracle_triage.read(self.fi_dir), key: record})
         return acted
@@ -1019,7 +1019,7 @@ class ImproveStageMixin:
     async def _numeric_reference(self, state: QuestState, oracle: dict[str, Any]) -> dict[str, Any]:
         """The check's number computed numerically from the definitions by a short script the model named for
         ``oracle_review`` writes (never shown either working or the measurement) and FI runs in the quest's environment,
-        bounded in time: ``{"value", "how", "model", "script"}`` (``value`` None when it gave none)."""
+        bounded in time: ``{"value", "how", "model", "script"}`` (``value`` None when it gave none; ``error``, its own numerical error bound, only when the script gave one)."""
         model = self._model_for_node(_oracle_challenge.NUMERIC_NODE) or self.config.provider.model or "the provider's default model"
         self._progress("Computing a known answer numerically, from the definitions")
         try:
@@ -1039,12 +1039,13 @@ class ImproveStageMixin:
         path.write_text(script, encoding="utf-8")
         code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.numeric_timeout(self.config.execution.timeout_s),
                                                 apart=True)
-        value, how = _oracle_challenge.numeric_value(out)
+        value, how, error = _oracle_challenge.numeric_value(out)
         if value is None and code != 0:
             how = f"the script failed ({(err or '').strip().splitlines()[-1][:200] if (err or '').strip() else code})"
         self._log.info("[oracle] the numerical computation of %r from the definitions: %s", str(oracle.get("name")),
                        f"{_oracle.fmt_digits(value)} ({how})" if value is not None else how)
-        return {"value": value, "how": how, "model": model, "script": self._rel_to_quest(path)}
+        return {"value": value, "how": how, "model": model, "script": self._rel_to_quest(path),
+                **({"error": error} if error is not None else {})}
 
     async def _recompute_expected(self, state: QuestState, oracle: dict[str, Any], value: float | None,
                                   ) -> tuple[dict[str, Any], bool]:

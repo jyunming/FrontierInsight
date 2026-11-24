@@ -24,7 +24,9 @@ Write ONE short, self-contained Python script that computes this number on this 
 The script's LAST line of output must be:
 
 ```
-$line {"value": <the number>, "how": "<the method and its numerical error, in one sentence>"}
+$line {"value": <the number>, "how": "<the method and its numerical error, in one sentence>", "error": <optional>}
 ```
+
+`error` is optional: a plain number, your script's own numerical error bound on `value` (the same units as `value`, at least 0). Leave `error` out when you cannot bound it.
 
 Reply with the script in one fenced Python block and nothing else.

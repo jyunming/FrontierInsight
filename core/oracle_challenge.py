@@ -416,8 +416,9 @@ def numeric_script(reply: Any) -> tuple[str, str]:
     return script + "\n", ""
 
 
-def numeric_value(stdout: str) -> tuple[float | None, str]:
-    """``(the value, how)`` from the script's last ``NUMERIC_JSON:`` line, or ``(None, why)``."""
+def numeric_value(stdout: str) -> tuple[float | None, str, float | None]:
+    """``(the value, how, its error)`` from the script's last ``NUMERIC_JSON:`` line, or ``(None, why, None)``. The
+    error is the script's own numerical error bound as a number (finite, >= 0); absent (``None``) when not given."""
     from . import oracle_triage as _triage
 
     for line in reversed(str(stdout or "").splitlines()):
@@ -425,11 +426,13 @@ def numeric_value(stdout: str) -> tuple[float | None, str]:
             try:
                 data = json.loads(line[len(NUMERIC_LINE):])
             except ValueError:
-                return None, "its last line could not be read"
+                return None, "its last line could not be read", None
             value = _triage.num(data.get("value")) if isinstance(data, dict) else None
             how = " ".join(str((data or {}).get("how") or "").split())[:400] if isinstance(data, dict) else ""
-            return (value, how) if value is not None else (None, "it gave no finite value")
-    return None, f"it printed no `{NUMERIC_LINE}` line"
+            error = _triage.num(data.get("error")) if isinstance(data, dict) else None
+            error = error if error is not None and error >= 0 else None
+            return (value, how, error) if value is not None else (None, "it gave no finite value", None)
+    return None, f"it printed no `{NUMERIC_LINE}` line", None
 
 
 def settle_numeric(oracle: dict[str, Any], challenge: dict[str, Any], verdict: dict[str, Any] | None,
