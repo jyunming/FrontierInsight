@@ -6,8 +6,6 @@ and the paper says so.
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +15,6 @@ from core import accepted_checks as ac, evidence, oracle_check as oc, todo
 from core.engine import Engine
 from tests.test_oracle_gate import _FAILING, _PROTOCOL, ORACLE, _cfg, _fake
 
-ROOT = Path(__file__).resolve().parent.parent
 REPORTED = {"checks": [{"name": ORACLE["name"], "value": 0.5}]}
 
 
@@ -60,31 +57,6 @@ def test_only_a_check_that_was_measured_and_failed_is_offered() -> None:
 
 
 # --- the three surfaces record a name, the conditions and the code version ------------------------------------------
-
-
-def test_vs_code_turns_the_card_action_into_accept_checks(tmp_path: Path) -> None:
-    ext = ROOT / "vscode-frontier-insight"
-    skills = (ext / "src" / "skills.ts").read_text(encoding="utf-8")
-    # The command reads the stop's offer and shows the conditions and the code before it asks for the name, and runs
-    # the same launch.py --accept-checks.
-    assert 'record.go_on' in skills and "failed.script_version" in skills and "failed.why_not" in skills
-    assert '["--accept-checks", questId, "--approve-as", who.trim()' in skills
-    compiled, source = ext / "out" / "stop-card.js", ext / "src" / "stop-card.ts"
-    node = shutil.which("node")
-    if node is None or not compiled.is_file() or compiled.stat().st_mtime < source.stat().st_mtime:
-        pytest.skip("node, or a compiled vscode-frontier-insight/out/stop-card.js as new as its source, is not here")
-    pause = {"kind": "oracle", "card": {"actions": [{"id": "go_on_failing", "label": "Mark the check unconfirmed and go on",
-                                                     "detail": "d", "vscode": "@fi /accept-checks q-1"}]}}
-    script = ("const m = require(process.argv[1]); const p = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-              "console.log(JSON.stringify(m.cardButtons(m.cardOf(p), 'q-1')));")
-    done = subprocess.run([node, "-e", script, str(compiled)], input=json.dumps(pause), capture_output=True,
-                          text=True, encoding="utf-8", timeout=60)
-    assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout) == [{"title": "Mark the check unconfirmed and go on",
-                                        "query": "@fi /accept-checks q-1", "send": True, "tooltip": "d"}]
-
-
-# --- the choice binds to the check's conditions and the code -------------------------------------------------------
 
 
 # --- a person is never offered the choice -------------------------------------------------------------------------

@@ -253,10 +253,6 @@ def script_version(files: dict[str, str]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def short_version(version: Any) -> str:
-    return str(version or "")[:12]
-
-
 def _mc_said(judged: dict[str, Any], limit: Any) -> dict[str, Any]:
     """What a check's entry keeps about the trials it was judged on (core/mc_error.py): how its number was had
     (``mc_words``) and, for a check those trials could not decide, ``undecided`` with why (``undecided_words``)."""
