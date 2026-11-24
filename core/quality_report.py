@@ -1367,6 +1367,11 @@ def _outcome(q: _Quest) -> dict[str, Any]:
                            "stopped before FI could write one.", "evidence": ev, "needs_person": False}
     if kind == "paper":
         out.update(kind="finished", line="A paper was delivered.")
+    elif kind == "stop" and q.stuck.get("return_reason"):
+        # A commissioned study handed back (core/commission.py): the reason leads the line a caller quotes.
+        out.update(kind="honest_stop", return_reason=str(q.stuck["return_reason"]),
+                   line=f"FI handed the commissioned study back ({q.stuck['return_reason']}): "
+                   + _one(q.stuck.get("problem") or q.stuck.get("say"), 300) + ".")
     elif kind == "stop":
         out.update(kind="honest_stop", line="FI stopped without a paper, on purpose: "
                    + _one(q.stuck.get("problem") or q.stuck.get("say"), 300) + ".")

@@ -342,11 +342,27 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 ## YAML config schema
 
 ```yaml
-# Required: the research question. Free text, multi-line is fine.
+# Required (unless a commission below gives it): the research question. Free text, multi-line is fine.
 topic: |
   Compare three numerical integrators on a damped harmonic
   oscillator (RK4 vs Velocity-Verlet vs forward Euler). Report
   energy drift over 10⁴ periods.
+
+# Optional, instead of a topic: a commission file that fixes the study (read against this file's folder). Its
+# question becomes the topic; FI does not make ideas, choose a study or search the literature, and reads only the
+# full texts the file supplies. A file with a key missing or wrong is refused before anything runs, naming it, and a
+# study that cannot be done in the time allowed is handed back (needs/STUCK.json, return_reason first), not made
+# smaller. The file (JSON):
+#   {"question": "...", "scope": "...", "limits": {"hours": 2, "model_calls": 60},
+#    "known_values": [{"name": "...", "value": 0.25, "tolerance": 0.01,
+#                      "case": "the situation the value applies to (which form, which parameter values)",
+#                      "passage": "the sentence of the source that states the value, with the value in it",
+#                      "source": {"title": "...", "doi": "...", "file": "source.pdf"}}],
+#    "success": [{"condition": "...", "verify": "..."}], "failure": [{"condition": "...", "verify": "..."}],
+#    "doubts": []}
+# known_values may be empty only with "no_known_values": true; the source file is .pdf, .md or .txt with at least
+# 200 characters of text, and holds the passage. See docs/capabilities-reference.md.
+# commission: commission.json
 
 # Optional: short identifier used in folder names. Defaults to a
 # slug derived from the topic.

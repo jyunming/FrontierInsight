@@ -2759,6 +2759,10 @@ async def _finish_outputs(
         "paper_md": str(art.paper_md) if art.paper_md else None,
         "paper_pdf": str(written.get("paper_pdf")) if written.get("paper_pdf") else None,
     }
+    from core import commission as _commission
+
+    if _commission.staged_path(Path(art.quest_root)).is_file():  # the commission this run answered
+        summary["commission_sha256"] = _commission.recorded_sha(Path(art.quest_root))
     # Which literature / full-text sources failed during the run (written by
     # the engine on every exit path). Surfaced here so the CLI and the VSCode
     # chat see it without opening run.log.
@@ -3885,7 +3889,13 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.config:
             # Absolute before anything below may change folder (a quest found elsewhere runs from its own).
             args.config = Path(args.config).resolve()
-            cfg = Config.from_yaml(args.config)
+            from core import commission as _commission
+
+            try:
+                cfg = Config.from_yaml(args.config)
+            except _commission.CommissionRefused as e:  # a commission missing a key: refused before anything starts
+                print(f"[FI] {e}", file=sys.stderr)
+                return 2
             if args.output is not None:
                 cfg.output.output_dir = args.output
             # A quest named by a shortened id, or one that is not under this YAML's outputs folder: look it up there
@@ -3948,6 +3958,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     return 1
                 return await _watch_quest(cfg, args, supervisor)
             if not (args.watch or args.emit):
+                try:
+                    # Before any model call, and on a resume before the quest's own config.yaml is replaced (run_one):
+                    # a commission's files and passages, or, resumed, that it is the one the quest was started from.
+                    _commission.door(cfg.commission,
+                                     Path(cfg.output.output_dir) / args.resume if args.resume else None)
+                except _commission.CommissionRefused as e:
+                    print(f"[FI] {e}", file=sys.stderr)
+                    return 2
                 from core.provider import missing_api_key
 
                 if (missing := missing_api_key(cfg.provider)) is not None:
@@ -3999,7 +4017,15 @@ async def main_async(args: argparse.Namespace) -> int:
             )
             return 0
 
-        configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
+        from core import commission as _commission
+
+        try:
+            configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
+            for _path, c in configs:
+                _commission.door(c.commission, None)  # every quest's commission before any starts
+        except _commission.CommissionRefused as e:
+            print(f"[FI] {e}", file=sys.stderr)
+            return 2
         for path, c in configs:
             _apply_vscode_bridge_override(c, args.vscode_bridge_port)
             _apply_vscode_bridge_socket_override(c, args.vscode_bridge_socket)

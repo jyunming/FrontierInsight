@@ -27,6 +27,7 @@ from .engine_base import (  # noqa: F401
     claude_cli_account_line, copy, hashlib, inspect, interrupt, json, missing_step_api_keys, model_for_node,
     node_provider_for, os, re, resolve_endpoint_async, step_provider_config, step_provider_lines,
 )
+from . import commission as _commission
 
 
 class PlanStageMixin:
@@ -227,6 +228,9 @@ class PlanStageMixin:
             source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
             audit += model_notes
             audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
+        if self._commissioned():  # type: ignore[attr-defined]
+            # Recorded only: making FI write these checks itself is a later step.
+            audit += _commission.oracle_gaps(self._commission_data(), normalized.get("protocol"))  # type: ignore[attr-defined]
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit,
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,

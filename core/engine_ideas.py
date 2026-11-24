@@ -19,6 +19,7 @@ from .engine_base import (  # noqa: F401
     _search_record_has_abstract, _sf_snapshot, _simulatability_answer, _source_text, _spell_out_title_options,
     _take_papers_declined, _topic_req, _usable_queries, _write_paper_need_stubs, asyncio, functools, hashlib, json,
 )
+from . import commission as _commission
 
 
 class IdeasStageMixin:
@@ -528,6 +529,9 @@ class IdeasStageMixin:
         }
 
     async def _node_ideate(self, state: QuestState) -> QuestState:
+        if self._commissioned():  # type: ignore[attr-defined]
+            self._log.info("[ideate] the commission gives the question; no ideas are made")
+            return {}
         if self.config.engine.analyze_local_first:
             # --analyze: the user supplied the data; there's nothing to
             # ideate. Passthrough (no LLM call) — downstream reads
@@ -843,6 +847,8 @@ class IdeasStageMixin:
         return WORK_SCOPE_PAPERS
 
     async def _node_literature(self, state: QuestState) -> QuestState:
+        if self._commissioned():  # type: ignore[attr-defined]
+            return await self._commission_literature(state)
         if self.config.engine.analyze_local_first:
             # --analyze: local-data-first, so NO external literature is
             # retrieved. Passthrough — the analysis rests on the user's
@@ -1316,6 +1322,27 @@ class IdeasStageMixin:
             out["literature_novelty"] = novelty
         return out
 
+    async def _commission_literature(self, state: QuestState) -> QuestState:
+        """The literature of a commissioned study: the full texts the commission supplies (``inputs/papers/``), named by
+        the commission's titles and DOIs, and nothing searched for, judged for novelty or broadened."""
+        prior = list(state.get("literature") or [])
+        seen = {str((e.get("content") if isinstance(e, dict) else "") or "")[:200] for e in prior}
+        merged, added = await asyncio.to_thread(_ingest_user_dropped_papers, self.quest_root, prior, seen, self._log)
+        merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
+        await self._flag_sources(merged, "literature", record_clean=True)  # type: ignore[attr-defined]
+        self._log.info("[literature] the commission gives the sources: %d full text(s) read from inputs/papers/, "
+                       "nothing searched for", added)
+        return {"literature": merged, "literature_iter": int(state.get("literature_iter") or 0) + 1}
+
+    def _commission_block(self, state: QuestState) -> str:
+        """What the commission fixes, for the plan's model, with each known value's source by its label ([n])."""
+        data = self._commission_data()  # type: ignore[attr-defined]
+        by_name = {name: raw for raw, name in _commission.staged_names(data).items()}
+        labels = {by_name[Path(str(meta.get("path") or "")).name]: label
+                  for label, meta, _item in _labelled_sources(state.get("literature") or [])
+                  if meta.get("source") == "user_supplied" and Path(str(meta.get("path") or "")).name in by_name}
+        return _commission.prompt_block(data, labels)
+
     async def _literature_novelty(self, state: QuestState, merged: list, iteration: int) -> dict[str, Any] | None:
         """One call: do the retrieved sources already answer the study's question, and what does the study add?
         Disclosed only (core/novelty.py): the checked answer goes to ``.fi/literature_novelty.json`` and into the plan and
@@ -1545,6 +1572,8 @@ class IdeasStageMixin:
                 else ""
             ),
         )
+        if self._commissioned():  # type: ignore[attr-defined]
+            prompt = f"{prompt}\n\n{self._commission_block(state)}\n"
         checklist = self._topic_checklist(state)
         return f"{prompt}\n\n{checklist}\n" if checklist else prompt
 

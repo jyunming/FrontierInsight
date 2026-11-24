@@ -1817,6 +1817,15 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
     "engine": {"phased": True},
 }
 
+# What a commission (``Config.commission``, core/commission.py) turns off where the config is silent: the work the
+# commission has already done (the discussion of the topic, the choice of a study, the search for more sources, the
+# novelty judgement) and the routes that would bring in a new topic or more literature.
+_COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
+    "pauses": {"clarify": "off", "scope": "off", "papers": False},
+    "knowledge": {"novelty_check": False, "foundational_works": False, "requery_on_low_relevance": False},
+    "engine": {"evidence_gate_max_broaden": 0, "enable_analyze_reroute": False},
+}
+
 
 class Config(BaseModel):
     topic: str
@@ -1842,6 +1851,10 @@ class Config(BaseModel):
     # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
     # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
+    # A commission file (core/commission.py) the study starts from instead of a topic: its question becomes the topic,
+    # making ideas and choosing a study are skipped, and only the full texts it supplies are read. A relative path is read
+    # against this config's folder.
+    commission: Path | None = None
 
     @property
     def effective_result_use(self) -> str:
@@ -1940,6 +1953,44 @@ class Config(BaseModel):
             )
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_commission(cls, data: Any) -> Any:
+        """With a ``commission``: refuse a file that is missing a key or has one of the wrong type, take its question as
+        the topic when the config gives none, and fill ``_COMMISSION_DEFAULTS`` (and the run's time limit from the
+        commission's hours) only where the config is silent. Defined after ``_merge_legacy_pauses`` so it runs before
+        it: a legacy pause flag the config sets counts as said."""
+        if not isinstance(data, dict) or not data.get("commission"):
+            return data
+        from core import commission as _commission
+
+        data = dict(data)
+        path = Path(str(data["commission"])).expanduser().resolve()
+        found = _commission.read(path)
+        if (problems := _commission.form_problems(found)):
+            raise ValueError(f"the commission {path} cannot be used: " + "; ".join(problems))
+        data["commission"] = path
+        if not str(data.get("topic") or "").strip():
+            data["topic"] = str(found["question"]).strip()
+        said_legacy = {new for section, old, new in _LEGACY_PAUSE_FLAGS
+                       if (old in data[section] if isinstance(data.get(section), dict) else
+                           isinstance(data.get(section), BaseModel) and old in data[section].model_fields_set)}
+        wanted = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
+        wanted["execution"] = {"timeout_s": max(1, int(float(found["limits"]["hours"]) * 3600))}
+        for section, values in wanted.items():
+            block = data.get(section)
+            if isinstance(block, BaseModel):
+                missing = {k: v for k, v in values.items() if k not in block.model_fields_set}
+                if missing:
+                    data[section] = block.model_copy(update=missing)
+                continue
+            block = dict(block or {})
+            for key, value in values.items():
+                if block.get(key) is None and not (section == "pauses" and key in said_legacy):
+                    block[key] = value
+            data[section] = block
+        return data
+
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:
         """Raise ``ValueError`` listing any YAML keys FI doesn't recognize.
@@ -1990,6 +2041,13 @@ class Config(BaseModel):
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if isinstance(data, dict):
             cls._audit_unknown_keys(data)
+            if data.get("commission"):
+                # Read against this file's folder, and refused here in plain words (core/commission.py), not in the
+                # validator, whose error would come back wrapped in pydantic's text.
+                from core import commission as _commission
+
+                data = {**data, "commission": str(_commission.locate(data["commission"], Path(path).resolve().parent))}
+                _commission.validate(Path(data["commission"]), sources=False)
         return cls.model_validate(data)
 
 

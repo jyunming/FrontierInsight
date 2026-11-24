@@ -18,6 +18,7 @@ from .engine_base import (  # noqa: F401
     _shown_reach, _split_figure_readings, _stop_power, _topic_req, asyncio, copy, derive_protocol,
     functools, json, scrub_secrets, shutil, tempfile, time,
 )
+from . import commission as _commission
 
 
 
@@ -1157,12 +1158,21 @@ class AnalyzeStageMixin:
                     self._log.warning("[stuck] could not set %s aside (%r)", name, exc)
         if aside.is_dir():
             record["set_aside"] = aside.relative_to(self.quest_root).as_posix()
-        try:
-            needs = self.quest_root / "needs"
-            needs.mkdir(parents=True, exist_ok=True)
-            (needs / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
-        except OSError as exc:
-            self._log.warning("[stuck] could not write needs/STUCK.json (%r)", exc)
+        if self._commissioned() and reason == "too_long":  # type: ignore[attr-defined]
+            # A commissioned study FI's timing says cannot be done in the time allowed is handed back, with what FI measured.
+            fit = (state.get("exec_result") or {}).get("too_long_fit")
+            fit = fit if isinstance(fit, dict) else {}
+            problem = _commission.too_long_problem(fit, said)
+            own_words = True
+            record = self._return_to_qc("scope_exceeds_cap", problem, {**fit, "measured": said}, tried,  # type: ignore[attr-defined]
+                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")})
+        else:
+            try:
+                needs = self.quest_root / "needs"
+                needs.mkdir(parents=True, exist_ok=True)
+                (needs / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+            except OSError as exc:
+                self._log.warning("[stuck] could not write needs/STUCK.json (%r)", exc)
         self._log.warning("[stuck] %s; stopping without a paper (needs/STUCK.json)", problem)
         for line in tried:
             self._log.info("[stuck] tried: %s", line)
@@ -2433,8 +2443,10 @@ class AnalyzeStageMixin:
             # results hold, so the reason the quest reports is the one that stopped it.
             why = str(exec_result[stopped])  # type: ignore[index]
             fit = exec_result.get("too_long_fit") if stopped == "too_long" else None  # type: ignore[union-attr]
+            # A commissioned study's scope is not FI's to make smaller: it is handed back instead (_node_stuck_no_findings).
             if (isinstance(fit, dict) and int(state.get("evidence_fit_redesigns") or 0) < 1
-                    and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(self.quest_root).is_file()):
+                    and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(self.quest_root).is_file()
+                    and not self._commissioned()):  # type: ignore[attr-defined]
                 # The plan was written before anything was timed: its model is told what FI measured and asked, once, for
                 # a study that fits (FI itself never chooses which settings to leave out). The new design is timed again.
                 self._log.warning("[evidence_gate] %s; the plan is asked once for a study that fits the time FI measured",

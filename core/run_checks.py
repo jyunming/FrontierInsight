@@ -4007,7 +4007,8 @@ class RunChecksMixin:
         fits_in = self._what_fits(est, limit_s)
         one_s = _estimate.cheapest_setting_s(probes)
         if _estimate.one_fits(one_s, limit_s) and self._asks_plan_before_cut(state, self.quest_root, fits_in):  # type: ignore[attr-defined]
-            text = self._few_fit_text(est, limit_s, fits_in or {})
+            text = self._few_fit_text(est, limit_s, fits_in or {},
+                                      asks=getattr(self.config, "commission", None) is None)  # type: ignore[attr-defined]
             self._log.warning("[execute] %s", text)  # type: ignore[attr-defined]
             print(f"[FI] {text[:1].upper()}{text[1:]}.")
             _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in,  # type: ignore[attr-defined]
@@ -4030,14 +4031,16 @@ class RunChecksMixin:
                 and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(Path(quest_root)).is_file())
 
     @staticmethod
-    def _few_fit_text(est: _estimate.Estimate, limit_s: float, fit: dict[str, Any]) -> str:
-        """The stop's sentence when fewer than one in ten of a study's settings fit (:meth:`_cut_grid`)."""
+    def _few_fit_text(est: _estimate.Estimate, limit_s: float, fit: dict[str, Any], *, asks: bool = True) -> str:
+        """The stop's sentence when fewer than one in ten of a study's settings fit (:meth:`_cut_grid`). ``asks=False``: a
+        commissioned study, which is handed back instead of being asked for again."""
         at_once = f" with {est.at_once} running at the same time" if est.at_once > 1 else ""
         n, total = int(fit.get("settings_that_fit") or 1), int(fit.get("settings") or est.cells)
         return (f"the experiment's {total:,} settings would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}{at_once}, more than the "
-                f"{_estimate.plain_duration(limit_s)} allowed, and only {n:,} of them fit, fewer than one in ten; FI asks the "
-                "plan once for a study that fits before it runs only a part of this one")
+                f"{_estimate.plain_duration(limit_s)} allowed, and only {n:,} of them fit, fewer than one in ten; "
+                + ("FI asks the plan once for a study that fits before it runs only a part of this one" if asks else
+                   "a commissioned study is not made smaller, so it is handed back"))
 
     def _run_up_to_the_limit(self, runner: Any, est: _estimate.Estimate, limit_s: float, one_s: float | None, *, kind: str,
                              base: dict[str, Any] | None = None, planned: dict[str, Any] | None = None,
