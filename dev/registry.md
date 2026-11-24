@@ -503,8 +503,20 @@ same PR that adds, splits or renames one.
   the staged texts (`given_sources` names them), `_progress_stage` quiet (`GIVEN_STAGES`) and `--from ideas|literature|studies`
   say so (`GIVEN_STEPS`); `_design_prompt` adds `prompt_block`; `_node_plan` adds `oracle_gaps` to plan.md's audit list.
   `Engine._return_to_qc` (`write_return`: `return_reason` first, `kind: returned`) hands a study back
-  for one of `RETURN_REASONS`; only `scope_exceeds_cap` is wired (`_node_stuck_no_findings` on `too_long`, with
-  `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no cut). `quality_report._outcome` puts the reason in the line.
+  for one of `RETURN_REASONS`: `scope_exceeds_cap` (`_node_stuck_no_findings` on `too_long`, with
+  `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no
+  cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
+- `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
+  (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value: `excerpt` of the staged
+  full text (a text whose equations were lost is not judged), `mask` (the value withheld from the request), one program
+  from `agents/known_value_program.md` (`program`: the fenced block, `oracle_challenge._FORBIDDEN`, 5-400 lines, no
+  typed-in number near the value), run apart from the quest (`_run_in_env(apart=True)`), read from its `KNOWN_JSON`
+  lines (`printed`) and judged (`judge`: two routes within 3x their combined error, each route within the larger of the
+  tolerance and 3x its error). A mismatch gets a second, independent program (the `oracle_review.numeric` model);
+  `agree` with the first hands the study back (`problem`, `evidence`; `_route_after_plan` ends the graph), anything
+  else goes on as `cannot_judge`. `.fi/known_values.json` (keyed by the commission's sha256: a resume asks nothing
+  again); `plan_block` tells the plan; `fill_checks` writes each named check's kind (`published_value`), expected value,
+  tolerance and source from the commission (a plan's model never types a published value: no word maps to that kind).
 - `core/config.py` — the typed `Config` tree, `rigor_profile: research` (`_RESEARCH_PROFILE`,
   `REQUIRED_REVIEW_ROLES`, `_apply_rigor_profile`), unknown-key auditing.
 - `core/attempt_records.py` — what a quest tried and under which conditions: `.fi/attempts.jsonl` (each run's outcome from `OUTCOMES` and `script_hashes`, each failed-check stop, the quest's four fields from `quest_status`; every line with `context_fingerprint` of a `CONTEXT_KINDS` kind, schema `SCHEMA`, a `record_id`) `.fi/branch_ledger.jsonl` (ideas, design revisions, repairs) and `.fi/model_calls.jsonl` (one line per model call attempt: `model_call_row` / `append_model_call`, written by `Engine._recorded_call` (failed attempts from `provider.CALL_ATTEMPTS`) and `provider.append_cost_row` for the generators; `model_call_gaps` compares it with the engine's per-step `model_call_counts` at the seal and the quest's end; after the seal calls go to `model_calls.after_seal.jsonl`); written by `Engine._record` / `_record_stop` / `_attempt_context`, read by nothing that routes yet.

@@ -392,6 +392,8 @@ async def test_the_plan_is_shown_what_the_commission_fixes_and_plan_md_names_a_k
     prompts: list[str] = []
 
     async def chat(messages: list[dict[str, str]], **_kw: Any) -> str:
+        if messages[-1]["content"].startswith("# Compute a Known Value"):
+            return "(no program)"  # the known value is left unconfirmed (tests/test_known_values.py)
         prompts.append(messages[-1]["content"])
         return json.dumps({**_draft({"n": [1, 2, 4]}, 4), "plan": EXTRA}) if len(prompts) == 1 else _NO_OBJECTIONS
 

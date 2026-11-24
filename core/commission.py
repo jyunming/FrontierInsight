@@ -304,8 +304,8 @@ def prompt_block(data: dict[str, Any], labels: dict[str, str]) -> str:
              f"Question: {data.get('question')}", f"Scope: {data.get('scope')}",
              f"Limits: at most {lim.get('hours')} hours of computing and {lim.get('model_calls')} model calls."]
     known = data.get("known_values") or []
-    lines.append("Known values. Give each one a check in `protocol.oracles` of kind `published_value`, with this exact "
-                 "`name`, the value as `expected`, this `tolerance`, and its source's label as `reference`:"
+    lines.append("Known values. Give each one a check in `protocol.oracles` with this exact `name`, the study's `case` and "
+                 "its `measure`; FI writes its kind, expected value, tolerance and source from the commission:"
                  if known else "Known values: none were given.")
     for kv in known:
         label = labels.get(str(kv["source"]["file"]))

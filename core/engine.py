@@ -2133,7 +2133,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_edge("pause_after_literature", "scope")
         g.add_edge("scope", "select_skills")
         g.add_edge("select_skills", "plan")
-        g.add_edge("plan", "design")
+        # A study handed back at the plan (core/known_values.py) ends there. The edge writes the same channel as the plain
+        # edge it replaced (``branch:to:design``), so a checkpoint saved between plan and design resumes into design.
+        g.add_conditional_edges("plan", self._audited_route("plan", self._route_after_plan), {"design": "design", "returned": END})
         # design → implement (normal sim path) OR auto_collect_data
         # (no-simulation, agent attempts auto-collect via Axon first
         # then wait_for_data handles the pause-if-still-empty case).
@@ -2266,6 +2268,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         return g
 
     # ---- conditional edges --------------------------------------------------
+
+    def _route_after_plan(self, state: QuestState) -> str:
+        return "returned" if (state.get("stuck") or {}).get("return_reason") == "known_value_mismatch" else "design"
 
     def _route_after_design(self, state: QuestState) -> str:
         """When ``no_simulation_resolved`` is set, skip the
