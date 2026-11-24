@@ -475,11 +475,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
             if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
-                # Frozen in the quest (launch.py checked it before this run): its hash goes into the trace and the summary.
                 sha = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
                 self._audit("commission_recorded", sha256=sha, source=str(self.config.commission))
-                self._log.info("[commission] the study was started from %s (sha256 %s); it is kept as inputs/%s",
-                               self.config.commission, sha, _commission.STAGED_NAME)
+                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -1759,8 +1757,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         return self.__dict__["_commission_read"]
 
     def _return_to_qc(self, reason: str, problem: str, evidence: Any, tried: list[str], **rest: Any) -> dict[str, Any]:
-        """Hand a commissioned study back (``needs/STUCK.json`` with ``return_reason`` first): one of
-        :data:`core.commission.RETURN_REASONS`."""
+        """Hand a commissioned study back for one of :data:`core.commission.RETURN_REASONS` (``needs/STUCK.json``)."""
         record = _commission.write_return(self.quest_root, reason, problem, evidence, tried, **rest)
         self._audit("returned", return_reason=reason, problem=problem)
         return record

@@ -1323,8 +1323,7 @@ class IdeasStageMixin:
         return out
 
     async def _commission_literature(self, state: QuestState) -> QuestState:
-        """The literature of a commissioned study: the full texts the commission supplies (``inputs/papers/``), named by
-        the commission's titles and DOIs, and nothing searched for, judged for novelty or broadened."""
+        """A commissioned study's literature: only the full texts it supplies (inputs/papers/), nothing searched for."""
         prior = list(state.get("literature") or [])
         seen = {str((e.get("content") if isinstance(e, dict) else "") or "")[:200] for e in prior}
         merged, added = await asyncio.to_thread(_ingest_user_dropped_papers, self.quest_root, prior, seen, self._log)

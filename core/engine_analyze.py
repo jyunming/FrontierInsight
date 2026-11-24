@@ -1159,7 +1159,6 @@ class AnalyzeStageMixin:
         if aside.is_dir():
             record["set_aside"] = aside.relative_to(self.quest_root).as_posix()
         if self._commissioned() and reason == "too_long":  # type: ignore[attr-defined]
-            # A commissioned study FI's timing says cannot be done in the time allowed is handed back, with what FI measured.
             fit = (state.get("exec_result") or {}).get("too_long_fit")
             fit = fit if isinstance(fit, dict) else {}
             problem = _commission.too_long_problem(fit, said)

@@ -2565,7 +2565,9 @@ class RunChecksMixin:
         (no request to the plan's model). The record of it (the plain note the paper states, the precision those runs give,
         and whether they are fewer than the plan's minimum), or ``None`` when plan.md could not be changed. ``topic``: the
         limit is the one the topic states; ``over_topic``: why that limit cannot be met even so (the run then has the plan's
-        minimum and is over it)."""
+        minimum and is over it). ``None`` for a commissioned study, whose runs FI never lowers (it is handed back)."""
+        if getattr(self.config, "commission", None) is not None:  # type: ignore[attr-defined]
+            return None
         fewer = int(fit.runs)
         path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
         try:
@@ -4053,8 +4055,8 @@ class RunChecksMixin:
         search runs its baseline, its coarse scan, its search and then FI's check, as it always does; the check keeps the
         time it needs (``reserve_s``, never more than half the limit) so the scan and the search cannot take all of it. The
         cut is kept in ``.fi/run_estimate.json`` (``truncated``); the paper and the quality report say what ran from FI's
-        records (:func:`core.disclosure.cut_short_text`)."""
-        if not _estimate.one_fits(one_s, limit_s):
+        records (:func:`core.disclosure.cut_short_text`). A commissioned study is never cut: it stops, and is handed back."""
+        if not _estimate.one_fits(one_s, limit_s) or getattr(self.config, "commission", None) is not None:  # type: ignore[attr-defined]
             return False
         reserve = min(max(0.0, reserve_s), limit_s / 2.0)
         cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),

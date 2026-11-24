@@ -3959,8 +3959,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 return await _watch_quest(cfg, args, supervisor)
             if not (args.watch or args.emit):
                 try:
-                    # Before any model call, and on a resume before the quest's own config.yaml is replaced (run_one):
-                    # a commission's files and passages, or, resumed, that it is the one the quest was started from.
+                    # Before any model call, and before run_one replaces a resumed quest's own config.yaml.
                     _commission.door(cfg.commission,
                                      Path(cfg.output.output_dir) / args.resume if args.resume else None)
                 except _commission.CommissionRefused as e:

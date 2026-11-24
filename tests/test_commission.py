@@ -173,7 +173,7 @@ def test_the_question_becomes_the_topic_and_only_silent_keys_are_turned_off(tmp_
     assert plain.commission is None and plain.pauses.scope == "ask" and plain.engine.evidence_gate_max_broaden == 1
 
 
-def test_a_commission_with_a_missing_key_does_not_build_a_config(tmp_path: Path) -> None:
+def test_a_commission_with_a_missing_key_is_refused_on_load_and_at_the_door(tmp_path: Path) -> None:
     from core import commission
 
     path = _commission(tmp_path / "order", question=None)
@@ -181,8 +181,8 @@ def test_a_commission_with_a_missing_key_does_not_build_a_config(tmp_path: Path)
     yaml.write_text("commission: commission.json\n", encoding="utf-8")
     with pytest.raises(commission.CommissionRefused, match="`question`"):
         Config.from_yaml(yaml)
-    with pytest.raises(ValueError, match="`question`"):
-        Config(commission=path)
+    with pytest.raises(commission.CommissionRefused, match="`question`"):
+        commission.door(path, None)  # a config built in code is refused at the door every start path runs
 
 
 # ---- frozen into the quest; a resume with another stops -----------------------------------------------------------------
@@ -453,3 +453,41 @@ def test_the_web_page_refuses_it_before_a_quest_folder_is_made(tmp_path: Path) -
     r = TestClient(make_app(out)).post("/api/quests/start", json={"yaml": f"commission: {path.as_posix()}\n"})
     assert r.status_code == 400 and "not in its source file" in r.json()["detail"]
     assert [p for p in out.iterdir() if p.is_dir() and (p / ".fi").exists()] == [], "no quest folder"
+
+
+async def _handed_back(eng: Any, patch: dict[str, Any] | None) -> dict[str, Any]:
+    """The stop FI's sizing returned, carried through the gate and the stop step: the record in needs/STUCK.json."""
+    assert patch is not None and patch["exec_result"].get("too_long"), "the study stops instead of being made smaller"
+    state = {"exec_result": patch["exec_result"], "result_json": {}, "iteration": 0,
+             "exec_give_up_reason": patch["exec_result"]["too_long"]}
+    verdict = eng._no_results_verdict(state)
+    assert verdict is not None and verdict["stuck"] is True and not verdict.get("fit_request")
+    await eng._node_stuck_no_findings({**state, "evidence_assessment": verdict})
+    return json.loads((eng.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_a_commissioned_study_one_in_ten_of_whose_settings_fit_is_handed_back_not_cut(tmp_path: Path,
+                                                                                          _timing: None) -> None:
+    from core import run_estimate
+    from tests.test_too_big_to_fit import _sizing
+
+    eng, _model, runner = await _sizing(tmp_path, timeout_s=8, grid={"n": [1, 2, 4], "k": [0, 1]})  # 6 settings, 1 fits
+    eng.config.commission = _commission(tmp_path / "order")
+    record = await _handed_back(eng, await eng._size_the_run({"iteration": 0}, runner, sys.executable, None))
+    assert "truncated" not in run_estimate.read_record(eng.quest_root), "nothing was run cut at the time limit"
+    assert record["return_reason"] == "scope_exceeds_cap" and record["evidence"]["settings"] == 6
+
+
+@pytest.mark.asyncio
+async def test_a_commissioned_study_whose_runs_fi_would_lower_is_handed_back_with_its_runs_kept(tmp_path: Path,
+                                                                                              _timing: None) -> None:
+    from core import plan, run_estimate
+    from tests.test_run_checks import _sizing
+
+    eng, _model, runner, _ex = await _sizing(tmp_path, timeout_s=8, min_runs_per_setting=8)
+    eng.config.commission = _commission(tmp_path / "order")
+    record = await _handed_back(eng, await eng._size_the_run({"iteration": 0}, runner, sys.executable, None))
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "the plan's runs are kept"
+    assert not run_estimate.read_record(eng.quest_root).get("reduced")
+    assert record["return_reason"] == "scope_exceeds_cap" and record["kind"] == "returned"

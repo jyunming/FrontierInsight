@@ -1817,9 +1817,7 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
     "engine": {"phased": True},
 }
 
-# What a commission (``Config.commission``, core/commission.py) turns off where the config is silent: the work the
-# commission has already done (the discussion of the topic, the choice of a study, the search for more sources, the
-# novelty judgement) and the routes that would bring in a new topic or more literature.
+# What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
     "pauses": {"clarify": "off", "scope": "off", "papers": False},
     "knowledge": {"novelty_check": False, "foundational_works": False, "requery_on_low_relevance": False},
@@ -1851,9 +1849,7 @@ class Config(BaseModel):
     # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
     # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
-    # A commission file (core/commission.py) the study starts from instead of a topic: its question becomes the topic,
-    # making ideas and choosing a study are skipped, and only the full texts it supplies are read. A relative path is read
-    # against this config's folder.
+    # A commission file (core/commission.py) the study starts from instead of a topic; relative to this config's folder.
     commission: Path | None = None
 
     @property
@@ -1956,38 +1952,30 @@ class Config(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _apply_commission(cls, data: Any) -> Any:
-        """With a ``commission``: refuse a file that is missing a key or has one of the wrong type, take its question as
-        the topic when the config gives none, and fill ``_COMMISSION_DEFAULTS`` (and the run's time limit from the
-        commission's hours) only where the config is silent. Defined after ``_merge_legacy_pauses`` so it runs before
-        it: a legacy pause flag the config sets counts as said."""
+        """A commission's question as the topic, and ``_COMMISSION_DEFAULTS`` and its hours where the config is silent."""
         if not isinstance(data, dict) or not data.get("commission"):
             return data
         from core import commission as _commission
 
-        data = dict(data)
-        path = Path(str(data["commission"])).expanduser().resolve()
-        found = _commission.read(path)
-        if (problems := _commission.form_problems(found)):
-            raise ValueError(f"the commission {path} cannot be used: " + "; ".join(problems))
-        data["commission"] = path
-        if not str(data.get("topic") or "").strip():
-            data["topic"] = str(found["question"]).strip()
-        said_legacy = {new for section, old, new in _LEGACY_PAUSE_FLAGS
-                       if (old in data[section] if isinstance(data.get(section), dict) else
-                           isinstance(data.get(section), BaseModel) and old in data[section].model_fields_set)}
-        wanted = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
-        wanted["execution"] = {"timeout_s": max(1, int(float(found["limits"]["hours"]) * 3600))}
+        # Runs before _merge_legacy_pauses (defined after it): a legacy pause flag the config sets counts as said.
+        data = {**data, "commission": Path(str(data["commission"])).expanduser().resolve()}
+        found = _commission.read(data["commission"])  # its keys are checked at the door (core/commission.py)
+        if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
+            data["topic"] = found["question"].strip()
+        said = {new for section, old, new in _LEGACY_PAUSE_FLAGS
+                if (old in data[section] if isinstance(data.get(section), dict) else
+                    isinstance(data.get(section), BaseModel) and old in data[section].model_fields_set)}
+        hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
+        wanted = {**_COMMISSION_DEFAULTS, **({"execution": {"timeout_s": max(1, int(float(hours) * 3600))}}
+                                             if isinstance(hours, (int, float)) and hours > 0 else {})}
         for section, values in wanted.items():
             block = data.get(section)
             if isinstance(block, BaseModel):
-                missing = {k: v for k, v in values.items() if k not in block.model_fields_set}
-                if missing:
-                    data[section] = block.model_copy(update=missing)
+                data[section] = block.model_copy(update={k: v for k, v in values.items() if k not in block.model_fields_set})
                 continue
             block = dict(block or {})
-            for key, value in values.items():
-                if block.get(key) is None and not (section == "pauses" and key in said_legacy):
-                    block[key] = value
+            block.update({k: v for k, v in values.items()
+                          if block.get(k) is None and not (section == "pauses" and k in said)})
             data[section] = block
         return data
 
@@ -2042,8 +2030,7 @@ class Config(BaseModel):
         if isinstance(data, dict):
             cls._audit_unknown_keys(data)
             if data.get("commission"):
-                # Read against this file's folder, and refused here in plain words (core/commission.py), not in the
-                # validator, whose error would come back wrapped in pydantic's text.
+                # Refused here in plain words, not in the validator, whose error pydantic would wrap.
                 from core import commission as _commission
 
                 data = {**data, "commission": str(_commission.locate(data["commission"], Path(path).resolve().parent))}

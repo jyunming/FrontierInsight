@@ -501,7 +501,7 @@ same PR that adds, splits or renames one.
   say so (`GIVEN_STEPS`); `_design_prompt` adds `prompt_block`; `_node_plan` adds `oracle_gaps` to plan.md's audit list.
   `Engine._return_to_qc` (`write_return`, `return_record`: `return_reason` first, `kind: returned`) hands a study back
   for one of `RETURN_REASONS`; only `scope_exceeds_cap` is wired (`_node_stuck_no_findings` on `too_long`, with
-  `too_long_problem`; `_no_results_verdict` skips the fit rewrite). `quality_report._outcome` puts the reason in the line.
+  `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no cut). `quality_report._outcome` puts the reason in the line.
 - `core/config.py` — the typed `Config` tree, `rigor_profile: research` (`_RESEARCH_PROFILE`,
   `REQUIRED_REVIEW_ROLES`, `_apply_rigor_profile`), unknown-key auditing.
 - `core/attempt_records.py` — what a quest tried and under which conditions: `.fi/attempts.jsonl` (each run's outcome from `OUTCOMES` and `script_hashes`, each failed-check stop, the quest's four fields from `quest_status`; every line with `context_fingerprint` of a `CONTEXT_KINDS` kind, schema `SCHEMA`, a `record_id`) `.fi/branch_ledger.jsonl` (ideas, design revisions, repairs) and `.fi/model_calls.jsonl` (one line per model call attempt: `model_call_row` / `append_model_call`, written by `Engine._recorded_call` (failed attempts from `provider.CALL_ATTEMPTS`) and `provider.append_cost_row` for the generators; `model_call_gaps` compares it with the engine's per-step `model_call_counts` at the seal and the quest's end; after the seal calls go to `model_calls.after_seal.jsonl`); written by `Engine._record` / `_record_stop` / `_attempt_context`, read by nothing that routes yet.
