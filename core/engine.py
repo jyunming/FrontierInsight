@@ -1740,7 +1740,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
     def _progress_stage(self, node: str) -> None:
         phrase = STAGE_PROGRESS.get(node)
-        if self._commissioned() and node in _commission.GIVEN_STAGES:
+        if self._commissioned() and node in _commission.GIVEN_STAGES and (
+                node != "scope" or self.config.pauses.scope == "off"):
             phrase = _commission.GIVEN_STAGES[node]  # a step the commission gives does not say it is being done
         if phrase:
             self._progress(f"[{node}] {phrase}")

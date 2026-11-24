@@ -432,10 +432,24 @@ async def test_the_summary_carries_the_commission_s_hash(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("value,passage", [(0.888, "measured as 0.8880 at rest"), (0.888, "a ratio of .888"),
                                            (1200, "about 1,200 cycles"), (0.001, "an error of 1e-3"),
-                                           (0.001, "an error of 1 x 10^-3"), (-0.3, "it falls by 0.3"),
+                                           (0.001, "an error of 1 x 10^-3"), (-0.3, "a change of −0.3 per step"),
                                            (25000.0, "a load of 2.5E4 newtons")])
 def test_a_value_is_found_in_its_passage_however_the_number_is_written(value: float, passage: str) -> None:
     from core import commission
 
     assert commission.number_in_text(value, passage)
     assert not commission.number_in_text(value * 1.01, passage)
+    assert not commission.number_in_text(-value, passage), "the sign is part of the number"
+
+
+def test_the_web_page_refuses_it_before_a_quest_folder_is_made(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    path = _commission(tmp_path / "order", known_values=_known(passage="The drain constant is 0.25 per day, said nowhere"))
+    out = tmp_path / "outputs"
+    out.mkdir()
+    r = TestClient(make_app(out)).post("/api/quests/start", json={"yaml": f"commission: {path.as_posix()}\n"})
+    assert r.status_code == 400 and "not in its source file" in r.json()["detail"]
+    assert [p for p in out.iterdir() if p.is_dir() and (p / ".fi").exists()] == [], "no quest folder"

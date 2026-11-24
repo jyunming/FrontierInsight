@@ -55,10 +55,10 @@ _NUMBER = re.compile(r"(?<![\w.])([-+−]?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.\d
 
 def number_in_text(value: float, text: str) -> bool:
     """Whether ``text`` writes the number ``value`` (0.888 as 0.8880 or .888, 1200 as 1,200, 0.001 as 1e-3 or
-    1 x 10^-3); the sign aside, since a passage may state a fall of 0.3 for a value of -0.3."""
-    for _sign, digits, exp in _NUMBER.findall(str(text or "")):
+    1 x 10^-3), with its sign."""
+    for sign, digits, exp in _NUMBER.findall(str(text or "")):
         found = float(digits.replace(",", "")) * 10.0 ** int((exp or "0").replace("−", "-"))
-        if math.isclose(found, abs(float(value)), rel_tol=1e-9, abs_tol=0.0):
+        if math.isclose(-found if sign in ("-", "−") else found, float(value), rel_tol=1e-9, abs_tol=0.0):
             return True
     return False
 
