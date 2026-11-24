@@ -102,6 +102,8 @@ REFUSALS: list[tuple[str, dict[str, Any], str]] = [
     ("missing file", {"known_values": _known(source={"title": "t", "file": "gone.md"})}, "'gone.md'"),
     ("passage not in its file", {"known_values": _known(passage="The drain constant of the reference tank is 0.25 per minute")},
      "passage of the known value 'drain constant' is not in its source file"),
+    ("passage too short to find", {"known_values": _known(passage="0.25 per hour")},
+     "give the sentence of the source that states it, at least 25 characters"),
 ]
 
 
@@ -154,23 +156,37 @@ async def test_the_command_line_refuses_it_before_any_model_call_and_exits_nonze
 
 # ---- the config ------------------------------------------------------------------------------------------------------
 
-def test_the_question_becomes_the_topic_and_only_silent_keys_are_turned_off(tmp_path: Path,
-                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever_the_config_says(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     _commission(tmp_path / "order")
     yaml = tmp_path / "order" / "quest.yaml"
-    yaml.write_text("commission: commission.json\npauses:\n  scope: ask\nengine:\n  clarify_mode: auto\n", encoding="utf-8")
+    yaml.write_text("commission: commission.json\npauses:\n  scope: ask\nengine:\n  clarify_mode: auto\n"
+                    "knowledge:\n  novelty_check: false\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    cfg = Config.from_yaml(yaml)
+    with caplog.at_level("WARNING", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(yaml)
     assert cfg.commission == (tmp_path / "order" / "commission.json").resolve()
     assert cfg.topic == "How fast does a tank drain through outlets of three sizes?"
-    assert cfg.pauses.scope == "ask", "a key the config sets is kept"
-    assert cfg.pauses.clarify == "auto", "a legacy pause flag the config sets counts as said"
+    assert cfg.pauses.scope == "off" and cfg.pauses.clarify == "off", "a step the commission gives stays off"
+    said = [r.getMessage() for r in caplog.records if "are not used" in r.getMessage()]
+    assert len(said) == 1 and "pauses.scope" in said[0] and "engine.clarify_mode" in said[0], said
+    assert "novelty_check" not in said[0], "a setting the commission agrees with is not named"
     assert cfg.pauses.papers is False and cfg.knowledge.novelty_check is False
     assert cfg.knowledge.foundational_works is False and cfg.knowledge.requery_on_low_relevance is False
     assert cfg.engine.evidence_gate_max_broaden == 0 and cfg.engine.enable_analyze_reroute is False
     assert cfg.execution.timeout_s == 2 * 3600, "the commission's hours are the run's time limit when the config is silent"
     plain = Config(topic="a draining tank")
     assert plain.commission is None and plain.pauses.scope == "ask" and plain.engine.evidence_gate_max_broaden == 1
+
+
+def test_the_commission_s_hours_cap_the_run_s_time_limit_the_config_sets(tmp_path: Path) -> None:
+    _commission(tmp_path / "order")
+    yaml = tmp_path / "order" / "quest.yaml"
+    for given, limit in ((99999, 2 * 3600), (600, 600)):  # the smaller one is kept
+        yaml.write_text(f"commission: commission.json\nexecution:\n  timeout_s: {given}\n", encoding="utf-8")
+        assert Config.from_yaml(yaml).execution.timeout_s == limit
+    in_code = Config(commission=tmp_path / "order" / "commission.json", execution=ExecutionConfig(sandbox="venv"))
+    assert in_code.execution.timeout_s == 2 * 3600, "a limit left unset in code is the commission's"
 
 
 def test_a_commission_with_a_missing_key_is_refused_on_load_and_at_the_door(tmp_path: Path) -> None:
@@ -491,3 +507,157 @@ async def test_a_commissioned_study_whose_runs_fi_would_lower_is_handed_back_wit
     assert plan.load_design(eng.quest_root)[0]["protocol"]["runs_per_setting"] == 40, "the plan's runs are kept"
     assert not run_estimate.read_record(eng.quest_root).get("reduced")
     assert record["return_reason"] == "scope_exceeds_cap" and record["kind"] == "returned"
+
+
+# ---- every door that continues a quest; what is frozen stays frozen ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_resume_stops_when_the_quest_s_own_copy_of_the_commission_or_a_source_changed(tmp_path: Path) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    eng = _engine(tmp_path, path)
+
+    async def stop(_root: Any) -> None:
+        raise _Stop()
+
+    eng.executor.setup = stop
+    with pytest.raises(_Stop):
+        await eng.run()
+    root = eng.quest_root
+    commission.door(path, root)  # nothing changed: goes on
+    for rel in ("inputs/commission.json", "inputs/papers/tank_note.md"):  # the file handed over is unchanged
+        before = (root / rel).read_bytes()
+        (root / rel).write_bytes(before.replace(b"0.25", b"0.35"))
+        with pytest.raises(commission.CommissionRefused, match=f"{rel} changed or missing"):
+            commission.door(path, root)
+        (root / rel).write_bytes(before)
+    (root / "inputs" / "papers" / "tank_note.md").unlink()
+    with pytest.raises(commission.CommissionRefused, match="changed or missing"):
+        commission.door(path, root)
+
+
+@pytest.mark.asyncio
+async def test_watching_a_quest_runs_the_same_door_before_it_continues_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+    from core import commission
+
+    monkeypatch.setattr(launch, "_watch_quest", AsyncMock(side_effect=AssertionError("the quest is not continued")))
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "outputs" / "q5"
+    commission.stage(path, root)
+    (root / ".fi").mkdir(parents=True)
+    (root / ".fi" / "state.sqlite").write_bytes(b"")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**data, "scope": "five outlet diameters"}), encoding="utf-8")
+    yaml = tmp_path / "order" / "quest.yaml"
+    yaml.write_text(f"commission: commission.json\nprovider:\n  name: ollama\noutput:\n  output_dir: "
+                    f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    rc = await launch.main_async(launch.parse_args(["--config", str(yaml), "--watch", "q5", "--no-axon-sidecar"]))
+    assert rc == 2 and "not the one quest q5 was started from" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["--config", "--fleet"])
+async def test_a_refused_commission_starts_no_service_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            capsys: pytest.CaptureFixture[str], flag: str) -> None:
+    import launch
+    from core import axon_sidecar
+
+    started: list[int] = []
+    monkeypatch.setattr(axon_sidecar, "ensure_axon_up", lambda *a, **k: started.append(1))
+    monkeypatch.setattr("core.engine.LLMClient.chat", AsyncMock(side_effect=AssertionError("no model call is made")))
+    _commission(tmp_path / "order", doubts=None)
+    yaml = tmp_path / "order" / "quest.yaml"
+    yaml.write_text(f"commission: commission.json\nprovider:\n  name: ollama\noutput:\n  output_dir: "
+                    f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert await launch.main_async(launch.parse_args([flag, str(yaml)])) == 2
+    assert started == [], "the knowledge service was not started for a study that is refused"
+    assert "`doubts`" in capsys.readouterr().err
+
+
+def test_a_number_that_is_one_side_of_a_fraction_is_not_the_value() -> None:
+    from core import commission
+
+    assert not commission.number_in_text(1, "a ratio of 1/2 at rest")
+    assert not commission.number_in_text(2, "a ratio of 1 / 2 at rest")
+    assert commission.number_in_text(1, "a ratio of 1 to 2 at rest")
+    assert commission.number_in_text(0.25, "a drain constant of 0.25/h at rest"), "a unit written with / is no fraction"
+    assert commission.number_in_text(10, "a flow of 10 / min at rest")
+
+
+def _staged_and_read(tmp_path: Path, files: tuple[str, ...]) -> tuple[dict[str, str], int]:
+    """The commission's sources at ``files`` staged into a quest: their staged names, and how many the reader read."""
+    import logging
+
+    from core import commission
+    from core.engine_base import _ingest_user_dropped_papers
+
+    folder = tmp_path / "order"
+    known = [{**_known()[0], "name": f"value {i}", "source": {"title": f"note {i}", "file": rel}}
+             for i, rel in enumerate(files)]
+    path = _commission(folder, known_values=known)
+    for i, rel in enumerate(files):
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_text(f"Source {i}. " + SOURCE_TEXT, encoding="utf-8")
+    root = tmp_path / "out" / "q6"
+    commission.stage(path, root)
+    return commission.staged_names(commission.read(path)), _ingest_user_dropped_papers(
+        root, [], set(), logging.getLogger("test"))[1]
+
+
+def test_two_sources_whose_names_differ_only_in_case_are_both_kept(tmp_path: Path) -> None:
+    names, read = _staged_and_read(tmp_path, ("a/Tank.md", "b/tank.md"))
+    assert len({n.lower() for n in names.values()}) == 2, names
+    assert read == 2, "both sources are read"
+
+
+def test_a_source_named_as_the_papers_reader_skips_is_staged_under_a_name_it_reads(tmp_path: Path) -> None:
+    names, read = _staged_and_read(tmp_path, ("README.md", ".hidden.md"))
+    assert not any(n.startswith(".") or n.lower() == "readme.md" for n in names.values()), names
+    assert read == 2, "every source the commission gives is read"
+
+
+@pytest.mark.asyncio
+async def test_the_settings_a_commission_overrides_are_named_once_in_the_quest_s_run_log(tmp_path: Path) -> None:
+    from core.engine import Engine
+
+    path = _commission(tmp_path / "order")
+    eng = Engine(Config(commission=path, provider=ProviderConfig(name="openai"), pauses=PausesConfig(scope="ask"),
+                        engine=EngineConfig(max_iterations=1, review_loop=False),
+                        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+                        output=OutputConfig(output_dir=tmp_path / "out")))
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=AssertionError("no model call is made")),
+                                    "aclose": AsyncMock()})()
+
+    async def stop(_root: Any) -> None:
+        raise _Stop()
+
+    eng.executor.setup = stop
+    with pytest.raises(_Stop):
+        await eng.run()
+    log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert log.count("settings of the config are not used: pauses.scope.") == 1, log[-2000:]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_by_a_shortened_id_with_a_changed_commission_stops(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+    from core import commission
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", AsyncMock(side_effect=AssertionError("no model call is made")))
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "outputs" / "tank-quest-q8"
+    commission.stage(path, root)
+    (root / ".fi").mkdir(parents=True)
+    (root / ".fi" / "state.sqlite").write_bytes(b"")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**data, "scope": "five outlet diameters"}), encoding="utf-8")
+    yaml = tmp_path / "order" / "quest.yaml"
+    yaml.write_text(f"commission: commission.json\nprovider:\n  name: ollama\noutput:\n  output_dir: "
+                    f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    rc = await launch.main_async(launch.parse_args(["--config", str(yaml), "--resume", "tank-quest", "--no-axon-sidecar"]))
+    assert rc == 2 and "not the one quest tank-quest-q8 was started from" in capsys.readouterr().err

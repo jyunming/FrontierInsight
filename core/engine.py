@@ -475,9 +475,12 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
             if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
-                sha = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
-                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission))
+                files = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
+                sha = files[f"inputs/{_commission.STAGED_NAME}"]
+                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=files)
                 self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
+            if self._commissioned() and self.config._commission_note:
+                self._log.warning("[commission] %s", self.config._commission_note)
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -1738,8 +1741,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
     def _progress_stage(self, node: str) -> None:
         phrase = STAGE_PROGRESS.get(node)
-        if self._commissioned() and node in _commission.GIVEN_STAGES and (
-                node != "scope" or self.config.pauses.scope == "off"):
+        if self._commissioned() and node in _commission.GIVEN_STAGES:
             phrase = _commission.GIVEN_STAGES[node]  # a step the commission gives does not say it is being done
         if phrase:
             self._progress(f"[{node}] {phrase}")

@@ -3540,6 +3540,25 @@ async def run_fleet(
 # ---- entry ---------------------------------------------------------------
 
 
+def _commission_refusal(args: argparse.Namespace) -> str | None:
+    """Why the commission a new quest's YAML (or a fleet's) names cannot be used; None when it can or none is named.
+    Anything else wrong with a YAML is said where it is loaded."""
+    import yaml
+    from core import commission as _commission
+
+    for path in list(args.fleet or []) or ([args.config] if args.config and not (args.resume or args.watch) else []):
+        try:
+            raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        try:
+            if isinstance(raw, dict) and raw.get("commission"):
+                _commission.door(_commission.locate(raw["commission"], Path(path).resolve().parent), None)
+        except _commission.CommissionRefused as e:
+            return str(e)
+    return None
+
+
 async def main_async(args: argparse.Namespace) -> int:
     # --rerun is --resume + re-open-on-terminal: normalize it onto args.resume
     # so all the resume plumbing (validation, checkpoint reuse) applies, and
@@ -3604,6 +3623,9 @@ async def main_async(args: argparse.Namespace) -> int:
         # Listing the steps a quest can be run again from reads its checkpoints only.
         or _list_steps
     )
+    if not (_axon_inert_modes or args.serve or args.ingest) and (refused := _commission_refusal(args)) is not None:
+        print(f"[FI] {refused}", file=sys.stderr)  # before any service starts
+        return 2
     if args.no_axon_sidecar:
         # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
         # environment, not this flag: without this, `--serve --no-axon-sidecar` still started one.
@@ -3956,15 +3978,18 @@ async def main_async(args: argparse.Namespace) -> int:
                     print(f"[FI] {watch_err}".replace("--resume", "--watch"),
                           file=sys.stderr)
                     return 1
-                return await _watch_quest(cfg, args, supervisor)
-            if not (args.watch or args.emit):
+            if not args.emit:
                 try:
                     # Before any model call, and before run_one replaces a resumed quest's own config.yaml.
-                    _commission.door(cfg.commission,
-                                     Path(cfg.output.output_dir) / args.resume if args.resume else None)
+                    # The quest's full id: a shortened one was looked up above.
+                    found_id = args.resume or args.watch
+                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None)
                 except _commission.CommissionRefused as e:
                     print(f"[FI] {e}", file=sys.stderr)
                     return 2
+            if args.watch:
+                return await _watch_quest(cfg, args, supervisor)
+            if not args.emit:
                 from core.provider import missing_api_key
 
                 if (missing := missing_api_key(cfg.provider)) is not None:

@@ -490,16 +490,19 @@ same PR that adds, splits or renames one.
 
 - `core/commission.py` — a study started from a commission file (`Config.commission`) instead of a topic. The file's
   rules live here only: `form_problems` (keys and types, a known value's `case`, a number tolerance, its value written
-  in its own passage, `number_in_text`), `source_problems` (each full text exists, has 200 characters of text, holds its
-  passage by `engine_base._quote_in_source`), `problems` / `validate` (both; what another program runs too). The door
-  is `door`, called by `launch.py` before any `Engine` is built (a new quest validated; a resumed one compared with
-  `recorded_sha` by `resume_problem` before `_refresh_quest_config`); `Config._apply_commission` fills `topic` and
-  `_COMMISSION_DEFAULTS` where the config is silent; `Config.from_yaml` reads the path against the YAML's folder
-  (`locate`). `Engine.run` freezes it (`stage`: `inputs/commission.json`, `inputs/papers/`, `commission_recorded` in the
-  trace; `commission_sha256` in the summary). `Engine._commissioned` makes `ideate` return at once, `literature` read only
+  in its own passage, `number_in_text`, a passage as long as `_quote_in_source` needs), `source_problems` (each full
+  text exists, has 200 characters of text, holds its passage by `engine_base._quote_in_source`), `problems` /
+  `validate` (both; what another program runs too). The door is `door`, called by `launch.py` before any `Engine` is
+  built (`_commission_refusal` before the Axon sidecar for a new quest or a fleet; then a new quest validated, a resumed
+  or watched one compared with `recorded_sha` and with each file `stage` recorded, before `_refresh_quest_config`) and by
+  the web start; `Config._apply_commission` sets `topic`, forces `_COMMISSION_DEFAULTS` (one log line names a setting
+  it overrides) and caps `execution.timeout_s` at `limits.hours`; `Config.from_yaml` reads the path against the YAML's
+  folder (`locate`). `Engine.run` freezes it (`stage`: `inputs/commission.json`, `inputs/papers/` under `staged_names`,
+  names the papers reader keeps; `commission_recorded` with each copy's sha256 in the trace; `commission_sha256` in the
+  summary). `Engine._commissioned` makes `ideate` return at once, `literature` read only
   the staged texts (`given_sources` names them), `_progress_stage` quiet (`GIVEN_STAGES`) and `--from ideas|literature|studies`
   say so (`GIVEN_STEPS`); `_design_prompt` adds `prompt_block`; `_node_plan` adds `oracle_gaps` to plan.md's audit list.
-  `Engine._return_to_qc` (`write_return`, `return_record`: `return_reason` first, `kind: returned`) hands a study back
+  `Engine._return_to_qc` (`write_return`: `return_reason` first, `kind: returned`) hands a study back
   for one of `RETURN_REASONS`; only `scope_exceeds_cap` is wired (`_node_stuck_no_findings` on `too_long`, with
   `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no cut). `quality_report._outcome` puts the reason in the line.
 - `core/config.py` — the typed `Config` tree, `rigor_profile: research` (`_RESEARCH_PROFILE`,

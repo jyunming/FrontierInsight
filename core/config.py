@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 ProviderName = Literal[
     "codex",
@@ -1825,7 +1825,15 @@ _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+def _set_in(block: Any, key: str) -> Any:
+    """The value a config section (a dict, or a model passed in code) was given for ``key``; None when not given."""
+    if isinstance(block, BaseModel):
+        return getattr(block, key, None) if key in block.model_fields_set else None
+    return block.get(key) if isinstance(block, dict) else None
+
+
 class Config(BaseModel):
+    _commission_note: str = PrivateAttr(default="")  # the settings a commission overrode (_apply_commission)
     topic: str
     title: str | None = None
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -1949,35 +1957,41 @@ class Config(BaseModel):
             )
         return data
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def _apply_commission(cls, data: Any) -> Any:
-        """A commission's question as the topic, and ``_COMMISSION_DEFAULTS`` and its hours where the config is silent."""
+    def _apply_commission(cls, data: Any, handler: Any) -> Any:
+        """A commission's question as the topic, ``_COMMISSION_DEFAULTS`` whatever the config says (a setting it
+        overrides is named in ``_commission_note``, which the log and the quest's run.log carry), and its hours as the
+        cap of the execution time limit."""
         if not isinstance(data, dict) or not data.get("commission"):
-            return data
+            return handler(data)
         from core import commission as _commission
 
-        # Runs before _merge_legacy_pauses (defined after it): a legacy pause flag the config sets counts as said.
         data = {**data, "commission": Path(str(data["commission"])).expanduser().resolve()}
         found = _commission.read(data["commission"])  # its keys are checked at the door (core/commission.py)
         if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
             data["topic"] = found["question"].strip()
-        said = {new for section, old, new in _LEGACY_PAUSE_FLAGS
-                if (old in data[section] if isinstance(data.get(section), dict) else
-                    isinstance(data.get(section), BaseModel) and old in data[section].model_fields_set)}
         hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
-        wanted = {**_COMMISSION_DEFAULTS, **({"execution": {"timeout_s": max(1, int(float(hours) * 3600))}}
-                                             if isinstance(hours, (int, float)) and hours > 0 else {})}
-        for section, values in wanted.items():
+        cap = max(1, int(float(hours) * 3600)) if isinstance(hours, (int, float)) and hours > 0 else None
+        given = _set_in(data.get("execution"), "timeout_s")
+        forced = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
+        if cap is not None:
+            numeric = isinstance(given, (int, float)) and not isinstance(given, bool)
+            forced["execution"] = {"timeout_s": min(given, cap) if numeric else cap if given is None else given}
+        # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
+        ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
+                   and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
+        for section, values in forced.items():
             block = data.get(section)
-            if isinstance(block, BaseModel):
-                data[section] = block.model_copy(update={k: v for k, v in values.items() if k not in block.model_fields_set})
-                continue
-            block = dict(block or {})
-            block.update({k: v for k, v in values.items()
-                          if block.get(k) is None and not (section == "pauses" and k in said)})
-            data[section] = block
-        return data
+            ignored += [f"{section}.{k}" for k, v in values.items() if _set_in(block, k) not in (None, v)]
+            data[section] = (block.model_copy(update=values) if isinstance(block, BaseModel)
+                             else {**dict(block or {}), **values})
+        config = handler(data)
+        if ignored:
+            config._commission_note = ("The commission gives the question, the study, the sources and the time allowed, "
+                                       f"so these settings of the config are not used: {', '.join(ignored)}.")
+            logging.getLogger("frontier_insight.config").warning("%s", config._commission_note)
+        return config
 
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:

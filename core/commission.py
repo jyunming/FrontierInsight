@@ -38,12 +38,26 @@ def _text(v: Any) -> bool:
 
 
 def number_in_text(value: float, text: str) -> bool:
-    """Whether ``text`` writes ``value`` with its sign (0.888 as 0.8880 or .888, 1200 as 1,200, 0.001 as 1e-3)."""
-    for sign, digits, exp in _NUMBER.findall(str(text or "")):
+    """Whether ``text`` writes ``value`` with its sign (0.888 as 0.8880 or .888, 1200 as 1,200, 0.001 as 1e-3); a
+    number that is one side of a fraction or ratio of two numbers written with "/" (1/2) is not that value, while a
+    unit written with one (0.25/h) leaves it the value."""
+    text = str(text or "")
+    for m in _NUMBER.finditer(text):
+        if re.search(r"\d\s*/\s*$", text[:m.start()]) or re.match(r"\s*/\s*[-+−]?\.?\d", text[m.end():]):
+            continue
+        sign, digits, exp = m.groups()
         found = float(digits.replace(",", "")) * 10.0 ** int((exp or "0").replace("−", "-"))
         if math.isclose(-found if sign in ("-", "−") else found, float(value), rel_tol=1e-9, abs_tol=0.0):
             return True
     return False
+
+
+def _too_short(passage: str) -> int:
+    """The length ``engine_base._quote_in_source`` needs when ``passage`` is shorter (measured as it does), else 0."""
+    from core.engine_base import _QUOTE_MIN_CHARS, _normalized_text
+
+    have = sum(len(p.strip(" .,;:[]")) for p in re.split(r"\.\.\.", _normalized_text(passage)))
+    return _QUOTE_MIN_CHARS if have < _QUOTE_MIN_CHARS else 0
 
 
 def read(path: Path) -> dict[str, Any]:
@@ -93,6 +107,9 @@ def form_problems(data: dict[str, Any]) -> list[str]:
             out.append(f"{who} has no `case` (the situation it applies to: which form, which parameter values)")
         if not _text(kv.get("passage")):
             out.append(f"{who} has no `passage` (the sentence of its source that states it)")
+        elif (need := _too_short(kv["passage"])):
+            out.append(f"the passage of {who} is too short to be found in its source: give the sentence of the source "
+                       f"that states it, at least {need} characters")
         elif _number(kv.get("value")) and not number_in_text(kv["value"], kv["passage"]):
             out.append(f"the passage of {who} does not state its value {kv['value']}")
         src = kv.get("source") if isinstance(kv.get("source"), dict) else None
@@ -178,14 +195,20 @@ def staged_path(quest_root: Path) -> Path:
 
 
 def staged_names(data: dict[str, Any]) -> dict[str, str]:
-    """Each source file -> its name in inputs/papers/ (numbered when two share one), from the file's words alone."""
+    """Each source file -> its name in inputs/papers/, from the file's words alone: numbered when two share one (case
+    aside), and never a name the papers reader skips (``engine_base._ingest_user_dropped_papers``: a leading "." or
+    README.md)."""
     out: dict[str, str] = {}
     for raw in (str((kv.get("source") or {}).get("file") or "") for kv in data.get("known_values") or []):
         if raw and raw not in out:
-            name, n = Path(raw).name, 1
-            while name in out.values():
+            path, n = Path(raw), 1
+            stem = path.stem.lstrip(".")
+            if path.name.startswith(".") or path.name.lower() == "readme.md":
+                stem = f"source_{stem}"
+            name = f"{stem}{path.suffix}"
+            while name.lower() in {v.lower() for v in out.values()}:
                 n += 1
-                name = f"{Path(raw).stem}-{n}{Path(raw).suffix}"
+                name = f"{stem}-{n}{path.suffix}"
             out[raw] = name
     return out
 
@@ -194,25 +217,33 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def stage(path: Path, quest_root: Path) -> str:
-    """Copy the commission to inputs/commission.json and its full texts to inputs/papers/; return its sha256."""
+def stage(path: Path, quest_root: Path) -> dict[str, str]:
+    """Copy the commission to inputs/commission.json and its full texts to inputs/papers/; return each copy (its path
+    in the quest) -> its sha256, the commission's first."""
     papers = Path(quest_root) / "inputs" / "papers"
     papers.mkdir(parents=True, exist_ok=True)
+    texts = {}
     for raw, name in staged_names(read(path)).items():
         shutil.copy2(_resolve(raw, Path(path).resolve().parent), papers / name)
-    shutil.copy2(path, staged_path(quest_root))
-    return sha256(staged_path(quest_root))
+        texts[f"inputs/papers/{name}"] = sha256(papers / name)
+    shutil.copy2(path, staged_path(quest_root))  # last: this copy is what says the quest was staged
+    return {f"inputs/{STAGED_NAME}": sha256(staged_path(quest_root)), **texts}
 
 
-def recorded_sha(quest_root: Path) -> str | None:
-    """The sha256 of the commission the quest was started from: the last one its trace recorded, else its copy's."""
+def _recorded(quest_root: Path) -> dict[str, Any]:
+    """The last ``commission_recorded`` event of the quest's trace (empty when there is none)."""
     from core import audit_log
 
     trace = Path(quest_root) / ".fi" / "audit.jsonl"
     named = trace.is_file() and "commission_recorded" in trace.read_text(encoding="utf-8", errors="replace")
-    events = [e.get("sha256") for e in (audit_log.read(trace) if named else []) if e.get("kind") == "commission_recorded"]
-    if events and events[-1]:
-        return str(events[-1])
+    events = [e for e in (audit_log.read(trace) if named else []) if e.get("kind") == "commission_recorded"]
+    return events[-1] if events else {}
+
+
+def recorded_sha(quest_root: Path) -> str | None:
+    """The sha256 of the commission the quest was started from: the one its trace recorded, else its copy's."""
+    if _recorded(quest_root).get("sha256"):
+        return str(_recorded(quest_root)["sha256"])
     return sha256(staged_path(quest_root)) if staged_path(quest_root).is_file() else None
 
 
@@ -230,6 +261,13 @@ def door(path: Path | None, quest_root: Path | None) -> None:
         raise CommissionRefused(f"the commission {path} is not the one quest {name} was started from (its content "
                                 "changed), and a commission cannot change after it is handed over; nothing was run. "
                                 "Resume with the file as it was, or start a new quest")
+    root = Path(quest_root or ".")
+    changed = [rel for rel, want in ((_recorded(root).get("files") or {}) if had else {}).items()
+               if not (root / rel).is_file() or sha256(root / rel) != want]
+    if changed:
+        raise CommissionRefused(f"quest {name}'s own copy of what its commission gave is no longer the one it was started "
+                                f"with ({', '.join(changed)} changed or missing); nothing was run. Put the files back as "
+                                "they were, or start a new quest")
     if path is not None and had is None:
         validate(path)
 
