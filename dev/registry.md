@@ -122,15 +122,12 @@ same PR that adds, splits or renames one.
   `went_on_entries` (the gate's automatic go-on for checks that measured nothing too). For quests an earlier FI stopped:
   `launch.py --accept-checks <quest> --approve-as <you>` (`_accept_checks`), `POST /api/quests/{id}/plan/accept-checks`
   and `GET .../plan/unsourced` (the quest page's *Go on as it is*), `@fi /accept-checks` (`skills.ts::runAcceptChecks`).
-  Also going on although a known-answer check was measured and failed (the same flag, button and command; `accept`
-  reads which stop it answers from `.fi/pause.json`): `offer(found, oracles, judged)` (offered only when every problem
-  is a measured failure; else why not), `script_version` (hash of the script the checks ran + helper modules beside it + the model's package),
-  `accept_failing` (`needs/FAILED_CHECKS_ACCEPTED.json`, bound to the fingerprint and the code version),
-  `failing_pending` (the stop's `go_on` in `needs/ORACLE_CHECK.json`; the web payload's `failed_checks`), `went_on_by`
-  / `no_longer_applies`, `gap` (the evidence's sentence, person or `automatic`), `failing_disclosure` (the writer's
-  note). Engine side: `_oracle_gate` honours a choice via `_chosen_go_on` before any plan change or repair, an
-  exploration goes on by itself via `_goes_on_by_itself`, the record's status is `went_on_failing`
-  (`_measuring_code_version`); `core/todo.py::waiting` lists it, `core/evidence.py` keeps the gap.
+  A known-answer check that was measured and failed is never put to a person (a person's choice to go on was deleted):
+  `offer(found, oracles, judged)` (the measured failures, when every problem is one), `script_version` (hash of the
+  script the checks ran + helper modules beside it + the model's package), `gap` (the evidence's sentence, `automatic`),
+  `failing_disclosure` (the writer's note). Engine side: `_oracle_gate` goes on by itself via `_goes_on_by_itself`, the
+  record's status is `went_on_failing` (`_measuring_code_version`); `core/todo.py::waiting` lists it, `core/evidence.py`
+  keeps the gap.
   `vscode-frontier-insight/src/resume-args.ts` (no VS Code import, run by a test with node): `splitRevisePlan` (`/resume
   <id> --revise-plan "..."` goes the `/plan` way) and `unknownResumeFlags` (any other flag is said, and nothing runs).
   `launch._plan_sources_status` prints, after `--revise-plan`, which checks still lack a source.
