@@ -62,7 +62,7 @@ $design_block
 $analysis_block
 
 ## Claim grounding (which paper claims trace to evidence)
-$claim_grounding_block$foundational_check_block$user_feedback_block$code_findings_block
+$claim_grounding_block$user_feedback_block$code_findings_block
 
 ## Paper draft
 (The measured run time and the trial counts are filled in by FI from its own records, between `<!-- fi:fact-... -->` markers; FI checks them after you, so do not judge them from memory and never ask for them to be changed or extended. What the study did not do, any point of an earlier review that no round answered, how the design was revised, how many runs were made, FI's record of the run (the seed the code used and the topic's time limit among it) and what a second reading of the code left open are in FI's quality report, not in the paper; the open points in the code are listed under "Open points in the code" in the Inputs above when there are any. A block between `<!-- fi:... -->` markers, such as the best design section, is written by FI and no revision can change it, so never ask for it to be edited or removed. The figures and their captions are FI's too, placed and written from its record of what each figure draws: never ask for a figure or a caption to be changed.)

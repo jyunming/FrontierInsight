@@ -676,7 +676,7 @@ _KNOWN_NODES = frozenset({
     # No-simulation routing: triggered when ``simulatability == "no"``.
     # web_plots/web_figures derive figures from collected web + literature
     # data on the no-simulation path.
-    "auto_collect_data", "wait_for_data", "data_load",
+    "wait_for_data", "data_load",
     "web_plots", "web_figures",
 })
 
@@ -690,7 +690,7 @@ _KNOWN_NODES = frozenset({
 # "[select_skills]"); "after_literature" -> `_node_pause_after_literature` (same mismatch); "stats"
 # -> `_node_analyze`; "numeric_oracle"/"stat_claims"/"figure_check"/"goal_coverage"/
 # "number_provenance"/"page_limit" -> `_node_review` (the reference-value/claim/figure/topic/page-limit checks
-# it runs before accepting or sending back; "number_provenance" is kept for older run logs); "auto_collect" -> `_node_auto_collect_data`. Left out
+# it runs before accepting or sending back; "number_provenance" is kept for older run logs). Left out
 # on purpose: "evidence" (written by `run()` after the graph settles, not from inside any one
 # node), "cost" (an ``_ensemble_chat`` line any ensembled node can log), "audit" (the audit-trace
 # wrapper around every node) — none names a single node truthfully.
@@ -708,7 +708,6 @@ _NODE_TAG_ALIASES: dict[str, str] = {
     "goal_coverage": "review",
     "number_provenance": "review",
     "page_limit": "review",
-    "auto_collect": "auto_collect_data",
 }
 
 

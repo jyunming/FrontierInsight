@@ -365,10 +365,6 @@ def approve(quest_root: Path, cfg: Any, *, say: Callable[[str], Any] | None = No
 
         from core import audit_log
 
-        # A changed quest has not answered a papers pause it was stopped at, and asks again for papers it comes back to.
-        from core.engine import forget_papers_asked
-
-        forget_papers_asked(fi_dir)
         # Written also when the quest has not run yet: the first run then compares against this approval.
         audit_log.AuditLog(fi_dir / "audit.jsonl", quest_root.name).append(
             "plan_settings_recorded", node="update",

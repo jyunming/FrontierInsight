@@ -34,8 +34,8 @@ async def test_the_skills_step_forks_where_the_code_step_does_and_is_reached_wit
                     ("execute",), ("analyze",)])
     assert await rerun_from.reached(graph, {}) == ["plan", "design", "skills", "code", "run", "analysis"]
     assert (await rerun_from.checkpoint_before(graph, {}, "skills"))["configurable"]["checkpoint_id"] == "3"
-    # No simulation: the data is collected instead of the code written; the skills were picked before either.
-    graph = _Graph([("design",), ("auto_collect_data",), ("wait_for_data",), ("data_load",), ("analyze",)])
+    # No simulation: the data is waited for instead of the code written; the skills were picked before either.
+    graph = _Graph([("design",), ("wait_for_data",), ("data_load",), ("analyze",)])
     assert await rerun_from.reached(graph, {}) == ["design", "skills", "run", "analysis"]
     assert (await rerun_from.checkpoint_before(graph, {}, "skills"))["configurable"]["checkpoint_id"] == "1"
     # A quest that stopped before the code has no step to pick the skills again from.

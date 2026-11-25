@@ -19,8 +19,8 @@ from .engine_base import (  # noqa: F401
     _code_project, _code_review, _cs, _disclosure, _discover_skill_names, _equation_tests, _experiment_deps,
     _extension_values, _figure_facts, _figure_label_findings, _figure_list_for_prompt, _figure_plan, _figures_drawn,
     _finalize_paper_sources, _finalize_with_numbering, _format_clarify, _format_cross_check, _format_evidence_note,
-    _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, _foundational_sources,
-    _foundational_write_block, _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
+    _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, 
+    _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
     _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
@@ -32,7 +32,7 @@ from .engine_base import (  # noqa: F401
     _resolve_selected_skills, _results_by_setting, _retractions, _review_items, _review_sends_the_experiment_back,
     _run_facts, _same_statement, _second_impl, _skeleton, _skill_mount_plan, _source_text, _split_figure_readings,
     _split_run, _stop_power, _strip_outer_fence, _take_out_unpointed, _take_refine_points, _take_refine_why,
-    _topic_req, _trial_table, _trim_further_reading, _uncited_foundational_works, _unsupported_still_in,
+    _topic_req, _trial_table, _trim_further_reading, _unsupported_still_in,
     _web_labels_cited, _words_to_cut, asyncio, build_further_reading, build_references, goal_coverage, json, os,
     paper_patch, paper_trim, pip_failure_summary, re, resolve_page_limit, shutil, web_pages_listed,
 )
@@ -248,10 +248,6 @@ class WriteStageMixin:
             literature_block=_format_lit_from_state(
                 state, audience=self.config.output.audience,
                 mark_thin=True, **self._lit_kwargs(state),
-            ),
-            # Empty when the prior-work block holds no foundational work.
-            foundational_block=_foundational_write_block(
-                state.get("literature") or [], self.config.output.audience,
             ),
             figure_list=_figure_list_for_prompt(state, root=self.quest_root),
             clarify_block=_format_clarify(state),
@@ -811,18 +807,6 @@ class WriteStageMixin:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
                 ", ".join(f"[{n}]" for n in dropped),
-            )
-        # What the foundational works came to: how many were in the prior-work
-        # block and which of them the draft cites, so a paper that leaves the
-        # field's original papers out can be found in the run log.
-        foundational = _foundational_sources(literature, self.config.output.audience)
-        if foundational:
-            left_out = _uncited_foundational_works(literature, markdown, self.config.output.audience)
-            self._log.info(
-                "[write] foundational works in the prior-work block: %d; the draft cites %d; "
-                "not cited: %s",
-                len(foundational), len(foundational) - len(left_out),
-                "; ".join(str(meta.get("title") or "") for _label, meta in left_out) or "-",
             )
         # The figures are FI's: every figure of the run goes in under the number the writer was given, with the caption
         # FI writes from its record of what the figure draws, and every image the draft wrote itself is taken out. No

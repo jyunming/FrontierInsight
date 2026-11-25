@@ -322,9 +322,9 @@ returns nothing for it.
 Where a connection cannot return reasoning, `run.log` says so once in plain
 words instead of repeating "returned no reasoning" at every step.
 
-**Which nodes.** Five nodes have been measured on a cheaper model:
-`cross_check`, `select_skills`, `literature_screen`, `slides` and
-`poster`. On one simulation topic, three runs each (codex, `terra` on
+**Which nodes.** Five nodes were measured on a cheaper model:
+`cross_check`, `select_skills`, `slides`, `poster` and a literature-screening
+step FI no longer has. On one simulation topic, three runs each (codex, `terra` on
 every node against the same with these five on `luna`, effort pinned),
 the cheaper arm used about 15% fewer tokens in every one of the three
 pairs, and the paper, slide and poster scores did not drop (paper mean

@@ -78,16 +78,18 @@ class BenchEngine(Engine):
             self._add_search_hits(extra_hits)
 
     def _add_search_hits(self, hits: list[dict[str, Any]]) -> None:
-        """Every literature search of this run also returns ``hits`` (a planted source, plant.py::plant_l1)."""
-        from core.knowledge import RetrievedDoc
+        """Every literature step of this run also reads ``hits`` (a planted source, plant.py::plant_l1), as if the
+        commission had given it: it goes through the same retraction lookup as the sources the commission gives."""
+        self._planted_sources = [{"content": h["content"], "metadata": dict(h["metadata"])} for h in hits]
 
-        search = self.knowledge.asearch
-
-        async def asearch(*a: Any, **kw: Any) -> list[Any]:
-            found = list(await search(*a, **kw) or [])
-            return found + [RetrievedDoc(content=h["content"], metadata=dict(h["metadata"])) for h in hits]
-
-        self.knowledge.asearch = asearch  # type: ignore[method-assign]
+    async def _commission_literature(self, state: Any) -> Any:
+        planted = getattr(self, "_planted_sources", None)
+        if planted:
+            have = {str((e.get("metadata") or {}).get("doi") or "") for e in state.get("literature") or []
+                    if isinstance(e, dict)}
+            state = {**state, "literature": list(state.get("literature") or [])
+                     + [p for p in planted if str(p["metadata"].get("doi") or "") not in have]}
+        return await super()._commission_literature(state)
 
     async def _connect_llm(self) -> None:
         replay = self._bench_replay

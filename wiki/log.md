@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-25 — no search by topic
+
+Updated [[literature-screening-record|Literature screening record]] (only the retraction lookup is left) and [[pauses|Pauses]] (no papers pause), and the fence page. FI no longer searches the literature by topic, finds no foundational works and collects no data by search: the literature step reads the commission's own sources, and a study with no simulation goes from `design` straight to `wait_for_data`. A checkpoint stopped before the removed data-search step is refused with one line.
+
+Sources: core/engine.py, core/engine_ideas.py, core/engine_data.py, core/config.py, dev/registry.md.
+
 ## 2026-11-14 — the engine is split by stage
 
 No page changed. `core/engine.py` now holds the `Engine` class, its graph and its run loop; what was at module level is in `core/engine_base.py`, and the methods of each stage are in `core/engine_<stage>.py` (ideas, plan, data, code, improve, run, analyze, write, review). A page whose sources list `core/engine.py` may mean any of these files; `dev/registry.md` says which.

@@ -93,45 +93,7 @@ def test_poster_band_escapes_latex_and_prints_no_url() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_relevance_guard_keeps_only_ontopic(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)  # relevance_guard defaults True
-    docs = [
-        RetrievedDoc("SpaceX booked $8B", {"title": "SpaceX revenue 2023"}),
-        RetrievedDoc("B-meson CP violation", {"title": "LHCb B-meson decays"}),
-    ]
 
-    async def fake_chat(prompt, *, node=None):
-        assert node == "relevance_guard"
-        return '{"relevant_indices": [0]}'
-    eng._chat = fake_chat
-
-    kept = asyncio.run(eng._filter_relevant_docs("SpaceX revenue", docs))
-    assert [d.metadata["title"] for d in kept] == ["SpaceX revenue 2023"]
-
-
-def test_relevance_guard_fails_open_on_bad_response(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    docs = [RetrievedDoc("x", {"title": "a"}), RetrievedDoc("y", {"title": "b"})]
-
-    async def fake_chat(prompt, *, node=None):
-        return "I am not JSON"
-    eng._chat = fake_chat
-
-    kept = asyncio.run(eng._filter_relevant_docs("topic", docs))
-    assert kept == docs  # fail-open: never drop the whole corpus on a hiccup
-
-
-def test_relevance_guard_disabled_is_passthrough(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_guard = False
-    docs = [RetrievedDoc("x", {"title": "a"})]
-
-    async def must_not_call(prompt, *, node=None):
-        raise AssertionError("guard disabled — no LLM call expected")
-    eng._chat = must_not_call
-
-    kept = asyncio.run(eng._filter_relevant_docs("topic", docs))
-    assert kept == docs
 
 
 # ---------------------------------------------------------------------------
@@ -252,50 +214,6 @@ def test_web_plots_passthrough_in_simulation_mode(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_literature_seed_counts_without_duplicating(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    state = {"literature": [
-        {"content": "EV outlook body", "metadata": {
-            "source": "web_search", "kind": "web_page",
-            "title": "IEA Global EV Outlook", "url": "https://iea.org/ev"}},
-        {"content": "internal", "metadata": {"kind": "fi_paper_spine", "title": "mem"}},
-        {"content": "x", "metadata": {}},  # no title/url → skipped
-    ]}
-    n = eng._literature_seed_step(state)
-    assert n == 1   # one citable web source counted (internal + untitled skipped)
-    # No duplicate copy is written: the sources already live in
-    # data/literature/ (written by the literature node) and data_load walks
-    # the whole data/ tree, so a second copy would only double-feed them.
-    assert not (eng.quest_root / "data" / "auto_collected").exists()
-
-
-def test_auto_collect_reuses_literature_without_requery(tmp_path: Path) -> None:
-    """The fix for the live-run failure: when the literature node already
-    fetched sources, the no-sim collector writes those to disk and does NOT
-    re-query the web (which can be rate-limited and come back empty)."""
-    eng = _engine(tmp_path)
-    called = {"asearch": False}
-
-    async def fake_asearch(*a, **k):
-        called["asearch"] = True
-        return []
-    eng.knowledge.asearch = fake_asearch
-    eng.knowledge.enabled = True
-
-    state = {
-        "no_simulation_resolved": True, "topic": "ev market share",
-        "literature": [{
-            "content": "2018: 2.0M, 2024: 17M EVs sold",
-            "metadata": {"source": "web_search", "kind": "web_page",
-                         "title": "IEA EV Outlook", "url": "https://iea.org/ev"}},
-        ],
-    }
-    out = asyncio.run(eng._node_auto_collect_data(state))
-    assert out["auto_collected_count"] >= 1
-    assert called["asearch"] is False  # reused literature; no redundant web query
-    # The reuse path counts the already-downloaded sources but writes NO
-    # duplicate copy — they already live in data/literature/.
-    assert not (eng.quest_root / "data" / "auto_collected").exists()
 
 
 def test_write_literature_files_persists_citable_corpus(tmp_path: Path) -> None:
@@ -328,50 +246,6 @@ def test_write_literature_files_no_citable_leaves_no_dir(tmp_path: Path) -> None
     assert not out_dir.exists()
 
 
-def test_node_literature_downloads_corpus_for_every_quest(tmp_path: Path) -> None:
-    """The literature node downloads its retrieved sources to
-    data/literature/ for EVERY quest — including simulation quests, which
-    never reach auto_collect_data. Builds a simulation engine
-    (no_simulation=False) and asserts the corpus lands on disk."""
-    from core.knowledge import RetrievedDoc
-
-    cfg = Config(
-        topic="t", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="off"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    eng = Engine(cfg)
-    qr = tmp_path / "quest"
-    qr.mkdir(exist_ok=True)
-    eng.quest_root = qr
-
-    docs = [
-        RetrievedDoc(content="IATA reports RPK back to 103% by 2024",
-                     metadata={"source": "web_search", "kind": "web_page",
-                               "title": "IATA Global Outlook",
-                               "url": "https://iata.org/outlook"}),
-        RetrievedDoc(content="x", metadata={}),  # no title/url → skipped
-    ]
-
-    async def fake_asearch(*a, **k):
-        return docs
-    eng.knowledge.asearch = fake_asearch  # type: ignore[method-assign]
-
-    out = asyncio.run(eng._node_literature({
-        "topic": "air travel recovery 2019-2024",
-        "chosen_idea": {"title": "Air travel recovery"},
-    }))
-    lit_dir = qr / "data" / "literature"
-    assert lit_dir.is_dir(), "simulation quest must still download data/literature/"
-    files = list(lit_dir.glob("lit_*.md"))
-    assert len(files) == 1  # only the citable source is written to disk
-    assert "https://iata.org/outlook" in files[0].read_text(encoding="utf-8")
-    # The node still returns BOTH retrieved docs for downstream nodes
-    # (the non-citable one is kept in state but not downloaded).
-    assert len(out["literature"]) == 2
-
 
 # ---------------------------------------------------------------------------
 # Literature relevance floor (deterministic embedding filter)
@@ -382,85 +256,9 @@ def _lit_docs(*titles: str) -> list:
     return [{"content": t, "metadata": {"title": t}} for t in titles]
 
 
-def test_relevance_floor_drops_off_topic(monkeypatch, tmp_path: Path) -> None:
-    """Docs scoring below relevance_min_score are dropped; on-topic kept."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.2
-    eng.config.knowledge.relevance_min_keep = 1
-    docs = _lit_docs("History of Sculpture", "Change-Point Detection Math")
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.6, 0.05])
-    kept = eng._filter_docs_by_relevance("sculpture history", docs)
-    assert [d["metadata"]["title"] for d in kept] == ["History of Sculpture"]
 
 
-def test_relevance_floor_retention_never_starves(monkeypatch, tmp_path: Path) -> None:
-    """When every doc is below the floor, retain the top min_keep by score
-    (never empty the corpus)."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.5
-    eng.config.knowledge.relevance_min_keep = 2
-    docs = _lit_docs("a", "b", "c")
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.10, 0.30, 0.05])
-    kept = {d["metadata"]["title"] for d in eng._filter_docs_by_relevance("t", docs)}
-    assert kept == {"a", "b"}  # top-2 by score, though both below 0.5
 
-
-def test_relevance_floor_fail_open_without_embeddings(monkeypatch, tmp_path: Path) -> None:
-    """No embeddings available (FI_OFFLINE / no model) → never filter blind."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.2
-    docs = _lit_docs("a", "b")
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
-    assert eng._filter_docs_by_relevance("t", docs) == docs
-
-
-def test_relevance_floor_disabled_at_zero(monkeypatch, tmp_path: Path) -> None:
-    """relevance_min_score=0 is a passthrough that never even embeds."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.0
-    called = []
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: called.append(1) or [0.0])
-    docs = _lit_docs("a", "b")
-    assert eng._filter_docs_by_relevance("t", docs) == docs
-    assert not called  # short-circuited before embedding
-
-
-def test_node_literature_applies_relevance_floor(monkeypatch, tmp_path: Path) -> None:
-    """End-to-end: the literature node drops off-topic retrieved docs so only
-    on-topic sources land in data/literature/ and in state."""
-    from core.knowledge import RetrievedDoc
-    import core.passages as pmod
-    eng = _engine(tmp_path)  # the floor is mode-independent (runs in _node_literature)
-    eng.config.knowledge.relevance_min_score = 0.2
-    eng.config.knowledge.relevance_min_keep = 1
-    docs = [
-        RetrievedDoc(content="movie character figurines history",
-                     metadata={"title": "Sculpture in Pop Culture",
-                               "url": "https://ex.com/sculpt", "kind": "web_page"}),
-        RetrievedDoc(content="kernel change-point detection",
-                     metadata={"title": "Change-Point Algorithm",
-                               "url": "https://arxiv.org/abs/x", "kind": "web_page"}),
-    ]
-
-    async def fake_asearch(*a, **k):
-        return docs
-    eng.knowledge.asearch = fake_asearch  # type: ignore[method-assign]
-    # On-topic doc scores high, off-topic low.
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.55, 0.04])
-
-    out = asyncio.run(eng._node_literature({
-        "topic": "the evolution of sculpture in pop culture",
-        "chosen_idea": {"title": "pop-culture sculpture"},
-    }))
-    titles = [d["metadata"].get("title") for d in out["literature"]]
-    assert titles == ["Sculpture in Pop Culture"]  # off-topic dropped
-    files = list((eng.quest_root / "data" / "literature").glob("lit_*.md"))
-    assert len(files) == 1
-    assert "Change-Point" not in files[0].read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -688,86 +486,10 @@ def test_arxiv_ids_from_literature_old_and_new_style(tmp_path: Path) -> None:
 # good" from "everything missed", which is what gates the requery.
 
 
-def test_stats_reports_docs_above_floor(monkeypatch, tmp_path: Path) -> None:
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.4
-    eng.config.knowledge.relevance_min_keep = 2
-    docs = _lit_docs("a", "b", "c")
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.9, 0.1, 0.05])
-    stats: dict = {}
-    eng._filter_docs_by_relevance("t", docs, stats=stats)
-    assert stats["scored"] is True
-    assert stats["above_floor"] == 1        # only "a" cleared it on merit
-    assert stats["best"] == pytest.approx(0.9)
 
 
-def test_stats_zero_above_floor_when_all_missed(monkeypatch, tmp_path: Path) -> None:
-    """min_keep padding must NOT be counted as docs that cleared the floor."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.5
-    eng.config.knowledge.relevance_min_keep = 3
-    docs = _lit_docs("a", "b", "c")
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: [0.1, 0.2, 0.05])
-    stats: dict = {}
-    kept = eng._filter_docs_by_relevance("t", docs, stats=stats)
-    assert len(kept) == 3                   # never-starve kept all three
-    assert stats["above_floor"] == 0        # but none earned their place
 
 
-def test_stats_marks_unscored_when_embeddings_absent(monkeypatch, tmp_path: Path) -> None:
-    """No scores → requery must not fire (retrying blind just costs money)."""
-    import core.passages as pmod
-    eng = _engine(tmp_path)
-    eng.config.knowledge.relevance_min_score = 0.2
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
-    stats: dict = {}
-    eng._filter_docs_by_relevance("t", _lit_docs("a"), stats=stats)
-    assert stats["scored"] is False
-    assert "above_floor" not in stats
-
-
-@pytest.mark.asyncio
-async def test_requery_proposes_alternative_query(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-
-    async def fake_chat(prompt, node=""):
-        assert node == "literature_requery"
-        assert "off-topic" in prompt
-        return '{"query": "metal oxide resist stochastic printing failure"}'
-
-    eng._chat = fake_chat
-    q = await eng._propose_literature_queries(
-        "EUV resist line edge roughness", ["euv ler"], _lit_docs("Unrelated Paper"),
-    )
-    assert q == "metal oxide resist stochastic printing failure"
-
-
-@pytest.mark.asyncio
-async def test_requery_rejects_repeat_of_tried_query(tmp_path: Path) -> None:
-    """Returning a query we already ran would loop without new information."""
-    eng = _engine(tmp_path)
-
-    async def fake_chat(prompt, node=""):
-        return '{"query": "euv ler"}'
-
-    eng._chat = fake_chat
-    assert await eng._propose_literature_queries(
-        "topic", ["EUV LER"], _lit_docs("x"),
-    ) == ""
-
-
-@pytest.mark.asyncio
-async def test_requery_degrades_to_empty_on_model_failure(tmp_path: Path) -> None:
-    """A flaky model must degrade to today's behaviour, not crash the node."""
-    eng = _engine(tmp_path)
-
-    async def boom(prompt, node=""):
-        raise RuntimeError("provider down")
-
-    eng._chat = boom
-    assert await eng._propose_literature_queries("t", ["q"], _lit_docs("x")) == ""
 
 
 # --- the first query: keywords, not the topic statement ---------------------
@@ -777,66 +499,8 @@ async def test_requery_degrades_to_empty_on_model_failure(tmp_path: Path) -> Non
 # where a 79-character keyword query found three on-target papers.
 
 
-@pytest.mark.asyncio
-async def test_first_query_is_derived_from_the_topic(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng.config.knowledge.enabled = True
-    seen: dict = {}
-
-    facets = [
-        "damped harmonic oscillator numerical integrators",
-        "energy drift symplectic integration",
-        "numerical methods ordinary differential equations",
-    ]
-
-    async def fake_chat(prompt, node=""):
-        seen["node"], seen["prompt"] = node, prompt
-        return json.dumps({"queries": facets})
-
-    eng._chat = fake_chat
-    qs = await eng._derive_literature_queries(
-        "Compare how accurately explicit Euler and RK4 track a damped oscillator.",
-        "Integrator bake-off",
-    )
-    assert qs == facets
-    assert seen["node"] == "literature_query"
-    assert "Integrator bake-off" in seen["prompt"]
 
 
-@pytest.mark.asyncio
-async def test_derivation_spends_no_call_when_retrieval_is_off(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)  # knowledge.enabled=False
-
-    async def must_not_call(prompt, node=""):
-        raise AssertionError("nothing would read the query")
-
-    eng._chat = must_not_call
-    assert await eng._derive_literature_queries("topic") == []
-
-
-@pytest.mark.asyncio
-async def test_derivation_rejects_the_topic_echoed_back(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng.config.knowledge.enabled = True
-    sentence = " ".join(["word"] * 40)
-
-    async def echo(prompt, node=""):
-        return '{"query": "' + sentence + '"}'
-
-    eng._chat = echo
-    assert await eng._derive_literature_queries(sentence) == []
-
-
-@pytest.mark.asyncio
-async def test_derivation_degrades_to_empty_on_model_failure(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng.config.knowledge.enabled = True
-
-    async def boom(prompt, node=""):
-        raise RuntimeError("provider down")
-
-    eng._chat = boom
-    assert await eng._derive_literature_queries("t") == []
 
 
 async def _literature_queries(monkeypatch, tmp_path: Path, chat) -> tuple[list, dict]:
@@ -859,26 +523,3 @@ async def _literature_queries(monkeypatch, tmp_path: Path, chat) -> tuple[list, 
     return sent, patch
 
 
-@pytest.mark.asyncio
-async def test_literature_node_searches_with_the_derived_query(
-    monkeypatch, tmp_path: Path,
-) -> None:
-    async def chat(prompt, node=""):
-        assert node == "literature_query"
-        return '{"query": "numerical integrators damped oscillator"}'
-
-    sent, patch = await _literature_queries(monkeypatch, tmp_path, chat)
-    assert sent == ["numerical integrators damped oscillator"]
-    assert patch["literature_query"] == "numerical integrators damped oscillator"
-
-
-@pytest.mark.asyncio
-async def test_literature_node_keeps_the_old_query_when_derivation_fails(
-    monkeypatch, tmp_path: Path,
-) -> None:
-    async def chat(prompt, node=""):
-        raise RuntimeError("provider down")
-
-    sent, patch = await _literature_queries(monkeypatch, tmp_path, chat)
-    assert sent == ["Bake-off A long topic statement\nwith a second line."]
-    assert patch["literature_query"] == sent[0]

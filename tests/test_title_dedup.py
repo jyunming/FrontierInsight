@@ -99,28 +99,3 @@ def test_references_list_one_entry_per_work() -> None:
     refs = build_references(lit, audience="external")
     assert [r["n"] for r in refs] == [1, 2]
     assert refs[1]["title"].startswith("A different study")
-
-
-@pytest.mark.asyncio
-async def test_literature_node_merge_drops_a_same_title_copy(tmp_path: Path) -> None:
-    cfg = Config(
-        topic="t", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "out"),
-        pauses={"papers": False},  # about dedup, not the paywalled-paper pause
-    )
-    eng = Engine(cfg)
-
-    async def fake_search(query, **kw):  # noqa: ANN001
-        return [
-            RetrievedDoc(content="a", metadata={"doi": "10.1/one", "title": RK4}),
-            RetrievedDoc(content="b", metadata={"doi": "10.1/two", "title": RK4.lower()}),
-            RetrievedDoc(content="c", metadata={"doi": "10.1/three", "title": "Energy drift in symplectic schemes"}),
-        ]
-
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-    patch = await eng._node_literature({"topic": "t", "chosen_idea": {"title": "T"}})
-    dois = [e["metadata"]["doi"] for e in patch["literature"]]
-    assert dois == ["10.1/one", "10.1/three"]

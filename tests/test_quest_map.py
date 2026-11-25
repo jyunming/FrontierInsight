@@ -68,7 +68,7 @@ def test_status_says_finished_stopped_here_and_not_reached() -> None:
     for name in ("implement", "execute", "analyze", "write", "review"):
         assert nodes[name]["status"] == "todo", name
     # The other path is off whatever the checkpoint says.
-    assert all(nodes[n]["status"] == "off" for n in ("auto_collect_data", "wait_for_data", "data_load", "web_figures"))
+    assert all(nodes[n]["status"] == "off" for n in ("wait_for_data", "data_load", "web_figures"))
 
 
 def test_a_finished_quest_has_nothing_that_is_still_open() -> None:
@@ -91,7 +91,7 @@ def test_a_quest_that_reached_nothing_is_all_not_reached() -> None:
 
 def test_a_node_on_the_other_path_is_never_clickable() -> None:
     nodes = {n["node"]: n for n in rerun_from.node_map(_steps(set(rerun_from.STEPS)))}
-    assert not nodes["auto_collect_data"]["clickable"] and not nodes["data_load"]["clickable"]
+    assert not nodes["data_load"]["clickable"]
     assert nodes["execute"]["clickable"]
 
 
@@ -232,7 +232,7 @@ def test_the_node_a_quest_stopped_in_is_now_even_when_it_is_not_a_step() -> None
     # On the data path the same pause is where the quest stopped.
     nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"literature", "plan", "design", "skills", "run"}),
                                                        no_simulation=True, at=["wait_for_data"])}
-    assert nodes["wait_for_data"]["status"] == "now" and nodes["auto_collect_data"]["status"] == "done"
+    assert nodes["wait_for_data"]["status"] == "now" and "auto_collect_data" not in nodes
     assert nodes["data_load"]["status"] == "todo"
 
 

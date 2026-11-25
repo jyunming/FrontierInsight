@@ -25,7 +25,6 @@ import pytest
 
 from core.engine import (
     _THIN_TEXT_CHARS,
-    _foundational_write_block,
     _format_lit_from_state,
     _thin_source,
 )
@@ -61,10 +60,8 @@ def _src(title: str, doi: str, text: str | None = None, **meta: Any) -> dict[str
 
 
 ALPHA = _src("Alpha", "10.1/a", ABSTRACT, work_type="article")
-TITLE_ONLY = _src("Stochastic Epidemic Models and Their Statistical Analysis", "10.1/b", work_type="book",
-                  foundational="suggested as a foundational work")
-BOOK_BLURB = _src("Modeling Infectious Diseases in Humans and Animals", "10.1/c", BLURB, work_type="book",
-                  foundational="suggested as a foundational work")
+TITLE_ONLY = _src("Stochastic Epidemic Models and Their Statistical Analysis", "10.1/b", work_type="book")
+BOOK_BLURB = _src("Modeling Infectious Diseases in Humans and Animals", "10.1/c", BLURB, work_type="book")
 DELTA = _src("Delta", "10.1/d", ABSTRACT + " " + ABSTRACT, work_type="article")
 FULL_TEXT = _src("Epsilon", "10.1/e", "short", work_type="article", content_quality="full_text",
                  fetched_full_text=True)
@@ -133,13 +130,6 @@ def test_a_block_with_no_thin_source_is_the_same_with_or_without_the_marks() -> 
     assert _format_lit_from_state(_state(lit), mark_thin=True) == _format_lit_from_state(_state(lit))
 
 
-def test_the_foundational_list_carries_the_same_marks() -> None:
-    block = _foundational_write_block(LIT)
-    lines = {line.split("]")[0].lstrip("- ["): line for line in block.splitlines() if line.startswith("- [")}
-    assert lines["2"].endswith("[title only] (book)")
-    assert lines["3"].endswith("[short blurb only] (book)")
-
-
 # --- the prompts -------------------------------------------------------------------------
 
 def test_the_instruction_is_one_sentence_in_the_write_and_the_edit_prompt() -> None:
@@ -154,7 +144,7 @@ def test_the_write_prompt_marks_the_entries(tmp_path: Path) -> None:
     asyncio.run(eng._node_write({"topic": TOPIC, "title": "t", "iteration": 0, "literature": LIT,
                                  "design": {}, "analysis": {}, "figures": []}))
     prompt = client.calls[0][1]
-    # The prior-work block's own entries (the foundational list marks these works too).
+    # The prior-work block's own entries.
     entries = _entry_lines(prompt)
     assert entries["2"].endswith("Statistical Analysis [title only]")
     assert entries["3"].endswith("Humans and Animals [short blurb only]")

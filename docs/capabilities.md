@@ -25,7 +25,7 @@ Every quest keeps an ordered, tamper-evident diary of its steps, checks and rout
 
 ## You in the loop
 
-FI stops for you at set points: to read and edit the plan, to let you download paywalled papers, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
+FI stops for you at set points: to read and edit the plan, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
 
 ## Literature and memory
 

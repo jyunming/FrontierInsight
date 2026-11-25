@@ -163,7 +163,7 @@ $design_block
 $analysis_block
 
 ## Prior work
-$literature_block$foundational_block
+$literature_block
 
 ## Figures available (refer to each by its number)
 $figure_list

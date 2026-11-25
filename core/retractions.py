@@ -243,8 +243,7 @@ def _with_meta(entry: Any, meta: dict[str, Any]) -> Any:
 
 
 def _source_key(meta: dict[str, Any], content: str) -> str:
-    """The source's identity as the floor and screen records in ``literature_queries.json`` name it
-    (``core.engine._paper_key``): its DOI, else its link, else its title, else a hash of its opening text."""
+    """The source's identity: its DOI, else its link, else its title, else a hash of its opening text."""
     for k in ("doi", "url", "source_url", "title"):
         v = str(meta.get(k) or "").strip().lower()
         if v:
@@ -469,16 +468,6 @@ def summary_line(rows: list[dict[str, Any]]) -> str:
 
 def is_retracted(meta: dict[str, Any] | None) -> bool:
     return bool(meta) and (meta or {}).get("retraction") == RETRACTED
-
-
-def retracted_dois(entries: list[Any]) -> set[str]:
-    """The DOIs of the entries marked retracted (normalized)."""
-    out: set[str] = set()
-    for entry in entries or []:
-        meta, _ok = _parts(entry)
-        if is_retracted(meta) and normalize_doi(meta.get("doi")):
-            out.add(normalize_doi(meta.get("doi")))
-    return out
 
 
 def apply_to_claims(

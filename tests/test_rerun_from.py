@@ -44,7 +44,6 @@ def test_a_new_plan_and_a_new_design_are_asked_again() -> None:
     asks = {name: getattr(_engine, name) for name in dir(_engine)
             if (name.endswith("_ASKED") or "_ASKED_" in name or name == "_FILL_MARKER")
             and isinstance(getattr(_engine, name), str) and getattr(_engine, name).endswith(".json")}
-    asks.pop("_PAPERS_ASKED")  # the pause for papers to add, before the plan: not the plan's
     assert len(asks) >= 12, sorted(asks)  # the sweep finds the records it is meant to
     for name, file in asks.items():
         assert f".fi/{file}" in rerun_from.OUTPUTS["plan"], name
@@ -150,10 +149,10 @@ class _Graph:
 @pytest.mark.asyncio
 async def test_a_step_of_several_nodes_is_done_again_from_its_first_node_of_the_latest_pass() -> None:
     # Two passes of a no-simulation quest; the second is paused at wait_for_data.
-    graph = _Graph([("design",), ("auto_collect_data",), ("wait_for_data",), ("data_load",), ("analyze",),
-                    ("review",), ("design",), ("auto_collect_data",), ("wait_for_data",)])
+    graph = _Graph([("design",), ("wait_for_data",), ("data_load",), ("analyze",),
+                    ("review",), ("design",), ("wait_for_data",)])
     found = await rerun_from.checkpoint_before(graph, {}, "run")
-    assert found == {"configurable": {"checkpoint_id": "7"}}, "the second pass's collection, not the first pass's"
+    assert found == {"configurable": {"checkpoint_id": "6"}}, "the second pass's wait for data, not the first pass's"
     graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("analyze",)])
     assert (await rerun_from.checkpoint_before(graph, {}, "code"))["configurable"]["checkpoint_id"] == "1"
     assert await rerun_from.checkpoint_before(graph, {}, "review") is None

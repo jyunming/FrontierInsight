@@ -103,16 +103,13 @@ def test_stage_data_skips_symlinks(tmp_path: Path) -> None:
 
 def test_build_analyze_config_defaults_are_no_simulation(tmp_path: Path) -> None:
     """The config must skip implement/execute and route through
-    auto_collect_data → wait_for_data → data_load → analyze."""
+    wait_for_data → data_load → analyze."""
     cfg = build_analyze_config(
         commission=_commission(tmp_path, "How do two regions' survey answers differ?"),
         output_dir=tmp_path / "outputs",
     )
     assert cfg.topic == "How do two regions' survey answers differ?"
     assert cfg.engine.no_simulation is True
-    # auto_collect_data: False because the user already supplied data;
-    # asking Axon to add more would dilute the prompt.
-    assert cfg.engine.auto_collect_data is False
     # No clarify call — the commission is the source of truth.
     assert cfg.engine.clarify_mode == "off"
     # One pass — analyze workflows usually don't want revise cycles.

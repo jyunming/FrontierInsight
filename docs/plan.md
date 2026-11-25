@@ -12,7 +12,7 @@
 `launch.py` parses YAML → `Config` → constructs an `Engine` per quest →
 the Engine compiles an async `StateGraph` — `clarify →
 literature → design →` then either `implement → execute →
-execute_reflect` (simulation) or `auto_collect_data → wait_for_data →
+execute_reflect` (simulation) or `wait_for_data →
 data_load → web_plots → web_figures` (no-simulation) `→ analyze →
 cross_check → evidence_gate → write → claim_check → review →
 human_feedback` — with four feedback loops (see
@@ -35,7 +35,7 @@ for the layered design see [`architecture.md`](architecture.md).
 - 21-node async LangGraph DAG with four feedback loops (clarify,
   literature, select_skills, design, implement_outline/implement,
   execute/execute_reflect
-  or the no-simulation chain auto_collect_data → wait_for_data → data_load
+  or the no-simulation chain wait_for_data → data_load
   → web_plots → web_figures, analyze, cross_check, evidence_gate, write,
   claim_check, review, human_feedback). `core/engine.py:_build_graph` is
   authoritative; `capabilities-reference.md` describes each node.
@@ -94,8 +94,8 @@ for the layered design see [`architecture.md`](architecture.md).
   catalog by ingesting `kind=fi_source_catalog` entries.
 - **Free-only full-text fetch** — only papers confirmed free to read are
   downloaded (login-wall rejection via Content-Type + `%PDF-`
-  magic-bytes check stays as a backstop). Paywalled papers are left for a
-  person via `needs/WANTED_PAPERS.md`.
+  magic-bytes check stays as a backstop). A paywalled paper is never requested; a person can drop it into
+  `inputs/papers/`.
 - **Structured ingest after accepted quests** — `fi_paper_spine`,
   `fi_quest_paper`, `fi_quest_summary`, `fi_topic_event`,
   `fi_external_ref_spine` × N.

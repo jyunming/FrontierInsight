@@ -216,8 +216,8 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             retractions.normalize_doi(plant.MADSEN["doi"]): {"status": "not_retracted", "why": "Crossref lists no retraction",
                                                              "notices": []},
         })
-        lit = {"knowledge": {"enabled": True, "source_routing": "manual", "literature_screen": False,
-                             "foundational_works": False, "web_search": False, "try_fetch_full_text": False}}
+        lit = {"knowledge": {"enabled": True, "source_routing": "manual",
+                             "web_search": False, "try_fetch_full_text": False}}
 
         async def campaign() -> list[dict[str, Any]]:
             jobs = [cli.run_planted(root / n, mode="partial") for n in runs if "L1" not in n]

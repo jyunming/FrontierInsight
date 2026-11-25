@@ -9,9 +9,7 @@ rather than asking the engine to plan an experiment. Workflow:
 2. We mint a new quest_id, create ``<output_root>/<quest_id>/data/``,
    and copy every file from ``my_data/`` (recursive) into it.
 3. We build a minimal :class:`Config` with
-   ``engine.no_simulation: true`` and ``engine.auto_collect_data:
-   false`` — the engine then routes through ``auto_collect_data``
-   (which passes through because auto_collect is off) → ``wait_for_data``
+   ``engine.no_simulation: true`` — the engine then routes through ``wait_for_data``
    (which passes through because ``data/`` already has files) →
    ``data_load`` → ``analyze → cross_check → write → review``.
 
@@ -170,9 +168,7 @@ def build_analyze_config(
       PASSTHROUGHS (no LLM call, no retrieval). Implies no_simulation.
     * ``knowledge.enabled: false`` + ``web_search: false`` +
       ``external_fallback: []`` — NO external retrieval, web or academic.
-      Without ``web_search: false`` the literature node would still web-
-      search, because ``web_search`` is independent of ``enabled``.
-    * ``auto_collect_data: false`` — no Axon collection either.
+      (The literature node only reads the sources the commission gives.)
     * ``review_loop: false`` — one write+review pass, not a revise cycle.
     * ``clarify_mode: off`` — the commission is the source of truth here
       (its question becomes the topic)."""
@@ -190,7 +186,6 @@ def build_analyze_config(
             clarify_mode="off",
             no_simulation=True,
             analyze_local_first=True,
-            auto_collect_data=False,
             cross_check_per_finding_k=0,
             enable_analyze_reroute=False,
         ),

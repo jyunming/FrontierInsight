@@ -582,8 +582,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "directory path; every file under it (recursive, "
              "symlinks skipped) is copied into the new quest's "
              "data/ directory before the engine starts. The engine "
-             "then routes auto_collect_data (passthrough) → "
-             "wait_for_data (passthrough, data is already there) → "
+             "then routes wait_for_data (passthrough, data is already there) → "
              "data_load → analyze → cross_check → write → review. "
              "Requires --commission: the commission of the study (its question is what the analysis answers). "
              "Use when you already have the dataset and just want a "
@@ -4127,8 +4126,8 @@ async def _run_analyze(
 
     Builds a no-simulation Config, stages the user's data into the
     quest's ``data/`` directory, then runs the engine through
-    ``run_one``. The engine's no-simulation path (auto_collect_data
-    passthrough → wait_for_data passthrough since data exists →
+    ``run_one``. The engine's no-simulation path (wait_for_data
+    passthrough since data exists →
     data_load → analyze → write → review) handles the rest.
 
     Unlike the single-shot tools (digest / summarize)

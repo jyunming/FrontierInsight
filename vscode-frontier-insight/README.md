@@ -272,7 +272,7 @@ Close the QuickPick or the refine box with Esc and the quest stops there instead
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
 
 ### Fleet (multiple quests in parallel)
 
@@ -407,7 +407,7 @@ cross-case studies, policy reviews, or factual questions about
 companies / markets / current events. For these, set
 `engine.no_simulation: true` in the config. The
 engine then skips `implement → execute` entirely and routes through
-`auto_collect_data → wait_for_data → data_load → web_plots → analyze`.
+`wait_for_data → data_load → web_plots → analyze`.
 
 For a purely descriptive **history / overview** (no experiment *and*
 no dataset — e.g. *"the evolution of X"*), set `engine.survey_mode: true`
@@ -452,43 +452,11 @@ node's prompt receives the passages most relevant to the question
 
 FI downloads only papers that are free to read; it does not fetch a
 paper that is not confirmed free, even from a network with a subscription.
-When a relevant paper is not confirmed free (SPIE / IEEE / Elsevier …)
-and only its abstract is reachable, **Supply paywalled papers** (on by
-default; turn it off for an unattended run) makes the
-quest pause and write a ranked
-`needs/WANTED_PAPERS.md` (download links + why each matters). After the
-run, the chat panel surfaces that list with instructions to drop the
-PDFs into `inputs/papers/` and, when the quest is waiting, `@fi /resume <quest_id>` — they're then
-ingested as real full text. A quest that did not stop for them just lists them. You can also pre-load a folder of papers via
-`knowledge.local_papers` (a directory is scanned recursively). To search
-with your own queries instead of the ones FI derives, write them in
-`inputs/search_queries.txt` in the quest folder, one per line (the first
-three are used), then `@fi /resume <quest_id>`; remove the file to go
-back to FI's.
+A paper that is not confirmed free is never requested. Put the PDFs you want read into
+`inputs/papers/` (or pin them in `knowledge.local_papers`; a directory is scanned
+recursively) and they are read as full text.
 
 Example files for the experiment itself (a simulation setup, an input deck, a config — any type) go in `execution.inputs`, or into `<quest>/inputs/examples/` while the quest is paused; the design and the code are written from them and the experiment finds the folder in `FI_INPUT_DIR`.
-
-Open-access sources never trigger that pause. An arXiv / PMC / preprint
-paper that came back abstract-only means FI's *download* failed — the
-host is usually unreachable behind a proxy or firewall — not that the
-paper costs money. Stopping to ask you to buy a free paper would be
-nonsense, so those are logged as a warning and listed in a separate
-"Open access — FI's download failed" section of `WANTED_PAPERS.md` as a
-manual fallback (a browser often succeeds where the agent's HTTP client
-is blocked). Fixing the network is the real fix.
-
-Before pausing, `auto_collect_data` runs:
-
-1. Knowledge retrieval against `topic + design.hypothesis` — Axon
-   **plus a general web search** (Brave when `BRAVE_API_KEY` is set,
-   else keyless DuckDuckGo), so non-academic topics get real web
-   pages, not irrelevant papers. Top hits land as Markdown files under
-   `outputs/<id>/data/auto_collected/<rank>_<slug>.md` with YAML
-   provenance front matter (each web hit keeps its source URL). A
-   relevance guard drops confident-but-off-topic results.
-2. Each adapter in `engine.dataset_adapters` (e.g. `worldbank`,
-   `wikipedia`) runs an external lookup and writes evidence into
-   `outputs/<id>/data/auto_collected/<adapter>/`.
 
 The `web_plots` step then turns any quantitative data the sources
 contain into source-attributed matplotlib figures (drawn in the
@@ -510,21 +478,10 @@ the quest YAML (an environment variable wins). CORE, OpenAIRE and DOAJ
 need no key and are where humanities and social-science topics find
 open-access books, theses and journals. Academic search keeps only
 citable record types: papers for a quest with an experiment, and papers
-plus books and book chapters for a quest without one. Each literature
-pass searches three short keyword queries, one per facet of the topic,
-worded for its kind (methods and measured quantities, or the names
-scholars of the subject write under), and fetches full text once, for
-the sources it keeps. Before that, one model call grades every
-retrieved source 0–3 on whether the paper could cite it: papers need a
-2, web pages are dropped only at 0, and your own papers are never
-screened (`knowledge.literature_screen`, on by default).
+plus books and book chapters for a quest without one.
 
-If any files land, the chat panel shows the count and the quest
-continues — many no-simulation quests run end-to-end without
-manual data drops. If Axon was empty AND every adapter returned
-nothing, the chat panel shows a *"Quest paused for data — drop
-files into `data/`"* line and the engine exits cleanly. Drop your
-own files and re-run with `@fi /resume <quest_id>`.
+A no-simulation quest waits for your data: drop files into `data/` and run
+`@fi /resume <quest_id>`.
 
 ## PDF strict mode
 
@@ -592,7 +549,7 @@ or shutting the machine down, is not a crash to report.
 @fi /analyze ./my_data commission.yaml
 ```
 
-When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a commission file; the commission's question is what the analysis answers. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a commission file; the commission's question is what the analysis answers. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
 
 Quote the path if it contains spaces: `@fi /analyze "C:/My Data" commission.yaml`.
 
@@ -628,7 +585,7 @@ Lands in Axon as `kind=fi_digest` so future quests can retrieve "what we were wo
 Each quest YAML defines which model to use per engine node, and nothing is
 chosen for you, since `vscode.lm` gives FI no price or tier. The five nodes
 measured as safe on a cheaper model are `cross_check`, `select_skills`,
-`literature_screen`, `slides` and `poster`. On one simulation
+`slides` and `poster` (and a literature-screening step FI no longer has). On one simulation
 topic, three runs each, moving those five nodes to a cheaper model used about
 15% fewer tokens and no drop in scores was seen; three runs cannot show a drop
 under about ten points, and this was measured with codex models, not through
@@ -766,10 +723,3 @@ abuse-detection risk from scraped tokens.
 - **Model availability depends on your subscription.** Run
   `vscode.lm.selectChatModels({vendor: 'copilot'})` to see what you
   have access to; copy model names from there into your `node_models`.
-- **`engine.dataset_adapters` make direct outbound HTTPS, not via
-  `vscode.lm`.** Enabling `worldbank` / `wikipedia` issues stdlib
-  `urllib` requests (wrapped in `asyncio.to_thread`) from the
-  engine process to `api.worldbank.org` / `en.wikipedia.org` — no
-  Copilot routing, no `vscode.lm` involvement. On a network that
-  blocks those hosts (corporate proxy, air-gapped VM), leave
-  `dataset_adapters` empty and rely on Axon + manual data drops.

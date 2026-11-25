@@ -170,27 +170,6 @@ def _engine(tmp_path: Path) -> Engine:
     (True, WORK_SCOPE_PAPERS_AND_BOOKS),
 ])
 @pytest.mark.asyncio
-async def test_the_literature_node_keeps_books_only_for_a_quest_without_an_experiment(
-    tmp_path: Path, no_sim: bool, expected: str,
-) -> None:
-    eng = _engine(tmp_path)
-    scopes: list = []
-
-    async def fake_search(query, **kw):  # noqa: ANN001
-        scopes.append(kw.get("work_scope"))
-        return [RetrievedDoc(content="a", metadata={"doi": "10.1/a", "title": "A study of toys"})]
-
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-    await eng._node_literature({"topic": "t", "chosen_idea": {"title": "T"},
-                                "no_simulation_resolved": no_sim})
-    assert scopes and set(scopes) == {expected}
-
-
-@pytest.mark.parametrize("no_sim,expected", [
-    (False, WORK_SCOPE_PAPERS),
-    (True, WORK_SCOPE_PAPERS_AND_BOOKS),
-])
-@pytest.mark.asyncio
 async def test_cross_check_searches_with_the_same_scope(tmp_path: Path, no_sim: bool, expected: str,
                                                          monkeypatch: pytest.MonkeyPatch) -> None:
     from core import cross_check_items as cci
@@ -209,27 +188,6 @@ async def test_cross_check_searches_with_the_same_scope(tmp_path: Path, no_sim: 
     await eng._node_cross_check({"analysis": {"key_findings": ["x rises with y"]},
                                  "no_simulation_resolved": no_sim})
     assert scopes == [expected]
-
-
-@pytest.mark.asyncio
-async def test_auto_collect_top_up_searches_with_the_same_scope(tmp_path: Path, monkeypatch) -> None:
-    eng = _engine(tmp_path)
-    eng.knowledge.enabled = True
-    scopes: list = []
-
-    async def fake_search(query, **kw):  # noqa: ANN001
-        scopes.append(kw.get("work_scope"))
-        return []
-
-    async def zero(*_a, **_k):
-        return 0
-
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-    monkeypatch.setattr(eng, "_run_dataset_adapters", zero)
-    eng.config.engine.auto_collect_data = True
-    await eng._node_auto_collect_data({"topic": "bilingualism", "design": {},
-                                       "no_simulation_resolved": True})
-    assert scopes == [WORK_SCOPE_PAPERS_AND_BOOKS]
 
 
 # --- CORE without a key ---------------------------------------------------------

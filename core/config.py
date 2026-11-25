@@ -631,7 +631,13 @@ _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review
 # Config's root validator so old YAML keeps working without touching read sites.
 # Keys a config may still set although the setting is gone: accepted, no effect, said once in the log.
 _RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check", "engine.ideate_reflect",
-                           "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope"})
+                           "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope",
+                           # The searches of a study that had no commission are gone (a commission gives the sources and
+                           # a data study analyses the person's own files).
+                           "engine.auto_collect_data", "engine.auto_collect_top_k", "engine.dataset_adapters",
+                           "engine.dataset_adapter_top_k", "knowledge.relevance_guard", "knowledge.relevance_min_score",
+                           "knowledge.relevance_min_keep", "knowledge.requery_on_low_relevance", "knowledge.requery_max",
+                           "knowledge.literature_screen", "knowledge.foundational_works"})
 
 _LEGACY_PAUSE_FLAGS = (
     ("engine", "clarify_mode", "clarify"),
@@ -1023,7 +1029,7 @@ class EngineConfig(BaseModel):
     # experiment AND NO dataset (e.g. "the evolution/history of X", an
     # overview or retrospective). A stronger form of ``no_simulation``: the
     # engine skips BOTH the experiment (implement/execute) AND the
-    # data-collection path (auto_collect_data/wait_for_data/data_load/
+    # data path (wait_for_data/data_load/
     # web_plots), routing ``design → web_figures → analyze`` so the paper
     # synthesises the cited literature directly (illustrative license-clean
     # images are still embedded). Setting this implies ``no_simulation``.
@@ -1041,47 +1047,6 @@ class EngineConfig(BaseModel):
     # also disable retrieval at the knowledge layer — ``web_search: false``
     # — so nothing reaches out to the web/academic sources.)
     analyze_local_first: bool = False
-    # When the engine enters no-simulation mode, an
-    # ``auto_collect_data`` node runs BEFORE ``wait_for_data`` and
-    # tries to pull relevant docs from the Knowledge layer (Axon).
-    # Successful hits land under ``<quest_root>/data/auto_collected/``
-    # as one ``.md`` file per doc (content + a YAML metadata header).
-    # ``wait_for_data`` then sees those files via its existing rglob
-    # walk and proceeds without pausing — so a no-simulation quest
-    # that COULD be answered from Axon never blocks for user input.
-    #
-    # When False, the auto_collect_data node is a passthrough — the
-    # engine pauses for user-supplied data exactly like before. Also
-    # passes through if ``knowledge.enabled`` is False (no Axon to
-    # query) — no need to set this False just to silence the node.
-    #
-    # The fallback to the manual pause is preserved: if Axon returns
-    # zero hits, ``wait_for_data`` still writes the README and pauses
-    # for the user just like the no-Axon case.
-    auto_collect_data: bool = True
-    # Top-K passed to ``Knowledge.asearch`` from the auto_collect_data
-    # node. 5 is a deliberate ceiling — the data_load LLM call has a
-    # finite content budget, and N=5 with one ~1k-token file each
-    # comfortably fits a 16k-context prompt. Bump only when running on
-    # a long-context model AND when the topic genuinely benefits from
-    # more breadth (most don't — the top 5 from a good retriever
-    # cover the space already). ``ge=1`` because passing top_k=0 to
-    # Axon would request "zero hits" — a useless config that should
-    # be a YAML error not silent passthrough.
-    auto_collect_top_k: int = Field(default=5, ge=1)
-    # Structured dataset adapters that run alongside the
-    # Axon retrieval in the auto_collect_data node. Each name in the
-    # list is looked up in ``core.datasets.ADAPTER_REGISTRY``;
-    # unrecognized names are logged as a WARNING and skipped. Empty
-    # list (default) means "Axon only" — Axon-only auto-collect.
-    # Available names: ``"worldbank"``.
-    #
-    # Adapters write into ``<quest_root>/data/auto_collected/<source>/``
-    # subdirectories so the manifest renders them grouped by origin
-    # (and the user can spot which dataset contributed what to the
-    # paper at a glance). Each adapter is best-effort — errors fall
-    # through silently to the safety net (``wait_for_data`` pause).
-    dataset_adapters: list[str] = Field(default_factory=list)
     # Simulation skills the quest may call instead of re-deriving the
     # physics. Each name is resolved against ``<FI_SKILLS_DIR>/<name>/`` and the
     # ``fi.skills`` entry-point group; a name that resolves to a skill
@@ -1124,12 +1089,6 @@ class EngineConfig(BaseModel):
     # trees, the per-OS application folders, and the project folder and its
     # parents). False turns that search off. See core/skills/registry.py.
     skills_scan_known_dirs: bool = True
-    # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
-    # above; this separate knob is for the dataset adapters because
-    # they tend to hit external APIs and a smaller default is the
-    # right cost trade-off. 3 indicators × a few countries each =
-    # enough comparative baseline for most no-simulation quests.
-    dataset_adapter_top_k: int = Field(default=3, ge=1)
     # In no-simulation mode, derive figures from the web/Axon content the
     # collector gathered: a small data-extraction + matplotlib step turns
     # quoted numbers (e.g. a revenue-by-year table scraped from sources)
@@ -1411,64 +1370,6 @@ class KnowledgeConfig(BaseModel):
     # a no-op (snippet only) when Playwright/Chromium isn't installed, so
     # it's safe to leave on. Only fires on a blocked/empty direct fetch.
     headless_fetch: bool = True
-    # Relevance guard. After retrieval/auto-collect, score the gathered
-    # docs against the topic; if they are clearly off-topic or empty
-    # (e.g. an academic-only collector returning physics preprints for a
-    # finance question), pause for user-supplied sources / escalate rather
-    # than letting analyze+write produce an honest-but-useless "pipeline
-    # failure" paper on garbage. Off → legacy behaviour (proceed anyway).
-    relevance_guard: bool = True
-    # Deterministic relevance floor applied to freshly-retrieved literature in
-    # the literature node — a cheap complement to the LLM ``relevance_guard``,
-    # which runs ONLY on the auto_collect path (so survey / simulation quests,
-    # which skip auto_collect, otherwise carry off-topic sources into
-    # analyze/write). Each retrieved doc is scored by embedding cosine (the
-    # all-MiniLM model shared with passage ranking) against the TOPIC; docs
-    # below ``relevance_min_score`` are dropped. Fail-open: no filtering when
-    # embeddings are unavailable (FI_OFFLINE / no model). 0.0 disables. The
-    # 0.20 default sits in the empirically-measured gap between on-topic
-    # (~0.4+) and off-topic (<0.1) docs for a humanities/history topic.
-    relevance_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
-    # Never-starve retention: always keep at least this many top-scoring docs
-    # even when all fall below ``relevance_min_score``, so a wholly-borderline
-    # corpus is not emptied (the evidence_gate then judges it thin instead).
-    relevance_min_keep: int = Field(default=3, ge=0)
-    # Re-search with different keywords when a retrieval comes back
-    # wholly off-topic. When NO doc clears ``relevance_min_score`` on its own
-    # merits, the first query was probably worded badly -- so ask the model
-    # for alternative phrasings and search again, rather than handing the
-    # writer the ``relevance_min_keep`` least-bad hits and proceeding as if
-    # they were evidence. Each retry costs one small LLM call plus a
-    # retrieval, so it is bounded and only fires on the wholly-missed case
-    # (not on "few but good" results).
-    #
-    # Skipped entirely when embeddings are unavailable: without scores there
-    # is no signal that the query was bad, and retrying blind would just
-    # multiply cost on exactly the air-gapped machines that can least
-    # afford it.
-    requery_on_low_relevance: bool = True
-    requery_max: int = Field(default=2, ge=0, le=5)
-    # LLM literature screen. After the relevance floor, one batched call
-    # grades every retrieved source 0-3 on "could the paper cite this for a
-    # claim?". Scholarly records need a 2 to stay; web pages are dropped only
-    # at 0, because they supply quotable text rather than citations. Keeps at
-    # least ``relevance_min_keep`` sources (highest grades first) and fails
-    # open: a failed or unreadable call keeps everything, and a source the
-    # model did not grade is kept. The embedding floor alone cannot tell a
-    # table of contents or an unrelated paper that shares the search terms
-    # from a real on-topic source; this can. Off → floor only.
-    literature_screen: bool = True
-    # Foundational works. A search engine matches every word of a query, so
-    # the original method papers and textbooks a topic rests on rarely come
-    # back: a damped-oscillator integrator quest found none of Verlet (1967),
-    # Hairer, Lubich & Wanner, or Butcher. One call asks the model for up to
-    # eight, each is looked up by title in OpenAlex and dropped when not found,
-    # and the works at least two retrieved papers cite are added (books too,
-    # whatever the quest's work scope). All of them go through the literature
-    # screen, labelled foundational, and the writer is asked to cite the ones
-    # that bear on the paper. Costs one LLM call and up to ten OpenAlex
-    # requests per literature pass. Off → no extra candidates.
-    foundational_works: bool = True
     # Pause-for-user-papers gate. FI downloads only papers that are free to
     # read. A paper behind a paywall is never fetched by FI: when the
     # literature comes back with abstract-only papers, the node writes a
@@ -1506,7 +1407,7 @@ class KnowledgeConfig(BaseModel):
     external_fallback: list[str] | str = Field(
         default_factory=lambda: ["openalex", "arxiv", "crossref"]
     )
-    # How the literature node picks which external sources to query:
+    # How an external search (the cross-check of the results) picks which sources to query:
     #   "auto"   — agent asks the LLM to choose sources from the
     #              catalog (built-in + Axon-ingested supplements) given
     #              the current topic. Falls back to `external_fallback`
@@ -1789,7 +1690,6 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
 # What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
     "pauses": {"clarify": "off", "papers": False},
-    "knowledge": {"foundational_works": False, "requery_on_low_relevance": False},
     "engine": {"enable_analyze_reroute": False},
 }
 

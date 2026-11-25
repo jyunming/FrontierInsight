@@ -16,7 +16,6 @@ import pytest
 
 import core.knowledge as kn
 from core.knowledge import RetrievedDoc, is_open_access
-from tests.test_literature_facets import _engine, _state
 
 PUBLISHER_PDF = "https://publisher.example/paywalled.pdf"
 PUBLISHER_PAGE = "https://publisher.example/article/123"
@@ -142,96 +141,6 @@ def test_an_unpaywall_failure_leaves_the_paper_for_a_person(monkeypatch) -> None
     assert kn._fetch_full_text(_paywalled(), timeout_s=5, max_kb=64) is None
     assert asked, "the free-copy lookup was tried"
     assert not [u for u in asked if "publisher.example" in u], asked
-
-
-# --- the papers gate in the literature step -------------------------------------------------------------------
-
-def _gate_engine(tmp_path: Path, monkeypatch, docs, *, pauses_papers: bool):
-    eng = _engine(tmp_path)
-    eng.config.pauses.papers = pauses_papers
-    eng.config.knowledge.foundational_works = False
-
-    async def chat(prompt, node=""):
-        return '{"queries": ["a query"]}'
-
-    eng._chat = chat
-
-    async def hits(query, **kw):
-        return list(docs)
-
-    eng.knowledge.asearch = hits  # type: ignore[method-assign]
-
-    async def route(*a, **k):
-        return ["crossref"]
-
-    eng.knowledge.choose_sources = route  # type: ignore[method-assign]
-
-    async def no_fetch(found):
-        return found
-
-    eng.knowledge.fetch_full_text = no_fetch  # type: ignore[method-assign]
-    paused: list[dict] = []
-    monkeypatch.setattr(eng, "_pause_for_human", lambda **kw: paused.append(kw))
-    lines: list[str] = []
-
-    class _H(logging.Handler):
-        def emit(self, record):
-            lines.append(record.getMessage())
-
-    eng._log.addHandler(_H())
-    eng._log.setLevel(logging.INFO)
-    return eng, paused, lines
-
-
-@pytest.mark.asyncio
-async def test_an_unattended_run_logs_one_count_and_lists_the_papers(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=False)
-    await eng._node_literature(_state())
-    assert paused == []
-    counted = [line for line in lines if "not confirmed free" in line]
-    assert len(counted) == 1 and counted[0].startswith("[literature] 1 paper(s)")
-    wanted = (eng.quest_root / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
-    assert "A paywalled paper" in wanted
-
-
-@pytest.mark.asyncio
-async def test_an_attended_run_pauses_for_the_paywalled_paper(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=True)
-    await eng._node_literature(_state())
-    assert len(paused) == 1 and paused[0]["kind"] == "papers"
-    assert not [line for line in lines if "not confirmed free" in line]
-    assert (eng.quest_root / "needs" / "WANTED_PAPERS.md").is_file()
-
-
-@pytest.mark.asyncio
-async def test_an_unattended_run_does_not_tell_the_person_to_resume(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=False)
-    await eng._node_literature(_state())
-    wanted = (eng.quest_root / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
-    readme = (eng.quest_root / "inputs" / "papers" / "README.md").read_text(encoding="utf-8")
-    assert "resume" not in wanted.lower().replace("nothing to resume", "")
-    assert "resume" not in readme.lower().replace("nothing to resume", "")
-    assert "nothing to resume" in wanted and "nothing to resume" in readme
-
-
-@pytest.mark.asyncio
-async def test_an_attended_run_tells_the_person_to_resume(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=True)
-    await eng._node_literature(_state())
-    wanted = (eng.quest_root / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
-    readme = (eng.quest_root / "inputs" / "papers" / "README.md").read_text(encoding="utf-8")
-    assert "resume" in wanted.lower() and "resume" in readme.lower()
-    assert "nothing to resume" not in wanted
-
-
-@pytest.mark.asyncio
-async def test_the_count_is_logged_even_when_papers_were_already_dropped(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=False)
-    drop = eng.quest_root / "inputs" / "papers"
-    drop.mkdir(parents=True, exist_ok=True)
-    (drop / "mine.md").write_text("my own paper " * 200, encoding="utf-8")
-    await eng._node_literature(_state())
-    assert [ln for ln in lines if "not confirmed free" in ln and "already has files" in ln]
 
 
 # --- a web hit is opened only when it is confirmed free, whatever its host ------------------------------------
@@ -527,11 +436,6 @@ def test_a_page_with_journal_metadata_that_is_confirmed_free_is_kept(monkeypatch
     assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False)
 
 
-def test_a_discarded_scholarly_page_is_asked_for_by_the_papers_gate() -> None:
-    from core.engine import _is_abstract_only
-    md = {"source": "web_search", "title": "T", "url": "https://x.example/1"}
-    assert _is_abstract_only(RetrievedDoc(content="short", metadata={**md, "scholarly_page": True})) is True
-
 
 def test_a_doi_resolver_is_never_a_free_location_for_any_source() -> None:
     assert kn._free_locations({"free_url": "https://doi.org/10.1/x", "url": "https://dx.doi.org/10.1/x"}) == []
@@ -553,39 +457,11 @@ def test_free_rules_after_review(md, free) -> None:
     assert is_open_access(md) is free
 
 
-def test_a_free_flag_with_no_free_address_goes_to_the_person() -> None:
-    from core.engine import _is_open_access
-    flagged = RetrievedDoc(content="a", metadata={"open_access": True, "url": "https://doi.org/10.1/x"})
-    assert _is_open_access(flagged) is False
-    with_id = RetrievedDoc(content="a", metadata={"open_access": True, "arxiv_id": "2401.1", "url": "https://doi.org/10.1/x"})
-    assert _is_open_access(with_id) is True
-    named = RetrievedDoc(content="a", metadata={"open_access": True, "free_url": "https://repo.example/p.pdf"})
-    assert _is_open_access(named) is True
-
 
 def test_url_host_ignores_a_trailing_dot() -> None:
     assert kn._url_host("https://Muse.JHU.edu./article/1").lower() == "muse.jhu.edu"
 
 
-@pytest.mark.asyncio
-async def test_the_attended_pause_card_does_not_say_paywalled(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=True)
-    await eng._node_literature(_state())
-    card = paused[0]
-    text = card["headline"] + " ".join(card["steps"])
-    assert "paywalled" not in text and "not confirmed free" in text
-
-
-@pytest.mark.asyncio
-async def test_the_papers_readme_follows_the_current_run(tmp_path: Path, monkeypatch) -> None:
-    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=False)
-    await eng._node_literature(_state())
-    readme = eng.quest_root / "inputs" / "papers" / "README.md"
-    assert "nothing to resume" in readme.read_text(encoding="utf-8")
-    eng.config.pauses.papers = True
-    await eng._node_literature(_state())
-    text = readme.read_text(encoding="utf-8")
-    assert "nothing to resume" not in text and "--resume" in text
 
 
 # --- round 4: headless redirect hops, OA-cascade redirects, PDF/content-type backstop, news pages, europepmc ---

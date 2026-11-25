@@ -158,7 +158,7 @@ Run it: `python launch.py --config my_quest.yaml`
 A quest runs on its own and only stops when it genuinely needs you. Every stop is one of just **two kinds of interaction**:
 
 - **ANSWER** — the quest asks you something (the setup questions; accept / reject / refine at the end).
-- **SUPPLY** — the quest needs files (a paywalled paper it found; a dataset).
+- **SUPPLY** — the quest needs files (a dataset, or a paper to read).
 
 There are five places it can stop, all configured in one place — the `pauses:` section of your YAML:
 
@@ -176,7 +176,6 @@ There are five places it can stop, all configured in one place — the `pauses:`
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
 | **clarify** (start) | ANSWER | answer the setup questions (what you want to see, the title, the baseline, ...) | on by default when someone can answer (the terminal with `--interactive`, the web quest page, VS Code for a quest on the VS Code chat model); `pauses.clarify: ask` always stops, `auto` lets the agent answer, `off` skips ([USAGE.md](USAGE.md#setup-questions)) |
-| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below), or resume without them: they are read from their abstracts and not asked for again | `pauses.papers: true` (the default; `false` turns it off) |
 | **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
 | **the plan** | SUPPLY | read `plan.md` (what the literature says, the gap, the design), edit it or ask for a change (`--revise-plan`); the design block in it is what runs | `pauses.plan: ask` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` \| `all` |
@@ -193,12 +192,11 @@ There are five places it can stop, all configured in one place — the `pauses:`
 # A quest that involves you at both ends and lets you feed it papers mid-run:
 pauses:
   clarify: ask            # answer setup questions before it starts
-  papers: true            # default: pause to let you download paywalled papers it finds (false = never)
   supply: before_build    # one drop-in point for your own papers/data
   review: ask             # accept / reject / refine before the paper is final
 ```
 
-> Legacy flag names (`engine.clarify_mode`, `engine.human_feedback_gate`, `engine.pause_for_user_input`, `knowledge.pause_for_user_papers`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
+> Legacy flag names (`engine.clarify_mode`, `engine.human_feedback_gate`, `engine.pause_for_user_input`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
 
 The sections below cover each pause in more detail.
 
@@ -445,9 +443,7 @@ High-quality content is the foundation of the research, so the fetch layer works
 
 - **Clean extraction.** Pages run through `trafilatura` (when installed) to isolate the article body and drop nav / menus / reference cruft; a built-in extractor is the fallback.
 - **Open-access full-text cascade.** For an academic source (PMC, a DOI, a preprint, a major publisher) FI resolves the `PMCID` / `DOI` / arXiv-id and pulls the clean open-access full text directly — preferring the **PMC BioC API** (section-labelled, no HTML cruft), then **Europe PMC**, the **preprint** server (arXiv / bioRxiv / medRxiv), **Unpaywall** (every OA location, repository copies first), and **Semantic Scholar** / **CORE** when a key is set.
-- **Off-topic retrievals are re-searched, not accepted.** The relevance floor keeps at least `knowledge.relevance_min_keep` sources (default 3) so a quest is never left with nothing — but when *no* source clears `relevance_min_score` on its own merits, that padding is the only thing keeping the corpus alive, and handing it to the writer is what produces "it found me three irrelevant papers". Instead FI asks the model for a better-worded query (the usual cause is vocabulary: a field publishes under different terms than the topic statement uses) and searches again, up to `knowledge.requery_max` times (default 2). Set `knowledge.requery_on_low_relevance: false` to disable. Skipped when embeddings are unavailable — without scores there is no signal that the query was bad, and retrying blind only multiplies cost.
-- **Only free papers are downloaded.** FI fetches a paper's full text only when it is confirmed free (arXiv, PubMed Central, bioRxiv / medRxiv, a fully open-access publisher such as MDPI, PLOS or Frontiers, or a free copy that OpenAlex, OpenAIRE, DOAJ, Unpaywall, Europe PMC, Semantic Scholar or CORE lists), and then only from that free copy. It does not request a paper that is not confirmed free from the publisher, even from a network with a subscription (VPN, campus login): journal pages are recognised by their site, DOI or article path, every redirect is checked again (also in the headless browser), and a page or PDF from an unknown site that says it is a journal article is discarded unread (at worst one request for that landing page, or two if it answered 403 and was then rendered). Those papers go on `needs/WANTED_PAPERS.md` for you to download. With `pauses.papers: false` the run does not stop: it logs one line with the number of papers left for a person and carries on with their abstracts.
-- **Open access is never treated as paywalled.** An arXiv / PMC / bioRxiv / medRxiv source (or anything OpenAlex reports as `is_oa`) that came back abstract-only means FI's *download* failed, not that the paper costs money — typically the host is unreachable behind a proxy or firewall. Those never trigger the `pauses.papers` stop: asking a person to hand-fetch a free arXiv PDF is asking them to work around a network fault. They are logged as a WARNING and listed in a separate "Open access — FI's download failed" section of `needs/WANTED_PAPERS.md`, since a browser often succeeds where the agent's HTTP client is blocked. The quest pauses only when something is *genuinely* paywalled.
+- **Only free papers are downloaded.** FI fetches a paper's full text only when it is confirmed free (arXiv, PubMed Central, bioRxiv / medRxiv, a fully open-access publisher such as MDPI, PLOS or Frontiers, or a free copy that OpenAlex, OpenAIRE, DOAJ, Unpaywall, Europe PMC, Semantic Scholar or CORE lists), and then only from that free copy. It does not request a paper that is not confirmed free from the publisher, even from a network with a subscription (VPN, campus login): journal pages are recognised by their site, DOI or article path, every redirect is checked again (also in the headless browser), and a page or PDF from an unknown site that says it is a journal article is discarded unread (at worst one request for that landing page, or two if it answered 403 and was then rendered). A paper that is not free is never requested; put its PDF into `inputs/papers/` to have it read.
 - **Walls rejected, not stored.** reCAPTCHA / "checking your browser" interstitials and paywall / abstract-only stubs (detected via a schema.org `isAccessibleForFree` / paywall-vendor check) are discarded; the real search snippet is kept instead of challenge garbage, and the cascade above is tried for the genuine full text.
 - **Relevance-selected excerpts.** Full text is stored uncapped on disk, but each node's prompt gets the passages most relevant to the question — so a number buried mid-document reaches the writer, not just the abstract.
 
@@ -464,7 +460,6 @@ knowledge:
   web_fetch_pages: true          # fetch full page text, not just snippets
   literature_excerpt_chars: 4000 # relevant chars of each source put into a prompt
   passage_ranking: auto          # hybrid semantic+lexical when a model loads, else lexical
-  relevance_guard: true          # drop confident-but-off-topic hits; pause if nothing fits
   # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead
   # openalex_api_key: ...        # or OPENALEX_API_KEY — full OpenAlex budget (arXiv is searched through it)
   # semantic_scholar_api_key: .. # or SEMANTIC_SCHOLAR_API_KEY — the keyless pool mostly 429s
@@ -504,11 +499,11 @@ Some research questions can't honestly be answered by a self-contained Python ex
 ```yaml
 engine:
   no_simulation: true
-  auto_collect_data: true              # default — try Axon first
-  dataset_adapters: [worldbank, wikipedia]  # opt-in external lookups
 ```
 
-The engine skips `implement → execute` entirely. Instead, `auto_collect_data` queries Axon **and the general web** for relevant sources, runs each enabled adapter (WorldBank pulls country-indicator tables, Wikipedia fetches article summaries), and writes everything into `outputs/<id>/data/auto_collected/`. A relevance guard drops confident-but-off-topic hits; the `web_plots` step then turns any quantitative data it found into source-attributed figures. If real sources land, the quest continues through `analyze → cross_check → write → review`. If nothing on-topic lands, the engine pauses cleanly with a `data/README.md` telling you what to drop. Drop your own files into `data/` and re-run:
+The engine skips `implement → execute` entirely and waits for your data: drop your own files into `outputs/<id>/data/` and run `python launch.py --config <yaml> --resume <quest_id>`. The `web_plots` step then turns any quantitative data into source-attributed figures, and the quest continues through `analyze → cross_check → write → review`.
+
+To carry on from a pause:
 
 ```bash
 python launch.py --config <yaml> --resume <quest_id>
@@ -567,7 +562,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 ### Use a different model per node
 
-A cheaper model for the light nodes and a stronger one where you want it. Only `cross_check`, `select_skills`, `literature_screen`, `slides` and `poster` have been measured on a cheaper model (about 15% fewer tokens, no score drop seen in three runs per arm on one topic); the other nodes below are illustrations, not measured advice:
+A cheaper model for the light nodes and a stronger one where you want it. Only `cross_check`, `select_skills`, `slides` and `poster` (and a literature-screening step FI no longer has) have been measured on a cheaper model (about 15% fewer tokens, no score drop seen in three runs per arm on one topic); the other nodes below are illustrations, not measured advice:
 
 ```yaml
 provider:
@@ -680,7 +675,6 @@ The agent reads them and cites them, every page: a scanned PDF (an older paper i
 
 Their figures are cut out too, each with its caption, into `data/literature/figures/`, and the ones that show values your question can use are read by the model (`knowledge.read_figures`; set a model for the step `figures` in `provider.node_models`, one that reads images).
 
-**Or let the agent ask.** Set `pauses.papers: true`. When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
 
 ---
 
@@ -689,6 +683,6 @@ Their figures are cut out too, each with its caption, into `data/literature/figu
 | Example | What it does | Wall time |
 |---|---|---|
 | [`examples/integrator_bakeoff/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/integrator_bakeoff) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
-| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bootstrap_ci_coverage) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Searches the literature, so it needs network access. | not timed end to end (its simulation runs in under a minute) |
+| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bootstrap_ci_coverage) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Reads the sources its commission names, so it needs network access. | not timed end to end (its simulation runs in under a minute) |
 | [`examples/bernstein_vazirani_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bernstein_vazirani_noise) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 
