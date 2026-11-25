@@ -221,8 +221,10 @@ def derive_protocol(state: dict[str, Any], config: Any) -> ResearchProtocol:
     if not isinstance(answers, dict):
         answers = {}
     no_simulation = bool(state.get("no_simulation_resolved"))
-    topic_type = _derive_topic_type(
-        str(answers.get("topic_shape") or ""), no_simulation)
+    # The commission's ``method`` is what sets the study's kind: a literature review is a ``survey``. An older checkpoint's
+    # clarify ``topic_shape`` is read only when no mode says so.
+    shape = "survey" if state.get("survey_mode_resolved") else str(answers.get("topic_shape") or "")
+    topic_type = _derive_topic_type(shape, no_simulation)
     # Deterministic upgrade: a markets / current-events question (detected
     # from the topic text) needs recent web sources. The clarify
     # ``topic_shape`` vocabulary can't express this, so without it the

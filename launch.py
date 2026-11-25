@@ -2450,6 +2450,25 @@ def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
         print(f"[FI] could not write the paper line to run.log: {exc!r}", file=sys.stderr)
 
 
+def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
+    """A study an earlier FI began may carry a `paper_venue` it was asked at the start: when the config left
+    `output.paper_format` at its default and that venue is another template, the final render uses the venue. A format
+    written in the config wins, and an unknown venue is ignored. A new study carries none (nothing asks it)."""
+    from typing import get_args
+
+    from core.config import PaperFormat
+
+    answers = (art.raw_state or {}).get("clarify_answers") or {}
+    venue = answers.get("paper_venue", "") if isinstance(answers, dict) else ""
+    if not isinstance(venue, str) or venue not in get_args(PaperFormat):
+        return
+    default = type(cfg.output).model_fields["paper_format"].default
+    if cfg.output.paper_format != default or venue == default:
+        return
+    print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {default} -> {venue}")
+    cfg.output.paper_format = venue  # type: ignore[assignment]
+
+
 async def _emit_one(
     cfg: Config, quest_id: str, kind: str, *, supervisor: ProxySupervisor,
 ) -> int:
@@ -2773,6 +2792,7 @@ async def _run_generators(
         print(f"[FI] quest {art.quest_id}: no paper, slides or poster were made, because the quest stopped without "
               "findings to write up (needs/STUCK.json says why).")
         return written
+    _apply_paper_venue_override(cfg, art)
     _apply_quest_byline(cfg, Path(art.quest_root))
     if ask_byline:
         await _ask_byline_once(cfg, Path(art.quest_root))
@@ -3911,7 +3931,7 @@ async def _run_analyze(
     from core.analyze_cli import prepare_analyze_quest
 
     try:  # before the quest folder is made or a file copied
-        _commission.door(commission, None)
+        _commission.door(commission, None, asked={"analyze_local_first": True})  # the data is the person's: so must be `method`
     except _commission.CommissionRefused as e:
         print(f"[FI] {e}", file=sys.stderr)
         return 2

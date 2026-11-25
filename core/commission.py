@@ -353,6 +353,12 @@ def mode_problem(path: Path, asked: Any) -> str | None:
     def on(name: str) -> bool:
         return (asked.get(name) if isinstance(asked, dict) else getattr(asked, name, None)) is True
 
+    if on("analyze_local_first"):  # ``--analyze <data>`` or ``engine.analyze_local_first: true``: the person's own data
+        method = method_of(read(path))
+        if method != "analyze_data":
+            said = f"it says `method: {method}`" if method else "it has no `method`"
+            return ("analysing the data you give (`--analyze`, or `engine.analyze_local_first: true`) needs the commission "
+                    f"to say so, and {said}; put `method: analyze_data` in the commission")
     no_sim, survey = on("no_simulation"), on("survey_mode")
     if not (no_sim or survey):
         return None

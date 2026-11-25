@@ -2946,6 +2946,10 @@ class WriteStageMixin:
                 "paper_style is briefing, which renders through HTML, not the LaTeX templates"
             )
         fmt = output.paper_format
+        answers = state.get("clarify_answers")  # only a study an earlier FI began carries a venue picked at the start
+        venue = answers.get("paper_venue") if isinstance(answers, dict) else None
+        if fmt == DEFAULT_PAPER_FORMAT and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
+            fmt = venue
         config = self.config.model_copy(update={"output": output.model_copy(update={
             "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
         })})

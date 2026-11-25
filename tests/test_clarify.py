@@ -103,11 +103,11 @@ async def test_the_commission_s_method_sets_the_two_modes(tmp_path: Path, method
 async def test_a_config_built_in_code_without_a_commission_keeps_its_own_two_keys(tmp_path: Path) -> None:
     """``Engine`` itself refuses nothing (the start paths call ``commission.door``): the keys of the config are the modes."""
     eng = Engine(_mk_cfg(tmp_path, no_simulation=True))
-    assert await eng._node_clarify({"topic": "x"}) == {
-        "clarify_done": True, "no_simulation_resolved": True, "survey_mode_resolved": False}
+    got = await eng._node_clarify({"topic": "x"})
+    assert (got["no_simulation_resolved"], got["survey_mode_resolved"]) == (True, False)
     eng = Engine(_mk_cfg(tmp_path / "s", survey_mode=True))
-    assert await eng._node_clarify({"topic": "x"}) == {
-        "clarify_done": True, "no_simulation_resolved": True, "survey_mode_resolved": True}
+    got = await eng._node_clarify({"topic": "x"})
+    assert (got["no_simulation_resolved"], got["survey_mode_resolved"]) == (True, True)
 
 
 @pytest.mark.asyncio

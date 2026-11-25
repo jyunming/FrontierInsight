@@ -1822,7 +1822,7 @@ class Config(BaseModel):
         # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
         ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
                    and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
-        engine_given = {k: _set_in(data.get("engine"), k) is True for k in ("no_simulation", "survey_mode")}
+        engine_given = {k: _set_in(data.get("engine"), k) is True for k in ("no_simulation", "survey_mode", "analyze_local_first")}
         modes = _commission.modes(found)  # None: no ``method``, so the config's own two keys stand (``door`` refuses them)
         if modes is not None and not _set_in(data.get("engine"), "analyze_local_first"):
             forced["engine"].update(no_simulation=modes[0], survey_mode=modes[1])
@@ -1847,7 +1847,8 @@ class Config(BaseModel):
         """The config's own ``engine.no_simulation`` / ``engine.survey_mode`` as it was written, for ``commission.door``:
         what the YAML said (a commission's ``method`` may have replaced it since), else what the engine section holds."""
         return dict(self._modes_asked) or {"no_simulation": self.engine.no_simulation,
-                                          "survey_mode": self.engine.survey_mode}
+                                          "survey_mode": self.engine.survey_mode,
+                                          "analyze_local_first": self.engine.analyze_local_first}
 
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:

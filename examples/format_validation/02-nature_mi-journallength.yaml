@@ -1,7 +1,8 @@
 # Format validation - nature_mi x journal-length
 # All format_validation/*.yaml run the same study (commission.yaml), so
 # differences in the produced paper come from paper_format
-# only. Run via:
+# only. ("brief" and "journallength" in the file names are history: how deep a study goes is no longer a setting,
+# so the length follows the format; set `output.page_limit` to cap the pages.) Run via:
 #   python launch.py --fleet examples/format_validation/*.yaml --max-concurrent 3
 commission: commission.yaml
 

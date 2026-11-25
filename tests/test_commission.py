@@ -11,6 +11,7 @@ The topic of these tests is a made-up draining tank.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -1169,3 +1170,84 @@ def _quest_id_has(cfg: Config, part: str) -> bool:
 
     cfg = cfg.model_copy(update={"output": OutputConfig(output_dir=cfg.output.output_dir)})
     return part in Engine(cfg).quest_id
+
+
+# ---- review round: the protocol, the person's own data, the title, an old checkpoint's venue -------------------------------
+
+
+@pytest.mark.parametrize("method,topic_type,policy", [("review_literature", "survey", "mixed"),
+                                                      ("analyze_data", "data_analysis", "user_data"),
+                                                      ("simulate", "simulation", None)])
+def test_the_protocol_takes_the_kind_of_study_from_the_commissions_method(
+        tmp_path: Path, method: str, topic_type: str, policy: str | None) -> None:
+    from core.protocol import derive_protocol
+
+    eng = _engine(tmp_path, _commission(tmp_path / "order", method=method))
+    out = asyncio.run(eng._node_clarify({"topic": eng.config.topic}))
+    protocol = derive_protocol({"topic": eng.config.topic, **out}, eng.config)
+    assert protocol.topic_type == topic_type
+    if policy:
+        assert protocol.source_policy == policy
+
+
+def test_an_old_checkpoints_topic_shape_still_sets_the_protocol_when_no_mode_says_otherwise() -> None:
+    from core.protocol import derive_protocol
+
+    state = {"topic": "a plain question", "no_simulation_resolved": True, "survey_mode_resolved": False,
+             "clarify_answers": {"topic_shape": "case_study"}}
+    assert derive_protocol(state, None).topic_type == "case_study"
+
+
+def test_analysing_the_persons_data_needs_the_commission_to_say_so(tmp_path: Path) -> None:
+    import launch
+
+    for changes, said in (({}, "no `method`"), ({"method": "simulate"}, "`method: simulate`")):
+        order = _commission(tmp_path / ("a" + said[:4]), **changes)
+        with pytest.raises(commission.CommissionRefused) as e:
+            commission.door(order, None, asked={"analyze_local_first": True})
+        assert "`method: analyze_data`" in str(e.value) and said in str(e.value) and "\n" not in str(e.value)
+        # ``--analyze <data> --commission <file>`` is refused the same way, before a folder is made or a file copied.
+        data = tmp_path / "mydata"
+        data.mkdir(exist_ok=True)
+        (data / "t.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        code = asyncio.run(launch._run_analyze(data_path=data, commission=order, output_root=tmp_path / "o",
+                                               provider_name="openai", vscode_bridge_port=0, supervisor=None))  # type: ignore[arg-type]
+        assert code == 2 and not (tmp_path / "o").exists()
+    ok = _commission(tmp_path / "ok", method="analyze_data")
+    commission.door(ok, None, asked={"analyze_local_first": True})
+    # A config that sets ``engine.analyze_local_first: true`` is refused at the door the same way.
+    cfg = tmp_path / "cfgs"
+    _commission(cfg)
+    (cfg / "study.yaml").write_text("commission: commission.json\nengine:\n  analyze_local_first: true\n", encoding="utf-8")
+    loaded = Config.from_yaml(cfg / "study.yaml")
+    with pytest.raises(commission.CommissionRefused):
+        commission.door(loaded.commission, None, topic=loaded.topic, asked=loaded.modes_asked())
+
+
+@pytest.mark.asyncio
+async def test_a_commission_title_is_the_title_the_writer_is_told_to_use(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, _commission(tmp_path / "order", title="Draining a tank"))
+    out = await eng._node_clarify({"topic": eng.config.topic})
+    assert out["title"] == "Draining a tank" and out["title_confirmed"] is True
+    plain = _engine(tmp_path / "p", _commission(tmp_path / "porder"))
+    out = await plain._node_clarify({"topic": plain.config.topic})
+    assert "title_confirmed" not in out, "no title given: the writer proposes one"
+
+
+def test_an_old_checkpoints_paper_venue_still_picks_the_write_persona_and_the_final_render(tmp_path: Path) -> None:
+    import launch
+
+    eng = _engine(tmp_path, _commission(tmp_path / "order"))
+    assert eng._write_venue({}) == eng.config.output.paper_format
+    assert eng._write_venue({"clarify_answers": {"paper_venue": "Report"}}) == "report"
+
+    class Art:
+        raw_state = {"clarify_answers": {"paper_venue": "report"}}
+
+    cfg = Config(commission=_commission(tmp_path / "o2"))
+    launch._apply_paper_venue_override(cfg, Art())  # type: ignore[arg-type]
+    assert cfg.output.paper_format == "report"
+    Art.raw_state = {}
+    cfg2 = Config(commission=_commission(tmp_path / "o3"))
+    launch._apply_paper_venue_override(cfg2, Art())  # type: ignore[arg-type]
+    assert cfg2.output.paper_format == type(cfg2.output).model_fields["paper_format"].default

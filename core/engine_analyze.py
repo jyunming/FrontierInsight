@@ -655,7 +655,11 @@ class AnalyzeStageMixin:
 
     def _write_venue(self, state: QuestState) -> str:
         """The paper format the write persona is chosen by (see :meth:`_resolve_write_persona`)."""
-        return self.config.output.paper_format or ""
+        venue = ""
+        answers = state.get("clarify_answers") or {}  # only a study an earlier FI began carries one (it asked the venue)
+        if isinstance(answers, dict):
+            venue = str(answers.get("paper_venue") or "").strip().lower()
+        return venue or self.config.output.paper_format or ""
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question

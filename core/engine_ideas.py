@@ -55,7 +55,10 @@ class IdeasStageMixin:
         no_sim = bool(engine.no_simulation) or survey
         self._log.info("[clarify] study mode: %s", "review of the literature (no experiment, no data)" if survey
                        else "analysis of the data you give (no experiment)" if no_sim else "experiment")
-        return {"clarify_done": True, "no_simulation_resolved": no_sim, "survey_mode_resolved": survey}
+        out: dict[str, Any] = {"clarify_done": True, "no_simulation_resolved": no_sim, "survey_mode_resolved": survey}
+        if (self.config.title or "").strip():  # the person's own title (the commission's, or the config's): the paper uses it
+            out.update(title=self.config.title.strip(), title_confirmed=True)
+        return out  # type: ignore[return-value]
 
     def _lit_kwargs(self, state: QuestState) -> dict[str, Any]:
         """Relevance-selection kwargs for the ``_format_lit*`` helpers, from
