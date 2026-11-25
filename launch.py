@@ -5497,7 +5497,7 @@ async def _why_skills(
     prompt = _load_prompts()["select_skills"].substitute(
         topic=topic,
         clarify_block="(not run — this is a preview)",
-        chosen_idea="{}",
+        study="(none)",
         catalogue_block=catalogue.render(),
     )
     sup = ProxySupervisor()
