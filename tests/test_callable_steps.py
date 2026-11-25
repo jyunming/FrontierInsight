@@ -110,6 +110,14 @@ async def test_the_design_step_alone_writes_plan_md_and_a_receipt_and_stops_afte
         "The design step was run on its own and finished; its receipt")
     receipt_events = [e for e in _trace(root) if e.get("kind") == "step_receipt"]
     assert receipt_events and receipt_events[-1]["sha256"] == _sha(root / rerun_from.RECEIPT)
+    rows = [line for line in (root / ".fi" / "model_calls.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert receipt["model_calls"] == len(rows) > 0, "the receipt counts the step's model calls"
+    assert set(receipt["handed_on"]) >= {"plan.md", "needs/receipts/design_audit.json"}
+    # A design whose design check did not pass still finished (the caller decides), and its report says which check.
+    (root / rerun_from.RECEIPT).write_text(json.dumps({**receipt, "checks": {
+        **receipt["checks"], "design_audit": {"judged": "ran", "status": "fail"}}}), encoding="utf-8")
+    assert quality_report.build(root, running=False)["outcome"]["line"].startswith(
+        "The design step was run on its own and finished with its design check not passed; its receipt")
 
 
 @pytest.mark.asyncio
@@ -183,8 +191,11 @@ async def test_a_design_step_held_at_its_plan_says_paused_and_then_done(tmp_path
     eng = Engine(cfg)
     await eng.run()
     assert _receipt(eng.quest_root)["ended"] == "paused" and "design" not in _started(eng.quest_root)
+    added = eng.quest_root / "inputs" / "notes.txt"  # a person adds to what the step is given while it waits
+    added.write_text("the counter is open at eight\n", encoding="utf-8")
     await Engine(cfg, resume_quest_id=eng.quest_id).run()
     assert _receipt(eng.quest_root)["ended"] == "done" and _started(eng.quest_root)[-1] == "design"
+    assert _receipt(eng.quest_root)["inputs"]["inputs/notes.txt"] == _sha(added), "the inputs are read at the step's end"
 
 
 @pytest.mark.asyncio
@@ -332,3 +343,86 @@ def test_a_route_out_of_a_step_is_back_only_when_it_leads_before_the_step() -> N
     assert rerun_from.step_back_to("compute", "analyze") == ""
     assert rerun_from.step_back_to("design", "implement_outline") == ""
     assert set(rerun_from.ALONE["compute"]) | set(rerun_from.ALONE["design"]) <= set(rerun_from.NODES)
+
+
+@pytest.mark.asyncio
+async def test_a_step_quest_goes_on_only_as_the_step_it_was_started_as(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.config import PausesConfig
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    as_compute = _config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "design")
+    with pytest.raises(ValueError, match="ran the design step, so it cannot go on as the compute step"):
+        await Engine(as_compute, resume_quest_id=design.quest_id).run()
+    with pytest.raises(ValueError, match="would go on at analyze, which is not part of the design step"):
+        design._step_inside(("analyze",))
+    # A whole study held at its plan is not resumed as one of its steps.
+    whole = _config(tmp_path, _commission(tmp_path / "order2"), None, "whole")
+    whole.pauses = PausesConfig(**{**whole.pauses.model_dump(), "plan": "ask"})
+    eng = Engine(whole)
+    await eng.run()
+    whole_as_step = whole.model_copy(update={"step": StepConfig(name="design")})
+    with pytest.raises(ValueError, match="was started as a whole study"):
+        await Engine(whole_as_step, resume_quest_id=eng.quest_id).run()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_step_quest_is_not_re_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    before = _started(design.quest_root)
+    with pytest.raises(ValueError, match="ran one step on its own and is not re-opened"):
+        await Engine(design.config, resume_quest_id=design.quest_id).run(reopen=True)
+    assert _started(design.quest_root) == before, "no node ran"
+
+
+@pytest.mark.asyncio
+async def test_a_compute_step_after_a_folder_whose_handed_on_record_changed_is_refused(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    audit = design.quest_root / "needs" / "receipts" / "design_audit.json"
+    audit.write_text(audit.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    with pytest.raises(ValueError, match="needs/receipts/design_audit.json changed since its receipt"):
+        await eng.run()
+    assert not _started(eng.quest_root)
+
+
+@pytest.mark.asyncio
+async def test_a_design_with_no_simulation_is_refused_by_the_compute_step_even_with_a_script(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake())
+    cfg = _config(tmp_path, _commission(tmp_path / "order"), {"name": "design"}, "design")
+    cfg.engine = cfg.engine.model_copy(update={"no_simulation": True})
+    design = Engine(cfg)
+    await design.run()
+    assert _receipt(design.quest_root)["ended"] == "done"
+    (design.quest_root / "code").mkdir(exist_ok=True)
+    (design.quest_root / "code" / "experiment.py").write_text(_GOOD_EXPERIMENT, encoding="utf-8")
+    eng = Engine(_config(tmp_path, cfg.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    with pytest.raises(ValueError, match="is a study with no simulation"):
+        await eng.run()
+    assert not _started(eng.quest_root), "the script was not run"
+
+
+def test_a_check_record_that_says_nothing_is_unreadable_not_ran(tmp_path: Path) -> None:
+    rec = tmp_path / "check.json"
+    for text in ("{not json", "{}", "[1, 2]", ""):
+        rec.write_text(text, encoding="utf-8")
+        assert rerun_from.judged(tmp_path, "check.json", None) == {"judged": "unreadable"}, text
+    rec.write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    assert rerun_from.judged(tmp_path, "check.json", None) == {"judged": "ran", "status": "ok"}
+
+
+def test_a_redo_from_a_step_moves_the_old_step_receipt_aside(tmp_path: Path) -> None:
+    (tmp_path / "needs").mkdir()
+    (tmp_path / rerun_from.RECEIPT).write_text("{}", encoding="utf-8")
+    (tmp_path / "plan.md").write_text("# plan\n", encoding="utf-8")
+    where, moved = rerun_from.back_up(tmp_path, "plan")
+    assert rerun_from.RECEIPT in moved and not (tmp_path / rerun_from.RECEIPT).exists()
+    assert (where / rerun_from.RECEIPT).is_file()

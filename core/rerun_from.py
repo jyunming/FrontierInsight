@@ -211,6 +211,8 @@ RECEIPT = "needs/STEP_RECEIPT.json"
 # What the compute step copies from the design step's folder: the plan and its records (and code a caller put there).
 HANDED_ON = [p for p in OUTPUTS["plan"] if p not in _EVIDENCE + _PAPER + _RUN_RECORDS] + [
     "needs/DESIGN_HISTORY.json", "needs/PLAN_HISTORY.json", ".fi/plan_versions", ".fi/known_values.json"]
+# What a design step's receipt binds of what it hands on (code/ is the caller's to add a script to).
+BOUND = [p for p in HANDED_ON if p != "code"]
 STEP_OUTPUTS: dict[str, tuple[str, ...]] = {
     "design": ("plan.md", "needs/receipts/design_audit.json", "needs/DESIGN_HISTORY.json", ".fi/known_values.json"),
     "compute": ("code", "results.json", "raw", "figures", "needs/FROZEN_PROTOCOL.json", *_RUN_RECORDS,
@@ -255,6 +257,13 @@ def hand_on(after: Path, quest_root: Path) -> list[str]:
     return copied
 
 
+def changed_since(folder: Path, recorded: dict[str, str]) -> str:
+    """How the files ``BOUND`` names in ``folder`` differ from the sha256s a receipt recorded (``""``: they do not)."""
+    now = files_sha(folder, BOUND)
+    diff = [k for k in sorted(set(now) | set(recorded)) if now.get(k) != recorded.get(k)]
+    return f"its {', '.join(diff[:3])}{' and more' if len(diff) > 3 else ''} changed since its receipt" if diff else ""
+
+
 def step_back_to(step: str, node: str) -> str:
     """The earlier step a study run as ``step`` would go back to when its graph sends it to ``node`` (``""``: forward):
     the step run alone that holds the node, else its ``--from`` step."""
@@ -266,7 +275,8 @@ def step_back_to(step: str, node: str) -> str:
 
 def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]:
     """What one check of a step judged, from the record it leaves: ``ran`` (with its status), ``not_applicable`` (the
-    record's status says so), ``off`` (its setting) or ``not_run`` (on, and no record, or a record saying it skipped)."""
+    record's status says so), ``off`` (its setting), ``not_run`` (on, and no record, or a record saying it skipped) or
+    ``unreadable`` (a record that cannot be read, is empty or is not an object)."""
     import json
 
     path = Path(quest_root) / record
@@ -275,8 +285,9 @@ def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"judged": "ran", "status": "unreadable"}
-    data = data if isinstance(data, dict) else {}
+        data = None
+    if not isinstance(data, dict) or not data:  # a record that says nothing is not a check that ran
+        return {"judged": "unreadable"}
     if data.get("status") == "not_applicable":
         return {"judged": "not_applicable", "why": str(data.get("detail") or data.get("error") or "")}
     if data.get("skipped"):  # a check that was on and did not read (its own record says why): not a fact of the study
@@ -625,7 +636,7 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
         dest = quest_root / ".fi" / "previous" / f"{stamp}-{n}"
         n += 1
     moved: list[str] = []
-    for pattern in dict.fromkeys(OUTPUTS[step]):
+    for pattern in dict.fromkeys([*OUTPUTS[step], RECEIPT]):  # a step's receipt is of the run being redone
         for rel in _matches(quest_root, pattern):
             src = quest_root / rel
             if not src.exists() or rel in moved:

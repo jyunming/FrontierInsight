@@ -563,6 +563,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                   f"`--resume {self.quest_id} --from` with no step lists the steps it did reach.")
                             return self._collect_artifacts({})
                         replaced_sha = ""
+                        if self._step() is not None:  # a redo of a step starts inside it
+                            self._step_inside((await graph.aget_state(fork_config)).next)
                         if _rerun_from.needs_approval(from_step):
                             if not (approved_by or "").strip():
                                 self._log.warning("[run] --from %s replaces the frozen protocol and needs --approve-as", from_step)
@@ -638,6 +640,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                         # consumes a loop slot and guarantees the prior review
                         # JSON is embedded (the design node skips it at
                         # iteration==0).
+                        if self._step() is not None:  # a resume goes on only inside the step it was started as
+                            if reopen and not prior_snapshot.next:
+                                raise ValueError(f"quest {self.quest_id} ran one step on its own and is not re-opened: "
+                                                 "run that step again in a new quest folder; nothing was run")
+                            self._step_inside(prior_snapshot.next)
                         if reopen and not prior_snapshot.next:
                             forget_papers_asked(self.fi_dir, declined=False)
                             self._set_aside_stuck_record()
@@ -1807,9 +1814,15 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         """Once, before anything runs: what the step is given, recorded in the trace. ``compute`` first checks the receipt
         of the design step in ``step.after`` (it ended, for this commission, with the plan.md that folder holds), then
         copies the plan and its records (``rerun_from.HANDED_ON``)."""
-        if self._step_started():
+        step, previous, started = self._step(), {}, self._step_started()
+        if started:  # a resume: it goes on as the step it was started as
+            if started.get("step") != step.name:
+                raise ValueError(f"quest {self.quest_id} ran the {started.get('step')} step, so it cannot go on as the "
+                                 f"{step.name} step; nothing was run")
             return
-        step, previous = self._step(), {}
+        if any(e.get("kind") == "node_started" for e in _audit_log.read(self.audit.path)):
+            raise ValueError(f"quest {self.quest_id} was started as a whole study, so it cannot go on as the {step.name} "
+                             "step alone; nothing was run")
         if step.name == "compute":
             after = Path(step.after)
             try:
@@ -1822,7 +1835,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                    else "its design step was run for another commission" if receipt.get("commission_sha256")
                    != _commission.recorded_sha(self.quest_root)
                    else "its plan.md is not the one its receipt names" if _rerun_from.files_sha(after, ["plan.md"]).get(
-                       "plan.md") != (receipt.get("outputs") or {}).get("plan.md") else "")
+                       "plan.md") != (receipt.get("outputs") or {}).get("plan.md")
+                   else "its receipt names none of the files it hands on" if not isinstance(receipt.get("handed_on"), dict)
+                   else _rerun_from.changed_since(after, receipt["handed_on"]))
             if why:
                 raise ValueError(f"the compute step runs the design of a finished design step, and {after} cannot give "
                                  f"one: {why}; nothing was run")
@@ -1831,6 +1846,14 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                         "after_quest": receipt.get("quest_id") or after.name, "design_sha256": receipt.get("design_sha256")}
         given = _rerun_from.files_sha(self.quest_root, ["inputs", *(_rerun_from.HANDED_ON if step.name == "compute" else [])])
         self._audit("step_started", step=step.name, inputs=given, **previous)
+
+    def _step_inside(self, next_nodes: Any) -> None:
+        """Refuse to go on when the quest's next node is not one of its step's (``rerun_from.ALONE``)."""
+        step = self._step()
+        outside = [n for n in (next_nodes or ()) if n not in _rerun_from.ALONE[step.name]]
+        if outside:
+            raise ValueError(f"quest {self.quest_id} would go on at {', '.join(outside)}, which is not part of the "
+                             f"{step.name} step, so it cannot go on as that step; nothing was run")
 
     async def _step_seed(self) -> tuple[dict[str, Any], str] | None:
         """The state a step that does not start the graph begins from, and the node it is written as. ``compute``: the
@@ -1852,6 +1875,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             raise ValueError(f"the state the design step in {after} ended with does not hold the design its receipt names; "
                              "nothing was run")
         values = {k: v for k, v in values.items() if k not in ("quest_root", "model_call_counts", "record_anchor", "stuck")}
+        if self._route_after_design(values) != "implement":  # the design's own route decides, not the files handed on
+            raise ValueError(f"the design in {after} is a study with no simulation, and the compute step runs a "
+                             "simulation only; nothing was run")
         script = self.quest_root / "code" / "experiment.py"
         if script.is_file():
             return {**values, **_FRESH_SCRIPT, "code": script.read_text(encoding="utf-8")}, "implement"
@@ -1885,6 +1911,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 f"the script still failed after its repairs (exit code {rc})" if rc not in (0, None)
                 else f"the script printed no result (exit code {rc})") + (f"; {gave_up.strip()[:300]}" if gave_up.strip() else ""))
         started, design = self._step_started(), state.get("design")
+        self._seed_call_counts(state)
         checks = {name: _rerun_from.judged(self.quest_root, rel, getattr(self.config.engine, key, None) if key else None)
                   for name, (rel, key) in _rerun_from.STEP_CHECKS[step.name].items()}
         if "known_values" in checks and not self._commission_data().get("known_values"):
@@ -1894,9 +1921,17 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             **({"return_reason": stuck["return_reason"], "problem": stuck.get("problem")} if ended == "returned" else {}),
             **({"stopped_because": why} if ended == "stopped" else {}),
             "previous_receipt_sha256": started.get("previous_receipt_sha256"), "after": started.get("after"),
-            "commission_sha256": _commission.recorded_sha(self.quest_root), "inputs": started.get("inputs") or {},
+            "commission_sha256": _commission.recorded_sha(self.quest_root),
+            # What it was given: the files handed on as they were at its start, and inputs/ as it is now (a person can
+            # add to it during a pause).
+            "inputs": {**{k: v for k, v in (started.get("inputs") or {}).items() if not k.startswith("inputs/")},
+                       **_rerun_from.files_sha(self.quest_root, ["inputs"])},
             "outputs": _rerun_from.files_sha(self.quest_root, _rerun_from.STEP_OUTPUTS[step.name]),
             "design_sha256": _attempts._json_sha(design) if design else None,
+            # The model calls this step made (a caller adds the steps up against the commission's limit).
+            "model_calls": sum(int(n or 0) for n in (self.__dict__.get("_model_call_counts") or {}).values()),
+            # What the compute step may take from this folder, as it is now (it refuses a folder changed since).
+            **({"handed_on": _rerun_from.files_sha(self.quest_root, _rerun_from.BOUND)} if step.name == "design" else {}),
             # What the run measured (its RESULT_JSON, FI's own record of it): the numbers are in no other file.
             **({"result": state.get("result_json") or None} if step.name == "compute" else {}), "checks": checks,
         }
