@@ -2197,10 +2197,30 @@ class TrialsRunner:
         self.left_out_settings: list[str] = []
         self._plan_seen: list[dict[str, Any]] | None = None
         self._plan_started = 0.0
-        self._range_said: set[str] = set()  # the line saying the study left the time range is said once
+        self._baseline: dict[str, int] = {}  # per setting: trials already in its results when it was planned (reused, not run now)
+        self._counts: tuple[int, int] | None = None  # (trials done in this run, trials of the study) as progress_text last read
+        self._alarm_ref: tuple[Any, Any, bool] | None = None  # the range kept at the start, the estimate said, and whether told
 
     def _note_plan(self, plan: list[dict[str, Any]]) -> None:
-        self._plan_seen, self._plan_started = plan, time.monotonic()
+        """Told the plan so far (again with every batch of a lazily planned study). The clock and the reference for the
+        time-range sentence are those of the first call; a setting whose trials are already in its results is not this run's work."""
+        if self._plan_seen is None:
+            from . import run_estimate as _estimate
+
+            self._plan_started, self._baseline, self._counts = time.monotonic(), {}, None
+            record = _estimate.read_record(self.quest_root)
+            self._alarm_ref = (record.get("range_s"), record.get("estimate_s"), bool(record.get("range_said")))
+        self._plan_seen = plan
+        for task in plan:
+            if task["nonce"] not in self._baseline:
+                self._baseline[task["nonce"]] = self._trials_in(task)
+
+    def _trials_in(self, task: dict[str, Any]) -> int:
+        try:
+            lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0
+        return sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
 
     def progress_text(self) -> str:
         """For the "still running" line: how many settings are done and how long is left, in plain words; empty when the
@@ -2210,38 +2230,33 @@ class TrialsRunner:
             return ""
         from . import run_estimate as _estimate
 
-        done_trials = 0
-        done_cells = 0
+        done_trials = done_cells = new_trials = 0
         for task in plan:
-            try:
-                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            seen = sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
-            done_trials += seen
+            seen = self._trials_in(task)
+            base = min(self._baseline.get(task["nonce"], 0), seen)
+            done_trials += seen - base
+            new_trials += len(task["trials"]) - base
             done_cells += seen >= len(task["trials"])
-        return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
-                                       time.monotonic() - self._plan_started)
+        self._counts = (done_trials, new_trials)
+        return _estimate.progress_line(done_cells, len(plan), done_trials, new_trials, time.monotonic() - self._plan_started)
 
     def progress_alarm(self) -> str:
-        """The sentence saying the study left the time range FI kept at the start, once; empty before that and after."""
-        plan = self._plan_seen
-        if not plan or self._range_said:
+        """The sentence saying the study left the time range FI kept at the start, once (kept in the estimate record, so a
+        resumed quest does not say it again); empty before that and after. It uses the counts :meth:`progress_text` just read,
+        and none for a study planned a batch at a time (its total is not known)."""
+        if self._plan_seen is None or self._counts is None or self._alarm_ref is None or self.first_cells is not None:
+            return ""
+        range_s, said_s, told = self._alarm_ref
+        if told or not range_s:
             return ""
         from . import run_estimate as _estimate
 
-        done = 0
-        for task in plan:
-            try:
-                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            done += sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
-        record = _estimate.read_record(self.quest_root)
-        text = _estimate.left_the_range(done, sum(len(t["trials"]) for t in plan), time.monotonic() - self._plan_started,
-                                        record.get("range_s"), record.get("estimate_s"))
+        text = _estimate.left_the_range(self._counts[0], self._counts[1], time.monotonic() - self._plan_started, range_s, said_s)
         if text:
-            self._range_said.add("range")
+            self._alarm_ref = (range_s, said_s, True)
+            record = _estimate.read_record(self.quest_root)
+            if record.get("estimate_s") == said_s:
+                _estimate.write_record(self.quest_root, {**record, "range_said": True})
         return text
 
     def _without_left_out(self, summary: Path) -> Path:

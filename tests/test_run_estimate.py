@@ -609,3 +609,84 @@ def test_a_study_that_left_the_range_is_told_once_on_the_console(tmp_path: Path)
 
     assert asyncio.run(Eng()._await_with_heartbeat(work(), label="x", interval_s=0.05, alarm=lambda: next(sentences, ""))) == 1
     assert shown == ["[execute] FI now expects the study to take about 9 h in all."]
+
+
+# ---- the running study's check of the time range: where its clock, its counts and its "told" mark come from ---------------
+
+
+def _runner(root: Path, **kw):  # type: ignore[no-untyped-def]
+    (root / "code").mkdir(parents=True, exist_ok=True)
+    (root / "code" / "simulate.py").write_text("def run_trial(cell, trial, seed):\n    return {}\n", encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol={"grid": {"n": [1, 2]}, "runs_per_setting": 4},
+        deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "simulate.py")
+    for k, v in kw.items():
+        setattr(runner, k, v)
+    return runner
+
+
+def _task(root: Path, name: str, done: int, total: int = 4) -> dict:
+    line = '{"status": "ok", "nonce": "%s"}\n' % name
+    (root / f"{name}.jsonl").write_text(line * done, encoding="utf-8")
+    return {"out": f"{name}.jsonl", "nonce": name, "trials": list(range(total))}
+
+
+def _kept_range(root: Path) -> None:
+    assert est.write_record(root, {"estimate_s": 4 * 3600.0, "timed": 1, "cells": 100})
+
+
+def test_a_batch_planned_later_does_not_restart_the_clock(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 0)])
+    first = runner._plan_started
+    import time
+
+    time.sleep(0.05)
+    runner._note_plan([_task(tmp_path, "a", 0), _task(tmp_path, "b", 0)])
+    assert runner._plan_started == first
+
+
+def test_a_study_planned_a_batch_at_a_time_gets_no_range_sentence(tmp_path: Path) -> None:
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path, first_cells=50)
+    runner._note_plan([_task(tmp_path, "a", 2)])
+    runner._plan_started -= 36000.0
+    runner.progress_text()
+    assert runner.progress_alarm() == ""
+
+
+def test_trials_already_in_the_results_are_not_this_runs_work(tmp_path: Path) -> None:
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 4), _task(tmp_path, "b", 0)])  # "a" was run by an earlier check
+    _task(tmp_path, "b", 1)
+    runner.progress_text()
+    assert runner._counts == (1, 4)  # one of the four trials this run has to do, not five of eight
+
+
+def test_the_range_sentence_is_said_once_and_not_again_after_a_resume(tmp_path: Path) -> None:
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 0), _task(tmp_path, "b", 0)])
+    _task(tmp_path, "a", 4)  # half of the trials done after (pretend) 40 hours: the total projects to 80 h
+    runner._plan_started -= 40 * 3600.0
+    runner.progress_text()
+    assert runner.progress_alarm().startswith("FI now expects the study to take about 3 days 8 h in all")
+    assert runner.progress_alarm() == ""
+    assert est.read_record(tmp_path).get("range_said") is True
+    resumed = _runner(tmp_path)  # the quest is started again from its record
+    resumed._note_plan([_task(tmp_path, "a", 0), _task(tmp_path, "b", 0)])
+    _task(tmp_path, "a", 4)
+    resumed._plan_started -= 40 * 3600.0
+    resumed.progress_text()
+    assert resumed.progress_alarm() == ""
+
+
+def test_the_range_sentence_reads_no_result_file_again(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 0)])
+    _task(tmp_path, "a", 3)
+    runner._plan_started -= 40 * 3600.0
+    runner.progress_text()
+    monkeypatch.setattr(runner, "_trials_in", lambda task: (_ for _ in ()).throw(AssertionError("read again")))
+    assert runner.progress_alarm() != ""
