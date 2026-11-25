@@ -50,7 +50,7 @@ def number_value(m: re.Match[str]) -> float | None:
 
 
 def number_in_text(value: float, text: str) -> bool:
-    """Whether ``text`` writes ``value`` with its sign (0.888 as 0.8880 or .888, 1200 as 1,200, 0.001 as 1e-3); a
+    """Whether ``text`` writes ``value`` with its sign (0.375 as 0.3750 or .375, 1200 as 1,200, 0.001 as 1e-3); a
     number that is one side of a fraction or ratio of two numbers written with "/" (1/2) is not that value, while a
     unit written with one (0.25/h) leaves it the value."""
     text = str(text or "")
