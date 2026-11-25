@@ -1383,8 +1383,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
              "Windows). Every FI run that is not a child of the extension "
              "routes LLM calls through `vscode.lm.*` this way: --serve / "
-             "--tools, and a `--update` you run in a terminal yourself (the "
-             "line `@fi /update` shows carries this flag). Auto-resolved per OS / user via "
+             "--tools, and a `--update` you run in a terminal yourself. "
+             "Auto-resolved per OS / user via "
              "`core.bridge_path.persistent_bridge_path()` under --serve "
              "only — pass it yourself in any other mode. Pass empty "
              "string to disable.",
