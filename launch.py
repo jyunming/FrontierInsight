@@ -2550,6 +2550,14 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     )
     if outcome == "timeout":
         return 3
+    from core import commission as _commission
+
+    try:  # the wait can be hours: the commission and the quest's copies are checked again before it goes on
+        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id)
+    except _commission.CommissionRefused as e:
+        print(f"[FI] {e}", file=sys.stderr)
+        engine._log.warning("[watch] %s", e)
+        return 2
     out(f"[watch] the job is {outcome}; resuming quest {quest_id}")
     await run_one(
         cfg, supervisor=supervisor, resume_quest_id=quest_id,
@@ -2759,6 +2767,10 @@ async def _finish_outputs(
         "paper_md": str(art.paper_md) if art.paper_md else None,
         "paper_pdf": str(written.get("paper_pdf")) if written.get("paper_pdf") else None,
     }
+    from core import commission as _commission
+
+    if _commission.staged_path(Path(art.quest_root)).is_file():  # the commission this run answered
+        summary["commission_sha256"] = _commission.recorded_sha(Path(art.quest_root))
     # Which literature / full-text sources failed during the run (written by
     # the engine on every exit path). Surfaced here so the CLI and the VSCode
     # chat see it without opening run.log.
@@ -3536,6 +3548,25 @@ async def run_fleet(
 # ---- entry ---------------------------------------------------------------
 
 
+def _commission_refusal(args: argparse.Namespace) -> str | None:
+    """Why the commission a new quest's YAML (or a fleet's) names cannot be used; None when it can or none is named.
+    Anything else wrong with a YAML is said where it is loaded."""
+    import yaml
+    from core import commission as _commission
+
+    for path in list(args.fleet or []) or ([args.config] if args.config and not (args.resume or args.watch) else []):
+        try:
+            raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        try:
+            if isinstance(raw, dict) and raw.get("commission"):
+                _commission.door(_commission.locate(raw["commission"], Path(path).resolve().parent), None)
+        except _commission.CommissionRefused as e:
+            return str(e)
+    return None
+
+
 async def main_async(args: argparse.Namespace) -> int:
     # --rerun is --resume + re-open-on-terminal: normalize it onto args.resume
     # so all the resume plumbing (validation, checkpoint reuse) applies, and
@@ -3600,6 +3631,9 @@ async def main_async(args: argparse.Namespace) -> int:
         # Listing the steps a quest can be run again from reads its checkpoints only.
         or _list_steps
     )
+    if not (_axon_inert_modes or args.serve or args.ingest) and (refused := _commission_refusal(args)) is not None:
+        print(f"[FI] {refused}", file=sys.stderr)  # before any service starts
+        return 2
     if args.no_axon_sidecar:
         # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
         # environment, not this flag: without this, `--serve --no-axon-sidecar` still started one.
@@ -3885,7 +3919,13 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.config:
             # Absolute before anything below may change folder (a quest found elsewhere runs from its own).
             args.config = Path(args.config).resolve()
-            cfg = Config.from_yaml(args.config)
+            from core import commission as _commission
+
+            try:
+                cfg = Config.from_yaml(args.config)
+            except _commission.CommissionRefused as e:  # a commission missing a key: refused before anything starts
+                print(f"[FI] {e}", file=sys.stderr)
+                return 2
             if args.output is not None:
                 cfg.output.output_dir = args.output
             # A quest named by a shortened id, or one that is not under this YAML's outputs folder: look it up there
@@ -3946,8 +3986,18 @@ async def main_async(args: argparse.Namespace) -> int:
                     print(f"[FI] {watch_err}".replace("--resume", "--watch"),
                           file=sys.stderr)
                     return 1
+            if not args.emit:
+                try:
+                    # Before any model call, and before run_one replaces a resumed quest's own config.yaml.
+                    # The quest's full id: a shortened one was looked up above.
+                    found_id = args.resume or args.watch
+                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None)
+                except _commission.CommissionRefused as e:
+                    print(f"[FI] {e}", file=sys.stderr)
+                    return 2
+            if args.watch:
                 return await _watch_quest(cfg, args, supervisor)
-            if not (args.watch or args.emit):
+            if not args.emit:
                 from core.provider import missing_api_key
 
                 if (missing := missing_api_key(cfg.provider)) is not None:
@@ -3999,7 +4049,15 @@ async def main_async(args: argparse.Namespace) -> int:
             )
             return 0
 
-        configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
+        from core import commission as _commission
+
+        try:
+            configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
+            for _path, c in configs:
+                _commission.door(c.commission, None)  # every quest's commission before any starts
+        except _commission.CommissionRefused as e:
+            print(f"[FI] {e}", file=sys.stderr)
+            return 2
         for path, c in configs:
             _apply_vscode_bridge_override(c, args.vscode_bridge_port)
             _apply_vscode_bridge_socket_override(c, args.vscode_bridge_socket)

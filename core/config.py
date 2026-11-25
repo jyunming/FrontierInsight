@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 ProviderName = Literal[
     "codex",
@@ -1817,8 +1817,23 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
     "engine": {"phased": True},
 }
 
+# What a commission (core/commission.py) turns off where the config is silent: the work it already did.
+_COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
+    "pauses": {"clarify": "off", "scope": "off", "papers": False},
+    "knowledge": {"novelty_check": False, "foundational_works": False, "requery_on_low_relevance": False},
+    "engine": {"evidence_gate_max_broaden": 0, "enable_analyze_reroute": False},
+}
+
+
+def _set_in(block: Any, key: str) -> Any:
+    """The value a config section (a dict, or a model passed in code) was given for ``key``; None when not given."""
+    if isinstance(block, BaseModel):
+        return getattr(block, key, None) if key in block.model_fields_set else None
+    return block.get(key) if isinstance(block, dict) else None
+
 
 class Config(BaseModel):
+    _commission_note: str = PrivateAttr(default="")  # the settings a commission overrode (_apply_commission)
     topic: str
     title: str | None = None
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -1842,6 +1857,8 @@ class Config(BaseModel):
     # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
     # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
+    # A commission file (core/commission.py) the study starts from instead of a topic; relative to this config's folder.
+    commission: Path | None = None
 
     @property
     def effective_result_use(self) -> str:
@@ -1940,6 +1957,43 @@ class Config(BaseModel):
             )
         return data
 
+    @model_validator(mode="wrap")
+    @classmethod
+    def _apply_commission(cls, data: Any, handler: Any) -> Any:
+        """A commission's question as the topic, ``_COMMISSION_DEFAULTS`` whatever the config says (a setting it
+        overrides is named in ``_commission_note``, which the log and the quest's run.log carry), and its hours as the
+        cap of the execution time limit."""
+        if not isinstance(data, dict) or not data.get("commission"):
+            return handler(data)
+        from core import commission as _commission
+
+        data = {**data, "commission": Path(str(data["commission"])).expanduser().resolve()}
+        found = _commission.read(data["commission"])  # its keys are checked at the door (core/commission.py)
+        if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
+            data["topic"] = found["question"].strip()
+        hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
+        cap = max(1, int(float(hours) * 3600)) if isinstance(hours, (int, float)) and hours > 0 else None
+        given = _set_in(data.get("execution"), "timeout_s")
+        forced = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
+        # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
+        ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
+                   and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
+        for section, values in forced.items():
+            block = data.get(section)
+            ignored += [f"{section}.{k}" for k, v in values.items() if _set_in(block, k) not in (None, v)]
+            data[section] = (block.model_copy(update=values) if isinstance(block, BaseModel)
+                             else {**dict(block or {}), **values})
+        config = handler(data)
+        # The cap on the value as validated, so every form the field accepts ("7200", 7200.0) is capped.
+        if cap is not None and (given is None or config.execution.timeout_s > cap):
+            ignored += ["execution.timeout_s"] if given is not None else []
+            config.execution = config.execution.model_copy(update={"timeout_s": cap})
+        if ignored:
+            config._commission_note = ("The commission gives the question, the study, the sources and the time allowed, "
+                                       f"so these settings of the config are not used: {', '.join(ignored)}.")
+            logging.getLogger("frontier_insight.config").warning("%s", config._commission_note)
+        return config
+
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:
         """Raise ``ValueError`` listing any YAML keys FI doesn't recognize.
@@ -1990,6 +2044,12 @@ class Config(BaseModel):
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if isinstance(data, dict):
             cls._audit_unknown_keys(data)
+            if data.get("commission"):
+                # Refused here in plain words, not in the validator, whose error pydantic would wrap.
+                from core import commission as _commission
+
+                data = {**data, "commission": str(_commission.locate(data["commission"], Path(path).resolve().parent))}
+                _commission.validate(Path(data["commission"]), sources=False)
         return cls.model_validate(data)
 
 

@@ -3325,6 +3325,12 @@ def make_app(
             raise HTTPException(400, f"invalid YAML config: {e}") from e
         # Ensure the quest lands under the server's configured output_root.
         cfg.output.output_dir = app.state.output_root
+        from core import commission as _commission
+
+        try:  # a commission's files and passages, before any quest folder or model call
+            _commission.door(cfg.commission, None)
+        except _commission.CommissionRefused as e:
+            raise HTTPException(400, str(e)) from e
 
         engine = Engine(cfg, supervisor=app.state.supervisor)
         quest_id = engine.quest_id

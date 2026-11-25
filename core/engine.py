@@ -159,6 +159,7 @@ from .engine_run import RunStageMixin
 from .engine_analyze import AnalyzeStageMixin
 from .engine_write import WriteStageMixin
 from .engine_review import ReviewStageMixin
+from . import commission as _commission
 
 
 class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, ImproveStageMixin, RunStageMixin, AnalyzeStageMixin, WriteStageMixin, ReviewStageMixin,
@@ -473,6 +474,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             self._preflight_paper_pdf()
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
+            if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
+                files = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
+                sha = files[f"inputs/{_commission.STAGED_NAME}"]
+                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=files)
+                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
+            if self._commissioned() and self.config._commission_note:
+                self._log.warning("[commission] %s", self.config._commission_note)
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -520,6 +528,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     # ``--from <step>``: the first call continues from the checkpoint taken just before that step; every
                     # call after it (a resume after a pause) continues the thread as it now is.
                     fork_config: dict[str, Any] | None = None
+                    if from_step in _commission.GIVEN_STEPS and self._commissioned():
+                        print(f"[FI] quest {self.quest_id} was started from a commission, which gives its question, "
+                              f"its study and its sources, so the {from_step} step is not one FI did and there is "
+                              "nothing to rerun from there; nothing was changed. `--from plan` writes the plan again.")
+                        return self._collect_artifacts({})
                     if from_step:
                         fork_config = await _rerun_from.checkpoint_before(graph, run_config, from_step)
                         if fork_config is None:
@@ -1728,8 +1741,28 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
     def _progress_stage(self, node: str) -> None:
         phrase = STAGE_PROGRESS.get(node)
+        if self._commissioned() and node in _commission.GIVEN_STAGES:
+            phrase = _commission.GIVEN_STAGES[node]  # a step the commission gives does not say it is being done
         if phrase:
             self._progress(f"[{node}] {phrase}")
+
+    def _commissioned(self) -> bool:
+        """Whether this quest was started from a commission (core/commission.py)."""
+        return getattr(getattr(self, "config", None), "commission", None) is not None
+
+    def _commission_data(self) -> dict[str, Any]:
+        """The commission this quest runs: its frozen copy in the quest, else the file the config names."""
+        if "_commission_read" not in self.__dict__:
+            staged = _commission.staged_path(self.quest_root)
+            self.__dict__["_commission_read"] = _commission.read(
+                staged if staged.is_file() else Path(self.config.commission))  # type: ignore[arg-type]
+        return self.__dict__["_commission_read"]
+
+    def _return_to_qc(self, reason: str, problem: str, evidence: Any, tried: list[str], **rest: Any) -> dict[str, Any]:
+        """Hand a commissioned study back for one of :data:`core.commission.RETURN_REASONS` (``needs/STUCK.json``)."""
+        record = _commission.write_return(self.quest_root, reason, problem, evidence, tried, **rest)
+        self._audit("returned", return_reason=reason, problem=problem)
+        return record
 
     def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
         """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""

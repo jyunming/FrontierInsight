@@ -2565,7 +2565,9 @@ class RunChecksMixin:
         (no request to the plan's model). The record of it (the plain note the paper states, the precision those runs give,
         and whether they are fewer than the plan's minimum), or ``None`` when plan.md could not be changed. ``topic``: the
         limit is the one the topic states; ``over_topic``: why that limit cannot be met even so (the run then has the plan's
-        minimum and is over it)."""
+        minimum and is over it). ``None`` for a commissioned study, whose runs FI never lowers (it is handed back)."""
+        if getattr(self.config, "commission", None) is not None:  # type: ignore[attr-defined]
+            return None
         fewer = int(fit.runs)
         path = _plan.plan_path(self.quest_root)  # type: ignore[attr-defined]
         try:
@@ -4007,7 +4009,8 @@ class RunChecksMixin:
         fits_in = self._what_fits(est, limit_s)
         one_s = _estimate.cheapest_setting_s(probes)
         if _estimate.one_fits(one_s, limit_s) and self._asks_plan_before_cut(state, self.quest_root, fits_in):  # type: ignore[attr-defined]
-            text = self._few_fit_text(est, limit_s, fits_in or {})
+            text = self._few_fit_text(est, limit_s, fits_in or {},
+                                      asks=getattr(self.config, "commission", None) is None)  # type: ignore[attr-defined]
             self._log.warning("[execute] %s", text)  # type: ignore[attr-defined]
             print(f"[FI] {text[:1].upper()}{text[1:]}.")
             _estimate.write_record(self.quest_root, {**base, "fits": False, "stopped": text, "fit": fits_in,  # type: ignore[attr-defined]
@@ -4030,14 +4033,16 @@ class RunChecksMixin:
                 and int(state.get("iteration", 0) or 0) == 0 and _plan.plan_path(Path(quest_root)).is_file())
 
     @staticmethod
-    def _few_fit_text(est: _estimate.Estimate, limit_s: float, fit: dict[str, Any]) -> str:
-        """The stop's sentence when fewer than one in ten of a study's settings fit (:meth:`_cut_grid`)."""
+    def _few_fit_text(est: _estimate.Estimate, limit_s: float, fit: dict[str, Any], *, asks: bool = True) -> str:
+        """The stop's sentence when fewer than one in ten of a study's settings fit (:meth:`_cut_grid`). ``asks=False``: a
+        commissioned study, which is handed back instead of being asked for again."""
         at_once = f" with {est.at_once} running at the same time" if est.at_once > 1 else ""
         n, total = int(fit.get("settings_that_fit") or 1), int(fit.get("settings") or est.cells)
         return (f"the experiment's {total:,} settings would take {'at least ' if est.at_least else 'about '}"
                 f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}{at_once}, more than the "
-                f"{_estimate.plain_duration(limit_s)} allowed, and only {n:,} of them fit, fewer than one in ten; FI asks the "
-                "plan once for a study that fits before it runs only a part of this one")
+                f"{_estimate.plain_duration(limit_s)} allowed, and only {n:,} of them fit, fewer than one in ten; "
+                + ("FI asks the plan once for a study that fits before it runs only a part of this one" if asks else
+                   "a commissioned study is not made smaller, so it is handed back"))
 
     def _run_up_to_the_limit(self, runner: Any, est: _estimate.Estimate, limit_s: float, one_s: float | None, *, kind: str,
                              base: dict[str, Any] | None = None, planned: dict[str, Any] | None = None,
@@ -4050,8 +4055,8 @@ class RunChecksMixin:
         search runs its baseline, its coarse scan, its search and then FI's check, as it always does; the check keeps the
         time it needs (``reserve_s``, never more than half the limit) so the scan and the search cannot take all of it. The
         cut is kept in ``.fi/run_estimate.json`` (``truncated``); the paper and the quality report say what ran from FI's
-        records (:func:`core.disclosure.cut_short_text`)."""
-        if not _estimate.one_fits(one_s, limit_s):
+        records (:func:`core.disclosure.cut_short_text`). A commissioned study is never cut: it stops, and is handed back."""
+        if not _estimate.one_fits(one_s, limit_s) or getattr(self.config, "commission", None) is not None:  # type: ignore[attr-defined]
             return False
         reserve = min(max(0.0, reserve_s), limit_s / 2.0)
         cut = {"kind": kind, "estimate_s": est.seconds * _estimate.SAFETY, "at_least": bool(est.at_least),
