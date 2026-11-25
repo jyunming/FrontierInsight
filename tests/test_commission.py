@@ -309,7 +309,7 @@ async def test_the_command_line_stops_a_resume_with_a_changed_commission_before_
     path = _commission(tmp_path / "order")
     root = tmp_path / "outputs" / "q3"
     commission.stage(path, root)
-    (root / ".fi").mkdir(parents=True)
+    (root / ".fi").mkdir(parents=True, exist_ok=True)
     (root / ".fi" / "state.sqlite").write_bytes(b"")
     own = "commission: commission.json\nprovider:\n  name: ollama\n"
     (root / "config.yaml").write_text(own, encoding="utf-8")
@@ -596,7 +596,7 @@ async def test_watching_a_quest_runs_the_same_door_before_it_continues_it(
     path = _commission(tmp_path / "order")
     root = tmp_path / "outputs" / "q5"
     commission.stage(path, root)
-    (root / ".fi").mkdir(parents=True)
+    (root / ".fi").mkdir(parents=True, exist_ok=True)
     (root / ".fi" / "state.sqlite").write_bytes(b"")
     data = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**data, "scope": "five outlet diameters"}), encoding="utf-8")
@@ -635,6 +635,11 @@ def test_a_number_that_is_one_side_of_a_fraction_is_not_the_value() -> None:
     assert commission.number_in_text(1, "a ratio of 1 to 2 at rest")
     assert commission.number_in_text(0.25, "a drain constant of 0.25/h at rest"), "a unit written with / is no fraction"
     assert commission.number_in_text(10, "a flow of 10 / min at rest")
+    for bracketed in ("a ratio of 1/(2) at rest", "a ratio of (1)/2 at rest", "a ratio of (1)/(2) at rest"):
+        assert not commission.number_in_text(1, bracketed) and not commission.number_in_text(2, bracketed)
+    for nested in ("a ratio of 1/((2)) at rest", "a ratio of ((1))/2 at rest", "a ratio of [(1)] / [(2)] at rest"):
+        assert not commission.number_in_text(1, nested) and not commission.number_in_text(2, nested)
+    assert commission.number_in_text(0.5, "a share of (0.5) at rest"), "a bracket alone makes no fraction"
 
 
 def test_an_exponent_is_read_on_its_own_line_only_and_one_no_float_holds_is_no_number() -> None:
@@ -711,7 +716,7 @@ async def test_a_resume_by_a_shortened_id_with_a_changed_commission_stops(
     path = _commission(tmp_path / "order")
     root = tmp_path / "outputs" / "tank-quest-q8"
     commission.stage(path, root)
-    (root / ".fi").mkdir(parents=True)
+    (root / ".fi").mkdir(parents=True, exist_ok=True)
     (root / ".fi" / "state.sqlite").write_bytes(b"")
     data = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**data, "scope": "five outlet diameters"}), encoding="utf-8")
@@ -720,3 +725,61 @@ async def test_a_resume_by_a_shortened_id_with_a_changed_commission_stops(
                     f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
     rc = await launch.main_async(launch.parse_args(["--config", str(yaml), "--resume", "tank-quest", "--no-axon-sidecar"]))
     assert rc == 2 and "not the one quest tank-quest-q8 was started from" in capsys.readouterr().err
+
+
+def test_a_quest_stopped_after_staging_and_before_the_trace_event_still_checks_its_files(tmp_path: Path) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "out" / "q9"
+    files = commission.stage(path, root)  # the process stops here: no commission_recorded event was written
+    commission.door(path, root)  # nothing changed: goes on
+    assert commission.staged_files(root) == files
+    text = next(root / rel for rel in files if rel.startswith("inputs/papers/"))
+    before = text.read_bytes()
+    text.write_bytes(before.replace(b"0.25", b"0.35"))
+    with pytest.raises(commission.CommissionRefused, match="changed or missing"):
+        commission.door(path, root)
+
+
+def test_a_staging_that_stops_in_the_middle_of_the_commission_copy_leaves_no_staged_marker(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "out" / "q10"
+    real = commission.shutil.copy2
+
+    def stops(src: Any, dst: Any, **kw: Any) -> Any:
+        if Path(src) == path:
+            Path(dst).write_bytes(Path(src).read_bytes()[:10])
+            raise OSError("stopped")
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(commission.shutil, "copy2", stops)
+    with pytest.raises(OSError):
+        commission.stage(path, root)
+    assert not commission.staged_path(root).exists()
+    monkeypatch.setattr(commission.shutil, "copy2", real)
+    commission.stage(path, root)
+    commission.door(path, root)  # the original file is still the one the quest was started from
+
+
+def test_a_staged_quest_with_no_trace_event_and_no_manifest_is_refused_but_one_with_the_event_goes_on(tmp_path: Path) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "out" / "q11"
+    files = commission.stage(path, root)
+    manifest = root / ".fi" / "commission_files.json"
+    for broken in (None, "{not json", "[1]"):
+        if broken is None:
+            manifest.unlink(missing_ok=True)
+        else:
+            manifest.write_text(broken, encoding="utf-8")
+        with pytest.raises(commission.CommissionRefused, match="record of its files is missing"):
+            commission.door(path, root)
+    (root / ".fi" / "audit.jsonl").write_text(
+        json.dumps({"kind": "commission_recorded", "sha256": files["inputs/commission.json"], "files": files}) + "\n",
+        encoding="utf-8")
+    commission.door(path, root)  # an older quest: its trace event checks the files, as before
