@@ -369,6 +369,14 @@ def test_a_value_typed_in_as_text_counts_as_typed_in() -> None:
     assert known_values.program(_program(("formula", 'float("1") / 4', "0")), 0.25, 0.01, given="")[0]
 
 
+def test_a_value_assembled_from_pieces_of_text_counts_as_typed_in() -> None:
+    for expression in ('float("0." + "25")', 'float("0" + "." + "25")', 'float(f"0.25")', 'float("0.2" "5")',
+                       'float(("0." + "25") * 1)'):
+        script, why = known_values.program(_program(("formula", expression, "0")), 0.25, 0.01, given="")
+        assert script == "" and "types in a number close to the value withheld" in why, expression
+    assert known_values.program(_program(("formula", 'float("1" + "0") / 40', "0")), 0.25, 0.01, given="")[0]
+
+
 def test_a_negative_value_keeps_its_sign_when_its_passage_writes_more_digits() -> None:
     from decimal import Decimal
 

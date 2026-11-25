@@ -110,15 +110,34 @@ def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") ->
         again=again or "")
 
 
+def _text_of(node: ast.AST) -> str | None:
+    """The text an expression of text constants is worth before it runs (``"2." + "3846"``, ``"2." "3846" * 1``,
+    an f-string of constants), else ``None``."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _text_of(node.left), _text_of(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        text = _text_of(node.left)
+        times = node.right.value if isinstance(node.right, ast.Constant) and isinstance(node.right.value, int) else None
+        return text * times if text is not None and times is not None and 0 <= times <= 20 else None
+    if isinstance(node, ast.JoinedStr):
+        parts = [_text_of(v.value) if isinstance(v, ast.FormattedValue) and v.conversion == -1 and v.format_spec is None
+                 else _text_of(v) for v in node.values]
+        return "".join(parts) if all(p is not None for p in parts) else None  # type: ignore[arg-type]
+    return None
+
+
 def _constants(tree: ast.AST) -> list[float]:
-    """Every number a program types: its number constants and each number written in a text constant
-    (``float("2.3846")``)."""
+    """Every number a program types: its number constants and each number written in a text constant, also one put
+    together from several (``float("2." + "3846")``)."""
     out: list[float] = []
     for n in ast.walk(tree):
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
             out.append(float(n.value))
-        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
-            out += [x for m in _commission._NUMBER.finditer(n.value) if (x := _commission.number_value(m)) is not None]
+        elif (text := _text_of(n)) is not None:
+            out += [x for m in _commission._NUMBER.finditer(text) if (x := _commission.number_value(m)) is not None]
     return out
 
 
