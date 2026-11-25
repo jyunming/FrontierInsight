@@ -130,10 +130,78 @@ async def test_the_compute_step_alone_starts_from_the_design_and_its_repairs_sta
     assert receipt["inputs"]["plan.md"] == _receipt(design.quest_root)["outputs"]["plan.md"]
     assert "code/experiment.py" in receipt["outputs"] and "needs/FROZEN_PROTOCOL.json" in receipt["outputs"]
     assert receipt["checks"]["checks_before_the_run"]["judged"] == "ran"
-    # A second call goes on from the checkpoint: nothing is seeded or run again.
-    count = len(_started(root))
+    # The reader of the code was the model that wrote it: a check that did not read, not a fact of the study.
+    assert receipt["checks"]["code_review"]["judged"] == "not_run" and receipt["checks"]["code_review"]["why"]
+    # A second call goes on from the checkpoint: nothing is seeded or run again, and both receipts stay byte for byte.
+    count, before, design_before = len(_started(root)), (root / rerun_from.RECEIPT).read_bytes(), _receipt(design.quest_root)
     await eng.run()
     assert len(_started(root)) == count and len([e for e in _trace(root) if e.get("kind") == "step_started"]) == 1
+    assert (root / rerun_from.RECEIPT).read_bytes() == before
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake())
+    await design.run()
+    assert _receipt(design.quest_root) == design_before
+
+
+@pytest.mark.asyncio
+async def test_a_compute_step_stopped_part_way_goes_on_from_where_it_stopped(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    real, calls = Engine._node_execute, {"n": 0}
+
+    async def once(self: Any, state: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the machine went away")
+        return await real(self, state)
+
+    monkeypatch.setattr(Engine, "_node_execute", once)
+    eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    with pytest.raises(RuntimeError, match="went away"):
+        await eng.run()
+    assert not (eng.quest_root / rerun_from.RECEIPT).exists()
+    await Engine(eng.config, resume_quest_id=eng.quest_id).run()
+    started = _started(eng.quest_root)
+    assert started.count("implement_outline") == 1 and started.count("implement") == 1 and started.count("execute") == 2
+    assert len([e for e in _trace(eng.quest_root) if e.get("kind") == "step_started"]) == 1
+    assert _receipt(eng.quest_root)["ended"] == "done" and _receipt(eng.quest_root)["result"] == {"score": 0.987}
+
+
+@pytest.mark.asyncio
+async def test_a_design_step_held_at_its_plan_says_paused_and_then_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.config import PausesConfig
+    from core.engine import Engine
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake())
+    cfg = _config(tmp_path, _commission(tmp_path / "order"), {"name": "design"}, "design")
+    cfg.pauses = PausesConfig(**{**cfg.pauses.model_dump(), "plan": "ask"})
+    eng = Engine(cfg)
+    await eng.run()
+    assert _receipt(eng.quest_root)["ended"] == "paused" and "design" not in _started(eng.quest_root)
+    await Engine(cfg, resume_quest_id=eng.quest_id).run()
+    assert _receipt(eng.quest_root)["ended"] == "done" and _started(eng.quest_root)[-1] == "design"
+
+
+@pytest.mark.asyncio
+async def test_a_script_that_still_fails_after_its_repairs_ends_the_step_with_no_result(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+
+    async def broken(self: Any, messages: list[dict[str, str]], **_kw: Any) -> str:
+        head = messages[-1]["content"].lstrip().splitlines()[0]
+        if "Implementation" in head or "Execute-Reflect" in head:
+            return json.dumps({"code": _BAD_EXPERIMENT, "deps": [], "patch_summary": "tried", "give_up_reason": ""})
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", broken)
+    eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    await eng.run()
+    receipt = _receipt(eng.quest_root)
+    # Measured, not a design choice: whether to write the code again is the gate's, after the analysis (a later step).
+    assert receipt["result"] is None and receipt["ended"] == "done", receipt["ended"]
 
 
 @pytest.mark.asyncio

@@ -266,7 +266,7 @@ def step_back_to(step: str, node: str) -> str:
 
 def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]:
     """What one check of a step judged, from the record it leaves: ``ran`` (with its status), ``not_applicable`` (the
-    record says so, and why), ``off`` (its setting) or ``not_run`` (on, and no record)."""
+    record's status says so), ``off`` (its setting) or ``not_run`` (on, and no record, or a record saying it skipped)."""
     import json
 
     path = Path(quest_root) / record
@@ -277,8 +277,10 @@ def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]
     except (OSError, ValueError):
         return {"judged": "ran", "status": "unreadable"}
     data = data if isinstance(data, dict) else {}
-    if data.get("status") == "not_applicable" or data.get("skipped"):
-        return {"judged": "not_applicable", "why": str(data.get("skipped") or data.get("detail") or data.get("error") or "")}
+    if data.get("status") == "not_applicable":
+        return {"judged": "not_applicable", "why": str(data.get("detail") or data.get("error") or "")}
+    if data.get("skipped"):  # a check that was on and did not read (its own record says why): not a fact of the study
+        return {"judged": "not_run", "why": str(data["skipped"])}
     return {"judged": "ran", **({"status": str(data["status"])} if data.get("status") else {})}
 
 
