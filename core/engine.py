@@ -14,8 +14,8 @@ from __future__ import annotations
 # are imported here by name so that `from core.engine import X` and `core.engine.X` read the same objects.
 from .engine_base import (  # noqa: F401
     AgentBuildMixin, Any, AsyncProcessTree, AsyncSqliteSaver, Awaitable, BridgeError, Callable, ClarifyCallback,
-    Command, Config, Counter, DEFAULT_PAPER_FORMAT, DockerLimits, END, ExecutionResult, FOUNDATIONAL_MAX_SUGGESTED,
-    FOUNDATIONAL_SUGGESTED, FallbackLLMClient, GraphBubbleUp, GraphInterrupt, HumanFeedbackCallback, Knowledge,
+    Command, Config, Counter, DEFAULT_PAPER_FORMAT, DockerLimits, END, ExecutionResult, 
+    FallbackLLMClient, GraphBubbleUp, GraphInterrupt, HumanFeedbackCallback, Knowledge,
     LLMClient, ModelAnswerTruncated, ModelUnavailable, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_KINDS,
     PRELIMINARY_NOTE, PROGRESS_LOG_NAME, PROMPTS_DIR, PROXY_PROVIDERS, Path, ProviderLimitError, ProviderUnusable,
     ProxySupervisor, QuestArtifacts, QuestState, RepairForAgent, ResultChecksMixin, RetrievedDoc, RunChecksMixin,
@@ -40,11 +40,11 @@ from .engine_base import (  # noqa: F401
     _MATH_LETTER_DIGIT_RE, _MATH_PAREN_SCRIPT_RE, _MATH_SCRIPT_MARK_RE, _MATH_SPACE_RE, _MD_FENCE_LINE_RE,
     _MIN_PAPER_CHARS, _ModelAnswerProblem, _NL, _NOT_A_CITATION_NUMBER, _NOT_GIVEN, _NOT_LITERATURE_FAILURES,
     _NOT_PROSE_RE, _NOT_SOLID, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _NO_SIM_WRITE_NOTE, _ONCE_PARTS,
-    _ORACLE_HIDDEN, _OUTSIDE_WORK_STEPS, _PAGE_LIMIT_HIT, _PANEL_COLS, _PANEL_ROWS, _PAPERS_ASKED, _PAPERS_DECLINED,
+    _ORACLE_HIDDEN, _OUTSIDE_WORK_STEPS, _PAGE_LIMIT_HIT, _PANEL_COLS, _PANEL_ROWS, 
     _PAPERS_README, _PAPER_BASIS_KEYS, _PAPER_IMAGE_RE, _PAPER_PROMPT_CHARS, _PARA, _PART_ASKED, _PART_HEADING,
-    _PERSONA_NAME_RE, _PERSON_QUERIES, _PIP_FREEZE_TIMEOUT_S, _PLAN_DIRECTIVE, _PROPORTION_NAME_RE, _PROSE_NUMBER,
+    _PERSONA_NAME_RE, _PIP_FREEZE_TIMEOUT_S, _PLAN_DIRECTIVE, _PROPORTION_NAME_RE, _PROSE_NUMBER,
     _PROXY_WARN_SHOWN, _PY_FENCE_RE, _PartsRefused, _PlanEditedMeanwhile, _ProgressOnly, _ProviderName,
-    _QUERY_SET_HASHED, _QUEST_MEMORY_KINDS, _QUOTE_MIN_CHARS, _QuerySetsUnreadable, _RANDOM_SOURCE_PATTERN,
+    _QUEST_MEMORY_KINDS, _QUOTE_MIN_CHARS, _RANDOM_SOURCE_PATTERN,
     _REDERIVE_BECAUSE, _REDESIGN_OWNED_PARTS, _REFERENCES_HEADING_LINE_RE, _REFERENCES_HEADING_RE,
     _REFERENCE_FORMS, _REFINE_POINT_RE, _REFINE_WHY_RE, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS, _REPAIR_REPLY_KEYS,
     _REPAIR_TEXT_KEYS, _REPLOT_STYLE_KEYS, _RESULT_LINE_RE, _RESULT_MARKER_RE, _RUN_FIGURE_IMAGE_RE,
@@ -52,7 +52,7 @@ from .engine_base import (  # noqa: F401
     _SEARCH_CALLS_PER_ASK, _SEARCH_PROTOCOL, _SEARCH_REFLECT_ANALYSIS, _SEARCH_REFLECT_SIMULATE, _SEARCH_REFUSED,
     _SEARCH_SIZE_KEYS, _SEEDING_CALLS, _SEED_KEYWORDS, _SEED_REPAIR_DIRECTIVE, _SENTENCE_END_RE, _SETTING_FIELDS,
     _SIMULATABILITY_LEAD, _SIZE_PARTS, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE,
-    _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, _SOURCE_VERDICT_HASHED,
+    _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, 
     _SPACED_HYPHEN_BREAK_RE, _SPLIT_PROTOCOL, _SPLIT_REFLECT_ANALYSIS, _SPLIT_REFLECT_SIMULATE, _SPLIT_REPLY_REMINDER,
     _SPLIT_RERUN_NOTE, _SPREAD, _SPREAD_IN_PARENS_RE, _SPREAD_RE, _STATE_TEXT_CHARS, _STOPPED_BEFORE_THE_STUDY,
     _STUDY_TYPE_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE, _SURVEY_WRITE_NOTE, _TEXT_ONLY_HITS,
@@ -86,37 +86,36 @@ from .engine_base import (  # noqa: F401
     _fit_scope, _flat_fact_sentence, _flat_moved, _flat_request, _flat_shown, _format_claim_grounding,
     _format_clarify, _format_cross_check, _format_evidence_note, _format_lit, _format_lit_excerpt,
     _format_lit_from_state, _format_lit_header, _format_reflect_history, _format_review_for_writer, _forms,
-    _foundational_line, _foundational_outcomes, _foundational_review_block, _foundational_sources,
-    _foundational_work_text, _foundational_write_block, _frozen, _function_steps, _further_reading_block,
+    _frozen, _function_steps, _further_reading_block,
     _further_reading_lines, _gate_inputs, _gate_receipt, _grid_keys, _grounding_after_trim, _guarded_absent,
     _has_full_text, _hidden, _hidden_series, _hit_name, _hits_need_only_a_rewrite, _imported_module_names, _improve,
-    _in_run, _ingest_user_dropped_papers, _input_numbers, _is_abstract_only, _is_audience_appropriate,
+    _in_run, _ingest_user_dropped_papers, _input_numbers, _is_audience_appropriate,
     _is_bot_check_title, _is_citable, _is_degenerate_result, _is_fatal_provider_error, _is_metric_key,
-    _is_not_a_paper, _is_open_access, _is_os_environ, _is_preliminary_memory, _is_replicate_seed_literal,
-    _is_scholarly_record, _is_web_page, _item_content, _json_file_is_answer, _labelled_sources, _last_error_line,
+    _is_not_a_paper, _is_os_environ, _is_preliminary_memory, _is_replicate_seed_literal,
+    _is_web_page, _item_content, _json_file_is_answer, _labelled_sources, _last_error_line,
     _latex_esc, _layout_views, _leading_simulatability_word, _ledger, _list_user_data_files, _lit_query,
-    _literature_entry, _literature_in_citation_order, _literature_key, _literature_query_prompt,
-    _literature_text_gaps, _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
+    _literature_entry, _literature_in_citation_order, _literature_key, 
+    _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
     _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mask_prose, _matching_brace_end, _math_folded,
-    _math_safe_cut, _mc_error, _merge_round_robin, _metric_spec, _names_a_verdict,
+    _math_safe_cut, _mc_error, _metric_spec, _names_a_verdict,
     _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls,
     _number_list, _numeric, _object_among_prose, _object_spans, _objection_key, _ok_call_ids, _ok_calls, _one_line,
     _optim, _optimise, _optimise_refine, _optimise_search, _oracle, _oracle_card, _oracle_challenge, _oracle_triage,
     _oracle_with_reader_flags, _outcome_of, _outside_run, _own_modules, _package_block_text, _page_limit_note, _pairs,
-    _panel_draws_nothing, _panel_place, _paper_basis, _paper_body, _paper_copies, _paper_display_title, _paper_facts,
-    _paper_figure_count, _paper_for_prompt, _paper_gist, _paper_key, _paper_resolve_link, _paper_scope,
-    _paper_sections, _paper_values, _papers_dir_has_files, _papers_next_step, _papers_to_ask,
+    _panel_draws_nothing, _panel_place, _paper_basis, _paper_body, _paper_copies, _paper_facts,
+    _paper_figure_count, _paper_for_prompt, _paper_scope,
+    _paper_sections, _paper_values, 
     _parse_implement_response, _parse_json_lenient, _parse_json_lenient_once, _parse_split_deps, _part_in_layouts,
-    _claim_numbers_shown, _passage_names_claim, _passage_stands, _person_queries, _phased, _phased_isolation, _physical_bound_paths,
+    _claim_numbers_shown, _passage_names_claim, _passage_stands, _phased, _phased_isolation, _physical_bound_paths,
     _pick_up_user_dropped_datasets, _place_figures, _places_as_placeholders, _plan, _plan_checks_note, _plan_scope,
     _plan_search_mark, _plan_settings, _plan_steps, _planned_figure_order, _plot_scope, _pool_evidence,
     _precision_target_on, _preliminary_reminders, _printed_in_figure, _prose_value, _protocol, _protocol_directive,
-    _provider_is_auth_error, _provider_sign_in_advice, _put_back_paper_copies, _quality_report, _query_set_digest,
-    _query_set_key, _query_set_standing, _quest_logger, _quote_in_source, _raise_if_required_skills_unusable,
-    _random_source_found, _rank_papers_by_relevance, _read_a_search_block, _read_figure_records, _read_hit_places,
-    _read_json_or_none_path, _read_key_set, _read_latex_object, _read_object_keys, _read_primary_figures,
-    _read_query_sets, _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor,
-    _record_numbers, _record_query_set, _redrawn_band_text, _ref_citation_text, _reference_entry, _reference_values,
+    _provider_is_auth_error, _provider_sign_in_advice, _put_back_paper_copies, _quality_report, 
+    _quest_logger, _quote_in_source, _raise_if_required_skills_unusable,
+    _random_source_found, _read_a_search_block, _read_figure_records, _read_hit_places,
+    _read_json_or_none_path, _read_latex_object, _read_object_keys, _read_primary_figures,
+    _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor,
+    _record_numbers, _redrawn_band_text, _ref_citation_text, _reference_entry, _reference_values,
     _refine, _refine_count, _refine_round, _rejudges_oracles_after, _rename_code_names, _render_auto_collected_md,
     _render_data_readme, _renumber_citations, _reorder_literature, _repair_reply_json, _repair_template_values,
     _replicate_assertions, _replicate_env, _replicate_line_figure, _replicate_metric_kinds,
@@ -125,26 +124,26 @@ from .engine_base import (  # noqa: F401
     _results_by_setting, _retractions, _review, _review_answer_problem, _review_decision, _review_items,
     _review_sends_the_experiment_back, _review_was_real, _rng_aliases, _rng_call_is_seeded, _rooted, _run_facts,
     _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures,
-    _screen_grades, _script_has_random_source, _script_reads_replicate_seed, _script_reply,
-    _search_record_has_abstract, _second_impl, _seed_label, _seeds_only_constants, _series_at,
-    _set_model_call_archive, _sf_snapshot, _shown_reach, _shrink_json_value, _simulatability_answer,
-    _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_ref, _source_text, _spaced_pattern,
+    _script_has_random_source, _script_reads_replicate_seed, _script_reply,
+    _second_impl, _seed_label, _seeds_only_constants, _series_at,
+    _set_model_call_archive, _shown_reach, _shrink_json_value, _simulatability_answer,
+    _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_text, _spaced_pattern,
     _spell_out_title_options, _split_figure_readings, _split_run, _stamp_figure_credit, _stats, _step_passages,
     _stop_power, _strip_outer_fence, _strip_plan_numbers, _strip_source_lists, _stripped, _study_size,
-    _summarise_long_arrays, _take_out_unpointed, _take_papers_declined, _take_refine_points, _take_refine_why,
-    _temperature_for_node, _thin_source, _thinking, _title_only_sentences, _titles_match, _todo,
+    _summarise_long_arrays, _take_out_unpointed, _take_refine_points, _take_refine_why,
+    _temperature_for_node, _thin_source, _thinking, _title_only_sentences, _todo,
     _top_level_json_objects, _topic_req, _trial_code, _trial_runner, _trial_table, _trim_further_reading,
-    _unchecked_quest_memory, _uncited_foundational_works, _unnamed_curve, _unread_results, _unseeded_rng_calls,
-    _unseeded_rng_directive, _unsupported_claim_hit, _unsupported_still_in, _usable_queries,
+    _unchecked_quest_memory, _unnamed_curve, _unread_results, _unseeded_rng_calls,
+    _unseeded_rng_directive, _unsupported_claim_hit, _unsupported_still_in, 
     _user_feedback_review_block, _walk_paths, _warn_if_unsanctioned_provider, _web_labels_cited, _with_newline,
     _with_reminders, _without_comments, _without_figure_embeds, _without_numbers, _without_reviewer_page_limit_hits,
-    _words_to_cut, _write_key_set, _write_paper_need_stubs, _write_personas, _write_query_sets,
-    _write_wanted_papers_md, _writes_code, _zero_expected_paths, append_cost_row, ast, asyncio, billing_stop,
+    _words_to_cut, _write_personas, _write_query_sets,
+    _writes_code, _zero_expected_paths, append_cost_row, ast, asyncio, billing_stop,
     blocked_stop, build_further_reading, build_references, cited_references, claude_cli_account_line, concurrent,
-    copy, dataclass, derive_protocol, escape_latex_backslashes, field, fnmatch, forget_papers_asked, functools,
+    copy, dataclass, derive_protocol, escape_latex_backslashes, field, fnmatch, functools,
     further_reading_listed, get_args, goal_coverage, hashlib, inspect, interrupt, io, json, langchain_core,
     limit_resumes_at, logging, make_executor, math, mint_quest_id, missing_step_api_keys, model_for_node,
-    node_provider_for, os, paper_patch, paper_trim, papers_declined_count, pip_failure_summary, platform, re,
+    node_provider_for, os, paper_patch, paper_trim, pip_failure_summary, platform, re,
     references_web_listed, render_references_marp_slide, replicate_seed_reaches_rng, resolve_endpoint_async,
     resolve_page_limit, route_for_topic_type, scrub_secrets, shutil, step_provider_config, step_provider_lines,
     string, sys, tempfile, threading, time, tokenize, traceback, unicodedata, unseeded_rng_calls, uuid, warnings,
@@ -182,16 +181,22 @@ class _StepGraph(StateGraph):
 
 # The nodes an earlier FI had that this one does not, by what a person called them. LangGraph reads a checkpoint about to
 # run one of them as having nothing left to run, which would look like a finished quest.
-_REMOVED_NODES = {"ideate": "making research ideas", "scope": "choosing a study from study cards"}
+_STUDY_FROM_COMMISSION = "a study now starts from a commission, which gives its question and its study"
+_REMOVED_NODES = {
+    "ideate": ("making research ideas", _STUDY_FROM_COMMISSION),
+    "scope": ("choosing a study from study cards", _STUDY_FROM_COMMISSION),
+    "auto_collect_data": ("looking for data on the topic",
+                          "a study that analyses data now uses the data the person puts in data/"),
+}
 
 
-async def _removed_step_waiting(saver: Any, run_config: dict[str, Any]) -> str:
-    """What the latest checkpoint was about to run that FI no longer has (``""``: nothing of the kind). The edge into a
-    node is the channel ``branch:to:<node>`` of the saved checkpoint."""
+async def _removed_step_waiting(saver: Any, run_config: dict[str, Any]) -> tuple[str, str]:
+    """What the latest checkpoint was about to run that FI no longer has, and why it is gone (``("", "")``: nothing of the
+    kind). The edge into a node is the channel ``branch:to:<node>`` of the saved checkpoint."""
     saved = await saver.aget_tuple(run_config)
     values = ((saved.checkpoint or {}).get("channel_values") or {}) if saved is not None else {}
     return next((_REMOVED_NODES[key.split(":", 2)[2]] for key in values
-                 if key.startswith("branch:to:") and key.split(":", 2)[2] in _REMOVED_NODES), "")
+                 if key.startswith("branch:to:") and key.split(":", 2)[2] in _REMOVED_NODES), ("", ""))
 
 
 class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, ImproveStageMixin, RunStageMixin, AnalyzeStageMixin, WriteStageMixin, ReviewStageMixin,
@@ -552,12 +557,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     # reused the quest_id; LangGraph still treated the
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
-                    if not from_step and (gone := await _removed_step_waiting(saver, run_config)):
+                    gone, why_gone = await _removed_step_waiting(saver, run_config) if not from_step else ("", "")
+                    if gone:
                         # Said like the other refusals of a resume (a plain line, nothing run), not as a crash.
                         self._log.warning("[run] the checkpoint waits at a step this FI does not have (%s)", gone)
                         print(f"[FI] quest {self.quest_id} stopped just before {gone}, a step an earlier FI had and this "
-                              "one does not (a study now starts from a commission, which gives its question and its "
-                              "study), so it cannot go on; nothing was run. Start the study again from a commission.")
+                              f"one does not ({why_gone}), so it cannot go on; nothing was run. Start the study again "
+                              "from a commission.")
                         return self._collect_artifacts({})
                     if getattr(prior_snapshot, "values", None):
                         # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
@@ -605,7 +611,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                             _frozen.record_replacement(self.quest_root, approved_by=approved_by.strip(), step=from_step)
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
-                        forget_papers_asked(self.fi_dir, declined=False)
                         if _rerun_from.picks_skills(from_step):
                             fork_config = await self._repick_skills(graph, fork_config)
                         try:
@@ -670,7 +675,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                                  "run that step again in a new quest folder; nothing was run")
                             self._step_inside(prior_snapshot.next)
                         if reopen and not prior_snapshot.next:
-                            forget_papers_asked(self.fi_dir, declined=False)
                             self._set_aside_stuck_record()
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
@@ -2285,11 +2289,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
         g.add_node("review", self._audited("review", self._node_review))
         g.add_node("human_feedback", self._audited("human_feedback", self._node_human_feedback))
-        # no-simulation mode: design → auto_collect_data → wait_for_data
-        # → (pause + resume) → data_load → analyze. All three new nodes
-        # are conditional and only fire when
-        # ``state.no_simulation_resolved`` is True.
-        g.add_node("auto_collect_data", self._audited("auto_collect_data", self._node_auto_collect_data))
+        # no-simulation mode: design → wait_for_data (the person's own data in data/; a pause + resume when it is not
+        # there yet) → data_load → analyze. These nodes only run when ``state.no_simulation_resolved`` is True.
         g.add_node("wait_for_data", self._audited("wait_for_data", self._node_wait_for_data))
         g.add_node("data_load", self._audited("data_load", self._node_data_load))
         # no-simulation mode only: turn the collected web/data content into
@@ -2310,9 +2311,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # A study handed back at the plan (core/known_values.py) ends there. The edge writes the same channel as the plain
         # edge it replaced (``branch:to:design``), so a checkpoint saved between plan and design resumes into design.
         g.add_conditional_edges("plan", self._audited_route("plan", self._route_after_plan), {"design": "design", "returned": END})
-        # design → implement (normal sim path) OR auto_collect_data
-        # (no-simulation, agent attempts auto-collect via Axon first
-        # then wait_for_data handles the pause-if-still-empty case).
+        # design → implement (normal sim path) OR wait_for_data
+        # (no-simulation: the person's own data in data/, asked for when it is not there yet).
         g.add_conditional_edges(
             "design",
             self._audited_route("design", self._route_after_design),
@@ -2326,7 +2326,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 # bypasses the outline and falls into the body's
                 # legacy single-shot prompt.
                 "implement": "implement_outline",
-                "auto_collect_data": "auto_collect_data",
+                "wait_for_data": "wait_for_data",
                 # survey mode: no experiment AND no dataset — jump straight
                 # to web_figures (illustrative images) → analyze, skipping
                 # the whole data-collection chain.
@@ -2348,15 +2348,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             self._audited_route("improve", self._route_after_improve),
             {"rerun": "execute", "proceed": "analyze"},
         )
-        # auto_collect_data: best-effort Axon retrieval that
-        # writes hits into <quest_root>/data/auto_collected/<idx>_<slug>.md
-        # so wait_for_data's rglob walk picks them up. Always proceeds —
-        # if Axon is disabled, returns zero docs, or the feature flag
-        # is off, the node is a logged passthrough.
-        g.add_edge("auto_collect_data", "wait_for_data")
         # wait_for_data uses LangGraph's ``interrupt()`` to pause when
-        # the user hasn't dropped any files yet AND auto_collect_data
-        # didn't land any either. On resume (with files present), the
+        # the user hasn't dropped any files yet. On resume (with files present), the
         # node returns and we proceed to data_load.
         g.add_edge("wait_for_data", "data_load")
         # data_load → web_plots → analyze. web_plots is a no-op in the
@@ -2395,7 +2388,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_conditional_edges(
             "write",
             self._audited_route("write", self._route_after_write),
-            {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "auto_collect_data",
+            {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "wait_for_data",
              "replot": "replot_layout"},
         )
         g.add_conditional_edges(
@@ -2446,9 +2439,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     def _route_after_design(self, state: QuestState) -> str:
         """When ``no_simulation_resolved`` is set, skip the
         implement → execute → execute_reflect chain entirely. Instead
-        route to ``auto_collect_data``, which best-effort-pulls
-        relevant docs from Axon into ``<quest_root>/data/auto_collected/``,
-        then hands off to ``wait_for_data`` → ``data_load`` → ``analyze``.
+        route to ``wait_for_data`` (the person's own data in ``data/``),
+        then ``data_load`` → ``analyze``.
 
         ``no_simulation_resolved`` is set by the clarify node from
         either the ``engine.no_simulation`` YAML flag (wins) or the
@@ -2467,7 +2459,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         """
         # Survey mode is the strongest form of no-simulation: no experiment
         # AND no dataset. Skip the data-collection chain entirely
-        # (auto_collect_data → wait_for_data → data_load → web_plots) and go
+        # (wait_for_data → data_load → web_plots) and go
         # straight to web_figures → analyze, so the paper synthesises the
         # literature directly. web_figures still runs (it is guarded on
         # no_simulation_resolved, which survey implies) and sources its
@@ -2479,7 +2471,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._warn_route_matrix_mismatch(
             state, "no_simulation" if no_sim else "simulation")
         if no_sim:
-            return "auto_collect_data"
+            return "wait_for_data"
         return "implement"
 
     def _warn_route_matrix_mismatch(

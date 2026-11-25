@@ -10,7 +10,6 @@ A pause is FI stopping because it needs a person. It is not a failure. Every pau
 | Pause | Setting (default) | What it asks |
 |---|---|---|
 | Setup questions | `pauses.clarify` (unset: ask if someone can answer, else FI answers itself) | the question's scope, before any work |
-| Papers | `pauses.papers` (true) | paywalled papers to download |
 | Plan | `pauses.plan` (off; `ask` under the research profile) | read or change `plan.md` |
 | Review | `pauses.review` (ask) | accept, reject or [[refine\|Refine]] the result |
 
@@ -23,7 +22,7 @@ Before any work, one model call writes the setup questions, each with a suggeste
 - `off`: skipped. `auto`: FI uses its own suggestions. `ask`: the quest waits for your answers.
 - Unset: it asks if someone can answer; otherwise FI uses its suggestions.
 - A `title:` in the YAML removes the title question.
-- A study started from a commission ([[starting-a-study|Starting a study]]) skips these questions and the papers pause: its commission already answers them.
+- A study started from a commission ([[starting-a-study|Starting a study]]) skips these questions: its commission already answers them.
 
 How to answer:
 

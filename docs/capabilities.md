@@ -6,7 +6,7 @@ One page, in plain words. Every item links to where it is described in full: the
 
 ## The research loop
 
-FI runs a topic through: literature search, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
+FI runs a commission through: its literature, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
 
 ## Checking its own experiments
 
@@ -25,7 +25,7 @@ Every quest keeps an ordered, tamper-evident diary of its steps, checks and rout
 
 ## You in the loop
 
-FI stops for you at set points: to read and edit the plan, to let you download paywalled papers, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
+FI stops for you at set points: to read and edit the plan, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
 
 ## Literature and memory
 

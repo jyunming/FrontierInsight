@@ -1312,10 +1312,6 @@ CHECKS: tuple[Check, ...] = (
           'write', 'own_record', 'strip',
           'citation numbers that name no source in the prior-work block are removed; engine writes '
           'References/Further reading'),
-    Check('foundational_works_uncited', 'core.engine', '_uncited_foundational_works',
-          'write', 'own_record', 'note',
-          'foundational works in the prior-work block the draft does not cite; logged and advisory in the '
-          'review prompt'),
     Check('code_project_clean_run', 'core.engine', 'Engine._check_code_project',
           'write', 'measured', 'note',
           'code/ run in a clean environment once per code version; a failure is a warning only'),

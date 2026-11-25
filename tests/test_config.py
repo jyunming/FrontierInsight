@@ -33,12 +33,6 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
         ExecutionConfig(clean_check_timeout_s=0)
     with pytest.raises(ValidationError):
         KnowledgeConfig(full_text_fetch_timeout_s=-1)
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_score=1.5)   # le=1.0 → >1 rejected
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_score=-0.1)   # ge=0.0 → <0 rejected
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_keep=-1)      # ge=0 → <0 rejected
     # Sanity: the defaults still construct.
     assert EngineConfig().max_iterations == 2
 
@@ -279,11 +273,6 @@ def test_axon_config_none_default() -> None:
     # New independent cap on external (web) search results.
     assert kc.external_top_k == 20
     assert kc.write_back_quests is True
-    # Literature relevance floor: on by default at the empirically-measured
-    # 0.20 cosine gap, retaining at least 3 top docs so a borderline corpus
-    # is never emptied.
-    assert kc.relevance_min_score == 0.20
-    assert kc.relevance_min_keep == 3
 
 
 def test_output_config_defaults_roundtrip() -> None:
@@ -446,6 +435,38 @@ def test_a_config_that_still_sets_the_idea_study_card_or_broaden_keys_loads_and_
     assert "provider.node_ensemble.ideate no longer does anything" in caplog.text
 
 
+def test_a_config_that_still_sets_the_searches_of_a_study_without_a_commission_loads_and_says_each_does_nothing(
+        tmp_path: Path, caplog) -> None:
+    """A commission gives the sources and a data study analyses the person's own files: the data search, its adapters and
+    the topic-only literature search are gone. A config written for an earlier FI loads, and the log names each line once."""
+    gone_keys = {
+        "engine": ["auto_collect_data", "auto_collect_top_k", "dataset_adapters", "dataset_adapter_top_k"],
+        "knowledge": ["relevance_guard", "relevance_min_score", "relevance_min_keep", "requery_on_low_relevance",
+                      "requery_max", "literature_screen", "foundational_works"],
+    }
+    values = {"auto_collect_data": "true", "auto_collect_top_k": "5", "dataset_adapters": "[worldbank, wikipedia]",
+              "dataset_adapter_top_k": "3", "relevance_guard": "true", "relevance_min_score": "0.2",
+              "relevance_min_keep": "3", "requery_on_low_relevance": "true", "requery_max": "2",
+              "literature_screen": "true", "foundational_works": "true"}
+    text = "topic: t\n" + "".join(
+        f"{section}:\n" + "".join(f"  {k}: {values[k]}\n" for k in keys) for section, keys in gone_keys.items())
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(_write(tmp_path, text))
+    assert cfg.topic == "t"
+    for section, keys in gone_keys.items():
+        for key in keys:
+            assert not hasattr(getattr(cfg, section), key), f"{section}.{key}"
+            assert caplog.text.count(f"config: {section}.{key} no longer does anything; the line can be removed.") == 1
+    # What still does something is not retired: the cross-check's search keeps using the router and the full-text fetch.
+    (tmp_path / "keep").mkdir()
+    keeps = _write(tmp_path / "keep", "topic: t\nknowledge:\n  source_routing: manual\n  try_fetch_full_text: false\n")
+    caplog.clear()
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        kept = Config.from_yaml(keeps)
+    assert kept.knowledge.source_routing == "manual" and kept.knowledge.try_fetch_full_text is False
+    assert "no longer does anything" not in caplog.text
+
+
 def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
     # Typos of real reliability knobs — the exact silent-revert footgun.
     p = _write(
@@ -505,3 +526,13 @@ def test_settings_at_once_is_auto_or_a_whole_number_of_at_least_one() -> None:
     for bad in (0, -2, True, "many"):
         with pytest.raises(ValidationError):
             ExecutionConfig(settings_at_once=bad)
+
+
+def test_the_two_papers_pause_keys_load_and_say_they_do_nothing(tmp_path: Path, caplog) -> None:
+    """FI no longer searches by topic, so it has no paywalled papers to stop for: an older config that still sets
+    ``pauses.papers`` or ``knowledge.pause_for_user_papers`` loads, and the log says each line does nothing."""
+    text = "topic: t\npauses:\n  papers: true\nknowledge:\n  pause_for_user_papers: true\n"
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        Config.from_yaml(_write(tmp_path, text))
+    for key in ("pauses.papers", "knowledge.pause_for_user_papers"):
+        assert caplog.text.count(f"config: {key} no longer does anything; the line can be removed.") == 1, key

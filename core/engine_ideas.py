@@ -8,16 +8,16 @@ from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
     Any, Counter, Path, QuestState, WORK_SCOPE_PAPERS, WORK_SCOPE_PAPERS_AND_BOOKS, _FILLED_AFTER_READ,
-    _LITERATURE_QUERIES, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _PERSON_QUERIES, _SURVEY_DESIGN_DIRECTIVE,
+    _LITERATURE_QUERIES, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE,
     _audit_log, _audit_open, _clean_title, _default_clarify_questions, _design_parts, _fault_from_record,
     _fault_record, _format_clarify, _format_lit_excerpt, _format_lit_from_state, _frozen,
-    _ingest_user_dropped_papers, _is_abstract_only, _is_open_access, _is_scholarly_record, _item_content,
-    _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, _literature_query_prompt,
-    _literature_text_gaps, _merge_round_robin, _normalize_title, _ok_calls, _one_line, _optim, _pairs,
-    _papers_dir_has_files, _papers_to_ask, _parse_json_lenient, _person_queries, _phased, _plan, _query_set_key,
-    _query_set_standing, _read_query_sets, _reading, _receipts, _record_query_set, _retractions,
-    _search_record_has_abstract, _sf_snapshot, _simulatability_answer, _source_text, _spell_out_title_options,
-    _take_papers_declined, _topic_req, _usable_queries, _write_paper_need_stubs, asyncio, functools, hashlib, json,
+    _ingest_user_dropped_papers, _item_content,
+    _entry_identities, _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, 
+    _normalize_title, _ok_calls, _one_line, _optim, _pairs,
+    _parse_json_lenient, _phased, _plan, 
+    _reading, _receipts, _retractions, _write_query_sets,
+    _simulatability_answer, _source_text, _spell_out_title_options,
+    _topic_req, asyncio, functools, hashlib, json,
 )
 from . import commission as _commission
 
@@ -500,473 +500,70 @@ class IdeasStageMixin:
         return WORK_SCOPE_PAPERS
 
     async def _node_literature(self, state: QuestState) -> QuestState:
-        if self._commissioned():  # type: ignore[attr-defined]
-            return await self._commission_literature(state)
-        if self.config.engine.analyze_local_first:
-            # --analyze: local-data-first, so NO external literature is
-            # retrieved. Passthrough — the analysis rests on the user's
-            # data, not on fetched sources.
-            self._log.info("[literature] analyze_local_first — no retrieval")
-            return {}
-        chosen = state.get("chosen_idea") or {}
-        prior = list(state.get("literature") or [])
-        prior_iter = int(state.get("literature_iter") or 0)
-        this_iter = prior_iter + 1
-        query = (chosen.get("title") or "") + " " + state["topic"][:200]
-        # A topic statement is written for a person; a search engine matches
-        # keywords. A real quest's 365-character topic came back from the
-        # academic sources with HTTP 200 and zero hits, where a 79-character
-        # keyword query found three on-target papers. One small call turns the
-        # topic into the terms the field publishes under. On any failure the
-        # concatenation above is kept, so a flaky model degrades to the old
-        # query rather than to no search at all.
-        scope = self._work_scope(state)
-        # The same search pass with the same inputs uses the queries it derived before (a resume after a pause runs
-        # this step again): no second call, and no drift to other queries finding other papers. A new pass, or
-        # changed inputs, derives them again, and the record says why.
-        title = chosen.get("title") or ""
-        derive_prompt = _literature_query_prompt(state["topic"], title, work_scope=scope)
-        # The model that derives them is part of what they answer: a different model derives them again.
-        deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
-        key = _query_set_key(derive_prompt, this_iter, deriving_model)
-        saved = [e for e in _read_query_sets(self.fi_dir, log=self._log) if e.get("stage") == "literature"]
-        # Only an entry whose digest checks out is used again. One changed after FI wrote it is said so, never used.
-        edited = [e for e in saved if e.get("key") == key and _query_set_standing(e) == "edited"]
-        if edited:
-            self._log.warning(
-                "[literature] the saved search queries for this pass in .fi/%s were changed after FI wrote them; they "
-                "are not used, and FI derives them again (to search with your own queries, put them in %s, one per "
-                "line)", _LITERATURE_QUERIES, _PERSON_QUERIES.as_posix())
-            self._audit("check_result", check="literature_queries", status="edited",
-                        summary=f"{len(edited)} saved query set(s) for this pass no longer match their digest")
-        ok_calls = _ok_calls(self.fi_dir, "literature_query")
-        prompt_sha = hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest()
-
-        def _backed(e: dict[str, Any]) -> bool:
-            # The entry names an answered call of this same prompt, and no other entry names that call.
-            cid = e.get("call_id")
-            return (cid in ok_calls and ok_calls[cid] == prompt_sha == e.get("prompt_sha256")
-                    and sum(1 for o in saved if o.get("call_id") == cid) == 1)
-
-        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))
-                     and e.get("revised_by") != "person" and _query_set_standing(e) == "verified"
-                     and _backed(e)), None)
-        person = _person_queries(self.quest_root) if self.config.knowledge.enabled else None
-        if person is not None:
-            # A person's own queries: used as given, recorded as their revision (once per version of the file).
-            queries, source_sha = person
-            known = next((e for e in reversed(saved) if e.get("revised_by") == "person"
-                          and e.get("source_sha256") == source_sha and e.get("iteration") == this_iter
-                          and _query_set_standing(e) == "verified"), None)
-            query_set = known or {
-                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
-                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(), "model": None,
-                "call_id": None, "reason": f"your queries in {_PERSON_QUERIES.as_posix()}", "revised_by": "person",
-                "source_sha256": source_sha,
-            }
-            query_set = {**query_set, "reused": known is not None}
-            if known is None:
-                _record_query_set(self.fi_dir, query_set, log=self._log)
-            self._audit("check_result", check="literature_queries", status="person",
-                        summary=f"searched with the person's own queries ({_PERSON_QUERIES.as_posix()})",
-                        source=_PERSON_QUERIES.as_posix(), source_sha256=source_sha, queries=queries)
-            self._log.info("[literature] searching with your queries from %s: %r", _PERSON_QUERIES.as_posix(), queries)
-        elif same is not None and self.config.knowledge.enabled:
-            queries = [q.strip() for q in same["queries"]][:3]
-            query_set = {**same, "reused": True}
-            self._log.info("[literature] reusing the search queries derived for this pass (by %s): %r",
-                           same.get("model") or "the model then", queries)
-        else:
-            if edited:
-                reason = "the saved queries for this pass were changed after FI wrote them"
-            elif any(e.get("key") == key and _query_set_standing(e) == "unverified" for e in saved):
-                reason = "the saved queries for this pass carry no digest (written before FI recorded one)"
-            elif any(e.get("key") == key and e.get("revised_by") != "person" and _usable_queries(e.get("queries"))
-                     and not _backed(e) for e in saved):
-                reason = ("the saved queries for this pass do not match an answered call in the record of model calls "
-                          "(none, another prompt, or a call another entry also names)")
-            elif any(e.get("iteration") == this_iter for e in saved):
-                reason = "the topic, the chosen direction or the model changed"
-            elif saved:
-                reason = f"a new search pass ({this_iter})"
-            else:
-                reason = "the first search"
-            self.__dict__.setdefault("_last_call_id", {}).pop("literature_query", None)
-            self.__dict__.setdefault("_last_call_outcome", {}).pop("literature_query", None)
-            queries = await self._derive_literature_queries(
-                state["topic"], title, work_scope=scope,
-            )
-            call_id = self.__dict__.get("_last_call_id", {}).get("literature_query")
-            call_outcome = self.__dict__.get("_last_call_outcome", {}).get("literature_query")
-            query_set = {
-                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
-                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
-                "model": ((self._chat_provenance("literature_query") or {}).get("model") or deriving_model or None)
-                if queries else None,
-                "call_id": call_id, "reason": reason, "revised_by": "fi", "reused": False,
-            }
-            if not queries:
-                query_set["reason"] = (f"{reason}; the derivation gave no query "
-                                       + ("(its answer held none)" if call_outcome == "ok" else "(the call failed)")
-                                       + ", so the search used the topic and the chosen direction as written")
-            # Every derivation is kept, a failed one too (its empty list is never reused, so the next run tries again).
-            if self.config.knowledge.enabled:
-                _record_query_set(self.fi_dir, query_set, log=self._log)
-        derived = bool(queries)
-        if queries:
-            if not query_set.get("reused") and query_set.get("revised_by") != "person":
-                self._log.info("[literature] search queries derived from the topic: %r", queries)
-            query = queries[0]
-        else:
-            queries = [query.strip()]
-        chat_fn = functools.partial(self._chat_messages, node="source_router")
-        # One routing decision for all facets: they are phrasings of one
-        # topic, and routing each would spend a call re-deriving the same list.
-        sources = await self.knowledge.choose_sources(
-            query, chosen_idea=chosen, chat_fn=chat_fn,
-        )
-        self._log.info(
-            "[literature] searching sources=%s (knowledge.enabled=%s, "
-            "source_routing=%s)",
-            sources or "none", self.config.knowledge.enabled,
-            self.config.knowledge.source_routing,
-        )
-
-        async def _retrieve(q: str, *, web: bool = True) -> list:
-            return await self.knowledge.asearch(
-                q.strip(),
-                top_k=self.config.knowledge.top_k,
-                # The literature node is the one path that explicitly wants
-                # broad external retrieval when Axon misses — pass the
-                # config's external cap so a web miss returns ~20 abstracts
-                # instead of being silently capped at the Axon top_k.
-                external_top_k=self.config.knowledge.external_top_k,
-                chosen_idea=chosen,
-                chat_fn=chat_fn,
-                work_scope=scope,
-                sources=sources,
-                # Web search runs for the first facet only: the keyless
-                # DuckDuckGo backend throttles a burst of queries, and the
-                # other facets are there to reach scholarly work.
-                web=web,
-                # Full text is fetched once, below, for the sources that
-                # survive the relevance screen -- not for every facet's hits.
-                fetch_full_text=False,
-            )
-
-        per_facet = await asyncio.gather(*(
-            _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
-        ))
-        docs = _merge_round_robin(list(per_facet))
-        if docs:
-            why_none = ""
-        elif not self.config.knowledge.enabled:
-            why_none = " — knowledge.enabled is false, so nothing was searched"
-        else:
-            why_none = (
-                " — no source returned anything; look for [source-failures] at "
-                "the end of this log, and check network access"
-            )
-        self._log.info(
-            "[literature] hits per query=%s, %d after merging%s",
-            [len(x) for x in per_facet], len(docs), why_none,
-        )
-        # Relevance floor: drop off-topic sources the retriever returned before
-        # they reach the corpus. This is the ONLY relevance filter on the
-        # literature path — the LLM guard runs only under auto_collect, which
-        # survey / simulation quests skip — so without this a humanities topic
-        # carries e.g. change-point-math papers into analyze/write. Scored vs
-        # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
-        rel_topic = (state.get("topic") or "").strip() or query
-        stats: dict = {}
-        filtered = self._filter_docs_by_relevance(rel_topic, docs, stats=stats)
-
-        # Re-search with different keywords when the whole retrieval missed.
-        # ``above_floor == 0`` means not one source cleared the threshold on
-        # its own merits and only never-starve retention kept anything — a
-        # symptom of a badly-worded query, not of a topic with no literature.
-        # Proceeding here is what produces "it gave me three irrelevant
-        # papers": min_keep pads the set and the writer treats the padding as
-        # evidence. Retrying with the model's alternative phrasings is the
-        # principled fix. Bounded, and skipped when unscored (see config).
-        kn = self.config.knowledge
-        tried_queries = list(queries)
-        if kn.requery_on_low_relevance and stats.get("scored") and docs:
-            attempt = 0
-            while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
-                attempt += 1
-                alt = await self._propose_literature_queries(
-                    rel_topic, tried_queries, docs, work_scope=scope,
-                )
-                if not alt:
-                    self._log.info(
-                        "[literature] requery %d: no alternative query proposed; "
-                        "keeping the original results", attempt,
-                    )
-                    break
-                self._log.info(
-                    "[literature] requery %d/%d: nothing cleared the relevance "
-                    "floor (best cosine=%.2f) — retrying with %r",
-                    attempt, kn.requery_max, stats.get("best", 0.0), alt,
-                )
-                tried_queries.append(alt)
-                more = await _retrieve(alt)
-                if not more:
-                    continue
-                # Merge rather than replace: the first pass may still hold the
-                # single on-topic hit, and dedup happens downstream anyway.
-                docs = docs + more
-                stats = {}
-                filtered = self._filter_docs_by_relevance(
-                    rel_topic, docs, stats=stats,
-                )
-            if stats.get("above_floor", 0) > 0 and attempt:
-                self._log.info(
-                    "[literature] requery succeeded after %d retry(ies): "
-                    "%d doc(s) now clear the floor",
-                    attempt, stats.get("above_floor", 0),
-                )
-                # The query that found sources is the one later searches reuse, not the one that found none.
-                query, derived = tried_queries[-1], True
-        self._record_floor_verdicts(docs, filtered, stats, this_iter)
-        docs = filtered
-        # The original papers and textbooks a keyword search does not reach
-        # join the candidates, and the screen judges them like the rest.
-        docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
-        # The floor scores word overlap; the screen asks whether the paper
-        # could cite each source for a claim (see _screen_literature).
-        n_before_screen = len(docs)
-        docs = await self._screen_literature(rel_topic, docs, work_scope=scope, iteration=this_iter)
-        self._log.info(
-            "[literature] kept %d of %d after the relevance floor and the screen",
-            len(docs), n_before_screen,
-        )
-        # Legal full text for the scholarly sources that were kept (web pages
-        # already carry their page text). Once here rather than per facet.
-        docs = await self.knowledge.fetch_full_text(docs)
-        # Keep the FULL fetched text (no truncation): it lands uncapped on
-        # disk under data/literature/ for audit, and the prompt builders
-        # relevance-select the passages each node needs (see
-        # _format_lit_excerpt / knowledge.literature_excerpt_chars) rather
-        # than the old first-2000-chars slice that usually held only the
-        # abstract. content_quality records whether real full text was
-        # recovered or only the search snippet survived.
-        # The whole text goes to disk (data/literature/.full_text/, up to knowledge.full_text_max_kb); the state keeps
-        # its first _STATE_TEXT_CHARS, as it always held, so the checkpoint does not grow with a 10 MB source. Readers
-        # that need the whole text (the passage selection, the claim check's quote check) read it back through
-        # _item_content. content_quality says what the text is: full_text, abstract_only (not much more than the
-        # abstract), preview_only (a table of contents), or snippet_only (nothing fetched).
-        new_entries = [_literature_entry(self.quest_root, d.content, d.metadata) for d in docs]
-        # Dedup-merge: identity is DOI when present, otherwise the
-        # canonical URL, otherwise the first 200 chars of content.
-        # On the first iteration ``prior`` is empty so this is a
-        # straight assignment; a resumed pass accumulates
-        # so the design node sees the full corpus FI has seen for
-        # this quest.
-        # A specific-enough title is a second identity: the same text reached
-        # under several DOIs (or once with a DOI, once without) is one source.
-        seen: set[str] = set()
-        merged: list[dict[str, Any]] = []
-        for entry in (*prior, *new_entries):
-            md = entry.get("metadata") or {}
-            ident = (
-                str(md.get("doi") or "").strip()
-                or str(md.get("url") or "").strip()
-                or (entry.get("content") or "")[:200]
-            )
-            norm_title = _normalize_title(md.get("title") or "")
-            idents = [i for i in (ident, f"title:{norm_title}" if norm_title else "") if i]
-            if any(i in seen for i in idents):
-                continue
-            seen.update(idents)
-            merged.append(entry)
-        added = len(merged) - len(prior)
-        # Pull in any PDFs the user dropped under ``inputs/papers/`` on
-        # a previous pause cycle. Indexes them as new ``user_supplied``
-        # literature entries so the design / write nodes see real
-        # full text instead of only the upstream abstracts.
-        # A thread: a scanned paper is read by OCR here, about ten seconds a page, and the event loop runs the rest of
-        # a --fleet meanwhile.
-        merged, user_added = await asyncio.to_thread(
-            _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
-        )
-        if user_added:
-            self._log.info(
-                "[literature] picked up %d user-supplied paper(s) from inputs/papers/",
-                user_added,
-            )
-        # Each DOI looked up in Crossref for a retraction (core/retractions.py); a retracted source is marked, never
-        # used as support. No answer is "could not be checked", and nothing here stops the quest.
-        if self.config.knowledge.enabled:
-            merged, retraction_rows = await _retractions.check_literature(merged)
-            if retraction_rows:
-                self._record_source_verdicts("retractions", this_iter, "checked", retraction_rows)
-                self._log.info("[literature] %s", _retractions.summary_line(retraction_rows))
-        self._log.info(
-            "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
-            "+%d user-supplied, total=%d)",
-            len(docs), this_iter, added, user_added, len(merged),
-        )
-        # Text in a source that is hidden from a reader or addressed to an AI model is flagged, never removed
-        # (core/source_text.py): marked in the prompts, recorded in the audit trace, and the quest goes on.
-        await self._flag_sources(merged, "literature", record_clean=True)
-        qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
-        full_n = qualities.get("full_text", 0)
-        # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
-        # the paper's abstract. The line used to call all of those "snippet only", which read as if not even the
-        # abstract had come back.
-        not_fetched = [e for e in merged
-                       if ((e.get("metadata") or {}).get("content_quality") or "snippet_only") == "snippet_only"]
-        scholarly = [e for e in not_fetched if _is_scholarly_record(e.get("metadata") or {})]
-        with_abstract = sum(1 for e in scholarly if _search_record_has_abstract(e.get("content") or ""))
-        self._log.info(
-            "[literature] full-text coverage: %d/%d sources have real full text (%d by OCR of a scanned PDF); "
-            "%d papers have the abstract only (from the search, nothing downloaded), %d only a title or a one-line "
-            "snippet, %d a download that held little more than the abstract, %d a preview or table of contents, "
-            "%d web pages or notes from earlier quests",
-            full_n, len(merged), sum(1 for e in merged if (e.get("metadata") or {}).get("full_text_ocr")),
-            with_abstract, len(scholarly) - with_abstract,
-            qualities.get("abstract_only", 0), qualities.get("preview_only", 0),
-            len(not_fetched) - len(scholarly),
-        )
-        why = _literature_text_gaps(
-            merged, _sf_snapshot(self.quest_id),
-            downloads_on=bool(self.config.knowledge.enabled and self.config.knowledge.try_fetch_full_text))
-        if why:
-            self._log.info("[literature] why the full text is missing: %s", why)
-
-        # Pause-for-user-papers gate. Fires only when the user opted in
-        # AND we have abstract-only hits (heuristic: content shorter
-        # than ~1500 chars or carrying an explicit ``abstract_only``
-        # flag from the retriever). On a re-entry after the user
-        # dropped PDFs, ``inputs/papers/`` is non-empty and we don't
-        # pause again — the resume path picks up the new files and
-        # proceeds.
-        if not _papers_dir_has_files(self.quest_root):
-            # A retracted paper is never asked for: it is not to be cited (core/retractions.py).
-            withdrawn = _retractions.retracted_dois(merged)
-            abstract_only = [d for d in docs if _is_abstract_only(d)
-                             and _retractions.normalize_doi((d.metadata or {}).get("doi")) not in withdrawn]
-            # Split the genuinely paywalled from open-access sources we simply
-            # failed to fetch. Only the former justify stopping the quest to
-            # ask a person for help: an arXiv/PMC paper we could not download
-            # is OUR network problem, and a pause that asks the user to fetch
-            # a free paper is both confusing and usually futile (the same host
-            # is behind the same proxy). The OA ones are still listed in
-            # WANTED_PAPERS.md as a manual fallback -- a browser often works
-            # where httpx does not -- but they never trigger the pause.
-            oa_unfetched = [d for d in abstract_only if _is_open_access(d)]
-            needed = [d for d in abstract_only if not _is_open_access(d)]
-            if oa_unfetched:
-                self._log.warning(
-                    "[literature] %d open-access source(s) (arXiv/PMC/preprint) "
-                    "came back abstract-only -- full-text fetch failed for "
-                    "sources that are free to download. This usually means "
-                    "the host is unreachable (proxy/firewall), not a paywall. "
-                    "Listed in WANTED_PAPERS.md as a manual fallback; not "
-                    "pausing the quest for them.",
-                    len(oa_unfetched),
-                )
-            # Resuming from the papers pause without adding files is the answer "go on without them": those papers
-            # are not asked for again. Only the papers not yet declined are asked for.
-            already = 0
-            if self.config.pauses.papers:
-                declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
-                                                     getattr(self, "_resumed_from_pause", None))
-                if declined_now:
-                    self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
-                    self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
-                                   "inputs/papers/): they are read from their abstracts only", len(declined_now))
-                needed, already = _papers_to_ask(needed, self.fi_dir)
-            if needed or oa_unfetched:
-                _write_paper_need_stubs(
-                    self.quest_root, needed, self._log,
-                    query=_lit_query(state), oa_unfetched=oa_unfetched,
-                    paused=bool(needed and self.config.pauses.papers),
-                )
-            if needed and not self.config.pauses.papers:
-                # Unattended: FI downloads only free papers and never fetches a paywalled one itself.
-                self._log.info(
-                    "[literature] %d paper(s) are not confirmed free to read, so FI did not download them. They "
-                    "are read from their abstracts; the list with a link each is in needs/WANTED_PAPERS.md if you "
-                    "want to download some by hand.",
-                    len(needed),
-                )
-            if needed and self.config.pauses.papers:
-                self._pause_for_human(
-                    kind="papers",
-                    interaction="supply",
-                    headline=f"download {len(needed)} paper(s) not confirmed free to read",
-                    steps=[
-                        f"{len(needed)} relevant paper(s) came back abstract-only "
-                        "(not confirmed free to read). They're listed, most-relevant-first, in "
-                        "`needs/WANTED_PAPERS.md` with a download link each."
-                        + (f" ({already} other(s) you went on without earlier are not asked for again.)"
-                           if already else ""),
-                        "Download the few that matter and drop the PDFs into "
-                        "`inputs/papers/` — they're ingested as full text.",
-                        "Or go on without them: resume without adding files, and those papers are used from "
-                        "their abstracts only (FI will not ask for them again).",
-                    ],
-                    payload={
-                        "papers_required": True,
-                        "quest_id": self.quest_id,
-                        "papers_dir": str(self.quest_root / "inputs" / "papers"),
-                        "needed_count": len(needed),
-                    },
-                    upload_targets=["papers"],
-                )
-                # Unreachable in practice (see ``wait_for_data`` for the
-                # same pattern): interrupt() raises GraphInterrupt; on
-                # resume this node is re-invoked from the checkpoint,
-                # ``_ingest_user_dropped_papers`` picks up the new
-                # files, and the gate's else-branch falls through.
-                return {}
-        else:
-            left = sum(1 for d in docs if _is_abstract_only(d) and not _is_open_access(d))
-            if left:
-                self._log.info(
-                    "[literature] %d paper(s) are not confirmed free to read and FI did not download them; "
-                    "inputs/papers/ already has files, so no new list was written.", left,
-                )
-
-        # Download the retrieved sources to disk for EVERY quest (sim and
-        # no-sim alike) so the collected web/academic literature is always
-        # auditable on disk under ``data/literature/``. The no-simulation
-        # path additionally reuses the same corpus as analysis data via
-        # auto_collect_data (``data/auto_collected/``); this write
-        # guarantees a downloaded corpus even on the SIMULATION path,
-        # where auto_collect_data never runs (design → implement →
-        # execute …). Empty corpus → no files, no empty directory.
-        downloaded = self._write_literature_files(
-            merged, self.quest_root / "data" / "literature",
-        )
-        if downloaded:
-            self._log.info(
-                "[literature] downloaded %d source(s) to data/literature/",
-                downloaded,
-            )
-
-        out: QuestState = {
-            "literature": merged,
-            "literature_iter": this_iter,
-            "literature_query": query.strip(),
-            "literature_queries": queries,
-            "literature_query_derived": derived,
-            "literature_query_set": query_set,
-        }
-        return out
+        """The literature step: a study starts from a commission, so its sources are the ones the commission gives."""
+        return await self._commission_literature(state)
 
     async def _commission_literature(self, state: QuestState) -> QuestState:
-        """A commissioned study's literature: only the full texts it supplies (inputs/papers/), nothing searched for."""
+        """A study's literature: the sources its commission gives, the papers dropped in inputs/papers/ and the ones pinned in
+        ``knowledge.local_papers``; nothing is searched for."""
         prior = list(state.get("literature") or [])
         seen = {str((e.get("content") if isinstance(e, dict) else "") or "")[:200] for e in prior}
         merged, added = await asyncio.to_thread(_ingest_user_dropped_papers, self.quest_root, prior, seen, self._log)
-        merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
+        merged, pinned = self._pin_local_papers(merged)
+        if self._commissioned():  # type: ignore[attr-defined]  # an engine built without one (a test, a program) reads only the dropped papers
+            merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
+        merged = await self._check_retractions(merged, int(state.get("literature_iter") or 0) + 1)
         await self._flag_sources(merged, "literature", record_clean=True)  # type: ignore[attr-defined]
         self._log.info("[literature] the commission gives the sources: %d full text(s) read from inputs/papers/, "
-                       "nothing searched for", added)
+                       "%d pinned in knowledge.local_papers, nothing searched for", added, pinned)
         return {"literature": merged, "literature_iter": int(state.get("literature_iter") or 0) + 1}
+
+    def _pin_local_papers(self, merged: list[Any]) -> tuple[list[Any], int]:
+        """The papers the person pinned in ``knowledge.local_papers`` join the study's literature (once: one already there,
+        by DOI, link, text or title, is not added again). Returns ``(literature, how many were added)``."""
+        pinned = list(getattr(self.knowledge, "_local_papers", None) or [])  # type: ignore[attr-defined]
+        if not pinned:
+            return merged, 0
+        out = list(merged)
+        seen = {i for entry in out if isinstance(entry, dict) for i in _entry_identities(entry)}
+        added = 0
+        for doc in pinned:
+            entry = _literature_entry(self.quest_root, doc.content, dict(doc.metadata or {}))  # type: ignore[attr-defined]
+            ids = _entry_identities(entry)
+            if any(i in seen for i in ids):
+                continue
+            seen.update(ids)
+            out.append(entry)
+            added += 1
+        return out, added
+
+    async def _check_retractions(self, merged: list[Any], iteration: int) -> list[Any]:
+        """Every way a paper enters the study's literature (the commission's sources, ``inputs/papers/``, the pinned
+        papers, the ones added at the pause after the literature) goes through this one retraction lookup: each DOI in
+        Crossref (core/retractions.py); a retracted source is marked, never used as support. No answer is "could not be
+        checked", and nothing here stops the quest. Not made when retrieval is off or ``knowledge.offline`` is set (no
+        network is wanted then)."""
+        knowledge = self.config.knowledge  # type: ignore[attr-defined]
+        if not knowledge.enabled or knowledge.offline:
+            return merged
+        merged, rows = await _retractions.check_literature(merged)
+        if rows:
+            self._record_retractions(rows, iteration)
+            self._log.info("[literature] %s", _retractions.summary_line(rows))  # type: ignore[attr-defined]
+        return merged
+
+    def _record_retractions(self, rows: list[dict[str, Any]], iteration: int) -> None:
+        """Keep what Crossref says of each source's retraction in ``.fi/literature_queries.json`` (the record the to-do card
+        and the seal read). Entries are only added. Best-effort: a record never stops a quest."""
+        fi_dir = self.fi_dir  # type: ignore[attr-defined]
+        path = fi_dir / _LITERATURE_QUERIES
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            entries = [e for e in (data.get("entries") if isinstance(data, dict) else None) or [] if isinstance(e, dict)]
+            entries.append({"stage": "retractions", "iteration": iteration, "outcome": "checked", "sources": rows})
+            _write_query_sets(fi_dir, entries)
+        except (OSError, ValueError) as e:
+            self._log.debug("[literature] could not record the retraction lookups: %r", e)  # type: ignore[attr-defined]
 
     def _study_given(self, state: QuestState) -> str:
         """The study, for the prompts that name it (skills, design, the design's review): on a commissioned quest the

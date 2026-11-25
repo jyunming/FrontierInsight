@@ -353,7 +353,7 @@ def test_route_after_design_survey_goes_to_synthesize(tmp_path: Path) -> None:
     # A plain no-sim (non-survey) quest still takes the data path.
     assert eng._route_after_design(
         {"no_simulation_resolved": True}
-    ) == "auto_collect_data"
+    ) == "wait_for_data"
     assert eng._route_after_design({}) == "implement"
 
 

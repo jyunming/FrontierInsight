@@ -238,25 +238,6 @@ async def test_a_provider_message_written_as_the_paper_fails_the_quest(
 
 
 @pytest.mark.asyncio
-async def test_run_log_says_why_the_literature_search_found_nothing(
-    smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A quest that "did not look for literature" left only "retrieved 0 docs"
-    in its log — no way to tell a disabled search from a failed one."""
-    engine = Engine(smoke_config)
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return _fake_response_for(messages[-1]["content"])
-
-    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-    await engine.run()
-
-    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "[literature] searching sources=" in log
-    assert "knowledge.enabled is false, so nothing was searched" in log
-
-
-@pytest.mark.asyncio
 async def test_dump_state_prints_a_real_checkpoint_as_text(
     smoke_config: Config, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -771,7 +752,7 @@ async def test_after_literature_pause_then_resume_does_not_search_again(
 
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     log = (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert log.count("[literature] searching sources=") == 1, "the search ran again"
+    assert log.count("[literature] the commission gives the sources") == 1, "the literature step ran again"
     assert "Experiment Design" not in calls_before_resume
     assert "Experiment Design" in calls
     path = dump_state(second.quest_root)
@@ -987,4 +968,36 @@ async def test_the_demo_and_a_shipped_example_run_from_their_commission(
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     assert (engine.quest_root / "inputs" / "commission.json").is_file(), "the commission is frozen into the quest"
     assert engine.config.topic == commission.read(cfg.commission)["question"].strip()
+
+
+@pytest.mark.asyncio
+async def test_a_commissioned_data_study_goes_from_its_design_to_the_persons_data_without_any_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A study that analyses data runs ``design -> wait_for_data -> data_load`` on the files the person put in data/: FI
+    looks for no data of its own (no ``auto_collect_data`` step exists), and the simulation steps do not run."""
+    from core import audit_log, commission, demo
+
+    cfg = Config.from_yaml(demo.write_demo_config(tmp_path, "openai"))
+    commission.door(cfg.commission, None)
+    cfg.provider = ProviderConfig(name="openai")
+    cfg.knowledge = KnowledgeConfig(enabled=False)
+    cfg.execution = ExecutionConfig(sandbox="venv", timeout_s=120)
+    cfg.output.output_dir = tmp_path / "outputs"
+    cfg.output.kinds = ["paper_md"]
+    cfg.engine.no_simulation = True
+    engine = Engine(cfg)
+    (engine.quest_root / "data").mkdir(parents=True)
+    (engine.quest_root / "data" / "table.csv").write_text("x,y\n1,2\n2,4\n3,6\n", encoding="utf-8")
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    await engine.run()
+    ran = [e["node"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "node_started"]
+    assert "auto_collect_data" not in ran
+    assert not {"implement_outline", "implement", "execute"} & set(ran), ran
+    assert ran.index("design") < ran.index("wait_for_data") < ran.index("data_load") < ran.index("analyze"), ran
+    assert "auto_collect_data" not in engine._build_graph().compile().get_graph().nodes
 

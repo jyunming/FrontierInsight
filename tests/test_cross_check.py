@@ -663,67 +663,31 @@ def test_route_after_cross_check_empty_cross_check_terminates_loop(
     }) == "write"
 
 
-# --- _node_literature iterative-loop behaviour ------------------------------
+# --- the literature step reads what it is given and searches for nothing ----------------------------------
 
 
 @pytest.mark.asyncio
-async def test_node_literature_first_pass_sets_iter_to_one(tmp_path: Path) -> None:
-    """First entry into the literature node — no prior literature, no
-    counter. Result: literature populated, ``literature_iter`` == 1."""
+async def test_node_literature_reads_the_given_papers_searches_nothing_and_keeps_what_it_had(tmp_path: Path) -> None:
+    """The literature step takes the full texts dropped in inputs/papers/ and never searches (a study starts from a
+    commission, which gives its sources). A second pass keeps the sources of the first and adds only new ones."""
     eng = Engine(_mk_cfg(tmp_path))
 
-    async def fake_search(query, **kw):  # noqa: ANN001
-        return [
-            RetrievedDoc(content="abstract A", metadata={"doi": "10.1/a", "url": "u1"}),
-            RetrievedDoc(content="abstract B", metadata={"doi": "10.1/b", "url": "u2"}),
-        ]
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+    async def no_search(query, **kw):  # noqa: ANN001
+        raise AssertionError("the literature step does not search")
+    eng.knowledge.asearch = no_search  # type: ignore[method-assign]
+    papers = eng.quest_root / "inputs" / "papers"
+    papers.mkdir(parents=True)
+    (papers / "first.md").write_text("# A first paper\n\n" + "Its method is described here. " * 40, encoding="utf-8")
 
-    patch = await eng._node_literature({
-        "topic": "first-pass topic",
-        "chosen_idea": {"title": "T"},
-    })
-    assert patch["literature_iter"] == 1
-    assert len(patch["literature"]) == 2
-    assert patch["literature"][0]["metadata"]["doi"] == "10.1/a"
+    first = await eng._node_literature({"topic": "first-pass topic"})
+    assert first["literature_iter"] == 1
+    assert len(first["literature"]) == 1 and "first paper" in first["literature"][0]["content"].lower()
 
-
-@pytest.mark.asyncio
-async def test_node_literature_second_pass_accumulates_and_dedups(
-    tmp_path: Path,
-) -> None:
-    """A second pass of the literature step (a resumed one) MUST keep the previously-retrieved docs and only append new
-    ones (DOI- / URL- / content-prefix dedup)."""
-    eng = Engine(_mk_cfg(tmp_path))
-
-    # Second pass returns one overlap (doi 10.1/a) and two genuinely new.
-    async def fake_search(query, **kw):  # noqa: ANN001
-        return [
-            RetrievedDoc(content="abstract A (dup)", metadata={"doi": "10.1/a"}),
-            RetrievedDoc(content="abstract C", metadata={"doi": "10.1/c"}),
-            RetrievedDoc(content="abstract D", metadata={"url": "uniq-url-d"}),
-        ]
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-
-    prior_state = {
-        "topic": "re-entry topic",
-        "chosen_idea": {"title": "T"},
-        "design": {"hypothesis": "specific design hypothesis"},
-        "literature_iter": 1,
-        "literature": [
-            {"content": "abstract A", "metadata": {"doi": "10.1/a", "url": "u1"}},
-            {"content": "abstract B", "metadata": {"doi": "10.1/b", "url": "u2"}},
-        ],
-    }
-    patch = await eng._node_literature(prior_state)
-    assert patch["literature_iter"] == 2
-    # Original 2 + 2 new (C, D) — the duplicate A is dropped.
-    assert len(patch["literature"]) == 4
-    dois = [e.get("metadata", {}).get("doi") for e in patch["literature"]]
-    assert dois.count("10.1/a") == 1, "duplicate DOI must be dropped on re-entry"
-    assert "10.1/c" in dois
-    urls = [e.get("metadata", {}).get("url") for e in patch["literature"]]
-    assert "uniq-url-d" in urls
+    (papers / "second.md").write_text("# A second paper\n\n" + "Its result is stated here. " * 40, encoding="utf-8")
+    again = await eng._node_literature({"topic": "first-pass topic", "literature": first["literature"],
+                                        "literature_iter": 1})
+    assert again["literature_iter"] == 2
+    assert len(again["literature"]) == 2, "the first source is kept once and the new one added"
 
 
 # --- ensemble cross_check + merge_vote integration -------------------------

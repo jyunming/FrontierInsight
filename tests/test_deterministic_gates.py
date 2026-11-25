@@ -22,7 +22,6 @@ from core.engine import Engine, _temperature_for_node
 def test_temperature_for_node_gates_are_zero():
     for gate in (
         "evidence_gate", "review", "claim_check", "cross_check",
-        "relevance_guard",
     ):
         assert _temperature_for_node(gate) == 0.0, gate
     # Every per-persona panel call is a verdict too.
@@ -74,7 +73,7 @@ async def test_chat_routes_gate_nodes_to_temperature_zero(tmp_path: Path):
 
     for node in (
         "evidence_gate", "review", "review_panel.methodologist",
-        "claim_check", "cross_check", "relevance_guard",
+        "claim_check", "cross_check",
         "plan", "write",
     ):
         await eng._chat("prompt", node=node)
@@ -84,7 +83,6 @@ async def test_chat_routes_gate_nodes_to_temperature_zero(tmp_path: Path):
     assert cap.temps["review_panel.methodologist"] == 0.0
     assert cap.temps["claim_check"] == 0.0
     assert cap.temps["cross_check"] == 0.0
-    assert cap.temps["relevance_guard"] == 0.0
     # Generative nodes are unchanged.
     assert cap.temps["plan"] == 0.2
     assert cap.temps["write"] == 0.2

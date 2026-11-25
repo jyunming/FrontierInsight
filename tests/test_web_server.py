@@ -150,7 +150,6 @@ def test_a_checks_own_narrower_tag_still_names_the_node_running_it() -> None:
         ("goal_coverage", "review"),
         ("number_provenance", "review"),
         ("page_limit", "review"),
-        ("auto_collect", "auto_collect_data"),
     ],
 )
 def test_every_aliased_sub_step_tag_resolves_to_the_node_that_logs_it(tag: str, node: str) -> None:

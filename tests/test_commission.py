@@ -172,7 +172,7 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
     _commission(tmp_path / "order")
     yaml = tmp_path / "order" / "quest.yaml"
     yaml.write_text("commission: commission.json\npauses:\n  clarify: ask\n  scope: ask\nengine:\n  clarify_mode: auto\n"
-                    "knowledge:\n  foundational_works: false\n", encoding="utf-8")
+                    "knowledge:\n  web_search: false\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     with caplog.at_level("INFO", logger="frontier_insight.config"):
         cfg = Config.from_yaml(yaml)
@@ -184,9 +184,7 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
     # The study cards are gone: the key loads, and the log says once that it does nothing.
     assert [r.getMessage() for r in caplog.records if "pauses.scope" in r.getMessage()] == [
         "config: pauses.scope no longer does anything; the line can be removed."]
-    assert "foundational_works" not in said[0], "a setting the commission agrees with is not named"
     assert cfg.pauses.papers is False
-    assert cfg.knowledge.foundational_works is False and cfg.knowledge.requery_on_low_relevance is False
     assert cfg.engine.enable_analyze_reroute is False
     assert cfg.execution.timeout_s == 2 * 3600, "the commission's hours are the run's time limit when the config is silent"
     plain = Config(topic="a draining tank")

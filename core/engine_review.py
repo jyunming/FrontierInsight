@@ -13,7 +13,7 @@ from .engine_base import (  # noqa: F401
     _JOB_SEED_PROTOCOL, _LAST_CALL, _ModelAnswerProblem, _NOT_GIVEN, _OUTSIDE_WORK_STEPS, _PIP_FREEZE_TIMEOUT_S,
     _SEARCH_PROTOCOL, _SKILL_MOUNTS_FILE, _SPLIT_PROTOCOL, _acceptance, _aggregate_panel_reviews, _attempts,
     _audit_log, _citations_unchecked, _code_layout, _code_review, _crash_kind, _design_parts_listing,
-    _extract_result_json, _format_claim_grounding, _format_clarify, _foundational_review_block, _function_steps,
+    _extract_result_json, _format_claim_grounding, _format_clarify, _function_steps,
     _grounding_after_trim, _in_run, _is_fatal_provider_error, _is_preliminary_memory, _last_error_line,
     _load_persona_prefix, _names_a_verdict, _one_line, _optim, _optimise_refine, _oracle, _outcome_of,
     _pairs, _paper_for_prompt, _paper_scope, _paper_sections, _parse_json_lenient, _phased, _plan_settings,
@@ -95,12 +95,6 @@ class ReviewStageMixin:
             design_block=json.dumps(state.get("design") or {}, indent=2) + _design_parts_listing(state.get("design")),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
-            # Advisory: what the reviewer may ask for,
-            # never a must-flag hit. Empty when the paper cites every foundational
-            # work it has, or has none.
-            foundational_check_block=_foundational_review_block(
-                state.get("literature") or [], paper_md, self.config.output.audience,
-            ),
             user_feedback_block=_user_feedback_review_block(state),
             # What a second model's reading of the code left open: a claim resting on it is not established.
             code_findings_block=_code_review.review_block(self.quest_root, self.quest_root / "code"),
@@ -656,8 +650,7 @@ class ReviewStageMixin:
         on this call only. Otherwise the endpoint default applies.
 
         ``temperature`` defaults to per-node routing: gate/verdict/classifier
-        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
-        relevance_guard) run at 0 for reproducible decisions; generative nodes
+        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
         if self._repairs_go_to == "agent" and _writes_code(node):
             raise RepairForAgent(str(node))  # the code is the coding agent's: the check reports to it (core/agent_build.py)

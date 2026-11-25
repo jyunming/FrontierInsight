@@ -235,7 +235,8 @@ def test_the_graph_has_both_routes(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     graph = eng._build_graph().compile().get_graph()
     edges = {(e.source, e.target) for e in graph.edges}
-    assert ("write", "implement") in edges and ("write", "replot_layout") in edges and ("write", "auto_collect_data") in edges
+    assert ("write", "implement") in edges and ("write", "replot_layout") in edges and ("write", "wait_for_data") in edges
+    assert not any("auto_collect_data" in edge for edge in edges)
     assert ("replot_layout", "claim_check") in edges
 
 
@@ -287,27 +288,6 @@ def test_a_two_script_quest_that_must_keep_both_stops_when_the_extension_returns
     stop = eng._cannot_repair_stop()
     assert stop is not None and "did not hold both scripts" in stop["exec_result"]["cannot_repair"]
     assert (code_dir / "experiment.py").read_text(encoding="utf-8") == "print('old')\n"
-
-
-def test_collecting_for_a_refine_looks_for_what_was_asked_and_says_when_nothing_came(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng.config.engine.auto_collect_data = True  # type: ignore[assignment]
-    seen: list[str] = []
-
-    async def collect(query: str, *a: Any, **kw: Any) -> int:
-        seen.append(query)
-        return 0
-
-    async def adapters(query: str, *a: Any, **kw: Any) -> int:
-        return 0
-
-    eng._axon_collect_step = collect  # type: ignore[method-assign]
-    eng._run_dataset_adapters = adapters  # type: ignore[method-assign]
-    out = asyncio.run(eng._node_auto_collect_data(  # type: ignore[arg-type]
-        {**STATE, "no_simulation_resolved": True, "refine_extend": ["GDP of Peru in 2019"],
-         "literature": [{"metadata": {"title": "T", "url": "u"}, "text": "x"}]}))
-    assert seen == ["GDP of Peru in 2019"], "searched for the ask even though earlier literature existed"
-    assert out["refine_extend"] == [] and out["extend_missed"] == ["GDP of Peru in 2019"]
 
 
 def test_the_run_manifest_does_not_fight_an_extension(tmp_path: Path) -> None:

@@ -187,12 +187,13 @@ async def test_engine_run_passes_initial_when_no_checkpoint(
 
 
 @pytest.mark.parametrize("node,said", [("scope", "choosing a study from study cards"),
-                                       ("ideate", "making research ideas")])
+                                       ("ideate", "making research ideas"),
+                                       ("auto_collect_data", "looking for data on the topic")])
 @pytest.mark.asyncio
 async def test_a_checkpoint_stopped_before_a_step_fi_no_longer_has_is_refused_plainly(
     tmp_path: Path, node: str, said: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An earlier FI's quest that stopped just before its idea step or its study cards: LangGraph reads the checkpoint
+    """An earlier FI's quest that stopped just before its idea step, its study cards or its data search: LangGraph reads the checkpoint
     as having nothing left to run (the node is gone), which would look like a finished quest. The resume is refused in
     one sentence (not as a crash) and nothing runs."""
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver

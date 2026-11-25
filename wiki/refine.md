@@ -22,7 +22,7 @@ If any point needs a different experiment, that route wins and missing-number po
 
 ## Missing number: extend the script
 
-FI asks the model to change the existing scripts as little as it can to compute what you asked for. The frozen protocol is not rewritten; the difference is recorded as extended at your request, and the protocol checks excuse only that difference. If the model returns no usable script, the old scripts are kept and the paper's limitations say the number could not be added. A quest without a simulation searches its data sources again for exactly that number.
+FI asks the model to change the existing scripts as little as it can to compute what you asked for. The frozen protocol is not rewritten; the difference is recorded as extended at your request, and the protocol checks excuse only that difference. If the model returns no usable script, the old scripts are kept and the paper's limitations say the number could not be added. A quest without a simulation analyses only the data you put in `data/`: FI looks for no other data, so a note asking for a number the data lacks is reported as not added, and the paper says so.
 
 **The number must reach the paper.** After the run, FI checks (without a model call) that each new value appears in the paper at the paper's rounding, or that a new result is named with a number. If not, the writer is asked once more with the computed values. If it is still missing, `run.log` says "Your request … was computed … but is not in the paper", the review shows it, and the paper is never accepted automatically.
 

@@ -7,7 +7,7 @@ the run was given. A planter changes a file of the copied quest (``edit``), or n
 
 The MVP planters: R1 (a number of the paper changed), R2 (a sentence with a number the run never computed added to the
 writer's answer), N3 (a factor taken out of the simulation), S1 (the analysis keeps one value in five of FI's trials) and
-L1 (a retracted paper among a fresh run's search results, with its DOI; its Crossref answer is recorded and replayed).
+L1 (a retracted paper among the sources a fresh run's literature step reads, with its DOI; its Crossref answer is recorded and replayed).
 """
 
 from __future__ import annotations
@@ -184,10 +184,10 @@ MADSEN = {
 
 
 def plant_l1(*, paper: dict[str, Any] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """L1: a retracted paper among the literature search's results of a fresh run (the run is not forked: see the
-    catalogue). Returns the record and the search hit to add (``BenchEngine(extra_hits=...)``).
+    """L1: a retracted paper among the sources a fresh run's literature step reads (the run is not forked: see the
+    catalogue). Returns the record and the source to add (``BenchEngine(extra_hits=...)``).
 
-    The hit carries its DOI, as a search result does. A paper pinned with ``knowledge.local_papers`` or dropped into
+    The source carries its DOI, as a retrieved record does. A paper pinned with ``knowledge.local_papers`` or dropped into
     ``inputs/papers/`` is not a way to plant it: FI keeps no DOI for those (core/knowledge.py::_load_local_paper,
     core/engine.py::_ingest_user_dropped_papers), so no retraction lookup is made for them at all."""
     paper = dict(paper or WAKEFIELD)

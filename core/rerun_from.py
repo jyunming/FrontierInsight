@@ -20,7 +20,7 @@ Graph nodes that are not a step, and why:
 * ``execute_reflect``: the repair of a crashed script, inside ``run`` (it has its own budget).
 * ``improve``: the changes to the simulation against its checks of correctness, inside ``run`` (``engine.improve_rounds``).
 * ``human_feedback``: a person's decision, not something to redo.
-* ``implement_outline`` / ``implement`` (the ``code`` step), ``auto_collect_data`` / ``data_load`` (the ``run`` step),
+* ``implement_outline`` / ``implement`` (the ``code`` step), ``data_load`` (the ``run`` step),
   ``web_plots`` / ``web_figures`` (the ``figures`` step) and ``select_skills`` (the ``skills`` step) are parts of a
   step, and their names are accepted as that step.
 """
@@ -40,10 +40,10 @@ STEPS: dict[str, tuple[str, ...]] = {
     "design": ("design",),
     # The skills are picked again just before the code (or, with no simulation, the data) is made: the same place in
     # the graph as ``code``, so the checkpoint is the same; the pick itself is redone by the engine (``Engine.run``).
-    "skills": ("implement_outline", "auto_collect_data"),
+    "skills": ("implement_outline", "wait_for_data"),
     "code": ("implement_outline", "implement"),
-    # The no-simulation path's run is the data: collected, waited for, loaded.
-    "run": ("execute", "auto_collect_data", "wait_for_data", "data_load"),
+    # The no-simulation path's run is the data: waited for (the person's own files in data/), loaded.
+    "run": ("execute", "wait_for_data", "data_load"),
     # The no-simulation path draws its plots and figures from the loaded data, before the analysis.
     "figures": ("web_plots", "web_figures"),
     "analysis": ("analyze",),
@@ -73,7 +73,7 @@ NEEDS_APPROVAL: frozenset[str] = frozenset({"literature", "plan", "design"})
 # What running the quest again from each step does, in one sentence a person reads before choosing.
 _REPLACES = "the experiment plan (frozen) is replaced by the new design's"
 REDOES: dict[str, str] = {
-    "literature": "searches the literature again, then redoes the plan, design, code and everything after; "
+    "literature": "reads the given sources again, then redoes the plan, design, code and everything after; "
                   f"{_REPLACES}, and the old one is kept in .fi/previous/",
     "plan": "writes plan.md again from the same literature and waits for you to read it, then redoes the design, code "
             f"and everything after; {_REPLACES}, and the old one is kept in .fi/previous/",
@@ -99,7 +99,7 @@ _ALIASES = {
     "literature review": "literature", "lit": "literature",
     "select_skills": "skills", "skill": "skills",
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run",
-    "auto_collect_data": "run", "web_plots": "figures", "web_figures": "figures", "plots": "figures",
+    "web_plots": "figures", "web_figures": "figures", "plots": "figures",
     "analyze": "analysis",
     "cross_check": "crosscheck", "cross-check": "crosscheck", "evidence_gate": "evidence",
     "write": "writing", "paper": "writing", "claim_check": "claims",
@@ -196,7 +196,7 @@ _GONE = {"ideas": "ideas", "ideate": "ideas", "idea": "ideas", "ideas & literatu
 # start goes to, so the repair of its code stays inside it and a way back to the design leaves it.
 ALONE: dict[str, tuple[str, ...]] = {
     "design": ("clarify", "literature", "pause_after_literature", "select_skills", "plan", "design"),
-    "compute": ("implement_outline", "implement", "execute", "execute_reflect", "improve", "auto_collect_data",
+    "compute": ("implement_outline", "implement", "execute", "execute_reflect", "improve",
                 "wait_for_data", "data_load", "web_plots", "web_figures", "evidence_gate", "stuck_no_findings"),
 }
 # The receipt each step leaves: what it was given, what it made and what its checks judged (``Engine._step_finish``).
@@ -388,7 +388,7 @@ def step_info(step: str, *, reached: bool) -> dict[str, Any]:
 # instead of the simulation path). The key of a block is what a node names in ``NODES``.
 MAP_BLOCKS: dict[str, tuple[str, str, bool]] = {
     "setup": ("Understand the question", "Check the setup.", False),
-    "lit": ("Read the literature", "Search papers and pause for any you must download.", False),
+    "lit": ("Read the literature", "Read the papers your commission gives.", False),
     "plan": ("Plan the work", "Choose tools, write the plan, design the experiment.", False),
     "run": ("Build and run the experiment", "Write the code, run it, repair it if it crashes.", False),
     "data": ("Or: use real data", "For questions with no simulation: collect and load data.", True),
@@ -404,12 +404,12 @@ NODES: dict[str, dict[str, str]] = {
     "clarify": {"block": "setup", "title": "Check the setup",
                 "sentence": "Reads your topic and settings, asks about anything unclear.",
                 "reads": "topic, config.yaml", "writes": "clarified topic"},
-    "literature": {"block": "lit", "title": "Search papers",
-                   "sentence": "Finds papers. Only free ones are downloaded automatically.",
-                   "reads": "topic", "writes": "literature notes, papers needed by hand"},
-    "pause_after_literature": {"block": "lit", "title": "Wait for papers",
-                               "sentence": "Stops so you can add paywalled papers. Skipped when none are needed.",
-                               "reads": "needs/WANTED_PAPERS.md", "writes": "inputs/papers/"},
+    "literature": {"block": "lit", "title": "Read the papers",
+                   "sentence": "Reads the papers your commission gives. Nothing is searched for.",
+                   "reads": "topic", "writes": "literature notes"},
+    "pause_after_literature": {"block": "lit", "title": "Wait for your papers",
+                               "sentence": "Stops so you can add papers of your own. Only when you ask for it.",
+                               "reads": "your files", "writes": "inputs/papers/"},
     "select_skills": {"block": "plan", "title": "Choose tools",
                       "sentence": "Picks which tools (skills) the code may use.",
                       "reads": "literature, approved tools", "writes": "chosen tools"},
@@ -437,9 +437,6 @@ NODES: dict[str, dict[str, str]] = {
                             "a change only when no check got worse.",
                 "reads": "checks of correctness, code/", "writes": "code/CHANGELOG.md, criteria history",
                 "loop": "a change kept: back to Run it once, in full (engine.improve_rounds)"},
-    "auto_collect_data": {"block": "data", "title": "Find data",
-                          "sentence": "Looks for public datasets.",
-                          "reads": "plan", "writes": "data/auto_collected/"},
     "wait_for_data": {"block": "data", "title": "Wait for your data",
                       "sentence": "Stops so you can add data by hand.",
                       "reads": "needs/", "writes": "inputs/"},

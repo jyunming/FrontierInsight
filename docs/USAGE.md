@@ -19,7 +19,7 @@ commands:
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the model behind the numbers, the design) in the editor, next to your other tabs, to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
-| `@fi /analyze <data-path> <commission-file>` | No-simulation quest on pre-staged data; the commission's question is what the analysis answers. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `auto_collect_data → wait_for_data → data_load → analyze → write → review`. Use it when you already have the dataset and want a paper analyzing it. | **~6** |
+| `@fi /analyze <data-path> <commission-file>` | No-simulation quest on pre-staged data; the commission's question is what the analysis answers. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `wait_for_data → data_load → analyze → write → review`. Use it when you already have the dataset and want a paper analyzing it. | **~6** |
 | `@fi /digest [days]` | Weekly project-manager digest across your quests: completed, in-progress, themes, ✅/🆕/⚠️/🛑/❓ diff vs prior digest, suggested next quests. Default window: 7 days. | **1** (or 0 if window is empty) |
 | `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
 | `@fi /rename <quest_id> <new title>` | Changes a finished or paused quest's title (see [Changing a quest's title](#changing-a-quests-title)). | **0** |
@@ -48,10 +48,7 @@ A single `/start` quest made **23–28 LLM calls** in 17 complete runs of one SI
 | Node | Calls | Notes |
 |---|---|---|
 | `clarify` | 0–1 | One call unless `pauses.clarify: off`. It asks what you want to see and proposes titles. |
-| `literature_query` | 1 per literature pass (a resume that runs the same pass again reuses them) | Turns the topic into keyword search queries. |
-| `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
-| `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
-| `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
+| `source_router` | 0, or 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
 | `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. A reviewer's job is to find problems: each finding says where, what is wrong, why and how to fix it, and the reply also lists what it checked and found no problem with. A reply with neither is asked once more (one more call) and then recorded as not reviewed. Under `rigor_profile: research` the result reaches *independently validated* only when this review gave a usable answer and the record of the calls shows another model gave it than the one that wrote the checks (a connection that does not name the answering model cannot show that). |
@@ -293,7 +290,7 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest | **0** (embeddings only; no LLM) |
 | `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 | **0** (GUI is read-only over existing outputs) |
 | `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` | **1** |
-| `--analyze <data-path>` | one directory + `--commission <file>` (its question is what the analysis answers) | no-simulation quest on pre-staged data (files copied into the new quest's `data/`); routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review` | **~6** |
+| `--analyze <data-path>` | one directory + `--commission <file>` (its question is what the analysis answers) | no-simulation quest on pre-staged data (files copied into the new quest's `data/`); routes through `wait_for_data → data_load → analyze → write → review` | **~6** |
 | `--digest` | none | weekly PM digest, pairs with `--days N` (default 7) | **1** (or 0 if window is empty) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
@@ -479,10 +476,6 @@ engine:
     # available: methodologist, statistician, devil_advocate, reproducibility
   no_simulation: false              # see "Topics that need real data" section below
   survey_mode: false                # literature/history synthesis: NO experiment AND NO dataset (implies no_simulation). See "Survey mode" below
-  auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
-  auto_collect_top_k: 5             # Axon top_k for auto_collect_data
-  dataset_adapters: []              # structured-data + web-fetch adapters. Available: "worldbank", "wikipedia"
-  dataset_adapter_top_k: 3          # rows per adapter
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -508,7 +501,7 @@ execution:
 
 knowledge:
   enabled: true
-  # Retracted papers: whenever knowledge is on, every source the search finds with a DOI is looked up in Crossref (a paper you pinned or dropped in without one is first matched to its DOI by its exact title, and by first author and year where it states them, else it is "could not be checked"; Crossref holds the Retraction Watch database; arXiv DOIs are not sent, Crossref holds none); there is no switch for it. A retracted one is marked [retracted] for the writer, never counts as support, is left off that pass's list of papers to download, and is named on the to-do card; any sentence that cites one is marked unsupported by the claim check. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest; offline it costs one request's timeout per literature pass (15 s, up to about 30 s behind a proxy that never answers). One line in run.log; each source's answer in .fi/literature_queries.json.
+  # Retracted papers: whenever knowledge is on, every source with a DOI the study was given is looked up in Crossref (a paper you pinned or dropped in without one is first matched to its DOI by its exact title, and by first author and year where it states them, else it is "could not be checked"; Crossref holds the Retraction Watch database; arXiv DOIs are not sent, Crossref holds none); there is no switch for it. A retracted one is marked [retracted] for the writer, never counts as support, and is named on the to-do card; any sentence that cites one is marked unsupported by the claim check. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest; offline it costs one request's timeout per run of the literature step (15 s, up to about 30 s behind a proxy that never answers). One line in run.log; each source's answer in .fi/literature_queries.json.
   # Inline AxonConfig (or pass a path to a YAML). Use Axon's NESTED shape
   # as below, not its flat field names — FI hands this to AxonConfig.load,
   # which does the nesting -> field mapping, env overrides and retired-key
@@ -526,13 +519,6 @@ knowledge:
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
   top_k: 8                          # Axon RAG cap — dense hits are precise, 8 strong matches beat 20 medium ones for the writer prompt.
   external_top_k: 20                # External (arXiv / OpenAlex / Crossref / S2 / ...) cap when Axon misses. Bigger than top_k because web search is coarser; bump to 30 for survey-shaped quests.
-  relevance_min_score: 0.20         # Literature relevance FLOOR: drop retrieved docs whose embedding cosine vs the TOPIC is below this, before they reach analyze/write. Runs in the literature node for EVERY quest (unlike relevance_guard, which only runs on the auto_collect path), so survey/simulation quests don't carry off-topic sources (e.g. change-point-math papers for a sculpture-history topic). 0.0 disables. Fail-open when embeddings are unavailable (FI_OFFLINE).
-  relevance_min_keep: 3             # Never-starve retention: keep at least this many top-scoring docs even if all fall below the floor (the evidence_gate then weighs how thin they are).
-  requery_on_low_relevance: true    # When NO doc clears relevance_min_score on its own merits, the query was probably worded badly (a field publishes under different terms than the topic statement uses). Ask the model for an alternative query and search again, instead of handing the writer the relevance_min_keep least-bad hits as if they were evidence. Skipped when embeddings are unavailable — without scores there is no signal the query was bad.
-  requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
-                                    # Your own search queries instead of FI's: write them in <quest folder>/inputs/search_queries.txt, one per line (first three used, # lines skipped); remove the file to go back to FI's. Listed in .fi/literature_queries.json.
-  literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened. Every source's grade and why it was kept or dropped is listed in .fi/literature_queries.json.
-  foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
 
@@ -544,7 +530,7 @@ knowledge:
 
   # Pinned local papers (always first in retrieval):
   local_papers:
-    - ~/papers/foundational-paper.pdf
+    - ~/papers/method-paper.pdf
     - ~/papers/local-note.md
 
   try_fetch_full_text: true         # download the full text of papers that are free to read (a paywalled paper is never downloaded; you add it yourself). false = abstracts only
@@ -945,8 +931,8 @@ a stronger form of no-simulation. Turn it on any of three ways:
   `survey` (triggers: "history of", "evolution of", "overview of", …).
 
 In survey mode the graph skips BOTH the experiment (`implement` /
-`execute`) AND the whole data path (`auto_collect_data` →
-`wait_for_data` → `data_load` → `web_plots`), routing `design →
+`execute`) AND the whole data path (`wait_for_data` →
+`data_load` → `web_plots`), routing `design →
 web_figures → analyze → write`. `web_figures` still embeds
 license-clean illustrative images; `analyze` synthesises the reviewed
 sources directly; the paper is a narrative history with a References
@@ -954,7 +940,7 @@ section and no fabricated metrics.
 
 For the no-simulation (data-analysis) path — where there IS a dataset
 to analyse — the engine runs `clarify → literature → design →
-auto_collect_data → wait_for_data → data_load → analyze → ...`. The
+wait_for_data → data_load → analyze → ...`. The
 two no-simulation-specific stops:
 
 **Confirming a data analysis** (`engine.phased: true`, on by default for research): when you
@@ -970,75 +956,9 @@ in `run.log` and `plan.md`. The held-back rows confirm one version of the design
 changed after that reading is a new version, which cannot be confirmed on rows already read, and
 says so. See docs/rigor.md, *Explore, then confirm*.
 
-**`auto_collect_data`** — agent-side data collection. Before
-pausing for user input, the engine asks the Knowledge layer (Axon)
-for relevant docs using `topic + design.hypothesis` as the query
-and writes the top hits into `<quest_root>/data/auto_collected/`
-as one Markdown file per doc (with YAML provenance front matter so
-the paper can cite back to specific sources). Controlled by:
-
-* `engine.auto_collect_data: true` (default) — try Axon first.
-  Set to `false` for "user-only" data flow when you don't trust
-  the corpus or want a manual pause every time.
-* `engine.auto_collect_top_k: 5` (default) — Axon hits requested.
-  5 fits comfortably in a 16k-context data_load prompt; raise
-  only on long-context models with topics that genuinely need
-  more breadth.
-
-**Dataset adapters**: in addition to the corpus-RAG retrieval,
-`auto_collect_data` can invoke structured-data adapters that hit
-public APIs and write tabular evidence into
-`<quest_root>/data/auto_collected/<adapter>/`. Opt in via:
-
-* `engine.dataset_adapters: [worldbank, wikipedia]` — list of
-  registered adapter names. Empty (default) means "Axon only —
-  no adapters run". Available adapters: `worldbank`, `wikipedia`.
-  Unknown names log a WARNING and are skipped (no hard error on typo).
-* `engine.dataset_adapter_top_k: 3` — rows per adapter. Smaller
-  default than the Axon knob because each row hits an external API.
-
-The WorldBank adapter heuristically extracts country names from the
-query (`"Belgium and Taiwan"` → `[BEL, TWN]`, falling back to
-global aggregates `WLD/OED/EUU/HIC/LIC` when no country named),
-scores ~1500 indicator names against the query keywords, and writes
-the top `top_k` matches as Markdown tables with the last 5 years of
-data. Adapter failures (network down, indicator not found, every
-write failing) fall through silently to the safety net.
-
-The Wikipedia adapter handles the long-tail "qualitative comparison"
-case where neither corpus-RAG nor structured-data fits — e.g.
-*"compare the 1968 student protests in Paris and Mexico City"*. It
-attempts to compress the query to its top-6 informative keywords
-(falls back to the raw trimmed query if every token was filtered
-out as a stop-word), calls `api.php?action=opensearch` to get
-candidate article titles, then fetches
-`api/rest_v1/page/summary/<title>` for each match and writes a
-Markdown file per article. The page's `description` and `extract`
-land in the document body; YAML front matter carries `source:
-wikipedia`, the canonical `title` / `url`, the article's
-`wikipedia_type` (e.g. `standard`, `disambiguation`), and
-`adapter: wikipedia` for downstream provenance. Articles with
-extracts under ~200 characters are dropped as too thin to cite.
-Request budget per quest: `1 + dataset_adapter_top_k` HTTP calls.
-
-Auto-collect falls through to the user-data pause (no files
-written, `auto_collected_count: 0` in state) in four cases:
-
-* `engine.auto_collect_data: false` — INFO log, **no Axon call**.
-* `knowledge.enabled: false` — INFO log, **no Axon call**.
-* `Knowledge.asearch` raised — WARNING log; Axon **was called** but
-  the exception is caught so the quest survives.
-* Axon returned zero hits — INFO log; Axon was called and answered
-  legitimately with nothing.
-
-In all four cases `wait_for_data` then makes the final pause-or-
-proceed decision based on `data/` contents (manual drops still
-count if you pre-staged some).
-
-**`wait_for_data`** — the user-data pause. With files already in
-`data/` (either auto-collected or user-supplied), this node
-passes through immediately. If the dir is empty (Axon returned
-nothing AND no manual drops), the engine exits cleanly (rc=0)
+**`wait_for_data`** — your data. A data study analyses the files you put in
+`data/`; FI looks for no data of its own. With files already in `data/`, this node
+passes through immediately. If the folder is empty, the engine exits cleanly (rc=0)
 with an instruction file at `outputs/<quest_id>/data/README.md`
 telling you what to drop. Then:
 
@@ -1047,12 +967,14 @@ fi --resume <quest_id>
 ```
 
 The engine picks up at the `data_load` node: walks every file in
-`data/` (including `auto_collected/`), classifies them (csv / json
+`data/`, classifies them (csv / json
 / pdf / md / xlsx / png), synthesizes a `result_json` via one LLM
 call grounded in the designed measurement plan, and then continues
 normally through `analyze → cross_check → write → review`. The
-paper cites the *specific files dropped or auto-collected* as
-primary sources, not invented data.
+paper cites the *specific files you dropped* as
+primary sources, not invented data. A note that asks for a number the data
+does not hold is not carried out (FI will not go and find it): the paper says it
+was not added.
 
 Permissive about format — drop whatever's natural. The walker
 deduplicates and budget-caps the prompt the same way `/summarize`
