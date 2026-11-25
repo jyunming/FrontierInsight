@@ -70,6 +70,17 @@ SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
+
+
+def paper_format_with_old_venue(configured: str, clarify_answers: Any) -> str:
+    """The paper format a quest writes, renders and page-checks in. A format written in the config (any but the default
+    one) wins; otherwise the ``paper_venue`` that a study an earlier FI began was asked at its start (normalised: trimmed,
+    lower case, a known format only); otherwise the configured one. A new study carries no venue (nothing asks it).
+    The one rule the write persona, the page check and the final render all use."""
+    if configured != DEFAULT_PAPER_FORMAT:
+        return configured
+    venue = str(clarify_answers.get("paper_venue") or "").strip().lower() if isinstance(clarify_answers, dict) else ""
+    return venue if venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS else configured
 # The paper template a quest gets when nobody chose one: FI's plain one-column
 # article.
 DEFAULT_PAPER_FORMAT: PaperFormat = "article"
@@ -1824,7 +1835,7 @@ class Config(BaseModel):
                    and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
         engine_given = {k: _set_in(data.get("engine"), k) is True for k in ("no_simulation", "survey_mode", "analyze_local_first")}
         modes = _commission.modes(found)  # None: no ``method``, so the config's own two keys stand (``door`` refuses them)
-        if modes is not None and not _set_in(data.get("engine"), "analyze_local_first"):
+        if modes is not None:
             forced["engine"].update(no_simulation=modes[0], survey_mode=modes[1])
         for section, values in forced.items():
             block = data.get(section)

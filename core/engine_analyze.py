@@ -7,7 +7,7 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
-    Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, _FRESH_SCRIPT, _ModelAnswerProblem,
+    Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, paper_format_with_old_venue, _FRESH_SCRIPT, _ModelAnswerProblem,
     _STOPPED_BEFORE_THE_STUDY, _UNPLACED_FINDING, _aggregate_result_json_replicates,
     _analysis_frame, _code_findings, _code_project, _code_reach, _code_review, _compact_result_json_block, _controls,
     _cross_check_items, _elide_value_lists, _evidence_gate_rule, _figure_list_for_prompt, _finding_repair,
@@ -655,11 +655,7 @@ class AnalyzeStageMixin:
 
     def _write_venue(self, state: QuestState) -> str:
         """The paper format the write persona is chosen by (see :meth:`_resolve_write_persona`)."""
-        venue = ""
-        answers = state.get("clarify_answers") or {}  # only a study an earlier FI began carries one (it asked the venue)
-        if isinstance(answers, dict):
-            venue = str(answers.get("paper_venue") or "").strip().lower()
-        return venue or self.config.output.paper_format or ""
+        return paper_format_with_old_venue(self.config.output.paper_format or "", state.get("clarify_answers"))
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question

@@ -10,6 +10,7 @@ from . import commission as _commission
 from .engine_base import (  # noqa: F401
     _ANY_HEADING_RE, _REFERENCES_HEADING_LINE_RE,
     Any, Callable, DEFAULT_PAPER_FORMAT, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_NOTE, Path, QuestState,
+    paper_format_with_old_venue,
     SCIENTIFIC_PAPER_FORMATS, _CITATION_SOURCE_CHARS, _CLAIM_EVIDENCE_CHARS, _CLAIM_FAULTS_TAKEN_OUT,
     _CODE_REEXECUTES, _ModelAnswerProblem, _NO_SIM_WRITE_NOTE, _PAGE_LIMIT_HIT, _PAPER_PROMPT_CHARS, _REFINE_POINT_RE,
     _REFINE_WHY_RE, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE, _SURVEY_WRITE_NOTE, _TEXT_ONLY_HITS,
@@ -2945,11 +2946,7 @@ class WriteStageMixin:
             return self._page_check_skipped(
                 "paper_style is briefing, which renders through HTML, not the LaTeX templates"
             )
-        fmt = output.paper_format
-        answers = state.get("clarify_answers")  # only a study an earlier FI began carries a venue picked at the start
-        venue = answers.get("paper_venue") if isinstance(answers, dict) else None
-        if fmt == DEFAULT_PAPER_FORMAT and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
-            fmt = venue
+        fmt = paper_format_with_old_venue(output.paper_format, state.get("clarify_answers"))
         config = self.config.model_copy(update={"output": output.model_copy(update={
             "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
         })})

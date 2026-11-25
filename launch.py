@@ -2454,18 +2454,12 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     """A study an earlier FI began may carry a `paper_venue` it was asked at the start: when the config left
     `output.paper_format` at its default and that venue is another template, the final render uses the venue. A format
     written in the config wins, and an unknown venue is ignored. A new study carries none (nothing asks it)."""
-    from typing import get_args
+    from core.config import paper_format_with_old_venue
 
-    from core.config import PaperFormat
-
-    answers = (art.raw_state or {}).get("clarify_answers") or {}
-    venue = answers.get("paper_venue", "") if isinstance(answers, dict) else ""
-    if not isinstance(venue, str) or venue not in get_args(PaperFormat):
+    venue = paper_format_with_old_venue(cfg.output.paper_format, (art.raw_state or {}).get("clarify_answers"))
+    if venue == cfg.output.paper_format:
         return
-    default = type(cfg.output).model_fields["paper_format"].default
-    if cfg.output.paper_format != default or venue == default:
-        return
-    print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {default} -> {venue}")
+    print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {cfg.output.paper_format} -> {venue}")
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
 

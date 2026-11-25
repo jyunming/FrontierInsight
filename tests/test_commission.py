@@ -1251,3 +1251,56 @@ def test_an_old_checkpoints_paper_venue_still_picks_the_write_persona_and_the_fi
     cfg2 = Config(commission=_commission(tmp_path / "o3"))
     launch._apply_paper_venue_override(cfg2, Art())  # type: ignore[arg-type]
     assert cfg2.output.paper_format == type(cfg2.output).model_fields["paper_format"].default
+
+
+# ---- second review: a commission's modes always apply; one rule for an old checkpoint's venue -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_data_commission_with_analyze_local_first_goes_to_the_persons_data_not_to_implement(tmp_path: Path) -> None:
+    order = tmp_path / "o"
+    _commission(order, method="analyze_data")
+    (order / "study.yaml").write_text("commission: commission.json\nengine:\n  analyze_local_first: true\n", encoding="utf-8")
+    cfg = Config.from_yaml(order / "study.yaml")
+    assert cfg.engine.no_simulation is True and cfg.engine.survey_mode is False
+    commission.door(cfg.commission, None, topic=cfg.topic, asked=cfg.modes_asked())  # a valid pair
+    eng = _engine(tmp_path / "q", cfg.commission, analyze_local_first=True)
+    out = await eng._node_clarify({"topic": eng.config.topic})
+    assert out["no_simulation_resolved"] is True
+    assert eng._route_after_design({"topic": eng.config.topic, **out, "design": {}}) == "wait_for_data"
+
+
+def test_analyze_gives_the_commissions_title_or_none_never_the_questions_slug(tmp_path: Path) -> None:
+    from core.analyze_cli import build_analyze_config
+
+    plain = build_analyze_config(commission=_commission(tmp_path / "a", method="analyze_data"), output_dir=tmp_path / "out")
+    assert not (plain.title or "").strip(), "no title given: the writer proposes one"
+    titled = build_analyze_config(commission=_commission(tmp_path / "b", method="analyze_data", title="Draining a tank"),
+                                  output_dir=tmp_path / "out")
+    assert titled.title == "Draining a tank"
+
+
+def test_the_persona_the_page_check_and_the_final_render_use_one_rule_for_an_old_venue(tmp_path: Path) -> None:
+    import launch
+    from core.config import paper_format_with_old_venue
+
+    eng = _engine(tmp_path, _commission(tmp_path / "order"))
+    old = {"clarify_answers": {"paper_venue": " Report "}}  # an earlier FI's answer, as it was typed
+
+    class Art:
+        raw_state = old
+
+    default = Config(commission=_commission(tmp_path / "o2"))  # the paper format is the default
+    assert eng._write_venue(old) == "report"
+    launch._apply_paper_venue_override(default, Art())  # type: ignore[arg-type]
+    assert default.output.paper_format == "report"
+    assert paper_format_with_old_venue("article", old["clarify_answers"]) == "report"  # what the page check uses
+    # A format written in the config wins, in all three places.
+    explicit = Config(commission=_commission(tmp_path / "o3"), output=OutputConfig(paper_format="neurips"))
+    eng2 = _engine(tmp_path / "e2", _commission(tmp_path / "order2"))
+    eng2.config.output.paper_format = "neurips"
+    assert eng2._write_venue(old) == "neurips"
+    launch._apply_paper_venue_override(explicit, Art())  # type: ignore[arg-type]
+    assert explicit.output.paper_format == "neurips"
+    assert paper_format_with_old_venue("neurips", old["clarify_answers"]) == "neurips"
+    assert paper_format_with_old_venue("article", {"paper_venue": "not-a-format"}) == "article"

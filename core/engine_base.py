@@ -173,6 +173,7 @@ from . import stop_power as _stop_power
 from . import stats as _stats
 from .config import (
     DEFAULT_PAPER_FORMAT,
+    paper_format_with_old_venue,
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
     SCIENTIFIC_PAPER_FORMATS,
