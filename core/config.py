@@ -633,6 +633,8 @@ _RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check", "
                            "engine.dataset_adapter_top_k", "knowledge.relevance_guard", "knowledge.relevance_min_score",
                            "knowledge.relevance_min_keep", "knowledge.requery_on_low_relevance", "knowledge.requery_max",
                            "knowledge.literature_screen", "knowledge.foundational_works",
+                           # FI no longer searches by topic, so it has no list of paywalled papers to stop for.
+                           "pauses.papers", "knowledge.pause_for_user_papers",
                            # The setup questions are gone: the commission says the question, the scope and the ``method``.
                            "pauses.clarify", "engine.clarify_mode", "engine.clarify_overrides"})
 
@@ -649,10 +651,8 @@ class PausesConfig(BaseModel):
     """When (and how) the quest stops to involve a human. See the README
     section *When the quest needs you* for the full model."""
 
-    # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
-    # so the user can download it and drop the PDF into inputs/papers/.
-    # On by default: a relevant paywalled paper the open-access cascade could
-    # not fetch is listed in needs/WANTED_PAPERS.md and the quest waits for it.
+    # Retired: FI no longer searches the literature by topic, so it has no paywalled papers to stop for. Kept so
+    # an older config still loads (it logs that the line no longer does anything).
     papers: bool = True
     # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
     #   "never" · "after_literature" (the literature is done and saved; the
@@ -1319,19 +1319,7 @@ class KnowledgeConfig(BaseModel):
     # a no-op (snippet only) when Playwright/Chromium isn't installed, so
     # it's safe to leave on. Only fires on a blocked/empty direct fetch.
     headless_fetch: bool = True
-    # Pause-for-user-papers gate. FI downloads only papers that are free to
-    # read. A paper behind a paywall is never fetched by FI: when the
-    # literature comes back with abstract-only papers, the node writes a
-    # ``needs/WANTED_PAPERS.md`` list (with a link each) and, when this is on,
-    # pauses so a person can download them and drop the files into
-    # ``inputs/papers/``. On ``fi --resume`` the files are read in, giving
-    # the writer real full text instead of abstracts. With this off
-    # (``pauses.papers: false``, an unattended run) the run goes on with the
-    # abstracts and logs how many papers were left for a person.
-    #
-    # Default ``True``, matching ``pauses.papers``: this legacy flag is merged
-    # into it, and the programmatic merge copies the attribute through, so
-    # the two defaults must agree.
+    # Retired (see ``pauses.papers``): kept so an older config still loads.
     pause_for_user_papers: bool = True
     write_back_quests: bool = True
     # Ordered list of external literature sources used by

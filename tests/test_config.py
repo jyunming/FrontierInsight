@@ -543,3 +543,13 @@ def test_settings_at_once_is_auto_or_a_whole_number_of_at_least_one() -> None:
     for bad in (0, -2, True, "many"):
         with pytest.raises(ValidationError):
             ExecutionConfig(settings_at_once=bad)
+
+
+def test_the_two_papers_pause_keys_load_and_say_they_do_nothing(tmp_path: Path, caplog) -> None:
+    """FI no longer searches by topic, so it has no paywalled papers to stop for: an older config that still sets
+    ``pauses.papers`` or ``knowledge.pause_for_user_papers`` loads, and the log says each line does nothing."""
+    text = "topic: t\npauses:\n  papers: true\nknowledge:\n  pause_for_user_papers: true\n"
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        Config.from_yaml(_write(tmp_path, text))
+    for key in ("pauses.papers", "knowledge.pause_for_user_papers"):
+        assert caplog.text.count(f"config: {key} no longer does anything; the line can be removed.") == 1, key

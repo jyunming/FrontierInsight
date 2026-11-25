@@ -558,7 +558,7 @@ with `knowledge.source_routing: manual` and slides and a poster:
 | Engine settings of the measured runs (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
 | Slides, poster, talk script | +1 each |
 | Design through review running a second time | 27–33 in four runs of the same quest on older engine versions, not counting slides and poster |
-| `knowledge.source_routing: auto` (the default) | +1 per literature pass, +1 per cross-check lookup |
+| `knowledge.source_routing: auto` (the default) | +1 per cross-check lookup |
 | Reviewer panel of N personas | N + 1 per review round (the personas plus a moderator) instead of 1 |
 
 The spread within 21–26 comes from the model: 0–3 experiment repair

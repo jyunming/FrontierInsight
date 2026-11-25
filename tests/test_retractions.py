@@ -358,6 +358,69 @@ async def test_the_literature_step_looks_up_the_sources_it_was_given_and_records
     assert len(items) == 1 and retractions.normalize_doi(RETRACTED_DOI) in items[0].why
 
 
+def _mock_lookup(monkeypatch, calls: list) -> None:
+    real = retractions.check_dois
+
+    async def mocked(dois, **kw):  # noqa: ANN001, ARG001
+        calls.append(list(dois))
+        return await real(dois, transport=_crossref([RETRACTED_ITEM, CLEAN_ITEM]))
+
+    async def titles(entries, transport):  # noqa: ANN001, ARG001
+        return {i: (retractions.normalize_doi(RETRACTED_DOI), "") for i, _m, _c in entries}
+
+    monkeypatch.setattr(retractions, "check_dois", mocked)
+    monkeypatch.setattr(retractions, "_dois_for_own_papers", titles)
+
+
+@pytest.mark.asyncio
+async def test_a_paper_added_at_the_pause_after_the_literature_is_looked_up_too(tmp_path: Path, monkeypatch) -> None:
+    eng = _lit_engine(tmp_path)
+    _mock_lookup(monkeypatch, [])
+    monkeypatch.setattr(eng, "_pause_stage_enabled", lambda stage: True)
+    monkeypatch.setattr(eng, "_maybe_pause_for_user_input", lambda state, stage: None)
+    given = eng.quest_root / "inputs" / "papers"
+    given.mkdir(parents=True)
+    (given / "lancet.md").write_text("# The Lancet paper\n\n" + "Ileal-lymphoid-nodular hyperplasia. " * 30, encoding="utf-8")
+    patch = await eng._node_pause_after_literature({"literature": [], "literature_iter": 1})
+    (entry,) = patch["literature"]
+    assert entry["metadata"]["retraction"] == "retracted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting", ["enabled", "offline"])
+async def test_no_retraction_lookup_reaches_the_network_when_retrieval_is_off_or_offline(
+        tmp_path: Path, monkeypatch, setting: str) -> None:
+    eng = _lit_engine(tmp_path)
+    calls: list = []
+    _mock_lookup(monkeypatch, calls)
+    if setting == "enabled":
+        eng.config.knowledge.enabled = False
+    else:
+        eng.config.knowledge.offline = True
+    given = eng.quest_root / "inputs" / "papers"
+    given.mkdir(parents=True)
+    (given / "lancet.md").write_text("# The Lancet paper\n\n" + "Ileal-lymphoid-nodular hyperplasia. " * 30, encoding="utf-8")
+    patch = await eng._node_literature({"topic": "vaccines and autism"})
+    (entry,) = patch["literature"]
+    assert calls == [] and "retraction" not in entry["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_papers_pinned_in_local_papers_join_the_literature_once_and_are_looked_up(
+        tmp_path: Path, monkeypatch) -> None:
+    pinned = tmp_path / "pinned.md"
+    pinned.write_text("# A pinned background paper\n\n" + "Background on the pinned topic. " * 30, encoding="utf-8")
+    eng = _lit_engine(tmp_path)
+    eng.config.knowledge.local_papers = [pinned]
+    eng.knowledge = type(eng.knowledge)(eng.config.knowledge)
+    _mock_lookup(monkeypatch, [])
+    patch = await eng._node_literature({"topic": "background"})
+    (entry,) = patch["literature"]
+    assert "pinned topic" in entry["content"] and entry["metadata"].get("retraction") == "retracted"
+    again = await eng._node_literature({"topic": "background", "literature": patch["literature"]})
+    assert len(again["literature"]) == 1, "a paper already in the literature is not added again"
+
+
 # --- the to-do card -------------------------------------------------------------------------------
 
 
