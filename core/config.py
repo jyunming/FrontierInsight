@@ -1975,9 +1975,6 @@ class Config(BaseModel):
         cap = max(1, int(float(hours) * 3600)) if isinstance(hours, (int, float)) and hours > 0 else None
         given = _set_in(data.get("execution"), "timeout_s")
         forced = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
-        if cap is not None:
-            numeric = isinstance(given, (int, float)) and not isinstance(given, bool)
-            forced["execution"] = {"timeout_s": min(given, cap) if numeric else cap if given is None else given}
         # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
         ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
                    and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
@@ -1987,6 +1984,10 @@ class Config(BaseModel):
             data[section] = (block.model_copy(update=values) if isinstance(block, BaseModel)
                              else {**dict(block or {}), **values})
         config = handler(data)
+        # The cap on the value as validated, so every form the field accepts ("7200", 7200.0) is capped.
+        if cap is not None and (given is None or config.execution.timeout_s > cap):
+            ignored += ["execution.timeout_s"] if given is not None else []
+            config.execution = config.execution.model_copy(update={"timeout_s": cap})
         if ignored:
             config._commission_note = ("The commission gives the question, the study, the sources and the time allowed, "
                                        f"so these settings of the config are not used: {', '.join(ignored)}.")

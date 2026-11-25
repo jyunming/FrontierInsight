@@ -2550,6 +2550,14 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     )
     if outcome == "timeout":
         return 3
+    from core import commission as _commission
+
+    try:  # the wait can be hours: the commission and the quest's copies are checked again before it goes on
+        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id)
+    except _commission.CommissionRefused as e:
+        print(f"[FI] {e}", file=sys.stderr)
+        engine._log.warning("[watch] %s", e)
+        return 2
     out(f"[watch] the job is {outcome}; resuming quest {quest_id}")
     await run_one(
         cfg, supervisor=supervisor, resume_quest_id=quest_id,

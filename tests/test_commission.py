@@ -189,6 +189,42 @@ def test_the_commission_s_hours_cap_the_run_s_time_limit_the_config_sets(tmp_pat
     assert in_code.execution.timeout_s == 2 * 3600, "a limit left unset in code is the commission's"
 
 
+@pytest.mark.parametrize("written", ['"99999"', "99999.0"])
+def test_a_time_limit_written_in_another_form_the_config_accepts_is_capped_too(tmp_path: Path, written: str) -> None:
+    _commission(tmp_path / "order")
+    yaml = tmp_path / "order" / "quest.yaml"
+    yaml.write_text(f"commission: commission.json\nexecution:\n  timeout_s: {written}\n", encoding="utf-8")
+    assert Config.from_yaml(yaml).execution.timeout_s == 2 * 3600
+
+
+@pytest.mark.asyncio
+async def test_a_watch_checks_the_commission_again_after_its_wait_before_it_resumes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import argparse
+
+    import launch
+    from core import commission, job_watch
+
+    path = _commission(tmp_path / "order")
+    cfg = Config(commission=path, provider=ProviderConfig(name="openai"), knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "outputs"))
+    root = tmp_path / "outputs" / "q9"
+    commission.stage(path, root)
+    job_watch.write_pending(root / ".fi", {"status": "pending", "id": "J1"}, "experiment.py")
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    async def wait(*_a: Any, **_k: Any) -> str:  # the commission is changed while the job runs
+        path.write_text(json.dumps({**data, "scope": "five outlet diameters"}), encoding="utf-8")
+        return "done"
+
+    monkeypatch.setattr(job_watch, "watch", wait)
+    monkeypatch.setattr(launch, "run_one", AsyncMock(side_effect=AssertionError("the quest is not resumed")))
+    args = argparse.Namespace(watch="q9", watch_every=1, watch_max_hours=0.0, config=tmp_path / "order" / "quest.yaml",
+                              auto_accept_on_pass=None)
+    assert await launch._watch_quest(cfg, args, supervisor=None) == 2
+    assert "not the one quest q9 was started from" in capsys.readouterr().err
+
+
 def test_a_commission_with_a_missing_key_is_refused_on_load_and_at_the_door(tmp_path: Path) -> None:
     from core import commission
 
