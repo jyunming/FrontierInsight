@@ -1555,17 +1555,6 @@ def other_candidates(quest_root: Path | str) -> list[dict[str, str]]:
     return out
 
 
-def printed_result_ids(paper_md: str) -> list[str]:
-    """The ids of the plan's results the paper prints, in order of first use: the first word of each ``{{v:...}}`` key (a
-    ``calc``, ``trend`` or ``comparison`` key names no result)."""
-    out: list[str] = []
-    for m in _values._PLACEHOLDER.finditer(_values.to_placeholders(paper_md or "")):
-        head = re.match(r"\s*([A-Za-z_]\w*)", m.group(1))
-        if head and head.group(1) not in out and head.group(1) not in ("calc", "trend", "comparison"):
-            out.append(head.group(1))
-    return out
-
-
 def run_facts_text(quest_root: Path | str, *, fallback_s: Any = None) -> str:
     """The paragraph ``{{run_facts}}`` stands for, composed from FI's records: how many settings and trials, and the
     measured run time, each only when FI holds it. ``""`` when it holds none."""

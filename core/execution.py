@@ -59,9 +59,17 @@ def scrub_secrets(env: "Mapping[str, str] | None" = None) -> dict[str, str]:
     ``AWS_ACCESS_KEY_ID``). A proxy or package-index URL keeps any login written into it: packages could not be
     installed behind such a proxy without it. Everything else (PATH, PYTHONPATH, HOME, TEMP, proxy settings,
     ``PIP_*``, ``CUDA_*``, ``FI_*``) stays. ``VenvExecutor`` and ``DockerExecutor`` apply this to whatever environment
-    they are given, and to ``os.environ`` when given none, so code a model wrote never sees FI's keys."""
+    they are given, and to ``os.environ`` when given none, so code a model wrote never sees FI's keys.
+
+    This is the one place the environment of code FI runs but did not write is built, so it also sets
+    ``MPLBACKEND=Agg``: a script that plots draws to a file and never opens a window on the user's desktop (nothing FI
+    runs reads a plot from a window)."""
     base = os.environ if env is None else env
-    return {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k)) and str(k).upper() not in _NEVER_PASSED}
+    out = {k: v for k, v in base.items() if not _SECRET_NAME.search(str(k)) and str(k).upper() not in _NEVER_PASSED}
+    for k in [k for k in out if str(k).upper() == "MPLBACKEND"]:
+        del out[k]
+    out["MPLBACKEND"] = "Agg"
+    return out
 
 
 def threads_beside(env: "Mapping[str, str] | None", at_once: int, cores: int | None = None) -> dict[str, str] | None:

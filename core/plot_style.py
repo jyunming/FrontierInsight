@@ -257,29 +257,6 @@ def _slide_rcparams(paper_style: str) -> dict[str, object]:
     }
 
 
-def apply_style(paper_style: str = "briefing", target: str = "slide") -> None:
-    """Apply the house style to the live matplotlib in THIS process: register
-    the teal colormap and push the rcParams. Imports matplotlib lazily and
-    never imports pyplot, so it won't lock a GUI backend before the caller
-    selects Agg. Used by the in-process demo/tests; the bootstrap file emits
-    the same logic for the experiment subprocess."""
-    import matplotlib
-    from cycler import cycler
-    from matplotlib.colors import LinearSegmentedColormap
-
-    cmap = LinearSegmentedColormap.from_list(FI_TEAL_CMAP_NAME, FI_TEAL_STOPS)
-    try:
-        matplotlib.colormaps.register(cmap, force=True)            # mpl >= 3.6
-    except (AttributeError, ValueError):
-        try:
-            matplotlib.cm.register_cmap(name=FI_TEAL_CMAP_NAME, cmap=cmap)
-        except Exception:
-            pass
-    matplotlib.rcParams.update(fi_rcparams(paper_style, target))
-    # prop_cycle needs a cycler object, so it can't live in the JSON rc dict.
-    matplotlib.rcParams["axes.prop_cycle"] = cycler(color=FI_COLOR_CYCLE)
-
-
 def _boot_source(paper_style: str) -> str:
     """Render the self-contained ``sitecustomize.py`` text. Everything is
     inlined (the venv can't import this package) and fully guarded — any

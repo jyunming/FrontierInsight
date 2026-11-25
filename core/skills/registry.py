@@ -457,6 +457,8 @@ def run_selftest(skill: Skill, *, timeout_s: int | None = None) -> tuple[bool, s
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
+                # Windows: no console window (never DETACHED_PROCESS, which opens one of its own).
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
     except subprocess.TimeoutExpired:
         return False, f"selftest timed out after {timeout_s}s"

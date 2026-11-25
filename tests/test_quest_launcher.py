@@ -161,15 +161,15 @@ def test_quest_launch_writes_log_into_quest_fi_folder(
 def test_tool_job_writes_log_into_per_job_folder(
     launcher: QuestLauncher, tmp_path: Path,
 ) -> None:
-    """Tool jobs (proposal/critique/digest/portfolio/summarize/analyze)
+    """Tool jobs (critique/digest/summarize/analyze)
     get their own ``<output_root>/_jobs/<job_id>/launch.log`` rather
     than a flat ``_logs/<job_id>.log`` file. Mirrors the per-quest
     layout (one folder per job) so per-job artifacts have somewhere
     obvious to live."""
     entry = launcher.launch_command(
-        job_id="proposal-xyz", argv_tail=["--proposal", "--topic", "x"],
+        job_id="critique-xyz", argv_tail=["--critique", "q-1"],
     )
-    expected = tmp_path / "outputs" / "_jobs" / "proposal-xyz" / "launch.log"
+    expected = tmp_path / "outputs" / "_jobs" / "critique-xyz" / "launch.log"
     assert entry.log_path == expected
     assert expected.parent.is_dir()
     assert expected.is_file()

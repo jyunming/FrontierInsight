@@ -258,12 +258,3 @@ def _units_of_claim(claim: dict[str, Any],
     passages.discard("")
     return [u for u in units if u[3] in passages]
 
-
-def placed_sentences(paper_md: str, claims: list[dict[str, Any]], *, plain: Callable[[str], str],
-                     keyed: Callable[[str], str] | None = None) -> list[tuple[int, int]]:
-    """``(start, end)`` of each writer's sentence of ``paper_md`` that one of ``claims`` names exactly (its keyed text equals
-    the claim's own passage, as for :func:`take_out_unsupported_numbers`), in order, each once. A claim with no passage
-    equal to a sentence names none."""
-    units = _prose_units(paper_md, plain, keyed) if paper_md and claims else []
-    found = {(u[0], u[1]) for c in claims if isinstance(c, dict) for u in _units_of_claim(c, units)}
-    return sorted(found)

@@ -1,7 +1,7 @@
 """``fi tools <name> ...`` (launch.py:_expand_tools_argv) and the short-vs-full ``--help`` split.
 
 103 top-level flags in one listing was unreadable; the ~15 rarer, one-shot utilities (a weekly digest, a
-cross-quest portfolio, an adversarial critique, ...) move under `fi tools <name>`, which is exactly the
+an adversarial critique, ...) move under `fi tools <name>`, which is exactly the
 existing flag under a friendlier name — nothing is removed, and every old script or doc that already says
 `--digest` keeps working unchanged."""
 
@@ -21,7 +21,6 @@ def test_every_tool_subcommand_parses_the_same_as_its_old_flag(tmp_path):
         (["tools", "fleet", "a.yaml", "b.yaml"], ["--fleet", "a.yaml", "b.yaml"]),
         (["tools", "install-tectonic"], ["--install-tectonic"]),
         (["tools", "install-tectonic-from", str(tmp_path)], ["--install-tectonic-from", str(tmp_path)]),
-        (["tools", "list-drafts"], ["--list-drafts"]),
         (["tools", "export-models", str(tmp_path)], ["--export-models", str(tmp_path)]),
     ]
     for via_tools, via_flag in cases:
@@ -51,7 +50,7 @@ def test_an_unknown_tool_name_says_so_and_lists_the_real_ones(capsys: pytest.Cap
         parse_args(["tools", "nonsense"])
     assert stop.value.code == 2
     out = capsys.readouterr().out
-    assert "no tool named 'nonsense'" in out and "digest" in out and "portfolio" in out
+    assert "no tool named 'nonsense'" in out and "digest" in out and "critique" in out
 
 
 @pytest.mark.parametrize("bare", [["tools"], ["tools", "-h"], ["tools", "--help"]])

@@ -19,9 +19,9 @@ Design choices for v1
   angles (methodology, reproducibility, statistics, alternative
   explanations) into one structured output. A future v2 can plug in
   the panel infra once it's refactored.
-* **Reuses** the digest/portfolio quest-resolution helpers
+* **Reuses** the digest quest-resolution helpers
   (``_parse_quest_id_timestamp``) but otherwise stands alone — the
-  critique is per-quest, not portfolio-wide.
+  critique is per-quest, not cross-quest.
 * **Different-provider hint** is informational. We honor a
   ``--critique-provider`` flag so the caller can route through a
   different model family from the one that wrote the paper. The
@@ -374,7 +374,7 @@ async def generate_critique(
         else:
             markdown = await client.chat(
                 [{"role": "user", "content": prompt}],
-                # Slightly higher than digest/portfolio — adversarial
+                # Slightly higher than digest — adversarial
                 # critique benefits from a wider exploration of failure
                 # modes than 0.2-temperature consensus-seeking.
                 temperature=0.4,

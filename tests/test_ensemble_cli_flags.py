@@ -1,4 +1,4 @@
-"""Tests for the ``--proposal-ensemble`` / ``--critique-ensemble`` CLI
+"""Tests for the ``--critique-ensemble`` / ``--digest-ensemble`` CLI
 flag parsing.
 
 The flags accept a comma-separated model list. The helper
@@ -28,7 +28,7 @@ def test_parse_empty_returns_none(models_csv) -> None:
 
 
 def test_parse_all_commas_returns_none() -> None:
-    """Edge case: ``--proposal-ensemble ,,,`` parses to no models →
+    """Edge case: ``--critique-ensemble ,,,`` parses to no models →
     None (don't silently kick off an empty fanout)."""
     result = _parse_ensemble_flag(",,,", "tournament", "")
     assert result is None

@@ -5,7 +5,7 @@ skill meant calling a Python function by hand, so the feature existed in zero
 of FI's three surfaces.
 
 One of these guards a regression introduced while adding the CLI: inserting
-new arguments moved ``--list-drafts`` out of the required mode group, which
+new arguments moved a standalone action out of the required mode group, which
 would have made it stop being a valid invocation.
 """
 from __future__ import annotations
@@ -42,15 +42,13 @@ def _parser() -> argparse.ArgumentParser:
         "--scan-skill",
         "--import-skill",
         "--list-foreign-skills",
-        "--list-drafts",
     ],
 )
 def test_standalone_actions_are_modes(flag: str) -> None:
     """Each must be usable on its own.
 
-    ``--list-drafts`` is in this list because adding the skills arguments
-    silently pushed it out of the required mode group — it parsed fine and
-    then refused to run.
+    Adding the skills arguments once silently pushed a standalone action out
+    of the required mode group — it parsed fine and then refused to run.
     """
     import inspect
     import re

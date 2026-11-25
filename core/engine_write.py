@@ -22,7 +22,7 @@ from .engine_base import (  # noqa: F401
     _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, _foundational_sources,
     _foundational_write_block, _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
-    _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
+    _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
     _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders, _figure_numbers, _keep_figure_numbers,
     _number_figures_by_place,
@@ -254,7 +254,6 @@ class WriteStageMixin:
             foundational_block=_foundational_write_block(
                 state.get("literature") or [], self.config.output.audience,
             ),
-            novelty_block=_novelty.write_block(state.get("literature_novelty")),
             figure_list=_figure_list_for_prompt(state, root=self.quest_root),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),

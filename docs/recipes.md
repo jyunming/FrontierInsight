@@ -620,39 +620,16 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
-### Project-manager commands — when to reach for each
+### Project-manager commands: when to reach for each
 
-FI ships four commands that live *outside* the per-quest loop. They turn FI from a single-quest tool into a portfolio assistant. One LLM call each (cheap; cap'd content); each ingests its output into Axon so future quests can retrieve it.
+FI ships two commands that live *outside* the per-quest loop. One LLM call each (cheap; cap'd content); each ingests its output into Axon so future quests can retrieve it.
 
 | Command | Use it when |
 |---|---|
-| `@fi /proposal <topic>` | About to run a quest. Want to sanity-check the plan first before committing a full run (23–28 LLM calls in a measured default quest with slides and a poster). |
 | `@fi /critique <quest_id>` | Quest finished. Want a second opinion that didn't already write the paper — pick a different model family in the picker. |
 | `@fi /digest [days]` | End of week. Want a 1-pager "what I shipped + what's stuck", with a structured diff vs last week. |
-| `@fi /portfolio` | End of month, or scoping the next push. Want a synthesis of themes + gaps + meta-paper candidates across *every* quest. |
 
-The next four sections walk through each in detail.
-
-### Plan a quest before you commit compute
-
-```
-@fi /proposal Compare RK4 vs Verlet on the Kepler problem with eccentric orbits
-```
-
-Or:
-
-```bash
-python launch.py --proposal "Compare RK4 vs Verlet on the Kepler problem"
-```
-
-Inverts the usual flow. Instead of running a full quest and discovering the question was poorly scoped, get a 1-page LLM-written proposal *first* — background, hypothesis, plan, success criteria, risks, recommended next step. The user reviews the plan; if it looks good, runs the auto-generated companion YAML. Writes two files under `outputs/_drafts/`:
-
-- `<id>-proposal.md` — the planning doc (read this, edit if needed).
-- `<id>.yaml` — minimal config.yaml with the user's original topic. Run `python launch.py --config outputs/_drafts/<id>.yaml` to start the actual quest.
-
-Ingested into Axon as `kind=fi_proposal` so future quests can retrieve "have I considered this before?"
-
-Every PM-command (`--proposal`, `--critique`, `--digest`, `--portfolio`, `--summarize`, `--analyze`) accepts a `--<tool>-model <id>` companion to `--<tool>-provider` so the picker selection from `/tools/<tool>` actually routes the LLM call. For `vscode_extension` the id is the model id surfaced by the live Copilot catalog (e.g. `gemini-3-flash-preview`); for CLI providers it's the same identifier the CLI's own `--model` flag accepts. Omit the flag to keep the provider default (or — for `vscode_extension` — fall through to whatever the user has selected in their Copilot Chat model picker).
+Every PM-command (`--critique`, `--digest`, `--summarize`, `--analyze`) accepts a `--<tool>-model <id>` companion to `--<tool>-provider` so the picker selection from `/tools/<tool>` actually routes the LLM call. For `vscode_extension` the id is the model id surfaced by the live Copilot catalog (e.g. `gemini-3-flash-preview`); for CLI providers it's the same identifier the CLI's own `--model` flag accepts. Omit the flag to keep the provider default (or — for `vscode_extension` — fall through to whatever the user has selected in their Copilot Chat model picker).
 
 ### Get an adversarial second opinion on a completed quest
 
@@ -667,29 +644,6 @@ python launch.py --critique <quest_id> --critique-provider claude_cli
 ```
 
 The in-quest review is biased — the same model wrote the paper AND reviewed it. `/critique` runs a fresh adversarial pass that has "never seen this paper before." For maximum effect, pick a different model family in your Copilot Chat picker (or pass `--critique-provider`) from the one that wrote the paper. Writes `outputs/<quest_id>/critique.md` with: a Verdict (accept / revise / reject / inconclusive), Methodology challenges (with quoted objections), Statistical issues (effect sizes, missing baselines, cherry-picked metrics), Reproducibility gaps, Alternative explanations the experiment doesn't rule out, an explicit "What the in-quest review missed" comparison, and Recommended follow-up experiments. Ingested into Axon as `kind=fi_critique`.
-
-### See your whole research portfolio at a glance
-
-```
-@fi /portfolio
-```
-
-Or from the terminal:
-
-```bash
-python launch.py --portfolio
-```
-
-Walks every quest under `outputs/` (no time window) and produces `outputs/_portfolio/<YYYY-MM-DD>.md` with:
-
-- **Topic clusters** — 2-6 thematic groupings; for each, the convergent finding (if any) and an open question the cluster surfaces.
-- **Near-duplicate detection** — pairs of quests asking substantially the same question with different wording. Recommendation: merge / keep both / retire.
-- **Meta-paper candidates** — places where ≥3 quests could be combined into a review/synthesis paper, with an effort estimate.
-- **Coverage gaps** — specific research directions the existing themes *should* but *do not* cover, each grounded in a future-work section of a real quest.
-- **Suggested next quests** — top 3 most-actionable topic strings ranked, each citing the prior quest it builds on.
-- **Portfolio statistics** — total quests, completion split, time span, completion cadence (median days between completions), provider breakdown.
-
-The portfolio also lands in Axon as `kind=fi_portfolio`. Use it monthly or when you're scoping the next research push.
 
 ### Get a weekly project-manager digest of your quests
 
