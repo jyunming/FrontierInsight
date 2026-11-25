@@ -1,6 +1,6 @@
 """Runtime model-list discovery for the provider picker.
 
-The interview's curated ``PROVIDER_MODEL_OPTIONS`` is a static
+The curated ``PROVIDER_MODEL_OPTIONS`` (core/provider_choices.py) is a static
 snapshot — it drifts every time a provider ships a new model family.
 This module hits each provider's _model-list_ endpoint (NOT chat) at
 runtime to return the live set. Zero LLM tokens consumed; only a
@@ -33,7 +33,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 
-# Public shape — same as ``interview_schema.json``'s
+# Public shape — same as ``provider_choices.schema()``'s
 # ``provider_models[provider]`` entries so the front-end can swap
 # discovered list in without re-rendering.
 ModelChoice = dict[str, str]

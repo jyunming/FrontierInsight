@@ -782,8 +782,7 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
                           "your approval and resumes; a plain resume would stop again to ask about it)."
                           if interview_made else "resume.")),
             # (A plain resume is not listed as its command: run before the setting is changed, it only stops here again.)
-            **({"cli": f"python launch.py --update {quest_id}", "web": "Update settings",
-                "vscode": f"@fi /update {quest_id}"} if interview_made else {}),
+            **({"cli": f"python launch.py --update {quest_id}"} if interview_made else {}),
         })
     else:
         if plan_incomplete:

@@ -55,8 +55,7 @@
   // VSCode's Chat model picker drive the model.
   let vscodeBridgeAvailable = false;
   // Extra model list for vscode_extension that's intentionally absent
-  // from the interview's `provider_models` map (the interview never
-  // asks about vscode_extension). Comes from /api/tools/schema.
+  // from the `provider_models` map of /api/provider-choices. Comes from /api/tools/schema.
   let vscodeExtensionModels = [];
 
   async function load() {
@@ -79,7 +78,7 @@
       try { allQuests = (await fetch('/api/quests').then(r => r.json())).quests || []; } catch (_) {}
     }
     if (spec.needs_llm) {
-      try { providerSchema = await fetch('/api/interview/schema').then(r => r.json()); } catch (_) {}
+      try { providerSchema = await fetch('/api/provider-choices').then(r => r.json()); } catch (_) {}
     }
     renderForm();
   }
@@ -102,7 +101,7 @@
       grid.classList.remove('grid-cols-1');
       grid.classList.add('grid-cols-1', 'md:grid-cols-2');
       // Augment provider list with vscode_extension when the dashboard
-      // was launched from a VSCode terminal. /api/interview/schema
+      // was launched from a VSCode terminal. /api/provider-choices
       // already injects it at the head when bridge is wired, so first
       // check whether it's there; only prepend if absent (older /serve
       // builds may not augment that schema).
@@ -199,8 +198,7 @@
     const wrap = document.createElement('div');
     wrap.className = 'flex flex-col gap-2';
     const opts = providers.map(p => `<option value="${escapeAttr(p.value)}" title="${escapeAttr(p.description || '')}">${escapeHtml(p.label)}</option>`).join('');
-    // Provider does NOT get an "Other" option (parity with the main
-    // interview's PROVIDER_CHOICES, which keeps allow_other=False).
+    // Provider does NOT get an "Other" option.
     // Provider names map to concrete transports in core/provider.py;
     // accepting a free-text value would just crash at engine init.
     wrap.innerHTML = `
@@ -276,9 +274,9 @@
   }
 
   function makeEnsemblePicker(profiles) {
-    // Profiles come from /api/interview/schema's `ensemble_profiles`.
+    // Profiles come from /api/provider-choices's `ensemble_profiles`.
     // Schema falls back to a static list so the picker still renders
-    // if the interview-side endpoint is unreachable.
+    // if that endpoint is unreachable.
     const fallback = [
       { value: 'off',                 label: 'off — single model (cheapest)' },
       { value: 'cross_check_only',    label: 'cross_check only — fan out the cross_check node' },
@@ -306,8 +304,7 @@
   // Reveal / hide a text input below a select when its value is the
   // sentinel `__OTHER__`. The input is reused on subsequent changes
   // and removed-by-hide (kept in the DOM so its value can be cleared
-  // when the user reselects a curated option). Mirrors the pattern
-  // interview.html uses so /tools and /interview behave the same.
+  // when the user reselects a curated option).
   function handleOtherSelection(sel, fieldLabel) {
     const otherId = `${sel.id}-other`;
     let other = document.getElementById(otherId);
@@ -339,7 +336,7 @@
     const form = document.getElementById('tool-form');
     const fd = new FormData(form);
     // Resolve __OTHER__ → user-typed value for model before POST so
-    // the backend sees a real value (mirrors interview.html). Strips
+    // the backend sees a real value. Strips
     // the side-channel `_other` field. Provider has no Other option.
     if (fd.get('provider_model') === '__OTHER__') {
       const typed = (fd.get('provider_model_other') || '').toString().trim();

@@ -533,6 +533,7 @@ class RunStageMixin:
                 ),
                 label="running simulate.py and experiment.py" if split else "running experiment.py",
                 progress=getattr(runner, "progress_text", None),
+                alarm=getattr(runner, "progress_alarm", None),
             )
         except _optimise_search.TooManySettings as exc:
             # A plan that names more settings than FI lists, and no earlier size check met it (a frozen or resumed run): the

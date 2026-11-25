@@ -80,7 +80,7 @@ def test_the_engine_stops_on_a_record_edited_to_match_a_weaker_config(tmp_path: 
 
 
 def test_update_records_its_approval_in_the_trace(tmp_path: Path) -> None:
-    from core.interview_update import approve_settings  # what --update calls
+    from core.plan_settings import approve as approve_settings  # what --update calls
 
     root, fi = _approved(tmp_path)
     trace = fi / "audit.jsonl"
@@ -145,7 +145,7 @@ def test_fis_own_rewrite_of_the_record_is_not_taken_for_an_edit(tmp_path: Path, 
 
 
 def test_update_before_the_first_run_starts_the_trace(tmp_path: Path) -> None:
-    from core.interview_update import approve_settings
+    from core.plan_settings import approve as approve_settings
 
     root, fi = _approved(tmp_path)
     approve_settings(root, _cfg(tmp_path, oracle_check="warn"))

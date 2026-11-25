@@ -425,7 +425,16 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # Before anything is written: lines another program added to the quest's records since FI last wrote them
             # are moved aside (core/record_anchor.py), so this run does not chain onto them.
             await self._check_records_changed_outside()
+            # The commission is staged before this run's first record, so a first start that stops at any check after
+            # it (the reviewer check, a changed setting) or is killed is still a commissioned quest on resume.
+            staged_now = None
+            if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
+                staged_now = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            if staged_now is not None:
+                sha = staged_now[f"inputs/{_commission.STAGED_NAME}"]
+                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=staged_now)
+                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             # Research explores first and confirms once by default (engine.phased); a research quest that began before
             # that default goes on as it began. Decided before the approved settings are compared, so a quest approved
             # with it off is compared as it runs.
@@ -502,11 +511,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             self._preflight_paper_pdf()
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
-            if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
-                files = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
-                sha = files[f"inputs/{_commission.STAGED_NAME}"]
-                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=files)
-                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             if self._commissioned() and self.config._commission_note:
                 self._log.warning("[commission] %s", self.config._commission_note)
             if self._step() is not None:

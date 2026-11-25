@@ -941,7 +941,7 @@ export class Bridge {
         const family = this.familyFromHint(hint);
         if (!family) {
             // No hint → use the model the user picked in the Chat
-            // picker. This is the case for every interview-generated
+            // picker. This is the case for every
             // quest that didn't set `provider.node_models`.
             if (this.opts.defaultModel) {
                 return this.opts.defaultModel;

@@ -452,12 +452,3 @@ def test_the_neutral_article_template_typesets_a_real_paper(tmp_path: Path) -> N
     assert gen.last_render["typeset"] is True
 
 
-def test_the_article_format_is_a_choice_everywhere_the_formats_are_listed() -> None:
-    import typing
-
-    from core.config import PaperFormat, SCIENTIFIC_PAPER_FORMATS
-    from core.interview import PAPER_FORMATS
-
-    assert "article" in typing.get_args(PaperFormat)
-    assert "article" in SCIENTIFIC_PAPER_FORMATS
-    assert "article" in {c.value for c in PAPER_FORMATS}

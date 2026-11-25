@@ -1,7 +1,7 @@
 # Frontier Insight — recipes & detailed how-to
 
 > Moved out of the README to keep the landing page short. This is the
-> full cookbook: provider setup, the headless interview, writing your own
+> full cookbook: provider setup, writing a commission, writing your own
 > quest, the human-in-the-loop pauses, and ~30 task-oriented recipes.
 > For the YAML schema see [`USAGE.md`](USAGE.md); for the full feature
 > catalogue see [`capabilities-reference.md`](capabilities-reference.md).
@@ -31,7 +31,7 @@ npm run package    # → vscode-frontier-insight.vsix (in this folder)
 #   CLI:  code --install-extension vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, web research, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, `@fi /start <config.yaml>` runs a study from a config that names a commission file (see below), and the chat panel streams every step. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -98,33 +98,28 @@ Then change `provider.name` to `ollama`. Slower but $0.
 
 ---
 
-## Headless interactive interview — `python launch.py --new`
+## Write a commission — `fi new` and `fi check`
 
-If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same interview the VSCode `@fi /new` flow uses. Its last questions are the optional author line (author, affiliation, contact email, project link) that the paper, slides and poster print; press Enter to skip any of them.
+Every study starts from a commission file: your question, what the study covers, the hours and model calls you allow, the values you already know from a source, and what counts as success and as failure. In any terminal (CI, a remote shell, your laptop):
 
 ```bash
-python launch.py --new                  # walks you through, then auto-starts the quest
-python launch.py --new --draft-only     # writes the YAML to outputs/_drafts/<id>.yaml and stops
-python launch.py --update <quest_id>    # mid-quest re-entry; pre-fills the editable fields
+python launch.py new                      # writes commission.yaml and study.yaml, never over an existing file
+python launch.py check commission.yaml    # one plain sentence per problem; no model call; exit 2 if any
+python launch.py --config study.yaml      # run it
 ```
 
-CLI-only questions: `provider.name` (openai / codex / claude_cli / codex_cli / copilot_cli / gemini_cli / ollama) and `provider.model` (curated list per provider with "Other (type your own)" escape hatch). VSCode skips both because the active Copilot model is captured automatically.
-
-The interview makes ONE LLM call after the first 5 questions to suggest topic-tuned defaults for `comparative_baseline` / `success_metric` / `budget`; the answers land in `engine.clarify_overrides` so the engine's clarify node short-circuits in auto mode (no wasted call). Pick `--draft-only` when you want to hand-edit the YAML before launching (e.g. tune `engine.cross_check_per_finding_k`, add `knowledge.local_papers`).
+`commission.yaml` has every key with a one-line comment of what goes there; `study.yaml` names it and holds the model and `output_dir`. Open `study.yaml` to tune anything else (for example `engine.cross_check_per_finding_k`). The keys are described in [USAGE.md](USAGE.md#the-commission-file).
 
 ---
 
 ## Write your own quest
 
-Copy `examples/integrator_bakeoff/config.yaml` to `my_quest.yaml` and edit the `topic:` field (root-level `.yaml` files are git-ignored, so it stays personal; to share it, move it into a folder such as `examples/<name>/config.yaml`). Keep everything else as-is until you want to tune.
+Run `fi new` for a commission and a config to fill in, or copy `examples/integrator_bakeoff/config.yaml` and its `commission.yaml` and edit them (the question, scope and limits go in the commission; root-level `.yaml` files are git-ignored, so they stay personal; to share them, move them into a folder such as `examples/<name>/`). Keep everything else as-is until you want to tune.
 
 Minimum viable config:
 
 ```yaml
-topic: |
-  <Your research question, 1-3 paragraphs.
-  Be specific about what's known, what you want to test,
-  and what success looks like.>
+commission: my_commission.yaml   # the question, scope, limits and known values (`fi new` writes one)
 
 title: my-quest
 
@@ -420,7 +415,7 @@ The YAML's `provider` block is honored on resume; everything else (topic, design
 
 ### Pull more (or fewer) prior-work citations
 
-Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default) — it doesn't need an Axon corpus, but it does require the knowledge layer's master switch `knowledge.enabled: true` (the default). Setting `knowledge.enabled: false` turns off **all** retrieval — Axon, the academic router, **and** web search. The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block fits comfortably in the writer prompt alongside the design + analysis blocks; each source contributes up to `knowledge.literature_excerpt_chars` (default 4000) of its **most relevant** passages, not its first N characters. Override per-quest:
+Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by `knowledge.web_search` (on by default) — it doesn't need an Axon corpus, but it does require the knowledge layer's master switch `knowledge.enabled: true` (the default). Setting `knowledge.enabled: false` turns off **all** retrieval — Axon, the academic router, **and** web search. The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block fits comfortably in the writer prompt alongside the design + analysis blocks; each source contributes up to `knowledge.literature_excerpt_chars` (default 4000) of its **most relevant** passages, not its first N characters. Override per-quest:
 
 ```yaml
 knowledge:
@@ -521,7 +516,7 @@ python launch.py --config <yaml> --resume <quest_id>
 
 The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `pauses.clarify` is `auto` or `ask` (or left unset) — setting `no_simulation: true` in YAML is just the explicit override.
 
-The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred). The interview pre-fills this for review-shaped topics.
+The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred).
 
 ### Make the PDF compile a hard gate
 
@@ -685,7 +680,7 @@ The agent reads them and cites them, every page: a scanned PDF (an older paper i
 
 Their figures are cut out too, each with its caption, into `data/literature/figures/`, and the ones that show values your question can use are read by the model (`knowledge.read_figures`; set a model for the step `figures` in `provider.node_models`, one that reads images).
 
-**Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`pauses.papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
+**Or let the agent ask.** Set `pauses.papers: true`. When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
 
 ---
 

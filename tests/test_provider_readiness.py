@@ -115,7 +115,7 @@ def test_a_cli_with_no_status_command_says_it_cannot_tell(no_tools: None, monkey
 
 def test_a_status_command_that_hangs_is_stopped() -> None:
     """The real runner: a command that never answers is stopped at the time limit (with what it started) and
-    reported as not answering, so a check never hangs the page or the interview."""
+    reported as not answering, so a check never hangs the page."""
     import sys
     import time
 
@@ -273,9 +273,3 @@ def test_settings_check_never_calls_an_api_key_service(no_tools: None, monkeypat
     assert asyncio.run(pr.check("openai")).state == "key_present"
 
 
-def test_available_providers_is_installed_or_key_set(no_tools: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    from core.interview import available_providers
-
-    monkeypatch.setattr(pr.shutil, "which", _which("copilot"))
-    # copilot_cli runs `copilot`, not `gh`: the old probe looked for `gh`.
-    assert available_providers() == ["copilot_cli"]

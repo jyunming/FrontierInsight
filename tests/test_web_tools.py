@@ -100,21 +100,21 @@ def test_build_argv_critique_happy_path(tmp_path: Path) -> None:
 def test_build_argv_analyze_needs_path_or_uploads(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
     with pytest.raises(ValueError, match="path"):
-        _build_argv(spec, {"topic": "test"}, [], tmp_path)
+        _build_argv(spec, {"commission": "c.yaml"}, [], tmp_path)
 
 
-def test_build_argv_analyze_needs_topic(tmp_path: Path) -> None:
+def test_build_argv_analyze_needs_a_commission(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
-    with pytest.raises(ValueError, match="topic"):
+    with pytest.raises(ValueError, match="commission"):
         _build_argv(spec, {"path": "/data"}, [], tmp_path)
 
 
 def test_build_argv_analyze_happy_path(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
     argv = _build_argv(
-        spec, {"path": "/data/x", "topic": "Compare"}, [], tmp_path,
+        spec, {"path": "/data/x", "commission": "c.yaml"}, [], tmp_path,
     )
-    assert argv == ["--analyze", "/data/x", "--analyze-topic", "Compare"]
+    assert argv == ["--analyze", "/data/x", "--commission", "c.yaml"]
 
 
 def test_build_argv_summarize_uses_upload_folder_when_provided(tmp_path: Path) -> None:
@@ -502,7 +502,7 @@ def test_build_argv_ensemble_wired_for_every_llm_tool(tmp_path: Path) -> None:
             "ensemble_models": "typed-a, typed-b",
             # Tool-specific required fields
             "days": 7, "folder": str(tmp_path), "path": str(tmp_path),
-            "topic": "t", "quest_id": "abc", "kind": "auto",
+            "commission": "c.yaml", "quest_id": "abc", "kind": "auto",
         }
         argv = _build_argv(spec, payload, [], tmp_path)
         assert f"--{name}-ensemble" in argv, name

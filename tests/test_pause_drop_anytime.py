@@ -278,35 +278,6 @@ def test_pause_writes_next_step_with_drop_zone_hints(
 # --- yaml emitter ---------------------------------------------------------
 
 
-def test_interview_yaml_emits_supply_pause_when_non_default() -> None:
-    """The interview emits the supply pause under the unified ``pauses:``
-    section, translated from interview vocabulary (after_design →
-    before_build), and only when the user chose something other than the
-    ``never`` default so common-case YAMLs stay tidy."""
-    from core.interview import InterviewAnswers, answers_to_yaml
-
-    base_kwargs: dict[str, Any] = dict(
-        topic="t", title="t",
-        output_kinds=["paper_md"], paper_format="generic",
-        no_simulation=False, study_depth="brief preprint",
-        comparative_baseline="", success_metric="", budget="",
-        clarify_mode="off", review_panel=[], knowledge_enabled=False,
-    )
-    default = InterviewAnswers(**base_kwargs)
-    supply = InterviewAnswers(
-        **{**base_kwargs, "pause_for_user_input": "after_design"},
-    )
-
-    yaml_default = answers_to_yaml(default, frontend="cli")
-    yaml_pause = answers_to_yaml(supply, frontend="cli")
-
-    # Default never → no supply line under pauses.
-    assert "supply:" not in yaml_default
-    # Explicit choice → supply line under pauses, translated to new vocab.
-    assert "pauses:" in yaml_pause
-    assert 'supply: "before_build"' in yaml_pause
-
-
 # --- after_literature ------------------------------------------------------
 
 

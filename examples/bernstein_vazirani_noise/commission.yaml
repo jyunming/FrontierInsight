@@ -1,0 +1,34 @@
+# The study this example asks FI to run (a commission). `fi check examples/bernstein_vazirani_noise/commission.yaml`
+# checks it.
+
+question: >-
+  How does the single-shot success probability of the Bernstein-Vazirani algorithm fall with the hidden-string length n
+  and the per-gate depolarizing error rate p, and up to which p does it keep its advantage over classical guessing?
+
+scope: >-
+  A dense state-vector simulator in pure numpy (no qiskit, cirq or other quantum library) for n in {2, 3, ..., 10}; the
+  circuit H^n, the oracle U_s, H^n, then a measurement; a single-qubit depolarizing channel at every gate layer with p
+  in {0, 1e-4, 1e-3, 1e-2, 5e-2, 1e-1}, sampled per shot (Monte Carlo, 1000 shots per (n, p) cell) and checked against
+  a closed form in one cell where it is tractable; the success probability averaged over 20 random hidden strings; a
+  fit of (1-p)^(c n) and its c; the comparison with the 1/2^n floor and the classical baseline; the p below which the
+  success stays above 1/2 + 1/2 * 1/2^n, as a function of n. CPU only, under 60 seconds, three figures, a short paper
+  of at most 4 pages. Amplitude damping and dephasing are out of scope.
+
+limits:
+  hours: 1
+  model_calls: 80
+
+known_values: []
+no_known_values: true
+
+success:
+  - condition: At p = 0 the hidden string is recovered in every shot for every n.
+    verify: The success probability at p = 0, for each n.
+  - condition: The success probability falls with p and with n, and a fit of (1-p)^(c n) describes it.
+    verify: The fitted c with its uncertainty, and the residuals of the fit over all (n, p) cells.
+failure:
+  - condition: The Monte Carlo estimate disagrees with the closed form in the cell where both are computed.
+    verify: The difference between the two, against the Monte Carlo standard error.
+
+doubts:
+  - The constant c depends on how the noise is modelled (per layer or per circuit, per qubit or global).

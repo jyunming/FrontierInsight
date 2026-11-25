@@ -161,3 +161,13 @@ Pages removed: *Picking the study to run* (`study-cards`): FI no longer offers s
 Pages updated: [[doing-a-step-again|Doing a step again]] (the `ideas` step is gone; `--from ideas` and `--from studies` get one plain sentence and change nothing).
 
 Sources: core/engine.py, core/rerun_from.py, core/config.py, core/engine_analyze.py.
+
+## 2026-11-25 — Every study starts from a commission
+
+Pages added: [[starting-a-study|Starting a study]] (the commission's keys, `fi new` and `fi check`, `fi demo`'s pair,
+`--analyze --commission`, the refusal at every start, `--update` without questions). Pages updated:
+[[pauses|Pauses]], [[explore-then-confirm|Explore then confirm]], [[how-fi-judges-correctness|How FI judges
+correctness]] (the setup interview is gone).
+
+Sources: core/commission.py, core/config.py, core/demo.py, core/analyze_cli.py, core/plan_settings.py, launch.py,
+web/server.py, vscode-frontier-insight/src/extension.ts.

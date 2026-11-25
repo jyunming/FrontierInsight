@@ -99,16 +99,16 @@ class IdeasStageMixin:
                 **self._resolve_modes({}),
             }
 
-        # When the interview / --update has pinned EVERY known clarify
-        # slot in YAML AND mode is auto, the LLM call is pure waste —
+        # When the YAML (engine.clarify_overrides) pins EVERY known clarify
+        # slot AND mode is auto, the LLM call is pure waste —
         # the answers are already known. Skip it. The 8-slot list
         # matches _CLARIFY_LABELS.
         overrides = dict(self.config.engine.clarify_overrides)
         # ``known_slots`` defines when ``clarify_mode=auto`` can
         # short-circuit (all answers known from clarify_overrides, no
         # LLM call needed). Kept at the ORIGINAL 7 slots so configs
-        # produced by the existing interview machinery — which doesn't
-        # pin ``topic_shape`` yet — continue to short-circuit instead
+        # written by the setup interview of earlier FI versions — which didn't
+        # pin ``topic_shape`` — continue to short-circuit instead
         # of regressing to a wasted LLM call on every quest.
         # ``topic_shape`` is handled by the safety-default a few lines
         # below: when not pinned, the engine populates a sensible
@@ -173,7 +173,7 @@ class IdeasStageMixin:
             }
             agent_count = len(agent_answers)  # pre-merge count for honest logging
             answers = dict(agent_answers)
-            # User-pinned overrides (from the interview / --update flow)
+            # User-pinned overrides (engine.clarify_overrides in the YAML)
             # win over the agent's self-answers. Logged so run.log
             # tells the user exactly which slots they pre-pinned.
             if overrides:
@@ -181,7 +181,7 @@ class IdeasStageMixin:
                 answers = {**agent_answers, **overrides}
                 # EXCEPT ``simulatability`` / ``topic_shape``: these are
                 # TOPIC JUDGMENTS the clarify agent is better placed to make
-                # than the interview's format heuristic. When the agent
+                # than a format heuristic. When the agent
                 # actually answered one and it conflicts with the pinned
                 # value, the agent's judgment wins back — otherwise a
                 # review-shaped topic the agent flagged as no-simulation
@@ -225,7 +225,7 @@ class IdeasStageMixin:
         self._keep_asked_clarify_questions(state["topic"], questions)
         # Interactive: pre-fill any user-pinned answers as the
         # default for each question's interrupt payload, so the human
-        # sees the interview / --update value already in the slot and
+        # sees the YAML's value already in the slot and
         # only has to confirm. Cheap merge; an empty overrides dict
         # is a no-op and preserves prior behavior.
         if overrides:
@@ -341,8 +341,7 @@ class IdeasStageMixin:
            ``simulatability`` slot existed (resumes from old
            checkpoints, hand-written YAML answers, etc.). New quests
            should always have the simulatability slot populated.
-        4. The YAML's ``engine.clarify_overrides.simulatability`` (what the
-           interview wrote), when the clarify answer is missing, empty or
+        4. The YAML's ``engine.clarify_overrides.simulatability``, when the clarify answer is missing, empty or
            does not start with yes / no / uncertain. Also with clarify off.
 
         Every resolution is logged at INFO level with the reason
@@ -416,10 +415,11 @@ class IdeasStageMixin:
             )
             return True
 
-        # The YAML's own answer (engine.clarify_overrides.simulatability, which the interview writes): used when the
+        # The YAML's own answer (engine.clarify_overrides.simulatability): used when the
         # clarify answer left the question open (the person cleared the slot, wrote something with no yes / no in
         # front, or their answer did not include it) and the legacy check above did not decide. After that check, so
-        # the interview's own "yes" (written for every quest not set to no-simulation) never outranks a topic judgment.
+        # a pinned "yes" (the setup interview of earlier FI versions wrote one for every quest not set to no-simulation)
+        # never outranks a topic judgment.
         pinned = (getattr(self.config.engine, "clarify_overrides", None) or {}).get("simulatability")
         pinned_decision = _leading_simulatability_word(_simulatability_answer(pinned)[0])
         if pinned_decision:

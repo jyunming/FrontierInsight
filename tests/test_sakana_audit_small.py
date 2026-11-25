@@ -102,7 +102,7 @@ def test_with_an_approved_record_the_steps_go_through_update(tmp_path: Path) -> 
     (engine.fi_dir / plan_settings.NAME).write_text("{}", encoding="utf-8")
     assert engine._review_models_stop() is not None
     text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "--update" in text and "Per-node model overrides" in text
+    assert "--update" in text and "review_panel.statistician" in text and "under its `provider:` section" in text
 
 
 def test_a_panel_that_already_reviewed_is_not_stopped(tmp_path: Path) -> None:

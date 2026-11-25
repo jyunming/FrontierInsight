@@ -951,3 +951,40 @@ async def test_asking_for_a_change_rewrites_the_plan_and_the_resume_runs_the_rew
     second = Engine(cfg, resume_quest_id=first.quest_id)
     artifacts = await second.run()
     assert artifacts.raw_state["design"]["hypothesis"] == "rewritten on request"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["fi demo", "a shipped example"])
+async def test_the_demo_and_a_shipped_example_run_from_their_commission(
+    which: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every study starts from a commission: the demo's config and a shipped example name one (no topic of their own),
+    pass the door every start path runs, and run end to end with the fake model."""
+    import shutil
+
+    from core import commission, demo
+
+    if which == "fi demo":
+        path = demo.write_demo_config(tmp_path, "openai")
+    else:
+        shutil.copytree(Path(__file__).resolve().parent.parent / "examples" / "format_validation", tmp_path / "ex")
+        path = tmp_path / "ex" / "09-generic-journallength.yaml"
+    assert "topic:" not in path.read_text(encoding="utf-8")
+    cfg = Config.from_yaml(path)
+    commission.door(cfg.commission, None)
+    cfg.provider = ProviderConfig(name="openai")  # the fake model answers whatever the provider
+    cfg.knowledge = KnowledgeConfig(enabled=False)
+    cfg.execution = ExecutionConfig(sandbox="venv", timeout_s=120)
+    cfg.output.output_dir = tmp_path / "outputs"
+    cfg.output.kinds = ["paper_md"]
+    engine = Engine(cfg)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    assert (engine.quest_root / "inputs" / "commission.json").is_file(), "the commission is frozen into the quest"
+    assert engine.config.topic == commission.read(cfg.commission)["question"].strip()
+

@@ -1328,7 +1328,7 @@ class ReviewStageMixin:
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None, alarm: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -1351,6 +1351,11 @@ class ReviewStageMixin:
                         where = str(progress() or "") if callable(progress) else ""
                     except Exception:  # noqa: BLE001
                         where = ""
+                    try:  # a study that left the time FI first said: told once, where the person sees it
+                        if callable(alarm) and (said := str(alarm() or "")):
+                            self._progress(f"[execute] {said}")
+                    except Exception:  # noqa: BLE001
+                        pass
                     if where:
                         from .run_estimate import plain_duration
 
@@ -1940,14 +1945,10 @@ class ReviewStageMixin:
         headline = "the review panel needs one reviewer on a different model"
         approved = (self.fi_dir / _plan_settings.NAME).is_file()
         how = (
-            f"Choose another model for one of them, then approve it with `python launch.py --update {self.quest_id}` "
-            f"(web: the quest page's Update, VS Code: `@fi /update {self.quest_id}`): in \"Per-node model overrides\" "
-            f"enter `review_panel.{persona}:<another model your provider offers>` (in VS Code choose \"Type node:model "
-            f"pairs\" there)."
-            if approved else
             f"Choose another model for one of them and add it to the quest's config.yaml, under its `provider:` section "
             f"(add one if there is none; never a second one), inside `node_models:` if that is already there:\n"
             f"  node_models:\n    review_panel.{persona}: <another model your provider offers>"
+            + (f"\nThen approve it: `python launch.py --update {self.quest_id}`." if approved else "")
         )
         self._write_next_step(
             kind="review_models",

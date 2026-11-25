@@ -138,8 +138,7 @@ for the layered design see [`architecture.md`](architecture.md).
 
 ### VSCode integration
 - Chat participant `@fi` registered via
-  `vscode.chat.createChatParticipant`. Commands: `/new` (interview),
-  `/start <yaml>`, `/fleet <yaml> <yaml> …`, `/resume [quest_id]`,
+  `vscode.chat.createChatParticipant`. Commands: `/start <yaml>`, `/fleet <yaml> <yaml> …`, `/resume [quest_id]`,
   `/summarize <folder> [kind]`, `/help`.
 - Every LLM call routes through `vscode.lm.selectChatModels` +
   `model.sendRequest` — the sanctioned API, no third-party proxies.

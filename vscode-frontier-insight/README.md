@@ -15,7 +15,7 @@ Five steps, then everything below is reference you can look up when you need it.
 2. Clone the FrontierInsight repo and install it into the Python the extension will use: `python -m pip install -e .` (that interpreter is the setting `frontierInsight.pythonPath`).
 3. Install this extension: build the `.vsix` and use *Install from VSIX...*, then reload the window (details in *One-time setup* below), or press **F5** in this folder to try it without installing.
 4. Open your project folder in VSCode. Nothing to set: the extension finds FrontierInsight by itself (through the Python from step 2), and if it ever can't, it asks you once for the folder and remembers it.
-5. In Copilot Chat type **`@fi /new`** and answer the questions. When a quest stops for you (a `paused` message in the chat), read what it asks and continue with **`@fi /resume`**.
+5. In a terminal, `fi new` writes a commission to fill in (your question, what it covers, the limits, what counts as success) and a config that names it; `fi check commission.yaml` checks it. Then in Copilot Chat type **`@fi /start study.yaml`**. When a quest stops for you (a `paused` message in the chat), read what it asks and continue with **`@fi /resume`**.
 
 The finished paper is in `outputs/<quest id>/paper/paper.md` in your project folder. Words you do not know are in the [glossary](../docs/glossary.md); a first run outside VSCode is in [first-quest.md](../docs/first-quest.md).
 
@@ -90,9 +90,8 @@ PowerPoint equations, with a readable text form for other viewers. A VS Code bui
 model that cannot take images checks from the measurements alone, and the chat
 says so.
 
-A topic that states a page limit ("≤ 4 pages", "at most 4 pages", "a 4-page
-paper"), or a Page limit set in `@fi /new` under "Edit an advanced field"
-(written to `output.page_limit`; leave it blank for no set limit), sets the
+A commission question that states a page limit ("≤ 4 pages", "at most 4 pages", "a 4-page
+paper"), or `output.page_limit` in the config (a limit written only in the commission's scope is not read), sets the
 paper's target length. The paper
 gets a tighter layout (2 cm margins where its template had 1 in, figures at most
 a third of the text height, smaller References and Further reading lists), and
@@ -173,33 +172,17 @@ reading still go to the supplement).
 
 ## Usage
 
-### Easiest — interactive setup (recommended for first-time users)
+### Start a study
 
-In the Copilot Chat panel, just type:
-
-```
-@fi
-```
-
-Or explicitly:
+A study starts from a commission file: your question, what it covers, the hours and model calls you allow, the values you already know and what counts as success. The extension does not ask for these. In a terminal, `fi new` writes `commission.yaml` and `study.yaml` (the config that names it) to fill in, and `fi check commission.yaml` checks the commission with no model call. Then, in Copilot Chat:
 
 ```
-@fi /new
+@fi /start study.yaml
 ```
 
-The extension asks three things in VSCode-native input modals (the model is the one you picked in the Chat view):
+Typing `@fi` alone shows the help. The model is the one you picked in the Chat view. `/start` refuses a config that does not name a commission, before anything runs, with one sentence saying so.
 
-1. **Your research question** — what do you want to study? (free text)
-2. **What is the result for?** — research (the default) or a decision gets every check a trusted result needs: the plan waits for you, every check can stop the quest, the experiment runs in a clean environment, and four reviewers read the paper, not all on one model, since reviewers on the same model tend to make the same mistakes: the next question (*A different model for one reviewer*) asks which of the other chat models VS Code offers the statistics reviewer should use (a name typed under *Other* must be one VS Code offers). A research quest is not launched without an answer. If you have only one model, pick *I only have one model*: the quest still runs, but its result says the review was one model's view and it is not marked publication-ready. For each reviewer the extension tells FI which chat model it selected and sent the request to (as VS Code reports it), so the result can show the reviewers really were on different models. With the chat picker on *Auto* no model is named, so that stays unproven: pick a model for each reviewer. Exploring is a cheaper preliminary draft (no idea self-critique, no per-finding cross-check, no redesign after the analysis). The same answer writes the same settings as the CLI and the web form.
-3. **A different model for one reviewer** (research or a decision only), as above.
-
-The name printed on the paper is not asked: it is the folded **Paper byline (optional)** line of the review (author, affiliation, contact email, a project link, each optional; **Edit a default** → *Paper byline*). It goes only into your own output files and is kept, on this machine only, in `~/.frontier-insight/profile.json` (the same file the CLI and the web form use), so later interviews fill it in.
-
-Then it shows four short cards, the same as the CLI and the web form: **how strictly it is checked, and what it costs**; **the model, and whether it is ready**; **data, sources and pauses**; **what you get**. In them, the defaults worked out from your topic: the **paper format** (article by default, or generic / NeurIPS / ICLR / IEEE Access / Nature MI for scientific work; essay / report / policy brief / whitepaper for prose; `output.paper_format`), the **deliverables** (paper + PDF by default; paper only, paper + slides, or everything), the **study depth** (brief preprint / journal-length / comprehensive review, which sets the word count and citation depth), the title (slugged from the topic), the **research approach** — computational (a Python script can produce the data), observational (real-world data needed), or **literature synthesis / survey** (a history / overview with no experiment and no dataset), mapping to `engine.no_simulation` (+ `engine.survey_mode`) and auto-suggested for "history of X" / "evolution of X" topics — the clarify mode, reviewer panel, knowledge layer, web research, paywalled-paper pause, the mid-quest pause for your own papers / datasets, paper audience, retrieval count and author line, and for research or a decision which model one reviewer uses (*A different model for one reviewer*). **Edit a default** changes any of them (a changed paper format works the study depth out again; a changed author line is kept for later quests); **Edit an advanced field** sets the **multi-model ensemble** (off by default, or a fan-out profile with its stated cost multiplier, ~1.3× / ~2.0× / ~2.5×, and the models you tick from those Copilot Chat offers; FI picks none, and fewer than two runs single-model), the comparative baseline, success metric, time / compute budget, per-node models, web retrieval count, the paper style (LaTeX article or the Frontier Insight briefing look), the design-revise iteration budget, **Confirm the result on data it never saw** (on by default for research and a decision, off when exploring; on, the model explores first, then the frozen design runs once more on a part of your data held back before it started, or on new random seeds, and only that run can be publication-ready, at the cost of one more full run; off under research writes `phased: false` and the plan says the result is not confirmed on unseen data: `engine.phased`, fixed for the quest; the review block shows it), or the poster size (A1 portrait by default, A0 portrait, or 48 × 36 in landscape).
-
-The active chat model is captured automatically into `provider.model`. **The model selected in the chat panel wins** whenever a quest is started or resumed from the chat (`/start`, `/fleet`, `/resume`): it replaces `provider.model` for that run, and the quest's `run.log` and trace say so ("the chat panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml"). With the picker on *Auto* no model is named and the config's stays. A run started from a terminal or the web page, and `@fi /update`, use the config's model. `run.log` also names the model that answered the first call (unless the picker is on *Auto*, which names no model) and warns when the quest's earlier results came from another model. The model list is not limited to Copilot: it is every chat model VSCode exposes to the extension, so a local Ollama server or a BYOK endpoint registered by another extension appears alongside Copilot's, tagged with its vendor. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. **Changing a quest's model.** Pick the model in the chat panel and `@fi /resume <quest_id>`, or put it in the quest's `config.yaml` (`provider.model`) and resume from a terminal, the web page or with the picker on *Auto*: no approval is needed. The chat shows one line, for example *the model changes from gpt-5.6-luna to claude-opus-5 from here on; steps already done were made by gpt-5.6-luna*; the change is recorded in the quest's trace and the paper says more than one model produced it. `.fi/cost.jsonl` keeps the earlier calls under the old model.
-
-`@fi /update <quest_id>` approves the settings in a quest's `config.yaml` after you changed one that decides how strictly it is checked (a quest stopped for that says so), then resumes it with the config's model. It runs here in the chat like `/resume`, never in a terminal: it shows why the quest is waiting and asks you to approve the settings in `config.yaml` as they are, or opens the file to change it first. To answer the setup questions one by one instead, it shows the exact `python launch.py --update <quest_id> ...` line to run in a terminal yourself (that line carries the address of the extension's session-long bridge, so its model calls still go through `vscode.lm.*`; keep this VSCode window open while it runs). The quest is both listed and resumed under `frontierInsight.outputDir`, so a custom output directory works rather than reporting the quest missing; a short id or a quest from another folder is found as `/resume` finds it, and the latter resumes from the folder it was started in.
+The active chat model is captured automatically into `provider.model`. **The model selected in the chat panel wins** whenever a quest is started or resumed from the chat (`/start`, `/fleet`, `/resume`): it replaces `provider.model` for that run, and the quest's `run.log` and trace say so ("the chat panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml"). With the picker on *Auto* no model is named and the config's stays. A run started from a terminal or the web page uses the config's model. `run.log` also names the model that answered the first call (unless the picker is on *Auto*, which names no model) and warns when the quest's earlier results came from another model. The model list is not limited to Copilot: it is every chat model VSCode exposes to the extension, so a local Ollama server or a BYOK endpoint registered by another extension appears alongside Copilot's, tagged with its vendor. Provider / model selection is NOT asked in VSCode — the extension always uses the bridge transport. **Changing a quest's model.** Pick the model in the chat panel and `@fi /resume <quest_id>`, or put it in the quest's `config.yaml` (`provider.model`) and resume from a terminal, the web page or with the picker on *Auto*: no approval is needed. The chat shows one line, for example *the model changes from gpt-5.6-luna to claude-opus-5 from here on; steps already done were made by gpt-5.6-luna*; the change is recorded in the quest's trace and the paper says more than one model produced it. `.fi/cost.jsonl` keeps the earlier calls under the old model.
 
 ### Other chat commands
 
@@ -250,10 +233,6 @@ What it cannot show is printed under the table: a model's description of its own
 
 Copilot bills **per call** — one "premium request" per LLM call regardless of how many tokens the prompt + completion contain. This is meaningfully different from `openai` / `claude_cli` / `gemini_cli`, which bill **per token**. For a 50-call quest with 10K-token prompts, Copilot is 50 units (flat); a token-priced provider could be substantially cheaper or more expensive depending on the prompt size. The web UI's `/quest/<id>` page shows per-quest cost for token-priced providers; Copilot calls show as $0 because the engine can't see the premium-request count from inside FI.
 
-It writes a config.yaml to `outputs/_drafts/<timestamp>-<title>.yaml`, then immediately starts the quest. You can re-run that same config later with `@fi /start <that-path>`, or edit it and re-run.
-
-Press **Esc** on any modal to cancel.
-
 ### Power-user — write your own YAML
 
 ```
@@ -276,11 +255,11 @@ In the chat panel you'll see progress messages:
 ✅ Quest finished. Paper: outputs/.../paper/paper.md
 ```
 
-That example YAML names `provider: openai`, so its model calls go to OpenAI rather than the chat model, and nobody can be asked its setup questions in VS Code, so the agent answers them itself. A YAML with `provider.name: vscode_extension` (what `@fi /new` writes) asks them in input boxes (below).
+That example YAML names `provider: openai`, so its model calls go to OpenAI rather than the chat model, and nobody can be asked its setup questions in VS Code, so the agent answers them itself. A YAML with `provider.name: vscode_extension` asks them in input boxes (below).
 
 ### Answer the setup questions
 
-When a quest on the VS Code chat model starts (`@fi /new`, or a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one, which the `@fi /new` interview always writes), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
+When a quest on the VS Code chat model starts (a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
 
 ### Review the result before it ships
 
@@ -309,8 +288,7 @@ with the quest's node + iteration so you can follow along.
 ### Running several studies at once
 
 Give each study its own folder, and open each folder in its own VS Code window
-(*File → New Window*, then open the folder). In each window, `@fi /new` or
-`@fi /start <yaml>` runs that study; the windows do not get in each other's way:
+(*File → New Window*, then open the folder). In each window, `@fi /start <yaml>` runs that study; the windows do not get in each other's way:
 
 - Each quest talks to VS Code over its own connection, so two or three quests run side by side,
   in one window or in several, and each chat shows only its own quest.
@@ -367,13 +345,13 @@ You can also pass the quest_id directly:
 
 **Several studies in several folders.** Whatever folder VS Code has open is where a new quest runs; open another folder for another study, nothing to set. FI remembers every quest it has run on this computer, in any folder or window (`~/.frontier-insight/quests.json`), so the short id is enough — the six characters after the last dash, `69ef80` here, or any other part the id starts or ends with, as long as it names one quest — and the quest may be one you ran in another folder: `@fi /resume 69ef80` finds it, and it runs in its own folder with its own `config.yaml`. When the id matches more than one quest, the chat lists them with their title and folder. `@fi /resume` and **FI: Quest map** offer one list: the open folder's quests first, then every quest FI has run elsewhere on this computer, each marked "running now" while its process runs (FI's own record of it, the same as on the web page). A quest that is running is not started a second time: FI itself refuses to start a quest whose own process record says another process runs it ("still running; nothing was started"), and `@fi /resume` says so before it starts anything when it can tell. `/rename`, `/why`, `/trace`, `/follow` and `/map` accept the short id too. `python launch.py tools quests` lists every quest with its short id.
 
-To do a quest again from one of its steps, add `--from` and the step: `skills`, `code`, `run`, `figures` (a quest with no simulation), `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (`@fi /resume <quest_id> --from` with no step lists the ones that quest reached). `ideas`, `literature`, `plan` and `design` replace the frozen protocol and need your name, so the chat refuses them and shows the terminal command with `--approve-as`. `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. `--from skills` picks the quest's skills again from its `config.yaml` (edit `engine.skills_exclude`, `engine.skills` or `engine.skills_required` there first) and writes the code again; a skill that is no longer used is named in the chat, and the literature, the plan and the frozen protocol are not touched. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
+To do a quest again from one of its steps, add `--from` and the step: `skills`, `code`, `run`, `figures` (a quest with no simulation), `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (`@fi /resume <quest_id> --from` with no step lists the ones that quest reached). `literature`, `plan` and `design` replace the frozen protocol and need your name, so the chat refuses them and shows the terminal command with `--approve-as`. `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. `--from skills` picks the quest's skills again from its `config.yaml` (edit `engine.skills_exclude`, `engine.skills` or `engine.skills_required` there first) and writes the code again; a skill that is no longer used is named in the chat, and the literature, the plan and the frozen protocol are not touched. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
 
 **The quest map.** **FI: Quest map** in the command palette (or `@fi /map <quest_id>`) opens a tab next to your other tabs (opening it again for the same quest brings that tab back, not a second one) with every step of the quest in seven blocks, each marked finished, where it stopped or not reached. Where it stopped is the step the quest runs next: the pause it waits in (the review, the papers or plan pause) or the step that failed, so a paused quest is never drawn as finished. Click a step to see what it does, what running again from there would keep and redo, and the command; **Restart from here** sends `@fi /resume <quest_id> --from <step>` to chat. From the design backwards it shows the command with `--approve-as` instead, since those need your name. It is the same map as the web quest page.
 
-A quest can also be run in two steps, the literature first and the experiment second: set `pauses.supply: after_literature` in its YAML, or answer *Pause after literature* in the `@fi /new` interview. The quest stops once the literature is saved (`data/literature/`, and `NEXT_STEP.md` says what to do); add papers to `inputs/papers/`, data to `inputs/data/` or your own simulation files to `inputs/examples/`, then `@fi /resume <quest_id>` runs skills, design and the experiment with that literature in hand, without searching again.
+A quest can also be run in two steps, the literature first and the experiment second: set `pauses.supply: after_literature` in its YAML. The quest stops once the literature is saved (`data/literature/`, and `NEXT_STEP.md` says what to do); add papers to `inputs/papers/`, data to `inputs/data/` or your own simulation files to `inputs/examples/`, then `@fi /resume <quest_id>` runs skills, design and the experiment with that literature in hand, without searching again.
 
-Every quest writes `plan.md` (what the literature says, the gap, the model behind the numbers with its equations and where each check's expected value comes from, how the code will be judged better or worse (two to five checks of correctness FI computes after every run), the design the experiment will run) before the design. Set `pauses.plan: ask`, or answer *Stop to read and edit the plan* in the `@fi /new` interview (advanced), and the quest stops once it is written. The advanced question *Rigor profile* in the same interview (`research` is recommended for a simulation study) turns that on together with the two-script split, the checks that stop the quest instead of only reporting (known-answer checks excepted: FI settles those itself), and a review panel; it is chosen when the quest is created. `@fi /plan <quest_id>` opens the file in the editor, next to your other tabs: edit it (the design block at the end is used exactly as written), or ask for a change with `@fi /plan <quest_id> <what to change>` and the plan is rewritten and reopened; repeat, then `@fi /resume <quest_id>` runs it. If FI later adds a check with a known answer to the plan (the plan had none, or one without numbers), one line in the chat says so; FI checks its expected value itself when it runs, and the frozen record says nobody approved that check.
+Every quest writes `plan.md` (what the literature says, the gap, the model behind the numbers with its equations and where each check's expected value comes from, how the code will be judged better or worse (two to five checks of correctness FI computes after every run), the design the experiment will run) before the design. Set `pauses.plan: ask` and the quest stops once it is written. `rigor_profile: research` (recommended for a simulation study) turns that on together with the two-script split, the checks that stop the quest instead of only reporting (known-answer checks excepted: FI settles those itself), and a review panel; it is chosen when the quest is created. `@fi /plan <quest_id>` opens the file in the editor, next to your other tabs: edit it (the design block at the end is used exactly as written), or ask for a change with `@fi /plan <quest_id> <what to change>` and the plan is rewritten and reopened; repeat, then `@fi /resume <quest_id>` runs it. If FI later adds a check with a known answer to the plan (the plan had none, or one without numbers), one line in the chat says so; FI checks its expected value itself when it runs, and the frozen record says nobody approved that check.
 
 When a check fails the quest stops with an *Action needed* message that names what is wrong and what to do; fix it and `@fi /resume <quest_id>`. It stops for:
 
@@ -389,7 +367,7 @@ A known-answer check never stops the quest to ask you whether the simulation or 
 
 A finished quest ends with a plain sentence, `[FI] evidence: <what was shown>`, and what stands between it and the next level; the underlying six levels (`executed` through `publication_ready`) are in [docs/rigor.md](../docs/rigor.md); the record is `needs/EVIDENCE.json`. How the checks work is in [docs/rigor.md](../docs/rigor.md).
 
-**Using a model that is not in the Copilot picker (Moonshot's Kimi, or any OpenAI-compatible endpoint).** Write a YAML whose `provider` names the endpoint and the environment variable that holds the key, and start it with `@fi /start <path>`: a YAML that names its own provider keeps it, so the quest does not go through Copilot. `examples/kimi_moonshot/config.yaml` is a ready one for Kimi K2.6. Put the key in a `.env` file in your workspace folder (the folder VSCode has open, which is where the extension runs FI from; FI reads it at start and the file is git-ignored), in the `.env` in the FrontierInsight folder (read too, after the workspace's), or in the environment VSCode was started from, never in the YAML. `provider.fixed_temperature` and `provider.extra_body` are for models that accept one temperature or need a request field (Kimi's `thinking`); the `@fi /new` interview does not ask for them, so write those two by hand.
+**Using a model that is not in the Copilot picker (Moonshot's Kimi, or any OpenAI-compatible endpoint).** Write a YAML whose `provider` names the endpoint and the environment variable that holds the key, and start it with `@fi /start <path>`: a YAML that names its own provider keeps it, so the quest does not go through Copilot. `examples/kimi_moonshot/config.yaml` is a ready one for Kimi K2.6. Put the key in a `.env` file in your workspace folder (the folder VSCode has open, which is where the extension runs FI from; FI reads it at start and the file is git-ignored), in the `.env` in the FrontierInsight folder (read too, after the workspace's), or in the environment VSCode was started from, never in the YAML. `provider.fixed_temperature` and `provider.extra_body` are for models that accept one temperature or need a request field (Kimi's `thinking`); write those two by hand.
 
 A quest waiting on a background job (HPC / cluster, `execution.background_jobs`) pauses cleanly and can be woken automatically:
 
@@ -404,7 +382,7 @@ A quest that runs a simulation, deterministic or random, keeps the simulation (`
 
 `code/` is a small project you can run on its own: `README.md`, `requirements.txt` (the versions FI installed), `run.py` (`python code/run.py` runs the simulation, then the analysis, into `run_output/`, apart from the quest's results) and, for the two-script layout, `study.json`. Every change FI or a refine makes is one commit in a git history inside `code/` and one entry in `code/CHANGELOG.md`, marked Added, Changed, Fixed or Tidied, with a line saying whether the results changed (the checks of correctness before and after, and whether the study's results changed; filled in once the run after the change finishes); a `README.md`, `requirements.txt`, `run.py` or `study.json` you edited is never overwritten (the scripts themselves are rewritten when FI repairs or extends them). The data tables an accepted run wrote are also copied into `data/results/`.
 
-Explore, then confirm (`engine.phased`) is asked as an advanced field of `@fi /new` (above; see [docs/rigor.md](../docs/rigor.md)). One setting in this area has no question in the interview, so write it in the quest's YAML: `engine.clarify_overrides.study_type` (`measure` or `find_best_design`: it answers the one question about the kind of study in advance when the agent answers the setup questions itself; when you are asked them it is only the suggested answer, and only if that question is asked). The plan's *How we will judge whether the code got better* section is edited in `plan.md` like the rest of the design; FI appends each run's values to `.fi/criteria_history.jsonl`.
+Explore, then confirm (`engine.phased`) is a setting in the quest's YAML (see [docs/rigor.md](../docs/rigor.md)). Another one to write there: `engine.clarify_overrides.study_type` (`measure` or `find_best_design`: it answers the one question about the kind of study in advance when the agent answers the setup questions itself; when you are asked them it is only the suggested answer, and only if that question is asked). The plan's *How we will judge whether the code got better* section is edited in `plan.md` like the rest of the design; FI appends each run's values to `.fi/criteria_history.jsonl`.
 
 A resume regenerates only the outputs actually missing on disk — a `paper.pdf` /
 slides / poster / talk that already rendered is left untouched — so re-running to
@@ -426,22 +404,21 @@ cross-provider failover chain with per-provider circuit breakers.
 Some research questions can't honestly be answered by a Python
 experiment — cultural comparisons, historical analyses, qualitative
 cross-case studies, policy reviews, or factual questions about
-companies / markets / current events. The `/new` interview's
-**Research approach** question covers this: pick *"observational"*
-and the generated YAML sets `engine.no_simulation: true`. The
+companies / markets / current events. For these, set
+`engine.no_simulation: true` in the config. The
 engine then skips `implement → execute` entirely and routes through
 `auto_collect_data → wait_for_data → data_load → web_plots → analyze`.
 
 For a purely descriptive **history / overview** (no experiment *and*
-no dataset — e.g. *"the evolution of X"*), pick *"literature synthesis
-/ survey"* instead. The YAML sets `engine.survey_mode: true` and the
+no dataset — e.g. *"the evolution of X"*), set `engine.survey_mode: true`
+instead. The
 engine routes `design → web_figures → analyze → write`, skipping the
 whole data path — the paper is a narrative synthesis of the cited
 sources with license-clean illustrative images and no fabricated
 metrics. Survey mode is auto-suggested for "history/evolution/overview
 of X" topics and can also be turned on by the clarify step.
 
-The `/new` interview also has a **Web research** question (on by
+**Web research** (`knowledge.web_search`, on by
 default): when on, the literature node searches the public web
 (Brave / DuckDuckGo) and **downloads every retrieved source to
 `outputs/<id>/data/literature/`** — for *every* quest, simulation and
@@ -477,7 +454,7 @@ FI downloads only papers that are free to read; it does not fetch a
 paper that is not confirmed free, even from a network with a subscription.
 When a relevant paper is not confirmed free (SPIE / IEEE / Elsevier …)
 and only its abstract is reachable, **Supply paywalled papers** (on by
-default; turn it off in the interview for an unattended run) makes the
+default; turn it off for an unattended run) makes the
 quest pause and write a ranked
 `needs/WANTED_PAPERS.md` (download links + why each matters). After the
 run, the chat panel surfaces that list with instructions to drop the
@@ -612,12 +589,12 @@ or shutting the machine down, is not a crash to report.
 ## Analyze pre-staged data
 
 ```
-@fi /analyze ./my_data Compare ridership trends across the three regions
+@fi /analyze ./my_data commission.yaml
 ```
 
-When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a commission file; the commission's question is what the analysis answers. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
 
-Quote the path if it contains spaces: `@fi /analyze "C:/My Data" Find common failure modes`.
+Quote the path if it contains spaces: `@fi /analyze "C:/My Data" commission.yaml`.
 
 ## Adversarial critique
 
@@ -648,15 +625,10 @@ Lands in Axon as `kind=fi_digest` so future quests can retrieve "what we were wo
 
 ## Per-node model routing
 
-Each quest YAML defines which model to use per engine node. In `@fi /new`
-you do not have to type it: under **Edit an advanced field → Per-node model
-overrides** a menu lists the models this VSCode offers (Copilot's, an Ollama
-server's, a bring-your-own-key endpoint's) and nothing is chosen for you, since
-`vscode.lm` gives FI no price or tier. It has one entry, **Light nodes → one
-cheaper model**, that sets the five nodes measured as safe on a cheaper model
-(`cross_check`, `select_skills`, `literature_screen`, `slides`, `poster`), an
-entry to set a single node (the untested ones are marked as such), one to clear
-every override, and one to type `node:model` pairs directly. On one simulation
+Each quest YAML defines which model to use per engine node, and nothing is
+chosen for you, since `vscode.lm` gives FI no price or tier. The five nodes
+measured as safe on a cheaper model are `cross_check`, `select_skills`,
+`literature_screen`, `slides` and `poster`. On one simulation
 topic, three runs each, moving those five nodes to a cheaper model used about
 15% fewer tokens and no drop in scores was seen; three runs cannot show a drop
 under about ten points, and this was measured with codex models, not through
@@ -704,10 +676,8 @@ limit and gets no reason an answer ended, so a cut-off there cannot be detected;
 
 ## Reasoning effort
 
-The interview's advanced list (`@fi /new` → review screen → advanced
-fields) has a **Reasoning effort** field that writes
-`provider.reasoning_effort`: `minimal`, `low`, `medium`, `high`, `xhigh`
-or `max`; "Provider default" writes nothing. `vscode.lm` has no
+`provider.reasoning_effort` takes `minimal`, `low`, `medium`, `high`, `xhigh`
+or `max`; left out, nothing is sent. `vscode.lm` has no
 reasoning-effort setting, so on the `vscode_extension` provider the level
 is not sent and the quest log says so once — the Copilot model runs at its
 own default. The level takes effect when the quest YAML names a provider
