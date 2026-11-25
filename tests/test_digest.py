@@ -79,7 +79,7 @@ def _make_state_sqlite(path: Path, *, with_review: bool) -> None:
         )
     else:
         con.execute(
-            "INSERT INTO writes (channel) VALUES ('ideate')"
+            "INSERT INTO writes (channel) VALUES ('plan')"
         )
     con.commit()
     con.close()

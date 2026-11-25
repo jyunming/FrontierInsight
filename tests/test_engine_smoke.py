@@ -76,15 +76,6 @@ _FAKE_RESPONSES = {
         "budget": {"question": "Time?", "default": "seconds on CPU"},
         "output_kinds": {"question": "Deliverables?", "default": ["paper_md"]},
     }),
-    "ideate": json.dumps({
-        "ideas": [{"title": "fake-idea", "summary": "x", "feasibility": "high", "novelty": "low"}],
-        "chosen": {"title": "fake-idea", "rationale": "only candidate"},
-    }),
-    "ideate_reflect": json.dumps({
-        "strongest_objection": "data may be trivial",
-        "swap_to": "",
-        "refined_rationale": "still the strongest pick given the constraints",
-    }),
     "cross_check": json.dumps({
         "supporting": [{"index": 1, "why": "matches reported direction"}],
         "conflicting": [],
@@ -138,8 +129,6 @@ def _classify(prompt: str) -> str:
         return "Clarify"
     if "Design Self-Critique" in head:
         return "DesignAudit"
-    if "Ideation Reflection" in head:
-        return "IdeateReflect"
     if "Execute-Reflect" in head:
         return "ExecuteReflect"
     if "Cross-Paper Check" in head:
@@ -148,7 +137,7 @@ def _classify(prompt: str) -> str:
         return "ClaimCheck"
     if "Evidence Gate" in head:
         return "EvidenceGate"
-    for tag in ("Ideation", "Experiment Design", "Implementation", "Analysis", "Writing", "Review"):
+    for tag in ("Experiment Design", "Implementation", "Analysis", "Writing", "Review"):
         if tag in head:
             return tag
     return "(unknown)"
@@ -161,8 +150,6 @@ def _fake_response_for(prompt: str) -> str:
         "TopicReading": json.dumps({"comparisons": [{"what": "the comparison the topic itself asks for"}]}),
         "TopicJudging": json.dumps({"items": []}),
         "Clarify": _FAKE_RESPONSES["clarify"],
-        "Ideation": _FAKE_RESPONSES["ideate"],
-        "IdeateReflect": _FAKE_RESPONSES["ideate_reflect"],
         "Experiment Design": _FAKE_RESPONSES["design"],
         # The methodology audit found nothing to change (a reply naming neither is an audit that could not judge).
         "DesignAudit": '{"objections_addressed": []}',
@@ -625,7 +612,7 @@ async def test_engine_runs_with_clarify_auto(
     """End-to-end: full DAG including the clarify node firing
     in auto mode. The agent generates the questionnaire, self-answers
     from each slot's default, and the answers flow through into the
-    ideate/design/write prompts via `_format_clarify`. Verifies the
+    design/write prompts via `_format_clarify`. Verifies the
     quest still reaches a terminal artifact bundle."""
     cfg = Config(
         topic="smoke-test topic for clarify-auto integration",
@@ -788,7 +775,7 @@ async def test_after_literature_pause_then_resume_does_not_search_again(
     assert "Experiment Design" not in calls_before_resume
     assert "Experiment Design" in calls
     path = dump_state(second.quest_root)
-    assert "->  pause_after_literature" in path and "->  scope" in path and "->  select_skills" in path
+    assert "->  pause_after_literature" in path and "->  select_skills" in path and "->  scope" not in path
 
 
 # ---------------------------------------------------------------------------

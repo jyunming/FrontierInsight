@@ -23,24 +23,21 @@ ENSEMBLE_PROFILES: tuple[Choice, ...] = (
            "One LLM call per node. Cost baseline = 1×."),
     Choice("cross_check_only", "Fan out cross_check only (~1.3× cost)",
            "3 models vote per finding; catches issues the writer might miss. Minimal extra spend."),
-    Choice("ideate_and_check", "Fan out ideate + cross_check (~2.0× cost)",
-           "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding."),
-    Choice("full", "Fan out ideate + analyze + cross_check (~2.5× cost)",
-           "Multi-model on the three highest-leverage nodes. Best signal; highest cost."),
+    Choice("full", "Fan out analyze + cross_check (~2.0× cost)",
+           "Multi-model on the two highest-leverage nodes. Best signal; highest cost."),
 )
 
 
 # Cost multipliers vs a single-model baseline. Frontends display these
 # next to the profile choice so the user sees the trade-off before
-# launch. The numbers are conservative estimates: ideate goes from 1
-# call to 4 (3 fan-out + 1 moderator); analyze same; cross_check goes
+# launch. The numbers are conservative estimates: analyze goes from 1
+# call to 4 (3 fan-out + 1 moderator); cross_check goes
 # from K calls to 3K (no moderator). Across a typical quest of 7-18
 # LLM calls, that's the rough multiplier each profile lands at.
 _ENSEMBLE_COST_MULTIPLIERS: dict[str, float] = {
     "off": 1.0,
     "cross_check_only": 1.3,
-    "ideate_and_check": 2.0,
-    "full": 2.5,
+    "full": 2.0,
 }
 
 

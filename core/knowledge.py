@@ -2,8 +2,8 @@
 
 Two responsibilities:
 
-1. **Retrieval** (`Knowledge.asearch`) for the engine's `ideate` and
-   `literature` nodes. Three layers, in order:
+1. **Retrieval** (`Knowledge.asearch`) for the engine's `literature`
+   node. Three layers, in order:
      a. Pinned `local_papers` — files the user dropped into the config;
         always at the head of the result.
      b. Axon — the FI long-term, curated store.
@@ -4444,14 +4444,14 @@ class Knowledge:
           caller's ``top_k`` → otherwise ``self.cfg.external_top_k``.
         The merged result is capped at ``max(k, external_k)`` so a broad
         caller (the literature node) keeps web + Axon + academic breadth
-        while a narrow caller (an ideate seed asking for 3) stays small.
+        while a narrow caller (one asking for 3) stays small.
         Local papers count toward the cap so the user isn't flooded."""
         k = top_k if top_k is not None else self.cfg.top_k
         if external_top_k is not None:
             external_k = external_top_k
         elif top_k is not None:
-            # Caller pinned a per-call cap (e.g. ideate seed wants 3
-            # papers) — honour it for external too. Otherwise the cheap
+            # Caller pinned a per-call cap (e.g. 3 papers) — honour it
+            # for external too. Otherwise the cheap
             # callers would silently trigger a 20-result fetch.
             external_k = top_k
         else:

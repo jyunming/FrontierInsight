@@ -70,7 +70,6 @@ Every quest writes **`plan.md`** before the experiment is designed. Ask FI to st
 ```yaml
 pauses:
   plan: ask      # "ask" stops to read and edit the plan
-  scope: ask     # before the plan, pick the study to run from 3 or 4 studies FI offers (off skips it)
 ```
 
 ```bash
@@ -89,7 +88,7 @@ Each finished quest ends with an **evidence level**, from `executed` (it ran) up
 
 ## Highlights
 
-- **The whole loop** — ideate, literature, code, run, analyze, write, review, without you driving each step; it fixes its own code when the experiment fails.
+- **The whole loop** — literature, plan, code, run, analyze, write, review, without you driving each step; it fixes its own code when the experiment fails.
 - **Real literature** — academic and open-web sources, with citations exported as BibTeX / CSL-JSON.
 - **Checks that are not just another LLM** — a number in the paper is compared with the number the run computed; a claim is traced to the experiment or marked unsupported.
 - **A plan you control** — read, edit or re-ask before compute is spent; later changes to the plan need your approval.

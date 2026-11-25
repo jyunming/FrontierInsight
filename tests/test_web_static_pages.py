@@ -715,7 +715,7 @@ def test_cost_endpoint_returns_records(tmp_path: Path) -> None:
     fi_dir.mkdir(parents=True)
     (fi_dir / "cost.jsonl").write_text(
         "\n".join([
-            _json.dumps({"ts": 1.0, "node": "ideate", "model": "gpt-4o",
+            _json.dumps({"ts": 1.0, "node": "plan", "model": "gpt-4o",
                          "usage": {"prompt_tokens": 100, "completion_tokens": 50,
                                    "total_tokens": 150},
                          "cost_usd": 0.0008}),
@@ -750,7 +750,7 @@ def test_cost_endpoint_summary_is_not_partial_when_every_call_is_priced(tmp_path
     client = _client(tmp_path)
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     _write_cost_rows(client, "q-priced", [
-        {"node": "ideate", "model": "gpt-4o", "usage": usage, "cost_usd": 0.001},
+        {"node": "plan", "model": "gpt-4o", "usage": usage, "cost_usd": 0.001},
         {"node": "write", "model": "gpt-4o", "usage": usage, "cost_usd": 0.002},
     ])
     summary = client.get("/api/quests/q-priced/cost").json()["summary"]
@@ -763,9 +763,9 @@ def test_cost_endpoint_summary_keeps_a_null_total_when_no_call_is_priced(tmp_pat
     client = _client(tmp_path)
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     _write_cost_rows(client, "q-unpriced", [
-        {"node": "ideate", "model": "gpt-5.6-luna", "usage": usage, "cost_usd": None},
+        {"node": "plan", "model": "gpt-5.6-luna", "usage": usage, "cost_usd": None},
         # a breadcrumb row is not a call, priced or not
-        {"node": "ideate.ensemble[m1]", "model": "m1", "ensemble": True, "role": "fanout"},
+        {"node": "plan.ensemble[m1]", "model": "m1", "ensemble": True, "role": "fanout"},
     ])
     summary = client.get("/api/quests/q-unpriced/cost").json()["summary"]
     assert summary["total_cost_usd"] is None
@@ -779,7 +779,7 @@ def test_cost_endpoint_tolerates_a_row_that_is_not_an_object(tmp_path: Path) -> 
     fi_dir = client.app.state.output_root / "q-stray" / ".fi"  # type: ignore[attr-defined]
     fi_dir.mkdir(parents=True)
     (fi_dir / "cost.jsonl").write_text(
-        '[1, 2]\n{"node": "ideate", "model": "gpt-4o", "usage": null, "cost_usd": 0.5}\n',
+        '[1, 2]\n{"node": "plan", "model": "gpt-4o", "usage": null, "cost_usd": 0.5}\n',
         encoding="utf-8",
     )
     res = client.get("/api/quests/q-stray/cost")

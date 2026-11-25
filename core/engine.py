@@ -124,7 +124,7 @@ from .engine_base import (  # noqa: F401
     _rerun_directive, _rerun_from, _resolve_selected_skills, _restore_primary_figures, _result_comparison_stats,
     _results_by_setting, _retractions, _review, _review_answer_problem, _review_decision, _review_items,
     _review_sends_the_experiment_back, _review_was_real, _rng_aliases, _rng_call_is_seeded, _rooted, _run_facts,
-    _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures, _scope_cards,
+    _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures,
     _screen_grades, _script_has_random_source, _script_reads_replicate_seed, _script_reply,
     _search_record_has_abstract, _second_impl, _seed_label, _seeds_only_constants, _series_at,
     _set_model_call_archive, _sf_snapshot, _shown_reach, _shrink_json_value, _simulatability_answer,
@@ -178,6 +178,20 @@ class _StepGraph(StateGraph):
             self.exits.update({(source, k): v for k, v in path_map.items() if v not in self.keep})
             path_map = {k: (v if v in self.keep else END) for k, v in path_map.items()}
         return super().add_conditional_edges(source, path, path_map)
+
+
+# The nodes an earlier FI had that this one does not, by what a person called them. LangGraph reads a checkpoint about to
+# run one of them as having nothing left to run, which would look like a finished quest.
+_REMOVED_NODES = {"ideate": "making research ideas", "scope": "choosing a study from study cards"}
+
+
+async def _removed_step_waiting(saver: Any, run_config: dict[str, Any]) -> str:
+    """What the latest checkpoint was about to run that FI no longer has (``""``: nothing of the kind). The edge into a
+    node is the channel ``branch:to:<node>`` of the saved checkpoint."""
+    saved = await saver.aget_tuple(run_config)
+    values = ((saved.checkpoint or {}).get("channel_values") or {}) if saved is not None else {}
+    return next((_REMOVED_NODES[key.split(":", 2)[2]] for key in values
+                 if key.startswith("branch:to:") and key.split(":", 2)[2] in _REMOVED_NODES), "")
 
 
 class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, ImproveStageMixin, RunStageMixin, AnalyzeStageMixin, WriteStageMixin, ReviewStageMixin,
@@ -332,7 +346,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         *,
         clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
-        scope_callback: ClarifyCallback | None = None,
         reopen: bool = False,
         from_step: str | None = None,
         approved_by: str | None = None,
@@ -384,9 +397,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
-        # The study cards have an answer channel of their own (its own files on the web page): the setup questions'
-        # channel would hand back the setup answer, and a rerun from the cards would reuse an old pick.
-        self._scope_answerer = scope_callback
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
@@ -537,11 +547,18 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     # Resume detection: if the thread already has checkpointed
                     # state (a prior run died mid-pipeline), pass `None` to
                     # ainvoke so LangGraph continues from the last-completed
-                    # node instead of replaying from `ideate` with the
+                    # node instead of replaying from `clarify` with the
                     # current YAML's topic. Without this, --resume only
                     # reused the quest_id; LangGraph still treated the
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
+                    if not from_step and (gone := await _removed_step_waiting(saver, run_config)):
+                        # Said like the other refusals of a resume (a plain line, nothing run), not as a crash.
+                        self._log.warning("[run] the checkpoint waits at a step this FI does not have (%s)", gone)
+                        print(f"[FI] quest {self.quest_id} stopped just before {gone}, a step an earlier FI had and this "
+                              "one does not (a study now starts from a commission, which gives its question and its "
+                              "study), so it cannot go on; nothing was run. Start the study again from a commission.")
+                        return self._collect_artifacts({})
                     if getattr(prior_snapshot, "values", None):
                         # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
                         stale = _equation_tests.remove_stale(self.quest_root / "code")
@@ -1501,6 +1518,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # The record of the search queries likewise: an empty one when no query was ever derived (every derivation,
         # failed or not, leaves an entry); missing after an answered derivation, it is the gap.
         if not (self.fi_dir / _LITERATURE_QUERIES).exists() and not (
+                # ``ideate_query``: the same derivation as an earlier FI's idea step named it, in a quest it began.
                 _ok_call_ids(self.fi_dir, "literature_query") or _ok_call_ids(self.fi_dir, "ideate_query")):
             _write_query_sets(self.fi_dir, [])
         call_gaps, call_summary = _attempts.model_call_gaps(
@@ -1681,41 +1699,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
     def _audit_stated_reasons(self, node: str, out: dict[str, Any]) -> None:
         """The reasons a model already wrote in its answer at the steps that choose between options, as ``model_claim``
-        events (no extra call, no extra tokens): the idea it chose (and, when they ran, what the pairwise comparison
-        and the self-critique said), the skills it picked or declined, how each finding sits against the literature,
+        events (no extra call, no extra tokens): the skills it picked or declined, how each finding sits against the literature,
         what a repair of the script changed and why (or why it gave up), and the reasons of the setup questions'
         answers it chose. Each carries the provenance of the call that wrote it. A reason is the model's own account,
         not evidence."""
-        if node == "ideate":
-            chosen = out.get("chosen_idea") if isinstance(out.get("chosen_idea"), dict) else {}
-            ideas = [i for i in out.get("ideas") or [] if isinstance(i, dict)]
-            options = [str(i.get("title") or "") for i in ideas if i.get("title")]
-            tournament = out.get("ideate_tournament") if isinstance(out.get("ideate_tournament"), dict) else {}
-            critique = out.get("ideate_critique") if isinstance(out.get("ideate_critique"), dict) else {}
-            first = str(chosen.get("rationale") or "")
-            decision = chosen.get("title")
-            if tournament:
-                first = first.split("[tournament]", 1)[0]  # the tournament's reasons follow, under their own call
-                if tournament.get("outcome") == "swapped":
-                    decision = "its first pick (the pairwise comparison then chose another idea)"
-            elif critique.get("swap_to") or critique.get("refined_rationale"):
-                first = ""  # the self-critique replaced it; its own words are recorded under its call below
-            self._claim(node, "ideate", "idea_chosen", first, decision=decision,
-                        options=options if len(options) > 1 else None)
-            winner = tournament.get("winner_idx")
-            for m in tournament.get("matches") or []:
-                if not isinstance(m, dict):
-                    continue
-                won = m.get("a_idx") if m.get("winner") == "A" else m.get("b_idx") if m.get("winner") == "B" else None
-                if winner is not None and won == winner:
-                    self._claim(node, "ideate_tournament", "idea_compared", m.get("reason"),
-                                decision=chosen.get("title"), margin=m.get("margin"))
-            if critique:
-                self._claim(node, "ideate_reflect", "idea_reconsidered",
-                            critique.get("refined_rationale") or critique.get("strongest_objection"),
-                            decision=(f"switched to {critique['swap_to']}" if critique.get("swap_to")
-                                      else "kept the first choice"))
-        elif node == "select_skills":
+        if node == "select_skills":
             record = out.get("skill_selection") if isinstance(out.get("skill_selection"), dict) else {}
             forced = set(record.get("forced") or [])  # required by the config: the engine's decision, not the model's
             for name, why in (record.get("reasons") or {}).items():
@@ -2261,10 +2249,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             g.keep, g.exits = frozenset(_rerun_from.ALONE[self.config.step.name]), {}
             self._step_exits = g.exits
         g.add_node("clarify", self._audited("clarify", self._node_clarify_then_phased))
-        g.add_node("ideate", self._audited("ideate", self._node_ideate))
         g.add_node("literature", self._audited("literature", self._node_literature))
         g.add_node("pause_after_literature", self._audited("pause_after_literature", self._node_pause_after_literature))
-        g.add_node("scope", self._audited("scope", self._node_scope))
         g.add_node("select_skills", self._audited("select_skills", self._node_select_skills))
         g.add_node("plan", self._audited("plan", self._node_plan))
         g.add_node("design", self._audited("design", self._node_design))
@@ -2289,8 +2275,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("cross_check", self._audited("cross_check", self._node_cross_check))
         # evidence_gate sits on the cross_check → write happy path: it
         # weighs the assembled evidence and either proceeds to write or
-        # sends the quest back for ONE bounded literature broaden. A
-        # logged passthrough when engine.evidence_gate is off.
+        # sends it back to the design, the code or the run when FI's own record says so.
         g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
         g.add_node("stuck_no_findings", self._audited("stuck_no_findings", self._node_stuck_no_findings))
         g.add_edge("stuck_no_findings", END)
@@ -2314,17 +2299,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("web_figures", self._audited("web_figures", self._node_web_figures))
 
         g.add_edge(START, "clarify")
-        g.add_edge("clarify", "ideate")
-        g.add_edge("ideate", "literature")
-        # Selection sits between literature and design so it sees the
-        # chosen direction and the retrieved sources — the direction is
-        # what actually names the instrument a quest needs.
+        g.add_edge("clarify", "literature")
+        # Selection sits between literature and design so it sees the retrieved sources.
         # ``pause_after_literature`` is a passthrough unless pauses.supply asks
         # for a stop there: the search is saved, and a resume starts here
         # rather than searching again.
         g.add_edge("literature", "pause_after_literature")
-        g.add_edge("pause_after_literature", "scope")
-        g.add_edge("scope", "select_skills")
+        g.add_edge("pause_after_literature", "select_skills")
         g.add_edge("select_skills", "plan")
         # A study handed back at the plan (core/known_values.py) ends there. The edge writes the same channel as the plain
         # edge it replaced (``branch:to:design``), so a checkpoint saved between plan and design resumes into design.
@@ -2389,16 +2370,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             "cross_check",
             self._audited_route("cross_check", self._route_after_cross_check),
             {
-                # The happy-path "write" label now lands on evidence_gate,
-                # which makes the real write-vs-broaden call.
+                # The happy-path "write" label lands on evidence_gate, which makes the real call.
                 "write": "evidence_gate",
                 "redesign": "design",
-                "broaden_lit": "literature",
             },
         )
-        # evidence_gate → write (sufficient / insufficient-but-write) OR
-        # back to literature for ONE bounded broaden pass.
-        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
+        # evidence_gate → write (sufficient / insufficient-but-write), or back to the design, the code or the run.
+        after_gate = {"write": "write", "redesign": "design", "stuck": "stuck_no_findings",
                       "repair_crash": "execute", "rewrite_code": "implement"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
@@ -2623,56 +2601,49 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     def _route_after_cross_check(self, state: QuestState) -> str:
         """Route based on analyze's ``next_step`` field.
 
-        Three outcomes:
+        Two outcomes:
 
-        * ``next_step == "broaden_lit"`` → ``broaden_lit`` (re-enter
-          ``literature`` so the next pass can fetch fresh evidence;
-          design then re-runs with the accumulated literature block).
-          Until this routing existed, ``broaden_lit`` collapsed onto
-          ``redesign`` and the design node re-ran with the SAME
-          literature it already had — defeating the signal.
         * ``next_step == "re_experiment"`` → ``redesign`` (re-enter
           ``design`` with the same literature; only the experimental
           plan changes).
         * Anything else (or budget exhausted, or rerouting disabled
           via ``engine.enable_analyze_reroute: false``) → ``write``.
 
-        Both re-entry branches share the same ``engine.max_iterations``
-        budget so the whole quest stays bounded.
+        The re-entry shares the ``engine.max_iterations`` budget with the review loop, so the whole quest stays bounded.
 
         ``_node_cross_check`` returns ``{"cross_check": []}`` early only when ``cross_check_per_finding_k <= 0`` (the draft
         profile skips this step); that return also carries ``cross_check_route: "write"``. Every other pass bumps the
-        iteration itself on a route that is not ``write``, so a ``broaden_lit`` loop is bounded by
+        iteration itself on a route that is not ``write``, so a redesign loop is bounded by
         ``engine.max_iterations`` whatever the number of results looked up (a run with none routes by ``next_step``).
 
         The cross_check node decides the route (``cross_check_route``) before it spends a round, and this router reads
         it, as the evidence gate's router does: a router that decided again after the node raised ``iteration`` saw the
         last round as already spent and wrote instead. Without the field (a state the node did not make), the route is
-        decided here from the state as it is.
+        decided here from the state as it is. A checkpoint of an earlier FI whose cross_check chose to search the
+        literature again writes instead: FI no longer goes back to the literature.
         """
         route = state.get("cross_check_route")
-        if route in ("write", "broaden_lit", "redesign"):
+        if route == "broaden_lit":
+            return "write"
+        if route in ("write", "redesign"):
             return route
         if not state.get("cross_check"):
             return "write"  # a checkpoint the new node did not write: this router bumps no round, so it never loops
         return self._cross_check_route(state)
 
     def _cross_check_route(self, state: QuestState) -> str:
-        """``write``, ``broaden_lit`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
+        """``write`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
         confirm stage of ``engine.phased`` and the rounds left (``iteration`` before this round is spent)."""
         if not self.config.engine.enable_analyze_reroute:
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
-        if next_step in ("broaden_lit", "re_experiment") and self._phased_confirming():
-            self._log.info("[phased] confirm stage: the frozen design is run once, so the analysis's request to %s is "
-                           "not followed; the confirm result is written up as it is",
-                           "look at the literature again" if next_step == "broaden_lit" else "redesign")
+        if next_step == "re_experiment" and self._phased_confirming():
+            self._log.info("[phased] confirm stage: the frozen design is run once, so the analysis's request to "
+                           "redesign is not followed; the confirm result is written up as it is")
             return "write"
         if state.get("iteration", 0) >= self.config.engine.max_iterations:
             return "write"
-        if next_step == "broaden_lit":
-            return "broaden_lit"
         if next_step == "re_experiment":
             missed = self._precision_missed(state)
             if missed:
@@ -2771,11 +2742,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 "settings and what is measured; change the number of trials so each target is reached.")
 
     def _route_after_evidence_gate(self, state: QuestState) -> str:
-        """The evidence_gate node already decided write vs broaden (it
-        owns the bounded-broaden bookkeeping); the router just reads it.
-        Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
-        exploration goes to the confirm run first (``_phased_route``)."""
+        """The evidence_gate node already decided the route; the router just reads it.
+        Fails open to ``write`` when the gate was a passthrough, and for a checkpoint of an earlier FI whose gate chose
+        to search the literature again (FI no longer goes back to the literature). Under ``engine.phased`` a write at the
+        end of exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
+        if route == "broaden_lit":
+            route = "write"
         if route in ("stuck", "repair_crash", "rewrite_code"):
             return route  # no findings to write up, a crash to repair first, code to write again: the same in every mode
         if _phased.enabled(self.config):

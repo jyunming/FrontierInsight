@@ -10,7 +10,7 @@
  *   3. Forward every Python `lm_request` to `vscode.lm.*` and stream
  *      the response back. Render progress in the chat panel.
  *
- * The Python engine drives the actual research loop (clarify, ideate,
+ * The Python engine drives the actual research loop (clarify,
  * literature, design, implement, execute, execute_reflect, analyze,
  * cross_check, write, review). All LLM calls go through `vscode.lm`,
  * which means: sanctioned API, user-consented, normal Copilot quota.
@@ -818,7 +818,7 @@ interface RunWhere {
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
 const RERUN_STEPS = ["skills", "code", "run", "figures", "analysis", "crosscheck", "evidence", "writing", "claims", "review"];
 // These replace the plan and need `--approve-as <name>`, which is given on the command line.
-const RERUN_STEPS_NEEDING_NAME = ["ideas", "literature", "plan", "design"];
+const RERUN_STEPS_NEEDING_NAME = ["literature", "plan", "design"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users

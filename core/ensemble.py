@@ -1,7 +1,7 @@
 """Multi-model ensemble primitive — N parallel LLM calls + a merger.
 
 Used by:
-* in-quest nodes (``ideate``, ``analyze``, ``cross_check``) when the
+* in-quest nodes (``analyze``, ``cross_check``) when the
   YAML carries ``provider.node_ensemble[node]``, and
 * standalone tools (``--critique``, ``--digest``) when the user passes
   ``--critique-ensemble`` / ``--digest-ensemble``.

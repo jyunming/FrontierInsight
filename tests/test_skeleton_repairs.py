@@ -236,7 +236,7 @@ def test_without_a_frame_the_finding_repair_asks_and_accepts_exactly_as_before(t
 
 def _cfg(tmp_path: Path) -> Config:
     return Config(topic="repairs keep the frame", title="frame-repairs", provider=ProviderConfig(name="openai"),
-                  engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3, ideate_reflect=False),
+                  engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3),
                   execution=ExecutionConfig(sandbox="venv", timeout_s=60, split_analysis=True),
                   knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"))
 

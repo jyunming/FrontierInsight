@@ -62,7 +62,7 @@ def _skip_setup(eng: Engine) -> None:
 def _made_calls(eng: Engine, model: str = "gpt-5.6-luna") -> None:
     """The quest made calls on ``model`` before (cost.jsonl is append-only, so they stay)."""
     eng.fi_dir.mkdir(parents=True, exist_ok=True)
-    (eng.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "ideate", "model": model}) + "\n", encoding="utf-8")
+    (eng.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "plan", "model": model}) + "\n", encoding="utf-8")
 
 
 def _started(tmp_path: Path, model: str = "gpt-5.6-luna", **kw: Any) -> Engine:
@@ -315,7 +315,7 @@ async def test_after_a_resume_with_a_new_model_cost_jsonl_names_it(tmp_path: Pat
         bridge = {"bridge_port": port}
         first = _started(tmp_path, "gpt-5.6-luna", name="vscode_extension", extra=bridge)
         # Calls made before the change: cost.jsonl keeps them (it is append-only).
-        (first.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "ideate", "model": "gpt-5.6-luna"}) + "\n",
+        (first.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "plan", "model": "gpt-5.6-luna"}) + "\n",
                                                   encoding="utf-8")
         _write_config(first.quest_root, "claude-opus-5")
         eng = Engine(_cfg(tmp_path, "claude-opus-5", name="vscode_extension", extra=bridge),
@@ -325,7 +325,7 @@ async def test_after_a_resume_with_a_new_model_cost_jsonl_names_it(tmp_path: Pat
 
         async def connect_and_call() -> None:
             await real_connect()
-            await eng._chat("hello", node="ideate")
+            await eng._chat("hello", node="plan")
             raise _Stop
 
         eng._connect_llm = connect_and_call  # type: ignore[method-assign]

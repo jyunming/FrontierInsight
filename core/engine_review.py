@@ -651,7 +651,7 @@ class ReviewStageMixin:
         temperature: float | None = None,
     ) -> str:
         """Single-user-message chat. ``node`` is the engine node name
-        (e.g. ``"ideate"``, ``"review"``); when present and the YAML
+        (e.g. ``"plan"``, ``"review"``); when present and the YAML
         config sets ``provider.node_models[node]``, that model is sent
         on this call only. Otherwise the endpoint default applies.
 
@@ -2556,7 +2556,7 @@ class ReviewStageMixin:
                 "abstract": (d.get("content") or "")[:1500],
             })
 
-        # Rich, indexable metadata that future quests' ideate node can
+        # Rich, indexable metadata that future quests can
         # filter / rank past work by. Keep the keys flat and JSON-safe.
         #
         # `paper_md_relpath` is the path RELATIVE TO `quest_root` (not

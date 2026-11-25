@@ -39,7 +39,7 @@ def _paper_engine(tmp_path: Path, docs: list[RetrievedDoc]):
 
     eng = Engine(Config(
         topic="papers pause", title="pp", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, ideate_reflect=False),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"), pauses={"papers": True},
     ))

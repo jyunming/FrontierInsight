@@ -211,28 +211,6 @@ async def test_cross_check_searches_with_the_same_scope(tmp_path: Path, no_sim: 
     assert scopes == [expected]
 
 
-@pytest.mark.parametrize("no_sim,expected", [
-    (False, WORK_SCOPE_PAPERS),
-    (True, WORK_SCOPE_PAPERS_AND_BOOKS),
-])
-@pytest.mark.asyncio
-async def test_ideate_seeds_with_the_same_scope(tmp_path: Path, no_sim: bool, expected: str) -> None:
-    eng = _engine(tmp_path)
-    scopes: list = []
-
-    class _Stop(Exception):
-        pass
-
-    async def fake_search(query, **kw):  # noqa: ANN001
-        scopes.append(kw.get("work_scope"))
-        raise _Stop
-
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-    with pytest.raises(_Stop):
-        await eng._node_ideate({"topic": "t", "no_simulation_resolved": no_sim})
-    assert scopes == [expected]
-
-
 @pytest.mark.asyncio
 async def test_auto_collect_top_up_searches_with_the_same_scope(tmp_path: Path, monkeypatch) -> None:
     eng = _engine(tmp_path)

@@ -1,8 +1,7 @@
 """Gaps a real quest found and left open (2026-09-13), closed on 2026-09-26.
 
-The ideate seed search and the no-simulation data collection searched with the topic as written: the search engines
-behind them match keywords, and a long topic statement found little or nothing there (the literature step already
-derived keyword queries; these two did not).
+The no-simulation data collection searched with the topic as written: the search engines behind it match keywords,
+and a long topic statement found little or nothing there (the literature step already derived keyword queries).
 """
 
 from __future__ import annotations
@@ -23,29 +22,13 @@ TOPIC = (
 def _engine(tmp_path: Path) -> Engine:
     eng = Engine(Config(
         topic=TOPIC, title="known-gaps", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", ideate_reflect=False),
+        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     ))
     eng.knowledge.enabled = True  # a knowledge layer to search, without Axon
     eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
     return eng
-
-
-def test_the_ideate_seed_search_uses_keywords_derived_from_the_topic(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng._derive_literature_queries = AsyncMock(return_value=["SIR model final epidemic size", "b", "c"])  # type: ignore[method-assign]
-    eng._chat = AsyncMock(return_value='{"ideas": [{"title": "t", "hypothesis": "h"}], "chosen": 0}')  # type: ignore[method-assign]
-    asyncio.run(eng._node_ideate({"topic": TOPIC}))  # type: ignore[arg-type]
-    assert eng.knowledge.asearch.await_args.args[0] == "SIR model final epidemic size"
-
-
-def test_the_ideate_seed_search_keeps_the_topic_when_no_keywords_come_back(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    eng._derive_literature_queries = AsyncMock(return_value=[])  # type: ignore[method-assign]
-    eng._chat = AsyncMock(return_value='{"ideas": [{"title": "t", "hypothesis": "h"}], "chosen": 0}')  # type: ignore[method-assign]
-    asyncio.run(eng._node_ideate({"topic": TOPIC}))  # type: ignore[arg-type]
-    assert eng.knowledge.asearch.await_args.args[0] == TOPIC
 
 
 def test_data_collection_searches_with_the_literature_steps_keywords(tmp_path: Path) -> None:

@@ -258,7 +258,7 @@ class RunStageMixin:
             _trial_checks.record_not_run(self.quest_root, "own_loop" if split else "one_script")
 
         # Clear figures from a PRIOR experiment version before this run. On a
-        # re_experiment / broaden / repair loop the implement node rewrites
+        # re_experiment / repair loop the implement node rewrites
         # experiment.py, which may emit a DIFFERENT set of figure filenames —
         # the old ones aren't overwritten, so without this they linger, get
         # counted in figures=N, and pollute the paper/slides/poster with a mix

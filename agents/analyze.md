@@ -29,9 +29,8 @@ After interpreting the results, decide one of:
 
 - `"publish"` — the results stand on their own and the paper can be written now.
 - `"re_experiment"` — the data was inconclusive (noise dominated, effect size too small, sample too thin) and another run with different design choices is justified.
-- `"broaden_lit"` — the finding raises a question the originally-fetched literature did not cover, and a literature re-fetch (followed by a re-design) is the right move.
 
-Use `re_experiment` and `broaden_lit` sparingly — they cost a full additional design-implement-execute cycle. When the experiment ran but produced a weak or negative result, `publish` is usually the right call (negative results are publishable).
+Use `re_experiment` sparingly — it costs a full additional design-implement-execute cycle. When the experiment ran but produced a weak or negative result, `publish` is usually the right call (negative results are publishable).
 
 **`key_findings` are about the results and the literature.** What FI checked (the section "What FI checked" in the Inputs: its oracle verdicts and its notes on the run) is not a finding: FI states it itself in the paper.
 
@@ -45,7 +44,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   "claims_unsupported": [{"claim": "<text>", "reason": "<text>"}, ...],
   "limitations": ["<bullet>", ...],
   "primary_sources": [{"title": "<source/file>", "detail": "<what it provided>"}, ...],
-  "next_step": "publish" | "re_experiment" | "broaden_lit",
+  "next_step": "publish" | "re_experiment",
   "next_step_reason": "<one sentence — why you picked this next step>"
 }
 

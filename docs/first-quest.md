@@ -38,7 +38,7 @@ It compares three numerical integrators on a damped oscillator, so it needs no d
 
 | Stage | What it is doing |
 |---|---|
-| `ideate`, `literature` | picks the angle; reads the sources the commission gives (none, for the example) |
+| `literature` | reads the sources the commission gives (none, for the example) |
 | `plan`, `design` | writes `plan.md` (what the papers say, the gap, the experiment it will run) |
 | `implement`, `oracle`, `execute` | writes the code, checks it on a case with a known answer, runs it |
 | `analyze`, `cross_check` | reads the results; checks them against the literature |

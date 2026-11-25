@@ -538,10 +538,13 @@ def test_conditional_edge_targets_match_route_return_values(tmp_path: Path) -> N
 
 def test_route_after_evidence_gate_reads_node_decision(tmp_path: Path) -> None:
     """The router just echoes the route the node already computed, and
-    fails open to ``write`` when the gate was a passthrough."""
+    fails open to ``write`` when the gate was a passthrough. A checkpoint of an earlier FI whose gate chose to search the
+    literature again writes: FI no longer goes back to the literature."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
     assert engine._route_after_evidence_gate(
-        {"evidence_assessment": {"route": "broaden_lit"}}) == "broaden_lit"
+        {"evidence_assessment": {"route": "broaden_lit"}}) == "write"
+    assert engine._route_after_evidence_gate(
+        {"evidence_assessment": {"route": "redesign"}}) == "redesign"
     assert engine._route_after_evidence_gate(
         {"evidence_assessment": {"route": "write"}}) == "write"
     assert engine._route_after_evidence_gate({}) == "write"
@@ -675,34 +678,27 @@ async def test_evidence_gate_ok_does_not_pause_under_research_profile(
     assert patch["evidence_assessment"]["status"] == "ok"
 
 
-async def test_evidence_gate_broaden_is_bounded(
+async def test_an_answer_of_broaden_is_read_as_insufficient_and_the_quest_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 'broaden' verdict re-enters literature at most
-    evidence_gate_max_broaden (default 1) times, then proceeds to write
-    even though the verdict is still 'broaden' — it can't spin. One source,
-    so the model answers rather than the no-source rule."""
+    """A model that still answers the verdict an earlier prompt offered ('broaden': thin evidence, search again) is
+    judged insufficient and the route is write, with retrieval on or off: FI no longer goes back to the literature. The
+    answer is not an unreadable one (that would be status unknown, which pauses a research quest)."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
-    # Retrieval on: a broaden only means something when the literature step can bring sources back (the test below
-    # covers retrieval off). The engine builds no knowledge layer for a unit test, so the flag is set on the config.
-    engine.config.knowledge.enabled = True
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001
-        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["more data"]}'
+        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["on-topic sources"]}'
 
     monkeypatch.setattr(engine, "_chat", fake_chat)
-    one = [{"content": "one source"}]
-    # Budget available → broaden, bump the counter.
-    p1 = await engine._node_evidence_gate(
-        {"topic": "t", "literature": one, "evidence_broaden_count": 0})
-    assert p1["evidence_assessment"]["route"] == "broaden_lit"
-    assert p1["evidence_assessment"]["decided_by"] == "model"
-    assert p1["evidence_broaden_count"] == 1
-    # Budget exhausted → write despite the same verdict; counter not bumped.
-    p2 = await engine._node_evidence_gate(
-        {"topic": "t", "literature": one, "evidence_broaden_count": 1})
-    assert p2["evidence_assessment"]["route"] == "write"
-    assert "evidence_broaden_count" not in p2
+    one = [{"content": "one source"}]  # one source, so the model answers rather than the no-source rule
+    for retrieval in (True, False):
+        engine.config.knowledge.enabled = retrieval
+        patch = await engine._node_evidence_gate({"topic": "t", "literature": one, "evidence_broaden_count": 0})
+        assessment = patch["evidence_assessment"]
+        assert assessment["route"] == "write" and assessment["status"] == "ok" and assessment["decided_by"] == "model"
+        assert assessment["verdict"] == "insufficient" and assessment["gaps"] == ["on-topic sources"]
+        assert "evidence_broaden_count" not in patch
+        assert "on-topic sources" in _format_evidence_note(assessment, is_survey=False)
 
 
 def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: Path) -> None:
@@ -722,29 +718,8 @@ def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: 
     assert "simulate.py" in said and "experiment.py" not in said
 
 
-async def test_evidence_gate_broaden_with_retrieval_off_writes_and_keeps_the_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With retrieval off there is no literature step to broaden: a live kimi-k3 quest's model-decided broaden sent it
-    back to redesign after its results were seen, changing its hypothesis and discarding a complete first run. The route
-    is write; the verdict and gaps stay recorded, so the writer frames its limits and the evidence level names the gap."""
-    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
-    assert engine.config.knowledge.enabled is False
-
-    async def fake_chat(prompt, node=None):  # noqa: ANN001
-        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["on-topic sources"]}'
-
-    monkeypatch.setattr(engine, "_chat", fake_chat)
-    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "evidence_broaden_count": 0})
-    assessment = patch["evidence_assessment"]
-    assert assessment["route"] == "write"
-    assert assessment["verdict"] == "broaden" and assessment["gaps"] == ["on-topic sources"]
-    assert "evidence_broaden_count" not in patch
-    assert "on-topic sources" in _format_evidence_note(assessment, is_survey=False)
-
-
 async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:
-    """--analyze (analyze_local_first) makes ideate / literature / design
+    """--analyze (analyze_local_first) makes literature / design
     PASSTHROUGHS — no LLM call, no retrieval — so the quest goes straight
     from clarify to loading + analysing the user's local data. Each returns
     an empty patch BEFORE touching the LLM / knowledge layer (which would
@@ -752,7 +727,6 @@ async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:
     cfg = _route_config(tmp_path, review_loop=False, max_iterations=1)
     cfg.engine.analyze_local_first = True
     engine = Engine(cfg)
-    assert await engine._node_ideate({"topic": "analyse my data"}) == {}
     assert await engine._node_literature({"topic": "analyse my data"}) == {}
     assert await engine._node_design({"topic": "analyse my data"}) == {}
 
@@ -892,8 +866,8 @@ _ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
 @pytest.mark.parametrize(
     ("state", "mode", "asked", "verdict"),
     [
-        # A simulation with no source: broaden, without asking.
-        ({"literature": []}, "retrieval", False, "broaden"),
+        # A simulation with no source: insufficient, without asking.
+        ({"literature": []}, "retrieval", False, "insufficient"),
         # 15 sources and a supported finding: sufficient, without asking.
         ({"literature": _gate_sources(15), "cross_check": _ONE_SUPPORTED},
          "retrieval", False, "sufficient"),
@@ -902,8 +876,8 @@ _ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
          "retrieval", True, "insufficient"),
         ({"literature": _gate_sources(15)}, "retrieval", True, "insufficient"),
         # The rules come from simulation quests with retrieval on. User data,
-        # a survey, --analyze (no literature step) and retrieval off (a
-        # broaden could find nothing) are always asked.
+        # a survey, --analyze (no literature step) and retrieval off (no
+        # source is normal there) are always asked.
         ({"literature": [], "no_simulation_resolved": True},
          "retrieval", True, "insufficient"),
         ({"literature": [], "clarify_answers": {"topic_shape": "survey"}},
@@ -918,7 +892,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     state: dict, mode: str, asked: bool, verdict: str,
 ) -> None:
-    """Over 68 gate calls the model always broadened a simulation with no
+    """Over 68 gate calls the model always judged thin a simulation with no
     source and always passed one with 15+ sources and a supported finding;
     between those it gave different answers to identical counts. So the two
     settled cases are decided by the counts, and everything else still asks
@@ -944,7 +918,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     assert ev["verdict"] == verdict
     assert ev["decided_by"] == ("model" if asked else "rule")
     if not asked:
-        # A rule-decided broaden still reaches the writer's evidence note.
+        # A rule-decided verdict still reaches the writer's evidence note.
         assert ev["rationale"]
     assert patch["research_protocol"]["topic_type"]
 
@@ -1160,35 +1134,34 @@ async def test_emit_artifacts_only_loads_checkpoint_without_rerun(
 
 
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
-    """Verify topology: linear ideate->...->review and conditional review->design|END."""
+    """Verify topology: linear clarify->...->review and conditional review->design|END. FI makes no research ideas and
+    offers no study cards: neither step is in the graph."""
     from langgraph.graph import END, START
 
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
     g = engine._build_graph()
 
     expected_nodes = {
-        "clarify", "ideate", "literature", "select_skills", "plan", "design",
+        "clarify", "literature", "select_skills", "plan", "design",
         "implement", "execute", "analyze", "write", "review",
     }
     assert expected_nodes.issubset(set(g.nodes))
+    assert not {"ideate", "scope"} & set(g.nodes)
 
     # Linear edges that must be present. `clarify` runs between
-    # START and `ideate`. The no-simulation mode turned
+    # START and `literature`. The no-simulation mode turned
     # ``design → implement`` into a conditional edge (implement vs
     # wait_for_data) — see the branches check below.
     plain_edges = set(g.edges)
     assert (START, "clarify") in plain_edges
-    assert ("clarify", "ideate") in plain_edges
-    assert ("ideate", "literature") in plain_edges
-    # `select_skills` sits between literature and design: it needs the chosen
-    # direction and the retrieved sources to match the topic against the skill
+    assert ("clarify", "literature") in plain_edges
+    # `select_skills` sits between literature and design: it needs the
+    # retrieved sources to match the topic against the skill
     # catalogue, and design needs its answer. `pause_after_literature` sits
     # between the literature and it: a passthrough unless pauses.supply asks
     # for a stop there, so a resume starts after the search, not inside it.
     assert ("literature", "pause_after_literature") in plain_edges
-    # The study cards sit between them: a person picks the study before the tools and the plan.
-    assert ("pause_after_literature", "scope") in plain_edges
-    assert ("scope", "select_skills") in plain_edges
+    assert ("pause_after_literature", "select_skills") in plain_edges
     # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
     # block the design step then adopts.
     assert ("select_skills", "plan") in plain_edges
@@ -1261,21 +1234,17 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     improve_branch = next(iter(g.branches["improve"].values()))
     assert improve_branch.ends == {"rerun": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
-    # Three terminal labels: ``broaden_lit`` re-enters the literature
-    # node (iterative literature loop), ``redesign`` re-enters design
-    # for ``re_experiment``, and the happy-path "write" label now lands
-    # on the evidence_gate node (which makes the real write-vs-broaden call).
+    # Two terminal labels: ``redesign`` re-enters design for ``re_experiment``, and the happy-path "write" label lands
+    # on the evidence_gate node. Nothing goes back to the literature.
     assert cross_branch.ends == {
         "write": "evidence_gate",
         "redesign": "design",
-        "broaden_lit": "literature",
     }
-    # evidence_gate routes to write (sufficient / insufficient-but-write)
-    # or back to literature for one bounded broaden pass.
+    # evidence_gate routes to write (sufficient / insufficient-but-write), or back to the design, the code or the run.
     assert "evidence_gate" in g.nodes
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
-    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
+    assert ev_branch.ends == {"write": "write", "redesign": "design", "stuck": "stuck_no_findings",
                               "repair_crash": "execute", "rewrite_code": "implement"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
@@ -1728,7 +1697,7 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
         (Path(__file__).resolve().parent.parent
          / "agents" / "design.md").read_text(encoding="utf-8")
     )
-    kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
+    kw = dict(topic="t", study="(none)", literature_block="lit",
               review_feedback="r", timeout_s="60", clarify_block="c",
               skills_block="(no simulation skills enabled)",
               inputs_block="(none supplied)", job_block="", time_note="")
@@ -3446,162 +3415,6 @@ async def test_engine_run_closes_logger_on_exception_path(
     assert not engine.quest_root.exists()
 
 
-# ---- _run_ideate_tournament ---------------------------------------------
-
-
-def _make_tournament_engine(tmp_path: Path) -> "Engine":
-    cfg = Config(
-        topic="some research topic",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(ideate_tournament=True, ideate_reflect=False),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    return Engine(cfg)
-
-
-def test_engine_config_ideate_tournament_default_false() -> None:
-    """Tournament must be OPT-IN — it costs 2 extra LLM calls vs.
-    the single-shot critique. Default-off keeps the cost floor at 7-18
-    calls/quest per docs/USAGE.md."""
-    from core.config import EngineConfig
-    assert EngineConfig().ideate_tournament is False
-
-
-def test_ideate_tournament_prompt_loads() -> None:
-    """The ``ideate_tournament`` prompt is added to ``_load_prompts``.
-    Regression guard so a future prompt-list edit doesn't silently
-    drop the tournament prompt and leave the feature unable to run."""
-    from core.engine import _load_prompts
-    prompts = _load_prompts()
-    assert "ideate_tournament" in prompts
-    t = prompts["ideate_tournament"]
-    # The prompt must accept the four variables the engine substitutes.
-    rendered = t.substitute(topic="x", clarify_block="y", idea_a="a", idea_b="b")
-    assert "winner" in rendered.lower()
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_picks_majority_winner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3 ideas → 3 pairwise matches. If idea 0 wins both its matches,
-    it has 2 wins; the other two have 1 win and 0 wins. Tournament
-    must pick idea 0."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [
-        {"title": "Alpha", "summary": "first"},
-        {"title": "Beta", "summary": "second"},
-        {"title": "Gamma", "summary": "third"},
-    ]
-    # Match outcomes (a_idx, b_idx) → winner letter
-    outcomes = {
-        (0, 1): "A",  # Alpha beats Beta
-        (0, 2): "A",  # Alpha beats Gamma
-        (1, 2): "B",  # Gamma beats Beta
-    }
-    call_count = {"n": 0}
-
-    async def fake_chat(self, prompt, *, node, **kw):
-        call_count["n"] += 1
-        # Extract a/b indices from the prompt text (each prompt has the
-        # full idea JSON inline, so we match on title to know which pair).
-        is_alpha_in_a = '"Alpha"' in prompt.split('# Idea B')[0]
-        is_beta_in_a = '"Beta"' in prompt.split('# Idea B')[0]
-        if is_alpha_in_a and '"Beta"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(0, 1)]
-        elif is_alpha_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(0, 2)]
-        elif is_beta_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(1, 2)]
-        else:
-            raise AssertionError(f"unexpected pair in prompt: {prompt[:200]}")
-        return f'{{"winner": "{w}", "reason": "tractability", "margin": "decisive"}}'
-
-    # monkeypatch.setattr is auto-scoped to this test — pytest's
-    # teardown restores Engine._chat even if an assertion raises mid-test.
-    # Patching the class attribute directly with try/finally is fragile
-    # to a setup-time exception leaking the replacement into later tests.
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[1],
-    )
-
-    assert winner["title"] == "Alpha"
-    assert record["winner_idx"] == 0
-    # Alpha wins both its matches (vs Beta, vs Gamma) → idx 0: 2 wins.
-    # Beta loses both its matches (vs Alpha, vs Gamma) → idx 1: 0 wins.
-    # Gamma loses to Alpha, beats Beta → idx 2: 1 win.
-    assert record["wins"] == [2, 0, 1]
-    assert record["outcome"] == "swapped"  # initial_chosen was Beta
-    assert call_count["n"] == 3  # C(3, 2)
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_falls_back_when_inconclusive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If every match returns malformed JSON (winner != "A" or "B"),
-    no idea accumulates wins. Tournament must fall back to
-    ``initial_chosen`` rather than crashing or picking arbitrarily."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "A", "summary": "x"}, {"title": "B", "summary": "y"}]
-    initial = ideas[1]
-
-    async def fake_chat(self, prompt, *, node, **kw):
-        return '{"winner": "TIE", "reason": "?"}'  # invalid winner
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=initial,
-    )
-
-    assert winner["title"] == "B"  # initial_chosen preserved
-    assert record["outcome"] == "inconclusive_fallback"
-    assert record["winner_idx"] is None
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_dispatches_matches_in_parallel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3 pairwise matches with 200ms simulated latency each. Parallel
-    dispatch → wall-clock ~200ms; serial would be 600ms. Threshold
-    set well below the serial floor so the test stays unambiguous
-    even under CI scheduling jitter / GC pauses (a tighter
-    130 ms-with-50 ms-sleeps threshold would flake on constrained
-    runners)."""
-    import asyncio as _asyncio
-    import time as _time
-
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
-
-    async def slow_chat(self, prompt, *, node, **kw):
-        await _asyncio.sleep(0.2)
-        return '{"winner": "A", "reason": "x", "margin": "decisive"}'
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", slow_chat)
-
-    start = _time.monotonic()
-    await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[0],
-    )
-    elapsed = _time.monotonic() - start
-
-    assert elapsed < 0.5, (
-        f"3 matches must dispatch concurrently; wall-clock {elapsed:.3f}s "
-        f"suggests serial execution (serial floor is ~0.6s for 3 × 200ms; "
-        f"parallel ceiling is ~0.2s + overhead)."
-    )
-
-
 # ---- non-scientific paper formats + write-persona ----------------------
 
 
@@ -3749,36 +3562,6 @@ def test_resolve_write_persona_unknown_format_falls_back_to_empty(
         "clarify_answers": {"paper_venue": "made_up_format"}
     })
     assert persona == ""
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """C(N, 2) is 0 for N=1, so the tournament has nothing to do.
-    ``_node_ideate``'s guard ``len(ideas) >= 2`` keeps the helper
-    from being called in this case — but if it ever IS called with
-    fewer ideas, the helper should also handle it gracefully (no
-    LLM calls, return initial_chosen)."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "Solo"}]
-
-    chat_calls = 0
-    async def fake_chat(self, prompt, *, node, **kw):
-        nonlocal chat_calls
-        chat_calls += 1
-        return '{"winner": "A"}'
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[0],
-    )
-
-    # No matches to play; outcome falls through to inconclusive_fallback.
-    assert chat_calls == 0
-    assert winner["title"] == "Solo"
-    assert record["outcome"] == "inconclusive_fallback"
 
 
 # ---- _clear_stale_figures ------------------------------------------------

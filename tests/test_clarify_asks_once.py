@@ -201,3 +201,21 @@ def test_with_nothing_anywhere_the_log_does_not_blame_the_yaml(tmp_path: Path) -
     assert no_sim is False
     assert not any("no signal from YAML" in m for m in lines)
     assert any("source=default" in m for m in lines)
+
+
+def test_the_clarify_web_callback_keeps_its_files(tmp_path: Path) -> None:
+    fi = tmp_path / ".fi"
+    cb = launch._web_page_clarify_callback(fi, logging.getLogger("test_clarify_asks_once"), 0.0)
+
+    async def go() -> dict:
+        task = asyncio.create_task(cb({"q": {"question": "?", "default": "a"}}))
+        for _ in range(50):
+            await asyncio.sleep(0.05)
+            if (fi / "clarify_questions.json").is_file():
+                break
+        assert (fi / "clarify_waiting.json").is_file()
+        (fi / "clarify_answer.json").write_text('{"q": "b"}', encoding="utf-8")
+        return await asyncio.wait_for(task, 10)
+
+    assert asyncio.run(go()) == {"q": "b"}
+    assert sorted(p.name for p in fi.iterdir()) == ["clarify_answer.json", "clarify_questions.json"]

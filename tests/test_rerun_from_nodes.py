@@ -16,7 +16,7 @@ from core.engine import Engine
 from tests.test_engine_smoke import _classify, _fake_response_for
 from tests.test_rerun_from import _cfg, _Graph
 
-NEW_STEPS = ["ideas", "literature", "plan", "design", "figures", "crosscheck", "evidence", "claims"]
+NEW_STEPS = ["literature", "plan", "design", "figures", "crosscheck", "evidence", "claims"]
 # The nodes that are deliberately not a step, and the step that covers the others.
 NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_reflect", "improve", "human_feedback",
               "replot_layout", "stuck_no_findings"}
@@ -24,7 +24,6 @@ NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_ref
 # Pinned here, apart from the module, so that dropping an entry from OUTPUTS fails a test: what each new step moves,
 # and what it leaves.
 MOVES = {
-    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json", "code", "paper.md"],
     "literature": ["data/literature", "plan.md", "needs/FROZEN_PROTOCOL.json", "results.json", "slides.pdf"],
     "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", "needs/FROZEN_PROTOCOL.json",
              "needs/receipts/design_audit.json", "code", "paper", ".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_dry_run.json"],
@@ -38,7 +37,6 @@ MOVES = {
                "slides.pdf", "poster.pdf"],
 }
 STAYS = {
-    "ideas": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "literature": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "plan": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "design": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "plan.md", ".fi/oracles_added.json", ".fi/oracle_guidance.json", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
@@ -83,9 +81,9 @@ def test_every_offered_step_has_its_words_its_files_and_a_block() -> None:
         info = rerun_from.step_info(step, reached=True)
         assert set(info) == {"name", "group", "sentence", "needs_approval", "reached", "outputs"}
         assert info["group"] and info["outputs"] == rerun_from.outputs_of(step)
-    for step in ("ideas", "literature", "studies", "plan", "design"):
+    for step in ("literature", "plan", "design"):
         assert rerun_from.needs_approval(step) and "experiment plan (frozen) is replaced" in rerun_from.REDOES[step]
-    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "studies", "plan", "design"))
+    assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("literature", "plan", "design"))
 
 
 def test_every_graph_node_is_a_step_or_says_why_not(tmp_path: Path) -> None:
@@ -99,16 +97,27 @@ def test_every_graph_node_is_a_step_or_says_why_not(tmp_path: Path) -> None:
 
 
 def test_the_raw_node_names_are_accepted_as_the_steps() -> None:
-    for alias, step in {"ideate": "ideas", "cross_check": "crosscheck", "evidence_gate": "evidence", "claim_check": "claims",
+    for alias, step in {"cross_check": "crosscheck", "evidence_gate": "evidence", "claim_check": "claims",
                         "web_plots": "figures", "web_figures": "figures", "Plan": "plan", "literature": "literature"}.items():
         assert rerun_from.resolve(alias) == step
+
+
+def test_a_step_fi_no_longer_has_is_named_plainly_and_nothing_else_is() -> None:
+    """``--from ideas`` / ``--from studies`` (and the old node names) get one plain sentence instead of the list of
+    steps: FI makes no research ideas and offers no study cards, a study starts from a commission."""
+    for name in ("ideas", "ideate", "studies", "scope", " Ideas "):
+        said = rerun_from.gone(name)
+        assert said.startswith("FI no longer has the ") and "commission" in said and "nothing was changed" in said, name
+        assert rerun_from.resolve(name) is None, name
+    for name in ("literature", "plan", "design", "", "nonsense"):
+        assert rerun_from.gone(name) == "", name
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("step", NEW_STEPS)
 async def test_the_checkpoint_is_the_state_before_the_step(step: str) -> None:
     first = rerun_from.STEPS[step][0]
-    others = ["ideate", "literature", "select_skills", "plan", "design", "implement_outline", "implement", "execute",
+    others = ["literature", "select_skills", "plan", "design", "implement_outline", "implement", "execute",
               "web_plots", "web_figures", "analyze", "cross_check", "evidence_gate", "write", "claim_check", "review"]
     order = [(n,) for n in others]
     found = await rerun_from.checkpoint_before(_Graph(order), {}, step)
@@ -123,7 +132,7 @@ async def test_the_checkpoint_is_the_state_before_the_step(step: str) -> None:
 @pytest.mark.parametrize("step", NEW_STEPS)
 async def test_a_step_the_quest_never_reached_is_not_offered(step: str) -> None:
     nodes = rerun_from.STEPS[step]
-    everything = ["ideate", "literature", "select_skills", "plan", "design", "implement_outline", "implement", "execute",
+    everything = ["literature", "select_skills", "plan", "design", "implement_outline", "implement", "execute",
                   "analyze", "cross_check", "evidence_gate", "write", "claim_check", "review"]
     without = [(n,) for n in everything if n not in nodes]
     assert step not in await rerun_from.reached(_Graph(without), {})
@@ -340,7 +349,7 @@ async def test_after_a_rerun_the_steps_of_the_abandoned_line_are_not_the_quest_s
         return {}
 
     builder = StateGraph(dict)
-    order = ["ideate", "plan", "design", "execute", "write", "review"]
+    order = ["literature", "plan", "design", "execute", "write", "review"]
     for name in order:
         builder.add_node(name, node)
     builder.add_edge(START, order[0])

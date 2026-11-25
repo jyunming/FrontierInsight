@@ -10,7 +10,7 @@
 ## Architecture in one paragraph
 
 `launch.py` parses YAML → `Config` → constructs an `Engine` per quest →
-the Engine compiles an async `StateGraph` — `clarify → ideate →
+the Engine compiles an async `StateGraph` — `clarify →
 literature → design →` then either `implement → execute →
 execute_reflect` (simulation) or `auto_collect_data → wait_for_data →
 data_load → web_plots → web_figures` (no-simulation) `→ analyze →
@@ -32,7 +32,7 @@ For exact YAML field semantics see [`capabilities-reference.md`](capabilities-re
 for the layered design see [`architecture.md`](architecture.md).
 
 ### Engine
-- 21-node async LangGraph DAG with four feedback loops (clarify, ideate,
+- 21-node async LangGraph DAG with four feedback loops (clarify,
   literature, select_skills, design, implement_outline/implement,
   execute/execute_reflect
   or the no-simulation chain auto_collect_data → wait_for_data → data_load
@@ -48,16 +48,13 @@ for the layered design see [`architecture.md`](architecture.md).
 - **Execute-repair loop** — when an agent-generated script crashes,
   the engine reads the traceback and lets the LLM patch the code,
   bounded by `engine.exec_reflect_max_iterations`.
-- **Analyze re-route** — `analyze.next_step ∈ {re_experiment,
-  broaden_lit}` sends control back to `design` (bounded by
+- **Analyze re-route** — `analyze.next_step == re_experiment` sends control back to `design` (bounded by
   `engine.max_iterations`).
 - **Review-driven rewrite** — a `review.verdict == "revise"` writes the
   paper again (its objections kept in the quality report), sharing the same `max_iterations` budget.
 - **Cross-paper check** — after `analyze`, each key finding gets a
   per-finding literature search and a supporting / conflicting /
   neutral classification surfaced into the write prompt.
-- **Ideate self-reflection** — an extra LLM call may swap the
-  picked idea before design begins.
 
 ### Clarify
 - Pre-flight questionnaire (`want_to_see`, `title`,

@@ -841,7 +841,7 @@ def assess(
     gate = state.get("evidence_assessment") or {}
     if gate.get("status") == "unknown":
         ready_gaps.append(f"the evidence gate could not be evaluated ({gate.get('failure') or 'no usable reply'})")
-    elif gate.get("verdict") in ("insufficient", "broaden"):
+    elif gate.get("verdict") in ("insufficient", "broaden"):  # "broaden": an earlier FI's word for thin evidence
         gaps_named = "; ".join(str(g) for g in gate.get("gaps") or []) or "none named"
         ready_gaps.append(f"the evidence gate judged the evidence {gate['verdict']} and the paper was written on it (gaps: {gaps_named})")
     critique_history = _json(needs / "DESIGN_CRITIQUE.json")

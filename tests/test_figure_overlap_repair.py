@@ -98,7 +98,7 @@ def _engine(tmp_path: Path, *, max_iter: int = 3, replicates: int = 1) -> Engine
     eng = Engine(Config(
         topic="figure overlap", title="figure overlap", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off", ideate_reflect=False,
+            max_iterations=1, review_loop=False, clarify_mode="off",
             exec_reflect_max_iterations=max_iter, execute_replicates=replicates,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),

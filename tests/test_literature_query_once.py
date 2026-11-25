@@ -1,8 +1,7 @@
 """The literature step derives its search queries once per pass and input (the 2026-09-28 re-audit, F-09).
 
-The idea step derives a seed query from the topic alone; the literature step derives its own from the topic AND the
-chosen direction (and, on a later pass, the hypothesis): different inputs, both kept. What was redundant is the
-literature step deriving again with the same inputs -- a resume after a pause runs the step again, spent a second
+The literature step derives its queries from the topic (and an earlier FI's chosen direction). What was redundant is
+the literature step deriving again with the same inputs -- a resume after a pause runs the step again, spent a second
 call, and could drift to other queries finding other papers. The query set is kept in ``.fi/literature_queries.json``
 (the step's own state is not saved until it finishes) and reused when the derivation prompt and the pass match.
 """
@@ -76,15 +75,15 @@ async def test_a_new_pass_or_changed_inputs_derive_again_and_say_why(tmp_path: P
     eng = _engine(tmp_path)
     calls = _counting(eng)
     await eng._node_literature(_state())
-    # A broaden-the-literature re-entry: pass 2, with the design's hypothesis folded in.
-    second = await eng._node_literature(_state(literature_iter=1, design={"hypothesis": "h1"}))
+    # A second pass (a resumed one): pass 2.
+    second = await eng._node_literature(_state(literature_iter=1))
     assert second["literature_query_set"]["reason"] == "a new search pass (2)"
-    # The same pass again, but the hypothesis changed.
-    third = await eng._node_literature(_state(literature_iter=1, design={"hypothesis": "h2"}))
-    assert third["literature_query_set"]["reason"] == "the topic, the chosen direction, the hypothesis or the model changed"
+    # The same pass again, but the chosen direction (an earlier FI's) changed.
+    third = await eng._node_literature(_state(literature_iter=1, chosen_idea={"title": "another direction"}))
+    assert third["literature_query_set"]["reason"] == "the topic, the chosen direction or the model changed"
     assert calls.count("literature_query") == 3
-    # ... and that pass with h2 once more is reused.
-    fourth = await eng._node_literature(_state(literature_iter=1, design={"hypothesis": "h2"}))
+    # ... and that pass once more is reused.
+    fourth = await eng._node_literature(_state(literature_iter=1, chosen_idea={"title": "another direction"}))
     assert fourth["literature_query_set"]["reused"] is True and calls.count("literature_query") == 3
 
 
@@ -122,7 +121,7 @@ async def test_another_kind_of_quest_or_another_model_derives_again(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_the_ideate_record_is_never_used_by_the_literature_step(tmp_path: Path) -> None:
+async def test_an_earlier_fi_s_idea_step_record_is_never_used_by_the_literature_step(tmp_path: Path) -> None:
     from core.engine import _record_query_set
 
     eng = _engine(tmp_path)

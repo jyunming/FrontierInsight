@@ -61,8 +61,8 @@ def test_map_blocks_mark_the_path_the_quest_does_not_take() -> None:
 
 def test_status_says_finished_stopped_here_and_not_reached() -> None:
     nodes = {n["node"]: n for n in rerun_from.node_map(
-        _steps({"ideas", "literature", "plan", "design", "skills", "code"}))}
-    for name in ("clarify", "ideate", "literature", "select_skills", "plan", "design"):
+        _steps({"literature", "plan", "design", "skills", "code"}))}
+    for name in ("clarify", "literature", "select_skills", "plan", "design"):
         assert nodes[name]["status"] == "done", name
     assert nodes["implement_outline"]["status"] == "now"
     for name in ("implement", "execute", "analyze", "write", "review"):
@@ -78,7 +78,7 @@ def test_a_finished_quest_has_nothing_that_is_still_open() -> None:
 
 def test_a_quest_with_no_simulation_takes_the_data_path() -> None:
     nodes = {n["node"]: n for n in rerun_from.node_map(
-        _steps({"ideas", "literature", "plan", "design", "skills", "run", "figures"}), no_simulation=True)}
+        _steps({"literature", "plan", "design", "skills", "run", "figures"}), no_simulation=True)}
     assert nodes["execute"]["status"] == "off" and not nodes["execute"]["clickable"]
     assert nodes["web_plots"]["status"] == "now" and nodes["web_plots"]["clickable"]
     assert nodes["data_load"]["status"] == "done" and nodes["data_load"]["clickable"]
@@ -102,8 +102,8 @@ def test_the_skills_node_says_where_to_tune_it() -> None:
 
 
 def test_only_reached_nodes_with_a_step_are_clickable() -> None:
-    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature", "plan", "design", "code", "run"}))}
-    for name in ("ideate", "literature", "plan", "design", "implement_outline", "implement", "execute"):
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"literature", "plan", "design", "code", "run"}))}
+    for name in ("literature", "plan", "design", "implement_outline", "implement", "execute"):
         assert nodes[name]["clickable"] and nodes[name]["redoes"] and nodes[name]["outputs"]
     # Not reached: greyed.
     assert not nodes["analyze"]["clickable"] and not nodes["write"]["clickable"]
@@ -117,7 +117,7 @@ def test_only_reached_nodes_with_a_step_are_clickable() -> None:
 
 def test_restart_at_or_before_design_needs_approval_and_later_does_not() -> None:
     nodes = {n["node"]: n for n in rerun_from.node_map(_steps(set(rerun_from.STEPS)))}
-    for name in ("ideate", "literature", "plan", "design"):
+    for name in ("literature", "plan", "design"):
         assert nodes[name]["needs_approval"], name
     for name in ("select_skills", "implement", "execute", "analyze", "write", "review"):
         assert not nodes[name]["needs_approval"], name
@@ -141,7 +141,7 @@ def test_rerun_steps_api_returns_the_map(tmp_path: Path, monkeypatch: pytest.Mon
     (quest_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")), encoding="utf-8")
 
     async def fake_steps(self) -> list[dict]:
-        return _steps({"ideas", "literature", "plan", "design", "code"})
+        return _steps({"literature", "plan", "design", "code"})
 
     async def no_values(self) -> dict:
         return {}
@@ -158,7 +158,7 @@ def test_rerun_steps_api_returns_the_map(tmp_path: Path, monkeypatch: pytest.Mon
     assert nodes["implement"]["title"] == "Write the code" and nodes["implement_outline"]["status"] == "now"
     assert nodes["design"]["status"] == "done" and nodes["analyze"]["status"] == "todo"
     # The menu's own list is unchanged.
-    assert [s["step"] for s in body["steps"]] == ["ideas", "literature", "plan", "design", "code"]
+    assert [s["step"] for s in body["steps"]] == ["literature", "plan", "design", "code"]
 
 
 def test_the_button_uses_the_existing_resume_endpoint(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_quest_page_has_the_map() -> None:
 
 
 def test_map_payload_is_what_the_web_and_vs_code_draw() -> None:
-    steps = _steps({"ideas", "literature"})
+    steps = _steps({"literature"})
     payload = rerun_from.map_payload(steps, finished=False, no_simulation=True)
     assert set(payload) == {"blocks", "finished", "nodes"}
     assert payload["nodes"] == rerun_from.node_map(steps, no_simulation=True)
@@ -206,7 +206,7 @@ def test_the_vs_code_panel_loads_the_shared_map_and_restarts_through_chat() -> N
 def test_a_node_the_quest_has_not_reached_is_not_clickable_even_when_its_step_was() -> None:
     """``implement_outline`` and ``implement`` share the ``code`` step: with the quest stopped at the outline, the second is
     not reached, so it is neither clickable nor offered a restart it would describe as 'nothing to redo'."""
-    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature", "plan", "design", "skills", "code"}))}
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"literature", "plan", "design", "skills", "code"}))}
     assert nodes["implement_outline"]["status"] == "now" and nodes["implement_outline"]["clickable"]
     assert nodes["implement"]["status"] == "todo" and not nodes["implement"]["clickable"]
 
@@ -225,12 +225,12 @@ def test_the_node_a_quest_stopped_in_is_now_even_when_it_is_not_a_step() -> None
     assert nodes["human_feedback"]["status"] == "now"
     assert all(nodes[n]["status"] == "done" for n in ("clarify", "design", "execute", "write", "claim_check", "review"))
     nodes = {n["node"]: n for n in rerun_from.node_map(_steps(set()), at=["clarify"])}
-    assert nodes["clarify"]["status"] == "now" and nodes["ideate"]["status"] == "todo"
+    assert nodes["clarify"]["status"] == "now" and nodes["literature"]["status"] == "todo"
     # A node on the other path is never where a quest stopped: the last reached step is used instead.
-    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature"}), at=["wait_for_data"])}
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"literature"}), at=["wait_for_data"])}
     assert nodes["literature"]["status"] == "now" and nodes["wait_for_data"]["status"] == "off"
     # On the data path the same pause is where the quest stopped.
-    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature", "plan", "design", "skills", "run"}),
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"literature", "plan", "design", "skills", "run"}),
                                                        no_simulation=True, at=["wait_for_data"])}
     assert nodes["wait_for_data"]["status"] == "now" and nodes["auto_collect_data"]["status"] == "done"
     assert nodes["data_load"]["status"] == "todo"
@@ -253,7 +253,7 @@ async def test_a_failed_quest_is_not_finished_and_shows_where_it_failed(tmp_path
     monkeypatch.setattr(Engine, "_checkpoint_next", at_execute)
     (quest_root / "quest_failed.md").write_text("the run crashed", encoding="utf-8")
     (quest_root / "frontier_insight_summary.json").write_text("{}", encoding="utf-8")
-    payload = await engine.quest_map(_steps({"ideas", "literature", "plan", "design", "skills", "code", "run"}))
+    payload = await engine.quest_map(_steps({"literature", "plan", "design", "skills", "code", "run"}))
     nodes = {n["node"]: n for n in payload["nodes"]}
     assert payload["finished"] is False and nodes["execute"]["status"] == "now"
     assert nodes["implement"]["status"] == "done" and nodes["analyze"]["status"] == "todo"
@@ -320,7 +320,7 @@ async def test_a_quest_paused_at_the_review_is_not_finished_until_it_is_accepted
     nodes = {n["node"]: n["status"] for n in paused["nodes"]}
     assert paused["finished"] is False
     assert nodes["human_feedback"] == "now"
-    assert all(nodes[n] == "done" for n in ("clarify", "ideate", "design", "execute", "write", "claim_check", "review"))
+    assert all(nodes[n] == "done" for n in ("clarify", "literature", "design", "execute", "write", "claim_check", "review"))
     web = TestClient(make_app(cfg.output.output_dir)).get(f"/api/quests/{quest_id}/rerun-steps").json()
     assert web["finished"] is False and web["nodes"] == paused["nodes"]
 
@@ -371,7 +371,7 @@ def test_the_rerun_steps_api_uses_the_data_path_clarify_chose(tmp_path: Path, mo
     (quest_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")), encoding="utf-8")
 
     async def fake_steps(self) -> list[dict]:
-        return _steps({"ideas", "literature", "plan", "design", "skills", "run"})
+        return _steps({"literature", "plan", "design", "skills", "run"})
 
     async def values(self) -> dict:
         return {"no_simulation_resolved": True}

@@ -423,7 +423,7 @@ knowledge:
   top_k: 12        # pull more — costs ~5K extra tokens per LLM call that uses the block
 ```
 
-Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`ideate`, `design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
+Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
 
 ### Keep internal docs out of an externally-published paper
 

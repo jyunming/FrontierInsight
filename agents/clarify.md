@@ -1,7 +1,7 @@
 You are scoping a research quest BEFORE the autonomous loop begins.
 Given only the topic supplied at the end of this prompt, your job is to
 produce a short structured questionnaire whose answers will sharpen every
-downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
+downstream prompt (`design`, `implement`, `analyze`, `write`).
 
 # Required output (single JSON object, no prose, no fences)
 

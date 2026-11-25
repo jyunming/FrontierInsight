@@ -280,8 +280,7 @@
     const fallback = [
       { value: 'off',                 label: 'off — single model (cheapest)' },
       { value: 'cross_check_only',    label: 'cross_check only — fan out the cross_check node' },
-      { value: 'ideate_and_check',    label: 'ideate + cross_check' },
-      { value: 'full',                label: 'full — ideate + analyze + cross_check' },
+      { value: 'full',                label: 'full — analyze + cross_check' },
     ];
     const list = profiles.length ? profiles : fallback;
     const opts = list.map(p => `<option value="${escapeAttr(p.value)}" title="${escapeAttr(p.description || '')}"${p.value === 'off' ? ' selected' : ''}>${escapeHtml(p.label)}</option>`).join('');

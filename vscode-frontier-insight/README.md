@@ -22,7 +22,7 @@ The finished paper is in `outputs/<quest id>/paper/paper.md` in your project fol
 ## What this is
 
 The Frontier Insight Python engine drives a 21-node async research
-DAG (`clarify → ideate → literature → design → implement → execute →
+DAG (`clarify → literature → design → implement → execute →
 execute_reflect → analyze → cross_check → write → review`, with three
 self-correction loops and an optional reviewer panel). This extension
 is the **host** that runs the engine inside VSCode and serves its LLM
@@ -247,8 +247,6 @@ In the chat panel you'll see progress messages:
   [FI] start quest_id=...-fi-demo-integrators-xxx provider=openai
   → clarify
   [clarify] mode=auto; agent self-answered 10 slots
-  → ideate
-  [ideate] topic=Compare numerical integrators...
   → literature
   [literature] retrieved 5 docs
   ...
@@ -262,8 +260,6 @@ That example YAML names `provider: openai`, so its model calls go to OpenAI rath
 ### Answer the setup questions
 
 When a quest on the VS Code chat model starts (a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
-
-Before the plan, a quest run through the extension shows its study cards as a quick pick: one item per card, *Edit a card…* to change a card's question, and *Write my own…* for a sentence of your own.
 
 ### Review the result before it ships
 
@@ -338,7 +334,7 @@ With no argument, that shows a QuickPick of every quest under
 and the extension auto-finds the matching draft YAML by title slug
 (falling back to a file picker if no match exists), then spawns FI
 with `--resume <quest_id>` so LangGraph continues from the last
-completed node instead of redoing `ideate`/`literature`/`design`
+completed node instead of redoing `literature`/`design`
 from scratch.
 
 You can also pass the quest_id directly:
@@ -349,7 +345,7 @@ You can also pass the quest_id directly:
 
 **Several studies in several folders.** Whatever folder VS Code has open is where a new quest runs; open another folder for another study, nothing to set. FI remembers every quest it has run on this computer, in any folder or window (`~/.frontier-insight/quests.json`), so the short id is enough — the six characters after the last dash, `69ef80` here, or any other part the id starts or ends with, as long as it names one quest — and the quest may be one you ran in another folder: `@fi /resume 69ef80` finds it, and it runs in its own folder with its own `config.yaml`. When the id matches more than one quest, the chat lists them with their title and folder. `@fi /resume` and **FI: Quest map** offer one list: the open folder's quests first, then every quest FI has run elsewhere on this computer, each marked "running now" while its process runs (FI's own record of it, the same as on the web page). A quest that is running is not started a second time: FI itself refuses to start a quest whose own process record says another process runs it ("still running; nothing was started"), and `@fi /resume` says so before it starts anything when it can tell. `/rename`, `/why`, `/trace`, `/follow` and `/map` accept the short id too. `python launch.py tools quests` lists every quest with its short id.
 
-To do a quest again from one of its steps, add `--from` and the step: `skills`, `code`, `run`, `figures` (a quest with no simulation), `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (`@fi /resume <quest_id> --from` with no step lists the ones that quest reached). `ideas`, `literature`, `plan` and `design` replace the frozen protocol and need your name, so the chat refuses them and shows the terminal command with `--approve-as`. `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. `--from skills` picks the quest's skills again from its `config.yaml` (edit `engine.skills_exclude`, `engine.skills` or `engine.skills_required` there first) and writes the code again; a skill that is no longer used is named in the chat, and the literature, the plan and the frozen protocol are not touched. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
+To do a quest again from one of its steps, add `--from` and the step: `skills`, `code`, `run`, `figures` (a quest with no simulation), `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (`@fi /resume <quest_id> --from` with no step lists the ones that quest reached). `literature`, `plan` and `design` replace the frozen protocol and need your name, so the chat refuses them and shows the terminal command with `--approve-as`. `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. `--from skills` picks the quest's skills again from its `config.yaml` (edit `engine.skills_exclude`, `engine.skills` or `engine.skills_required` there first) and writes the code again; a skill that is no longer used is named in the chat, and the literature, the plan and the frozen protocol are not touched. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
 
 **The quest map.** **FI: Quest map** in the command palette (or `@fi /map <quest_id>`) opens a tab next to your other tabs (opening it again for the same quest brings that tab back, not a second one) with every step of the quest in seven blocks, each marked finished, where it stopped or not reached. Where it stopped is the step the quest runs next: the pause it waits in (the review, the papers or plan pause) or the step that failed, so a paused quest is never drawn as finished. Click a step to see what it does, what running again from there would keep and redo, and the command; **Restart from here** sends `@fi /resume <quest_id> --from <step>` to chat. From the design backwards it shows the command with `--approve-as` instead, since those need your name. It is the same map as the web quest page.
 
@@ -596,7 +592,7 @@ or shutting the machine down, is not a crash to report.
 @fi /analyze ./my_data commission.yaml
 ```
 
-When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a commission file; the commission's question is what the analysis answers. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `ideate` / `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a commission file; the commission's question is what the analysis answers. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
 
 Quote the path if it contains spaces: `@fi /analyze "C:/My Data" commission.yaml`.
 
@@ -643,7 +639,7 @@ provider:
   name: vscode_extension       # set automatically when launched from this extension
   node_models:
     clarify:       gpt-4o-mini       # cheap classification
-    ideate:        claude-3-5-sonnet # broad thinker
+    design:        claude-3-5-sonnet # broad thinker
     cross_check:   gpt-4o-mini
     write:         claude-3-5-sonnet # prose
     review_panel.statistician:   claude-3-5-sonnet

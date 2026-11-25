@@ -126,7 +126,6 @@ async def run_one_vendor(
         provider=ProviderConfig(name=provider_name),
         engine=EngineConfig(
             clarify_mode="auto",
-            ideate_reflect=False,
             max_iterations=1,
             review_loop=False,
         ),

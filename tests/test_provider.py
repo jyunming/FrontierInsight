@@ -675,7 +675,7 @@ async def test_chat_cancellation_does_not_get_a_note():
     client = LLMClient(ep, http=fake_http)
 
     task = asyncio.create_task(
-        client.chat([{"role": "user", "content": "hi"}], node="ideate"),
+        client.chat([{"role": "user", "content": "hi"}], node="plan"),
     )
     await asyncio.wait_for(post_entered.wait(), timeout=2.0)
     task.cancel()

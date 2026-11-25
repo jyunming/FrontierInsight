@@ -164,7 +164,6 @@ from . import hidden_check as _hidden
 from . import refinement_check as _refine
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
-from . import scope_cards as _scope_cards
 from . import optimise as _optimise
 from . import optimise_refine as _optimise_refine
 from . import optimise_search as _optimise_search
@@ -243,9 +242,7 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 # gap. `PROGRESS_LOG_NAME` is a second file with only these lines, for the web page and for `--progress <quest_id>`.
 STAGE_PROGRESS: dict[str, str] = {
     "clarify": "Checking the setup.",
-    "ideate": "Choosing the angle to take.",
     "literature": "Searching the literature.",
-    "scope": "Offering the studies this topic could mean.",
     "select_skills": "Choosing which tools to use.",
     "plan": "Writing the plan.",
     "design": "Designing the experiment.",
@@ -279,16 +276,16 @@ _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
 # (names), kept in ``.fi/`` for a ``--watch`` that has no quest state.
 _SKILL_MOUNTS_FILE = "skill_mounts.json"
 
-# Default sampling temperature for generative nodes (ideate, write, analyze…).
+# Default sampling temperature for generative nodes (plan, write, analyze…).
 _DEFAULT_CHAT_TEMPERATURE = 0.2
 
 # How long the environment record waits for `pip freeze` before it records the timeout and stops it (with everything it
 # started) instead.
 _PIP_FREEZE_TIMEOUT_S = 30.0
 # Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
-# routing decision (sufficient vs broaden, accept vs revise, supported vs not),
+# routing decision (sufficient vs insufficient, accept vs revise, supported vs not),
 # where run-to-run flakiness means the same corpus can flip the route and
-# trigger wasted broaden loops or spurious revise cycles (audit: "gates are
+# trigger spurious revise cycles (audit: "gates are
 # non-deterministic"). These run at temperature 0 so the decision is
 # reproducible wherever the transport honours it (HTTP + vscode_bridge; CLI
 # transports that don't expose temperature are unaffected — no regression).
@@ -359,25 +356,20 @@ class QuestState(TypedDict, total=False):
     clarify_questions: dict[str, Any]
     clarify_answers: dict[str, Any]
     clarify_done: bool
-    # The study a person picked before the plan (core/scope_cards.py), or None: nobody picked one.
+    # Kept so a checkpoint of an earlier FI still reads: the study a person picked from the study cards FI offered then.
     scope_card: dict[str, Any] | None
     title_confirmed: bool
+    # Kept so a checkpoint of an earlier FI still reads: the research ideas FI made then, the one it chose (read by
+    # ``.get()``, empty since FI makes no ideas), and how it was chosen.
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
-    # Ideate self-reflection result. Optional; describes what
-    # the agent considered before locking in `chosen_idea`.
     ideate_critique: dict[str, Any]
-    # Ideate tournament result. Optional; present only when
-    # `engine.ideate_tournament: true`. Carries the match table, win
-    # counts, and outcome label ("confirmed" / "swapped" /
-    # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
-    # How chosen_idea was picked: "ensemble", "tournament", "reflection" or "model" (the ideate node's own pick).
     idea_selection: str
     literature: list[dict[str, Any]]
     # Iterative-literature counter. Incremented on every entry into
-    # ``_node_literature``. First entry sets it to 1; ``broaden_lit``
-    # re-entries from ``cross_check`` bump it. Used to (a) emit a
+    # ``_node_literature``. First entry sets it to 1; a resumed pass
+    # bumps it. Used to (a) emit a
     # distinct INFO log per pass, (b) decide whether to dedup-merge
     # vs replace the literature list, and (c) optionally cap
     # additional retrievals at ``engine.max_iterations + 1``.
@@ -506,7 +498,7 @@ class QuestState(TypedDict, total=False):
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
-    # Where the quest goes after cross_check ("write" / "broaden_lit" / "redesign"), decided by the node before it
+    # Where the quest goes after cross_check ("write" / "redesign"), decided by the node before it
     # spends a round; the router reads it.
     cross_check_route: str
     # The typed research contract (core.protocol.ResearchProtocol, stored
@@ -514,12 +506,11 @@ class QuestState(TypedDict, total=False):
     # success_metric, … Derived at the evidence_gate from clarify + config.
     research_protocol: dict[str, Any]
     # Evidence-sufficiency assessment from the evidence_gate node:
-    # ``{"verdict": "sufficient"|"broaden"|"insufficient", "rationale",
+    # ``{"verdict": "sufficient"|"insufficient", "rationale",
     # "gaps": [...], "n_sources", "n_supporting"}``. Read by the writer so
     # a thin-evidence paper frames its limits honestly.
     evidence_assessment: dict[str, Any]
-    # How many times the evidence_gate has sent the quest back to broaden
-    # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
+    # Kept so a checkpoint of an earlier FI still reads: how often its evidence gate sent the quest back to the literature.
     evidence_broaden_count: int
     # How many times the evidence_gate has given a simulation with no results another try (at most once): back to design,
     # or, when the script could not run to the end, its code written again from the same design.
@@ -901,7 +892,7 @@ def _design_parts_listing(design: Any) -> str:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify", "ideate", "ideate_reflect", "ideate_tournament",
+        "clarify",
         "design", "design_self_critique",   # second-pass methodology audit
         "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over
@@ -927,7 +918,6 @@ def _load_prompts() -> dict[str, string.Template]:
         "known_value_program",              # a commission's known value computed from its source (core/known_values.py)
         "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
-        "scope",                # the few studies the topic could mean, for a person to pick before the plan
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
         "implement_update",                 # a revised plan: ONLY the functions of the scripts the revision touched
@@ -971,7 +961,7 @@ def _load_prompts() -> dict[str, string.Template]:
 
 
 # Per-paper excerpt size when rendering retrieved literature into the
-# write / ideate / design prompts. Was 600 chars — too short for the
+# write / design prompts. Was 600 chars — too short for the
 # model to extract specific findings or methods, so citations stayed
 # generic. 2000 chars is roughly an abstract + intro, which is enough
 # to discuss prior work by content rather than by title alone.
@@ -5578,21 +5568,20 @@ def _evidence_gate_rule(
     """The evidence gate's verdict where the counts already decide it, else
     ``None`` and the model is asked.
 
-    From 68 gate calls over 28 quests: the model answered ``broaden`` for
+    From 68 gate calls over 28 quests: the model judged the evidence thin for
     both simulation quests that had no source with text, and ``sufficient``
     for all six with at least 15 sources and a finding a source supports.
     Between those it gave different verdicts to identical counts, so the
     rest stays with the model. Every one of those quests was a simulation
     with retrieval on, so everything else is always asked: other topic
     types; ``--analyze``, where the literature step is skipped; and a quest
-    with retrieval off, where no source is the normal case and a broaden
-    would re-run the experiment for sources it cannot find.
+    with retrieval off, where no source is the normal case.
     """
     if analyze_local_first or not retrieval_on or topic_type != "simulation":
         return None
     if n_sources == 0:
         return {
-            "verdict": "broaden",
+            "verdict": "insufficient",
             "rationale": "no source with readable text was retrieved.",
             "gaps": ["sources on the research question"],
         }
@@ -5611,7 +5600,7 @@ def _format_evidence_note(
     evidence_assessment: dict[str, Any] | None, *, is_survey: bool,
 ) -> str:
     """The pre-write 'evidence note' handed to the writer when the evidence gate
-    judged the assembled evidence thin (``insufficient`` / ``broaden``), so the
+    judged the assembled evidence thin (``insufficient``; ``broaden`` in a record of an earlier FI), so the
     paper frames its limits honestly. Returns ``""`` when the gate was satisfied
     / disabled.
 
@@ -5620,8 +5609,7 @@ def _format_evidence_note(
     experiment-oriented criteria (results, cross-check support) don't apply and
     this note would just make the essay apologise for experiment-grade evidence
     it never needed. The ``_SURVEY_WRITE_NOTE`` already enforces honest,
-    source-only framing for surveys. (The broaden *routing* still ran, so a
-    survey that broadened simply gathered more sources.)"""
+    source-only framing for surveys."""
     ev = evidence_assessment or {}
     if is_survey:
         return ""
@@ -9286,7 +9274,7 @@ def _append_design_revision(
         seen = "results were seen" if results_seen else "the run before it produced no results"
         if reason:
             pass
-        elif next_step in ("re_experiment", "broaden_lit"):
+        elif next_step == "re_experiment":
             reason = f"analyze.next_step={next_step} ({seen})"
         elif verdict:
             reason = f"review verdict={verdict} ({seen})"
@@ -9447,8 +9435,8 @@ _LITERATURE_QUERIES = "literature_queries.json"
 
 def _query_set_key(prompt: str, iteration: int, model: str = "") -> str:
     """What a saved query set answers: the exact derivation prompt (topic, chosen direction, hypothesis, kind of
-    quest), the search pass and the model that derives them. A new pass (a broaden-the-literature re-entry) or another
-    model is a new key, so it derives afresh."""
+    quest), the search pass and the model that derives them. A new pass or another model is a new key, so it derives
+    afresh."""
     return hashlib.sha256(f"{iteration}\n{model}\n{prompt}".encode("utf-8")).hexdigest()
 
 
@@ -9959,7 +9947,7 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
         f"This quest is running in **no-simulation mode** "
         f"(`engine.no_simulation: true` OR clarify answered "
         f"`empirical_vs_theoretical: empirical`). The engine has\n"
-        f"finished the planning half (clarify → ideate → literature → "
+        f"finished the planning half (clarify → literature → "
         f"design) and is paused waiting for you to supply real-world "
         f"data.\n\n"
         f"## What to drop into this folder\n\n"
