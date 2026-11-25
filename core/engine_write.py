@@ -2047,7 +2047,7 @@ class WriteStageMixin:
         prompt = self._prompts["select_skills"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),  # type: ignore[attr-defined]
             catalogue_block=catalogue.render(),
         )
 

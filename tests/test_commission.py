@@ -337,6 +337,47 @@ def test_the_quest_s_own_config_finds_its_frozen_commission(tmp_path: Path) -> N
 # ---- the steps the commission gives -------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_the_skill_picker_and_the_design_are_given_the_commission_s_question_and_scope(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI makes no research ideas, so the slot that carried the chosen idea was an empty ``{}``: the skill picker never
+    saw what the study is limited to. It is given the commission's question and scope, and so are the design's
+    prompts (the same slot)."""
+    from core.skills import approval
+    from core.skills.base import EXTERNAL_SOURCE, Skill
+
+    monkeypatch.delenv("FI_EXTERNAL_SKILLS_DIRS", raising=False)
+    monkeypatch.setenv("FI_SKILLS_DIR", str(tmp_path / "own_skills"))
+    monkeypatch.setenv("FI_SKILLS_APPROVALS", str(tmp_path / "approvals.json"))
+    folder = tmp_path / "agent" / "skills" / "flow-units"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nname: flow-units\ndescription: units for flow rates\n---\nUse SI.\n",
+                                     encoding="utf-8")
+    skill = Skill(name="flow-units", path=folder, source=EXTERNAL_SOURCE)
+    approval.approve(skill.ledger_name, skill.content_hash(), approved_by="me", note="t")
+    eng = _engine(tmp_path, _commission(tmp_path / "order"), skills_dirs=[str(folder.parent)],
+                  skills_scan_known_dirs=False)
+    asked: list[str] = []
+
+    async def chat(prompt: str, node: str | None = None, **_kw: Any) -> str:
+        if node == "select_skills":
+            asked.append(prompt)
+        return json.dumps({"skills": [], "declined": []})
+
+    eng._chat = chat  # type: ignore[method-assign]
+    await eng._node_select_skills({"topic": eng.config.topic})
+    (prompt,) = asked
+    given = ("Question: How fast does a tank drain through outlets of three sizes?\n"
+             "Scope: three outlet diameters, one fill level")
+    assert f"## The study\n\n{given}\n" in prompt and "flow-units" in prompt
+    old = {"chosen_idea": {"title": "an old checkpoint's idea"}}
+    assert eng._study_given(old) == given, "the commission fixes the study, whatever a checkpoint holds"
+    # A quest with no commission: the direction an earlier FI's checkpoint chose, else nothing.
+    eng._commissioned = lambda: False  # type: ignore[method-assign]
+    assert eng._study_given({}) == "(none)"
+    assert '"title": "an old checkpoint\'s idea"' in eng._study_given(old)
+
+
+@pytest.mark.asyncio
 async def test_the_literature_step_reads_only_the_commission_s_sources_and_says_so(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import commission

@@ -1697,7 +1697,7 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
         (Path(__file__).resolve().parent.parent
          / "agents" / "design.md").read_text(encoding="utf-8")
     )
-    kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
+    kw = dict(topic="t", study="(none)", literature_block="lit",
               review_feedback="r", timeout_s="60", clarify_block="c",
               skills_block="(no simulation skills enabled)",
               inputs_block="(none supplied)", job_block="", time_note="")

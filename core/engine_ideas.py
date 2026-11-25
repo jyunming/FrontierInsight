@@ -968,6 +968,16 @@ class IdeasStageMixin:
                        "nothing searched for", added)
         return {"literature": merged, "literature_iter": int(state.get("literature_iter") or 0) + 1}
 
+    def _study_given(self, state: QuestState) -> str:
+        """The study, for the prompts that name it (skills, design, the design's review): on a commissioned quest the
+        commission's question and scope, which fix the study; else the direction a checkpoint of an earlier FI chose
+        (FI makes no research ideas now), or ``(none)``."""
+        if self._commissioned():  # type: ignore[attr-defined]
+            data = self._commission_data()  # type: ignore[attr-defined]
+            return f"Question: {data.get('question')}\nScope: {data.get('scope')}"
+        chosen = state.get("chosen_idea")
+        return json.dumps(chosen, indent=2) if isinstance(chosen, dict) and chosen else "(none)"
+
     def _commission_block(self, state: QuestState) -> str:
         """What the commission fixes, for the plan's model, with each known value's source by its label ([n])."""
         data = self._commission_data()  # type: ignore[attr-defined]
@@ -1125,12 +1135,12 @@ class IdeasStageMixin:
         return design
 
     def _design_prompt(self, state: QuestState) -> str:
-        """The design prompt for this state: the topic, the chosen direction, the literature, the
+        """The design prompt for this state: the topic, the study, the literature, the
         clarifications, the skills and example files, and, on a later pass, what the review and the person said."""
         review_feedback = self._design_feedback(state)
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),
             # The full excerpts, as analyze and write get. At 800 characters a
             # source, design chose a 1% major-outbreak threshold in 6 of 10
             # replays of a real quest (0 of 5 at the full budget): short
@@ -1220,7 +1230,7 @@ class IdeasStageMixin:
         review_node = self._review_node("design_review")
         critique_prompt = self._prompts["design_self_critique"].substitute(
             topic=state["topic"],
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),
             clarify_block=_format_clarify(state),
             draft_design=json.dumps(design, indent=2),
         )
