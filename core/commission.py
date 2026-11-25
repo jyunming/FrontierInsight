@@ -380,12 +380,6 @@ def known_answer_problem(name: str, found: dict[str, Any], reason: str) -> str:
             "FI did not run the study, so it is handed back")
 
 
-def defined_twice_problem(left: list[str]) -> str:
-    """The sentence of a study handed back because its plan defines one quantity two ways after its model was asked."""
-    return (f"the plan defines one quantity two ways ({'; '.join(left)}), and the plan's model, asked once to make them "
-            "agree, left both; FI did not run the study, so it is handed back")
-
-
 def write_return(quest_root: Path, reason: str, problem: str, evidence: Any, tried: list[str], **rest: Any) -> dict[str, Any]:
     """Write needs/STUCK.json for a study handed back, ``return_reason`` first, and return the record."""
     if reason not in RETURN_REASONS:

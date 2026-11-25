@@ -210,8 +210,7 @@ def plan_defines_twice(design: dict[str, Any] | None, protocol: dict[str, Any] |
     This is a comparison of TEXT, read from the plan's own structure; it does not know whether two formulas mean the same
     (``b+a`` against ``a+b``, or two names for one quantity, are told apart), and it does not read a second definition that is
     only in the method's prose. So it is never a reason to keep or to take out a value; it only changes what is said about
-    the name, when the plan counts as completed, and hands a commissioned study back when the plan's model, asked once,
-    leaves it (Engine._route_plan_conflicts)."""
+    the name and when the plan counts as completed."""
     design = design if isinstance(design, dict) else {}
     variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
     metrics = {}

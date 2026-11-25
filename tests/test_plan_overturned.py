@@ -1,7 +1,6 @@
 """A commissioned study is handed back before it runs when FI's own evidence overturns its plan: a failing known-answer
 check whose three numbers (the simulation's measured value, FI's independent recomputation and the expected value)
-disagree, each judged by its own error; or a plan that still defines one quantity two ways after its model was asked
-once. A study run directly goes on, the check marked unconfirmed, as before.
+disagree, each judged by its own error. A study run directly goes on, the check marked unconfirmed, as before.
 
 The topic of these tests is a made-up draining tank; no real model is called.
 """
@@ -14,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from core import commission, oracle_challenge as ch, plan
+from core import commission, oracle_challenge as ch
 from core.engine import Engine
 from tests.test_commission import _commission
 from tests.test_oracle_gate import _HEAD, _PROTOCOL, _TAIL, _cfg, _fake, _record
@@ -150,53 +149,3 @@ async def test_a_study_run_directly_goes_on_with_the_check_marked_unconfirmed_as
     assert record["status"] == "went_on_failing" and "returned" not in record
     assert [e["name"] for e in record["went_on"]] == [CHECK["name"]] and record["went_on"][0]["by"] == "automatic"
     assert not (engine.quest_root / "needs" / "STUCK.json").exists()
-
-
-# --- the plan that defines one quantity two ways ----------------------------------------------------------------------
-
-METRIC = {"id": "drain_rate", "kind": "mean", "unit": "one trial", "estimand": "(level_start - level_end)/duration"}
-TWICE = {"hypothesis": "a made-up hypothesis", "variables": {"independent": ["outlet"],
-                                                             "dependent": ["drain_rate = level_end/level_start"]},
-         "protocol": {"form": "contract", "metrics": [METRIC]}}
-
-
-async def _plan_conflict(tmp_path: Path, commissioned: bool, design: dict[str, Any]) -> Engine:
-    from tests.test_commission import _engine
-
-    engine = _engine(tmp_path, _commission(tmp_path / "order"))
-    if not commissioned:
-        engine.config.commission = None
-    plan.plan_path(engine.quest_root).parent.mkdir(parents=True, exist_ok=True)
-    plan.plan_path(engine.quest_root).write_text(plan.render("a made-up tank", {}, design), encoding="utf-8")
-    engine._runs_code = lambda state: True  # type: ignore[method-assign]
-
-    async def asked(*args: Any, **kwargs: Any) -> None:
-        return None  # the plan's model leaves the plan as it was
-
-    engine._ask_plan_to_complete = asked  # type: ignore[method-assign]
-    record = {"issues": {"F-1": {"id": "F-1", "plan_conflict": True, "outcome": "open", "text": "two definitions",
-                                 "why": "the plan's metric and its variable differ", "readings": [{"status": "open"}]}}}
-    await engine._route_plan_conflicts({}, record, "code_review")
-    return engine
-
-
-@pytest.mark.asyncio
-async def test_a_commissioned_plan_that_still_defines_one_quantity_two_ways_is_handed_back(tmp_path: Path) -> None:
-    engine = await _plan_conflict(tmp_path, True, TWICE)
-    stop = engine._returned_stop()
-    assert stop is not None and engine._returned_stop() is None, "handed back once"
-    assert engine._route_after_execute_reflect(stop) == "stuck"
-    state = {**stop, "iteration": 0}
-    verdict = engine._no_results_verdict(state)
-    assert verdict is not None and verdict["stuck_reason"] == "returned"
-    await engine._node_stuck_no_findings({**state, "evidence_assessment": verdict})
-    stuck = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
-    assert stuck["return_reason"] == "plan_contradicts_sources" and stuck["evidence"]["detector"] == "defined_twice"
-    assert "drain_rate" in stuck["problem"] and "defines one quantity two ways" in stuck["problem"]
-
-
-@pytest.mark.asyncio
-async def test_a_plan_defined_once_or_a_study_run_directly_is_not_handed_back(tmp_path: Path) -> None:
-    once = {**TWICE, "variables": {"independent": ["outlet"], "dependent": ["drain_rate"]}}
-    assert (await _plan_conflict(tmp_path / "once", True, once))._returned_stop() is None
-    assert (await _plan_conflict(tmp_path / "direct", False, TWICE))._returned_stop() is None

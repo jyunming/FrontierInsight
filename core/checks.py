@@ -202,8 +202,7 @@ CHECKS: tuple[Check, ...] = (
           'Refuses a repaired file that changes what the findings name or no longer prints RESULT_JSON.'),
     Check('code_review_plan_conflict', 'core.engine', 'Engine._route_plan_conflicts',
           'execute', 'model_judge', 'repair',
-          "A finding saying the PLAN contradicts itself is sent to the plan's model, never to the code; a commissioned "
-          'study whose plan still defines one quantity two ways after the ask is handed back.'),
+          "A finding saying the PLAN contradicts itself is sent to the plan's model, never to the code."),
     Check('code_review_finding_demonstrated', 'core.code_findings', 'shown_by_assertion',
           'execute', 'measured', 'note',
           'A finding counts as demonstrated only when its generated test fails by its own assertion about '

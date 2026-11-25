@@ -2910,17 +2910,6 @@ class CodeStageMixin:
             issue["plan_asked"] = True
             issue["plan_changed"] = after != sha
         _code_review.save(self.quest_root, record)
-        left = _code_review.double_definition_gaps(self._design_from_plan()[0]) if twice_before else []
-        if left and self._commissioned() and _frozen.load(self.quest_root) is None:
-            # FI's own fact, after the plan's model was asked once: a commissioned study is handed back (_returned_stop).
-            from . import commission as _commission
-
-            problem = _commission.defined_twice_problem(left)
-            self._log.warning("[code_review] %s", problem)
-            self._pending_return = {"reason": "plan_contradicts_sources", "problem": problem,
-                                    "evidence": {"detector": "defined_twice", "definitions": left},
-                                    "tried": ["compared each quantity's definition in the plan with its metric's", *left,
-                                              "asked the plan's model once to make them agree: both were left"]}
 
     def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""

@@ -516,16 +516,12 @@ def referee_expected(oracle: dict[str, Any]) -> float | None:
     return expected if limit is not None and math.isfinite(expected) else None
 
 
-#: How many standard errors (each number's own) two of a failing check's three numbers must be apart to disagree.
-APART_SE = 3.0
-
-
 def three_disagree(oracle: dict[str, Any], judged: dict[str, Any], referee: dict[str, Any] | None) -> dict[str, Any] | None:
     """A failing check whose three numbers disagree pairwise, each judged by its own error: the simulation's measured value
     (its trials' standard error, ``mc.se``), the plan's expected value (exact: a derivation has no error) and the referee's
     number (its own ``error``). Only a referee that sided with neither working by the check's tolerance (``unsettled``)
     counts, never on a check that is 0 by its form; a number with no error given has an unknown error, and nothing is
-    found. ``{"numbers", "gaps"}`` when every pair is more than :data:`APART_SE` of its standard errors apart, else None."""
+    found. ``{"numbers", "gaps"}`` when every pair is more than ``mc_error.BAND_SE`` of its standard errors apart, else None."""
     mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else {}
     numeric = (referee or {}).get("numeric") if isinstance((referee or {}).get("numeric"), dict) else {}
     plan, sim, sim_err = referee_expected(oracle), _triage_num(judged.get("value")), _triage_num(mc.get("se"))
@@ -533,10 +529,12 @@ def three_disagree(oracle: dict[str, Any], judged: dict[str, Any], referee: dict
     if (judged.get("passed_by_engine") is not False or (referee or {}).get("outcome") != "unsettled" or zero_by_form(oracle)
             or plan is None or sim is None or ref is None or sim_err is None or ref_err is None or min(sim_err, ref_err) < 0):
         return None
+    from .mc_error import BAND_SE
+
     gaps: dict[str, dict[str, Any]] = {}
     for key, a, b, err in (("simulation_vs_plan", sim, plan, sim_err), ("reference_vs_plan", ref, plan, ref_err),
                            ("simulation_vs_reference", sim, ref, math.hypot(sim_err, ref_err))):
-        if abs(a - b) <= APART_SE * err or a == b:
+        if abs(a - b) <= BAND_SE * err or a == b:
             return None
         gaps[key] = {"gap": abs(a - b), "standard_errors": abs(a - b) / err if err else None}
     return {"numbers": {"plan": plan, "simulation": {"value": sim, "error": sim_err},

@@ -2342,8 +2342,6 @@ class ImproveStageMixin:
         if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
             return gated, None, False
         await self._code_review_gate(state)
-        if (back := self._returned_stop()) is not None:
-            return back, None, False
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations, None, False
