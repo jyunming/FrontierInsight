@@ -24,7 +24,8 @@ LINE = "KNOWN_JSON:"
 RECORD = "known_values.json"  # in .fi/
 WITHHELD = "[value withheld]"
 EXCERPT_CHARS = 12000  # how much of the source text the program's writer is shown
-_HEAD_CHARS = 2000  # ... of which the opening of the text (its definitions), when the passage is further in
+_HEAD_CHARS = 2000  # ... of which the opening of the text, when the passage is further in
+_BEFORE_CHARS = 2000  # ... and of the text before the passage: the rest is what follows it (its definitions)
 # A display equation whose formula did not survive the conversion to text: a numbered row with nothing in it.
 _LOST_EQUATION = re.compile(r"^\s*\|\s*\(\d+\)\s*\|\s*$", re.M)
 _SECOND = ("Another program computed this value before yours, and FI is checking it: write yours on your own, from "
@@ -66,17 +67,16 @@ def withhold(text: Any, value: float) -> str:
 
 
 def excerpt(text: str, passage: str) -> str:
-    """The part of the source text the program's writer is shown: all of it when short, else its opening and the
-    stretch around the passage, at most :data:`EXCERPT_CHARS` characters."""
+    """The part of the source text the program's writer is shown, at most :data:`EXCERPT_CHARS` characters: all of it
+    when short, else a little before the passage and what follows it (where a table's or a result's definitions are),
+    with the text's opening first when the passage is further in."""
     if len(text) <= EXCERPT_CHARS:
         return text
     words = str(passage or "").split()[:12]
     found = re.search(r"\s+".join(map(re.escape, words)), text, re.IGNORECASE) if words else None
-    if found is None or found.start() < EXCERPT_CHARS - _HEAD_CHARS:
-        return text[:EXCERPT_CHARS]
-    width = EXCERPT_CHARS - _HEAD_CHARS
-    start = max(_HEAD_CHARS, found.start() - width // 2)
-    return text[:_HEAD_CHARS] + "\n[...]\n" + text[start:start + width]
+    start = max(0, found.start() - _BEFORE_CHARS) if found is not None else 0
+    head = text[:_HEAD_CHARS] + "\n[...]\n" if start > _HEAD_CHARS else ""
+    return head + text[start if head else 0:][:EXCERPT_CHARS - len(head)]
 
 
 def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") -> str:
@@ -207,7 +207,7 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
         failed = (err or "").strip().splitlines()[-1][:200] if (err or "").strip() else f"exit code {code}"
         why = (f"the program says the text does not give what it needs: {cannot}" if cannot else
                f"the program printed no `{LINE}` value ({failed})")
-        return {**ran, "verdict": "cannot_judge", "why": why}
+        return {**ran, "verdict": "cannot_judge", "why": why, "crashed": not cannot}
     verdict, why = judge(routes, value, tolerance)
     return {**ran, "verdict": verdict, "why": why}
 
@@ -221,10 +221,13 @@ async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[
     slug = re.sub(r"[^A-Za-z0-9_]+", "_", str(kv["name"]))[:60] or "value"
     first = await _program(kv, shown, folder / f"{slug}_1.py", second=False, **how)
     out["programs"].append(first)
-    if first["verdict"] != "no_match":
+    if first["verdict"] != "no_match" and not first.get("crashed"):
         return {**out, "verdict": first["verdict"], "why": first["why"]}
-    second = await _program(kv, shown, folder / f"{slug}_2.py", second=True, **how)
+    second = await _program(kv, shown, folder / f"{slug}_2.py", second=True, **how)  # never shown the first's output
     out["programs"].append(second)
+    if first.get("crashed"):  # a program that gave no value says nothing of the value: the second one decides alone
+        return {**out, "verdict": "match" if second["verdict"] == "match" else "cannot_judge",
+                "why": f"a first program gave no value ({first['why']}); a second one: {second['why']}"}
     if second["verdict"] == "no_match" and agree(first["routes"], second["routes"], out["tolerance"]):
         return {**out, "verdict": "no_match", "why": f"{first['why']}; a second, independent program gives the same numbers"}
     said = ("reproduced it" if second["verdict"] == "match" else

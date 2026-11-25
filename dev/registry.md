@@ -508,12 +508,13 @@ same PR that adds, splits or renames one.
   cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
 - `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
   (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value: `excerpt` of the staged
-  full text (a text whose equations were lost is not judged), `withhold` (the value withheld from the request), one program
+  full text (a little before the passage and what follows it; a text whose equations were lost is not judged), `withhold` (the value withheld from the request), one program
   from `agents/known_value_program.md` (`program`: the fenced block, `oracle_challenge._FORBIDDEN`, 5-400 lines, no
   typed-in number near the value), run apart from the quest (`_run_in_env(apart=True)`), read from its `KNOWN_JSON`
   lines (`printed`) and judged (`judge`: two routes within 3x their combined error, each route within the larger of the
-  tolerance and 3x its error). A mismatch gets a second, independent program (the `oracle_review.numeric` model);
-  `agree` with the first hands the study back (`problem`, `evidence`; `_route_after_plan` ends the graph), anything
+  tolerance and 3x its error). A mismatch, or a program that gave no value, gets a second, independent program (the
+  `oracle_review.numeric` model, never shown the first's output; after a first that gave no value it decides alone);
+  `agree` with a first that mismatched hands the study back (`problem`, `evidence`; `_route_after_plan` ends the graph), anything
   else goes on as `cannot_judge`. `.fi/known_values.json` (keyed by the commission's sha256: a resume asks nothing
   again); `plan_block` tells the plan; `fill_checks` writes each named check's kind (`published_value`), expected value,
   tolerance and source from the commission (a plan's model never types a published value: no word maps to that kind).

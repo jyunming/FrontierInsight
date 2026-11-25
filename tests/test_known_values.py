@@ -312,3 +312,24 @@ async def test_a_quest_handed_back_at_the_plan_ends_as_a_return_not_a_failure(tm
     assert not (eng.quest_root / "quest_failed.md").exists() and not (eng.quest_root / "plan.md").exists()
     quality = json.loads((eng.quest_root / ".fi" / "quality.json").read_text(encoding="utf-8"))
     assert quality["outcome"]["return_reason"] == "known_value_mismatch"
+
+
+def test_a_passage_early_in_a_long_text_is_shown_with_what_follows_it() -> None:
+    # A table near the start whose definitions come after the first 12,000 characters (a real text did this).
+    text = ("Opening words of a made-up note. " * 150) + "Table 1 states the drain constant." + (
+        " Filler of the text. " * 360) + "DEFINITION: the drain constant is the outflow over the level." + " More." * 2000
+    shown = known_values.excerpt(text, "Table 1 states the drain constant.")
+    assert "Table 1 states the drain constant." in shown and "DEFINITION: the drain constant" in shown
+    assert len(shown) <= known_values.EXCERPT_CHARS + 10
+    assert text.index("DEFINITION") > known_values.EXCERPT_CHARS, "the definition is past the first 12,000 characters"
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_crashes_is_followed_by_a_second_one_that_decides(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    crash = "```python\nimport json\n\nCASE = {\"outlet\": \"open\"}\n\nraise RuntimeError(\"a made-up crash 7741\")\n```"
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [crash, RIGHT])
+    assert "stuck" not in out and len(model.asked) == 2
+    assert "Another program computed this value" in model.asked[1] and "7741" not in model.asked[1]
+    value = _record(eng)["values"][0]
+    assert value["verdict"] == "match" and "a first program gave no value" in value["why"]
