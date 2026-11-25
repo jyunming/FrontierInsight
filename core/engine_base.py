@@ -9070,6 +9070,10 @@ def _pick_up_user_dropped_datasets(quest_root: Path) -> list[str]:
     return out
 
 
+#: Folders of ``data/`` that FI itself writes (the papers it read, what an earlier FI collected): never the person's data.
+_FI_OWN_DATA_FOLDERS: frozenset[str] = frozenset({"literature", "auto_collected"})
+
+
 def _list_user_data_files(data_dir: Path) -> list[Path]:
     """Files the user has dropped into ``<quest_root>/data/``. Excludes
     the README.md we auto-write and any dot-prefixed files. Order is
@@ -9084,6 +9088,8 @@ def _list_user_data_files(data_dir: Path) -> list[Path]:
         if p.name == "README.md" and p.parent == data_dir:
             continue
         if p.name.startswith("."):
+            continue
+        if p.relative_to(data_dir).parts[0] in _FI_OWN_DATA_FOLDERS:
             continue
         out.append(p)
     return out

@@ -12,7 +12,7 @@ from .engine_base import (  # noqa: F401
     _audit_log, _audit_open, _clean_title, _default_clarify_questions, _design_parts, _fault_from_record,
     _fault_record, _format_clarify, _format_lit_excerpt, _format_lit_from_state, _frozen,
     _ingest_user_dropped_papers, _item_content,
-    _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, 
+    _entry_identities, _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, 
     _normalize_title, _ok_calls, _one_line, _optim, _pairs,
     _parse_json_lenient, _phased, _plan, 
     _reading, _receipts, _retractions, _write_query_sets,
@@ -504,23 +504,53 @@ class IdeasStageMixin:
         return await self._commission_literature(state)
 
     async def _commission_literature(self, state: QuestState) -> QuestState:
-        """A study's literature: only the full texts it supplies (inputs/papers/), nothing searched for."""
+        """A study's literature: the sources its commission gives, the papers dropped in inputs/papers/ and the ones pinned in
+        ``knowledge.local_papers``; nothing is searched for."""
         prior = list(state.get("literature") or [])
         seen = {str((e.get("content") if isinstance(e, dict) else "") or "")[:200] for e in prior}
         merged, added = await asyncio.to_thread(_ingest_user_dropped_papers, self.quest_root, prior, seen, self._log)
+        merged, pinned = self._pin_local_papers(merged)
         if self._commissioned():  # type: ignore[attr-defined]  # an engine built without one (a test, a program) reads only the dropped papers
             merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
-        # Each DOI looked up in Crossref for a retraction (core/retractions.py); a retracted source is marked, never used as
-        # support. No answer is "could not be checked", and nothing here stops the quest.
-        if self.config.knowledge.enabled:  # type: ignore[attr-defined]
-            merged, retraction_rows = await _retractions.check_literature(merged)
-            if retraction_rows:
-                self._record_retractions(retraction_rows, int(state.get("literature_iter") or 0) + 1)
-                self._log.info("[literature] %s", _retractions.summary_line(retraction_rows))  # type: ignore[attr-defined]
+        merged = await self._check_retractions(merged, int(state.get("literature_iter") or 0) + 1)
         await self._flag_sources(merged, "literature", record_clean=True)  # type: ignore[attr-defined]
         self._log.info("[literature] the commission gives the sources: %d full text(s) read from inputs/papers/, "
-                       "nothing searched for", added)
+                       "%d pinned in knowledge.local_papers, nothing searched for", added, pinned)
         return {"literature": merged, "literature_iter": int(state.get("literature_iter") or 0) + 1}
+
+    def _pin_local_papers(self, merged: list[Any]) -> tuple[list[Any], int]:
+        """The papers the person pinned in ``knowledge.local_papers`` join the study's literature (once: one already there,
+        by DOI, link, text or title, is not added again). Returns ``(literature, how many were added)``."""
+        pinned = list(getattr(self.knowledge, "_local_papers", None) or [])  # type: ignore[attr-defined]
+        if not pinned:
+            return merged, 0
+        out = list(merged)
+        seen = {i for entry in out if isinstance(entry, dict) for i in _entry_identities(entry)}
+        added = 0
+        for doc in pinned:
+            entry = _literature_entry(self.quest_root, doc.content, dict(doc.metadata or {}))  # type: ignore[attr-defined]
+            ids = _entry_identities(entry)
+            if any(i in seen for i in ids):
+                continue
+            seen.update(ids)
+            out.append(entry)
+            added += 1
+        return out, added
+
+    async def _check_retractions(self, merged: list[Any], iteration: int) -> list[Any]:
+        """Every way a paper enters the study's literature (the commission's sources, ``inputs/papers/``, the pinned
+        papers, the ones added at the pause after the literature) goes through this one retraction lookup: each DOI in
+        Crossref (core/retractions.py); a retracted source is marked, never used as support. No answer is "could not be
+        checked", and nothing here stops the quest. Not made when retrieval is off or ``knowledge.offline`` is set (no
+        network is wanted then)."""
+        knowledge = self.config.knowledge  # type: ignore[attr-defined]
+        if not knowledge.enabled or knowledge.offline:
+            return merged
+        merged, rows = await _retractions.check_literature(merged)
+        if rows:
+            self._record_retractions(rows, iteration)
+            self._log.info("[literature] %s", _retractions.summary_line(rows))  # type: ignore[attr-defined]
+        return merged
 
     def _record_retractions(self, rows: list[dict[str, Any]], iteration: int) -> None:
         """Keep what Crossref says of each source's retraction in ``.fi/literature_queries.json`` (the record the to-do card

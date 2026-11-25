@@ -69,4 +69,3 @@ def test_the_record_is_watched_step_by_step_in_the_trace() -> None:
     from core.engine import Engine
 
     assert ".fi/literature_queries.json" in Engine._AUDIT_WATCHED
-

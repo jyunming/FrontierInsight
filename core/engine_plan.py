@@ -4465,6 +4465,7 @@ class PlanStageMixin:
                     "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
                     "while paused", added,
                 )
+                merged = await self._check_retractions(merged, int(state.get("literature_iter") or 0))
         read = await self._read_literature_figures(state, merged)
         if not added and not read:
             return {}
