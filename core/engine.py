@@ -1785,6 +1785,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                f"the study back to it{': ' + why if why else ''})",
                                {"step": back, "from": last["node"], "route": last["chosen"], "facts": last.get("facts") or {}},
                                [f"the {step.name} step, up to its {last['node']} step"], step=back)
+        if step.name == "design" and not paused:
+            self._judge_the_search_the_design_hands_on(state, stuck_path)
         try:
             stuck = json.loads(stuck_path.read_text(encoding="utf-8")) if stuck_path.is_file() else {}
         except (OSError, ValueError):
@@ -1827,6 +1829,29 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         (self.quest_root / _rerun_from.RECEIPT).write_bytes(text.encode("utf-8"))  # the bytes its hash names
         self._audit("step_receipt", step=step.name, ended=ended, sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
         self._log.info("[step] the %s step %s; its receipt is %s", step.name, ended, _rerun_from.RECEIPT)
+
+    def _judge_the_search_the_design_hands_on(self, state: dict[str, Any], stuck_path: Path) -> None:
+        """The design step's check ``search_ready``: a plan that is a search for the best design must hand on the search FI
+        can run. A design step that ends with a plan that lacks it ends ``stopped`` with the plain reason (the stop the code
+        and run stages make, ``needs/STUCK.json``), never ``done``, for the compute step would only find the same."""
+        try:
+            judged = self._search_ready(state, state.get("design"))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 -- the check never stops a step that would otherwise end
+            judged = {"status": "unreadable", "detail": f"{type(exc).__name__}: {exc}"}
+            self._log.warning("[step] the check that the plan hands on a search FI can run could not be made (%r)", exc)
+        try:
+            (self.fi_dir / "search_ready.json").write_text(json.dumps(judged, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[step] could not write the record of the search check (%r)", exc)
+        if judged.get("status") != "not_ready" or stuck_path.is_file():
+            return
+        problem = str(judged["detail"])
+        record = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": judged.get("tried") or [problem],
+                  "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
+                  "why_repairs_ended": "the plan's model could not write a search FI can run"}
+        stuck_path.parent.mkdir(parents=True, exist_ok=True)
+        stuck_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        self._log.warning("[step] the design step ends stopped: %s", problem)
 
     def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
         """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""

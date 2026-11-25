@@ -3029,12 +3029,10 @@ class PlanStageMixin:
                           "; ".join(_one_line(m, 200) for m in missing[:3]))
         return await self._ask_plan_for_the_search(state, design, plan_sha)
 
-    def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
-        """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
-        the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
-        reader's exact reason each time, and the search is still not there. Nothing is run and nobody is asked to pick
-        another model or to write any of it. ``None`` when the design is not a search, the search can start, or the quest
-        runs no experiment of its own. A search is never run as a plain sweep instead."""
+    def _search_stop_words(self, state: QuestState, design: Any) -> tuple[str, list[str], list[str], str] | None:
+        """``(text, tried, missing, said)`` for a design that is a search for the best design whose search FI could not make:
+        the plain sentence, what FI tried, the reader's own sentences of what is missing, and them joined for run.log.
+        ``None`` when the design is not a search, the search can start, or the quest runs no experiment of its own."""
         if not self._runs_code(state):
             return None
         wanted, missing, block_why = self._search_problems(state, design)
@@ -3055,11 +3053,47 @@ class PlanStageMixin:
             *[_one_line(m, 400) for m in missing[:3]],
             "did not run the plan as a plain sweep: that would answer a different question",
         ]
-        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping, nothing "
-                          "was run", said)
+        return text, tried, missing, said
+
+    def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
+        """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
+        the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
+        reader's exact reason each time, and the search is still not there. Nothing is run and nobody is asked to pick
+        another model or to write any of it. ``None`` when the design is not a search, the search can start, or the quest
+        runs no experiment of its own. A search is never run as a plain sweep instead. The compute step of a commissioned
+        study, given such a design, hands it back to the design step (``needs_earlier_step``) instead of stopping: the
+        search is that step's to write."""
+        words = self._search_stop_words(state, design)
+        if words is None:
+            return None
+        text, tried, missing, said = words
+        step = self._step()  # type: ignore[attr-defined]
+        back = step is not None and step.name == "compute"
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); %s", said,
+                          "handing it back to the design step, nothing was run" if back else "stopping, nothing was run")
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but FI could not make the search "
               f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
+        if back:
+            problem = ("the design this step was given is a search for the best design, but its plan has no search FI can "
+                       "run, so the design step must write it: " + text.split("but FI could not make a search of it: ", 1)[-1])
+            stop = self._stop_before_run(problem, "returned", tried=tried)
+            stop["exec_result"]["returned_for"] = {
+                "reason": "needs_earlier_step", "evidence": {"step": "design", "missing": missing[:6]},
+                "rest": {"step": "design"}}
+            return stop
         return self._stop_before_run(text, "no_search", tried=tried)
+
+    def _search_ready(self, state: QuestState, design: Any) -> dict[str, Any]:
+        """What the design step's check ``search_ready`` judges, as the record it leaves (``.fi/search_ready.json``): a
+        plan that is a search for the best design has the search FI can run (``ready``), lacks it (``not_ready``, with the
+        plain reason and what FI tried), or is not such a plan or runs no experiment (``not_applicable``)."""
+        words = self._search_stop_words(state, design)
+        if words is not None:
+            text, tried, _missing, _said = words
+            return {"status": "not_ready", "detail": text, "tried": tried}
+        wanted = self._runs_code(state) and self._search_problems(state, design)[0]
+        return ({"status": "ready"} if wanted else
+                {"status": "not_applicable", "detail": "the plan is not a search for the best design, or runs no experiment"})
 
     def _stop_for_unusable_search(self, runner: Any) -> QuestState | None:
         """The honest stop (no paper, no repair) for a study in its second stage whose kept search cannot be used

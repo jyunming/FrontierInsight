@@ -1147,7 +1147,8 @@ class AnalyzeStageMixin:
         elif reason == "returned" and isinstance(back := (state.get("exec_result") or {}).get("returned_for"), dict):
             own_words = True
             record = self._return_to_qc(back["reason"], problem, back.get("evidence"), tried,  # type: ignore[attr-defined]
-                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")})
+                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")},
+                                        **(back.get("rest") or {}))
         else:
             try:
                 needs = self.quest_root / "needs"
