@@ -690,3 +690,52 @@ def test_the_range_sentence_reads_no_result_file_again(tmp_path: Path, monkeypat
     runner.progress_text()
     monkeypatch.setattr(runner, "_trials_in", lambda task: (_ for _ in ()).throw(AssertionError("read again")))
     assert runner.progress_alarm() != ""
+
+
+def test_a_study_partly_done_before_this_run_gets_no_range_sentence(tmp_path: Path) -> None:
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 4), _task(tmp_path, "b", 0)])  # half of the trials were run by an earlier check
+    _task(tmp_path, "b", 4)
+    runner._plan_started -= 40 * 3600.0
+    runner.progress_text()
+    assert runner.progress_alarm() == ""
+
+
+def test_a_setting_run_again_alone_gets_no_range_sentence(tmp_path: Path) -> None:
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path)
+    plan = [_task(tmp_path, "a", 0), _task(tmp_path, "b", 0)]
+    runner._note_plan(plan)
+    plan[0]["out"] = "a.alone.jsonl"  # a shared process died: the setting gets a results file of its own
+    _task(tmp_path, "b", 4)
+    runner._plan_started -= 40 * 3600.0
+    runner.progress_text()
+    assert runner.progress_alarm() == ""
+
+
+def test_the_sentence_waits_when_its_mark_cannot_be_kept(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _kept_range(tmp_path)
+    runner = _runner(tmp_path)
+    runner._note_plan([_task(tmp_path, "a", 0)])
+    _task(tmp_path, "a", 3)
+    runner._plan_started -= 40 * 3600.0
+    runner.progress_text()
+    monkeypatch.setattr(est, "write_record", lambda *a, **k: False)
+    assert runner.progress_alarm() == ""
+    monkeypatch.undo()
+    assert runner.progress_alarm() != ""  # the next heartbeat says it, and keeps the mark
+
+
+def test_a_record_whose_range_is_not_numbers_means_no_range(tmp_path: Path) -> None:
+    assert est.left_the_range(30, 100, 36000.0, "ab", 14400.0) == ""
+    assert est.left_the_range(30, 100, 36000.0, ["x", None], 14400.0) == ""
+    assert est.left_the_range(30, 100, 36000.0, [1800.0, 20000.0], "soon").startswith("FI now expects")
+
+
+def test_a_write_that_cannot_finish_leaves_the_record_as_it_was(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    assert est.write_record(tmp_path, {"estimate_s": 7.0})
+    monkeypatch.setattr(est.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("full")))
+    assert est.write_record(tmp_path, {"estimate_s": 9.0}) is False
+    monkeypatch.undo()
+    assert est.read_record(tmp_path)["estimate_s"] == 7.0

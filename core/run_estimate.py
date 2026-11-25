@@ -64,6 +64,7 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import statistics
 import time
 from dataclasses import dataclass, field, replace as _replace
@@ -1173,7 +1174,9 @@ def write_record(quest_root: Path, record: dict[str, Any]) -> bool:
         record = {k: v for k, v in record.items() if k != "range_s"}
         if spread is not None:
             record["range_s"] = [round(spread[0], 1), round(spread[1], 1)]  # what the start line said
-        path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, path)  # an interrupted write never leaves broken JSON
         return True
     except OSError:
         return False
@@ -1228,10 +1231,18 @@ def left_the_range(done_trials: int, trials: int, elapsed_s: float, range_s: Seq
                    said_s: float | None) -> str:
     """The one sentence that tells a running study's projected total is outside the range kept at the start (``range_s``), once at
     least :data:`ALARM_FROM` of the trials are done; ``""`` otherwise. ``said_s`` is the estimate first said."""
-    if not range_s or len(range_s) != 2 or trials <= 0 or done_trials <= 0 or elapsed_s <= 0 or done_trials / trials < ALARM_FROM:
+    try:
+        low, high = (float(x) for x in range_s) if isinstance(range_s, (list, tuple)) and len(range_s) == 2 else (None, None)
+    except (TypeError, ValueError):
+        return ""  # a record that does not hold numbers has no range to leave
+    try:
+        said_s = float(said_s) if said_s else None
+    except (TypeError, ValueError):
+        said_s = None  # the estimate first said is not a number: the sentence leaves it out
+    if low is None or trials <= 0 or done_trials <= 0 or elapsed_s <= 0 or done_trials / trials < ALARM_FROM:
         return ""
     total = elapsed_s / done_trials * trials
-    if range_s[0] <= total <= range_s[1]:
+    if low <= total <= high:
         return ""
     first = f", not about {plain_duration(said_s)} as first said" if said_s else ""
     return f"FI now expects the study to take about {plain_duration(total)} in all{first}."
