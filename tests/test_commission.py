@@ -637,6 +637,8 @@ def test_a_number_that_is_one_side_of_a_fraction_is_not_the_value() -> None:
     assert commission.number_in_text(10, "a flow of 10 / min at rest")
     for bracketed in ("a ratio of 1/(2) at rest", "a ratio of (1)/2 at rest", "a ratio of (1)/(2) at rest"):
         assert not commission.number_in_text(1, bracketed) and not commission.number_in_text(2, bracketed)
+    for nested in ("a ratio of 1/((2)) at rest", "a ratio of ((1))/2 at rest", "a ratio of [(1)] / [(2)] at rest"):
+        assert not commission.number_in_text(1, nested) and not commission.number_in_text(2, nested)
     assert commission.number_in_text(0.5, "a share of (0.5) at rest"), "a bracket alone makes no fraction"
 
 
@@ -738,3 +740,46 @@ def test_a_quest_stopped_after_staging_and_before_the_trace_event_still_checks_i
     text.write_bytes(before.replace(b"0.25", b"0.35"))
     with pytest.raises(commission.CommissionRefused, match="changed or missing"):
         commission.door(path, root)
+
+
+def test_a_staging_that_stops_in_the_middle_of_the_commission_copy_leaves_no_staged_marker(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "out" / "q10"
+    real = commission.shutil.copy2
+
+    def stops(src: Any, dst: Any, **kw: Any) -> Any:
+        if Path(src) == path:
+            Path(dst).write_bytes(Path(src).read_bytes()[:10])
+            raise OSError("stopped")
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(commission.shutil, "copy2", stops)
+    with pytest.raises(OSError):
+        commission.stage(path, root)
+    assert not commission.staged_path(root).exists()
+    monkeypatch.setattr(commission.shutil, "copy2", real)
+    commission.stage(path, root)
+    commission.door(path, root)  # the original file is still the one the quest was started from
+
+
+def test_a_staged_quest_with_no_trace_event_and_no_manifest_is_refused_but_one_with_the_event_goes_on(tmp_path: Path) -> None:
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    root = tmp_path / "out" / "q11"
+    files = commission.stage(path, root)
+    manifest = root / ".fi" / "commission_files.json"
+    for broken in (None, "{not json", "[1]"):
+        if broken is None:
+            manifest.unlink(missing_ok=True)
+        else:
+            manifest.write_text(broken, encoding="utf-8")
+        with pytest.raises(commission.CommissionRefused, match="record of its files is missing"):
+            commission.door(path, root)
+    (root / ".fi" / "audit.jsonl").write_text(
+        json.dumps({"kind": "commission_recorded", "sha256": files["inputs/commission.json"], "files": files}) + "\n",
+        encoding="utf-8")
+    commission.door(path, root)  # an older quest: its trace event checks the files, as before

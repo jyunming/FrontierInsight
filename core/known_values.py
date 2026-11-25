@@ -110,34 +110,54 @@ def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") ->
         again=again or "")
 
 
-def _text_of(node: ast.AST) -> str | None:
-    """The text an expression of text constants is worth before it runs (``"2." + "3846"``, ``"2." "3846" * 1``,
-    an f-string of constants), else ``None``."""
+_FOLD_DEPTH = 100  # deeper than this an expression is not folded (nothing is raised)
+_FOLD_CHARS = 1000  # nor is one whose text is longer
+
+
+def _text_of(node: ast.AST, depth: int = 0) -> str | None:
+    """The text an expression of constants is worth before it runs (``"2." + "3846"``, ``"2." * 1``, ``f"{0.2}{5}"``),
+    else ``None``."""
+    if depth > _FOLD_DEPTH:
+        return None
+    out: str | None = None
     if isinstance(node, ast.Constant):
-        return node.value if isinstance(node.value, str) else None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left, right = _text_of(node.left), _text_of(node.right)
-        return left + right if left is not None and right is not None else None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
-        text = _text_of(node.left)
+        out = node.value if isinstance(node.value, str) else None
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _text_of(node.left, depth + 1), _text_of(node.right, depth + 1)
+        out = left + right if left is not None and right is not None else None
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        text = _text_of(node.left, depth + 1)
         times = node.right.value if isinstance(node.right, ast.Constant) and isinstance(node.right.value, int) else None
-        return text * times if text is not None and times is not None and 0 <= times <= 20 else None
-    if isinstance(node, ast.JoinedStr):
-        parts = [_text_of(v.value) if isinstance(v, ast.FormattedValue) and v.conversion == -1 and v.format_spec is None
-                 else _text_of(v) for v in node.values]
-        return "".join(parts) if all(p is not None for p in parts) else None  # type: ignore[arg-type]
-    return None
+        out = text * times if text is not None and times is not None and 0 <= times <= _FOLD_CHARS             and len(text) * times <= _FOLD_CHARS else None
+    elif isinstance(node, ast.JoinedStr):
+        parts: list[str | None] = []
+        for v in node.values:
+            if not isinstance(v, ast.FormattedValue):
+                parts.append(_text_of(v, depth + 1))
+            elif v.format_spec is not None or v.conversion not in (-1, 115, 114):
+                parts.append(None)
+            elif isinstance(v.value, ast.Constant) and not isinstance(v.value.value, str):
+                parts.append(repr(v.value.value) if v.conversion == 114 else str(v.value.value))
+            else:
+                inner = _text_of(v.value, depth + 1)
+                parts.append(repr(inner) if inner is not None and v.conversion == 114 else inner)
+        out = "".join(parts) if all(x is not None for x in parts) else None  # type: ignore[arg-type]
+    return out if out is not None and len(out) <= _FOLD_CHARS else None
 
 
 def _constants(tree: ast.AST) -> list[float]:
-    """Every number a program types: its number constants and each number written in a text constant, also one put
-    together from several (``float("2." + "3846")``)."""
+    """Every number a program types: its number constants and each number written in a text expression of constants
+    (``float("2." + "3846")``), the whole expression and never a part of it (``"0." + "25" + "7"`` is 0.257)."""
     out: list[float] = []
-    for n in ast.walk(tree):
+    todo = [tree]
+    while todo:  # not recursive: a long chain of "+" must not run out of stack
+        n = todo.pop()
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
             out.append(float(n.value))
         elif (text := _text_of(n)) is not None:
             out += [x for m in _commission._NUMBER.finditer(text) if (x := _commission.number_value(m)) is not None]
+        else:
+            todo.extend(ast.iter_child_nodes(n))
     return out
 
 

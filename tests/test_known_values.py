@@ -530,3 +530,15 @@ def test_the_note_on_a_plan_with_no_check_still_names_a_published_benchmark() ->
     from core import oracle_check
 
     assert "a published benchmark value" in oracle_check.problems([], None, 0)[0]
+
+
+def test_only_the_whole_text_expression_is_read_and_constant_f_strings_and_deep_chains_are_handled() -> None:
+    def program(expression: str) -> tuple[str, str]:
+        return known_values.program(_program(("formula", expression, "0")), 0.25, 0.00001, given="")
+
+    assert program('float("0." + "25" + "7")')[0], "0.257 is not the value withheld: its inner piece is not read alone"
+    for typed in ('float(f"{0.2}{5}")', "float(f\"{'0.'!s}{'25'!s}\")"):
+        assert program(typed)[0] == "", typed
+    long = " + ".join(['"a"'] * 1500)  # past the depth cap: not folded, and nothing is raised
+    assert program(f"len({long})")[0]
+    assert program('len((("ab" * 20) * 20) * 20 * 20)')[0]  # text past the length cap is not folded either

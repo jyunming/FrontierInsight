@@ -52,11 +52,12 @@ def number_value(m: re.Match[str]) -> float | None:
 
 def number_in_text(value: float, text: str) -> bool:
     """Whether ``text`` writes ``value`` with its sign (0.375 as 0.3750 or .375, 1200 as 1,200, 0.001 as 1e-3); a
-    number that is one side of a fraction or ratio of two numbers written with "/" (1/2, 1/(2)) is not that value, while a
+    number that is one side of a fraction or ratio of two numbers written with "/" (1/2, 1/((2))) is not that value, while a
     unit written with one (0.25/h) leaves it the value."""
     text = str(text or "")
     for m in _NUMBER.finditer(text):
-        if re.search(r"\d\s*[)\]]?\s*/\s*[(\[]?\s*$", text[:m.start()]) or re.match(r"\s*[)\]]?\s*/\s*[(\[]?\s*[-+−]?\.?\d", text[m.end():]):
+        if (re.search(r"\d[\s)\]]*/[\s(\[]*$", text[:m.start()])
+                or re.match(r"[\s)\]]*/[\s(\[]*[-+−]?\.?\d", text[m.end():])):
             continue
         found = number_value(m)
         if found is not None and math.isclose(found, float(value), rel_tol=1e-9, abs_tol=0.0):
@@ -253,7 +254,9 @@ def stage(path: Path, quest_root: Path) -> dict[str, str]:
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.with_name(manifest.name + ".tmp").write_text(json.dumps(files, indent=1), encoding="utf-8")
     os.replace(manifest.with_name(manifest.name + ".tmp"), manifest)
-    shutil.copy2(path, staged_path(quest_root))  # last: this copy is what says the quest was staged
+    copy = staged_path(quest_root).with_name(STAGED_NAME + ".tmp")  # whole or not there: never half a file
+    shutil.copy2(path, copy)
+    os.replace(copy, staged_path(quest_root))  # last: this copy is what says the quest was staged
     return files
 
 
@@ -261,14 +264,19 @@ def _manifest_path(quest_root: Path) -> Path:
     return Path(quest_root) / ".fi" / "commission_files.json"
 
 
-def staged_files(quest_root: Path) -> dict[str, str]:
-    """Each file the staging copied (its path in the quest) -> its sha256: the manifest written with the staging, with
-    what the trace recorded laid over it (so a quest stopped before the trace event is checked all the same)."""
+def _manifest(quest_root: Path) -> dict[str, str] | None:
+    """The manifest written with the staging; ``None`` when it is missing or unreadable."""
     try:
         kept = json.loads(_manifest_path(quest_root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        kept = {}
-    return {**(kept if isinstance(kept, dict) else {}), **(_recorded(quest_root).get("files") or {})}
+        return None
+    return kept if isinstance(kept, dict) else None
+
+
+def staged_files(quest_root: Path) -> dict[str, str]:
+    """Each file the staging copied (its path in the quest) -> its sha256: the manifest written with the staging, with
+    what the trace recorded laid over it (so a quest stopped before the trace event is checked all the same)."""
+    return {**(_manifest(quest_root) or {}), **(_recorded(quest_root).get("files") or {})}
 
 
 def _recorded(quest_root: Path) -> dict[str, Any]:
@@ -303,6 +311,9 @@ def door(path: Path | None, quest_root: Path | None) -> None:
                                 "changed), and a commission cannot change after it is handed over; nothing was run. "
                                 "Resume with the file as it was, or start a new quest")
     root = Path(quest_root or ".")
+    if had is not None and not _recorded(root) and _manifest(root) is None:
+        raise CommissionRefused(f"quest {name} was staged from a commission but the record of its files is missing, so "
+                                "its copies cannot be checked; nothing was run. Start a new quest")
     changed = [rel for rel, want in (staged_files(root) if had else {}).items()
                if not (root / rel).is_file() or sha256(root / rel) != want]
     if changed:
