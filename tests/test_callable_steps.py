@@ -104,6 +104,10 @@ async def test_the_design_step_alone_writes_plan_md_and_a_receipt_and_stops_afte
     assert receipt["checks"]["design_audit"]["judged"] == "ran"
     assert receipt["checks"]["known_values"] == {"judged": "not_applicable", "why": "the commission gives no known values"}
     assert not (root / "needs" / "EVIDENCE.json").exists(), "a step alone claims no evidence level"
+    from core import quality_report
+
+    assert quality_report.build(root, running=False)["outcome"]["line"].startswith(
+        "The design step was run on its own and finished; its receipt")
     receipt_events = [e for e in _trace(root) if e.get("kind") == "step_receipt"]
     assert receipt_events and receipt_events[-1]["sha256"] == _sha(root / rerun_from.RECEIPT)
 
@@ -200,8 +204,53 @@ async def test_a_script_that_still_fails_after_its_repairs_ends_the_step_with_no
     eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
     await eng.run()
     receipt = _receipt(eng.quest_root)
-    # Measured, not a design choice: whether to write the code again is the gate's, after the analysis (a later step).
-    assert receipt["result"] is None and receipt["ended"] == "done", receipt["ended"]
+    # Whether to write the code again is the gate's, after the analysis (a later step): this step stopped, and says why.
+    assert receipt["result"] is None and receipt["ended"] == "stopped", receipt["ended"]
+    assert receipt["stopped_because"].startswith("the run gave no result: the script still failed after its repairs")
+    from core import quality_report
+
+    line = quality_report.build(eng.quest_root, running=False)["outcome"]["line"]
+    assert line.startswith("The compute step was run on its own and stopped: the run gave no result"), line
+
+
+@pytest.mark.asyncio
+async def test_a_known_value_of_the_commission_is_checked_inside_the_compute_step(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+    from tests.test_commission import _commission as _with_known_value
+    from tests.test_engine_smoke import _FAKE_RESPONSES
+    from tests.test_oracle_gate import _HEAD, _TAIL
+
+    # The script answers the check FI writes from the commission's known value (0.25, tolerance 0.01) when asked.
+    answers = _HEAD + """if os.environ.get("FI_ORACLE") == "1":
+    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "drain constant", "value": 0.2502}]}))
+    raise SystemExit(0)
+""" + _TAIL
+
+    async def chat(self: Any, messages: list[dict[str, str]], **_kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        head = prompt.lstrip().splitlines()[0] if prompt.strip() else ""
+        if prompt.startswith("# Compute a Known Value"):
+            return "(no program)"  # the known value is left unconfirmed at the plan (tests/test_known_values.py)
+        if "Experiment Design" in head:  # a plan with a protocol: FI adds the commission's check to it
+            return json.dumps({**json.loads(_FAKE_RESPONSES["design"]), "protocol": {"runs_per_setting": 300}})
+        if "Implementation" in head:
+            return json.dumps({"code": answers, "deps": ["matplotlib"]})
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", chat)
+    order = _with_known_value(tmp_path / "order")
+    design = Engine(_config(tmp_path, order, {"name": "design"}, "design"))
+    await design.run()
+    assert _receipt(design.quest_root)["checks"]["known_values"]["judged"] == "ran"
+    eng = Engine(_config(tmp_path, order, {"name": "compute", "after": design.quest_root}, "compute"))
+    eng.config.engine.execute_replicates, eng.config.engine.pilot_run = 1, False
+    await eng.run()
+    receipt = _receipt(eng.quest_root)
+    oracle = json.loads((eng.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert oracle["attempts"][-1]["oracles"] == ["drain constant"], oracle
+    assert oracle["status"] == "ok" and receipt["checks"]["known_answer_checks"] == {"judged": "ran", "status": "ok"}
+    assert receipt["ended"] == "done" and receipt["previous_receipt_sha256"] == _sha(design.quest_root / rerun_from.RECEIPT)
 
 
 @pytest.mark.asyncio

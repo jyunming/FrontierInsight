@@ -1877,6 +1877,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         except (OSError, ValueError):
             stuck = {"kind": "unreadable"}
         ended = "paused" if paused else "returned" if stuck.get("return_reason") else "stopped" if stuck else "done"
+        why = str(stuck.get("problem") or stuck.get("say") or "") if ended == "stopped" else ""
+        if ended == "done" and step.name == "compute" and not state.get("result_json"):
+            # A compute step is done only with a result: one whose script gave none stopped, and says why.
+            rc, gave_up = (state.get("exec_result") or {}).get("returncode"), str(state.get("exec_give_up_reason") or "")
+            ended, why = "stopped", ("the run gave no result: " + (
+                f"the script still failed after its repairs (exit code {rc})" if rc not in (0, None)
+                else f"the script printed no result (exit code {rc})") + (f"; {gave_up.strip()[:300]}" if gave_up.strip() else ""))
         started, design = self._step_started(), state.get("design")
         checks = {name: _rerun_from.judged(self.quest_root, rel, getattr(self.config.engine, key, None) if key else None)
                   for name, (rel, key) in _rerun_from.STEP_CHECKS[step.name].items()}
@@ -1885,6 +1892,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         record = {
             "step": step.name, "quest_id": self.quest_id, "ended": ended,
             **({"return_reason": stuck["return_reason"], "problem": stuck.get("problem")} if ended == "returned" else {}),
+            **({"stopped_because": why} if ended == "stopped" else {}),
             "previous_receipt_sha256": started.get("previous_receipt_sha256"), "after": started.get("after"),
             "commission_sha256": _commission.recorded_sha(self.quest_root), "inputs": started.get("inputs") or {},
             "outputs": _rerun_from.files_sha(self.quest_root, _rerun_from.STEP_OUTPUTS[step.name]),

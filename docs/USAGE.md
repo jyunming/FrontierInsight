@@ -375,6 +375,17 @@ topic: |
 #       oracle_review.numeric: {name: codex_cli, model: gpt-6.1-terra}
 # commission: commission.json
 
+# Optional, with a commission only: run one step of the study on its own, in its own quest folder, and stop where
+# the step ends. `design` writes plan.md and the design; `compute` takes the design of a finished design step and
+# writes and runs the code (a code/experiment.py left in that folder is run as it is), with its checks and repairs,
+# and stops before the analysis. Each step leaves needs/STEP_RECEIPT.json: how it ended (done, stopped with the
+# reason, returned, paused), what it was given and made, what each of its checks did, the run's result, and the
+# sha256 of the receipt of the step before it. A step that would have to go back to an earlier one hands the study
+# back (needs/STUCK.json, return_reason: needs_earlier_step). Two calls, one config each:
+#   step: {name: design}                                          -> python launch.py --config design.yaml
+#   step: {name: compute, after: outputs/<the design quest's id>} -> python launch.py --config compute.yaml
+# step: {name: design}
+
 # Optional: short identifier used in folder names. Defaults to a
 # slug derived from the topic.
 title: integrator-bakeoff
