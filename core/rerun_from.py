@@ -73,7 +73,7 @@ NEEDS_APPROVAL: frozenset[str] = frozenset({"literature", "plan", "design"})
 # What running the quest again from each step does, in one sentence a person reads before choosing.
 _REPLACES = "the experiment plan (frozen) is replaced by the new design's"
 REDOES: dict[str, str] = {
-    "literature": "searches the literature again, then redoes the plan, design, code and everything after; "
+    "literature": "reads the given sources again, then redoes the plan, design, code and everything after; "
                   f"{_REPLACES}, and the old one is kept in .fi/previous/",
     "plan": "writes plan.md again from the same literature and waits for you to read it, then redoes the design, code "
             f"and everything after; {_REPLACES}, and the old one is kept in .fi/previous/",

@@ -9070,8 +9070,9 @@ def _pick_up_user_dropped_datasets(quest_root: Path) -> list[str]:
     return out
 
 
-#: Folders of ``data/`` that FI itself writes (the papers it read, what an earlier FI collected): never the person's data.
-_FI_OWN_DATA_FOLDERS: frozenset[str] = frozenset({"literature", "auto_collected"})
+#: Folders of ``data/`` that FI itself writes (the papers it read, what an earlier FI collected, the study's results):
+#: never the person's data. One definition: the phased split of the data reads the same (core/phased.py ``COLLECTED``).
+_FI_OWN_DATA_FOLDERS: frozenset[str] = frozenset(_phased.COLLECTED)
 
 
 def _list_user_data_files(data_dir: Path) -> list[Path]:
