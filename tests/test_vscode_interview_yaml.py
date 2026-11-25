@@ -145,10 +145,10 @@ def test_vscode_emitter_expands_the_ensemble_profile(tmp_path: Path) -> None:
     )
     assert "node_ensemble:" in yaml_text
     ensemble = cfg.provider.node_ensemble
-    assert set(ensemble) == {"ideate", "analyze", "cross_check"}
+    assert set(ensemble) == {"analyze", "cross_check"}  # the emitter's ideate entry is dropped on load: FI makes no ideas
     # The models are the ones the user ticked, in their order: FI picks none.
     assert list(ensemble["cross_check"].models) == ["picked-a", "picked-b", "picked-c"]
-    assert ensemble["ideate"].moderator == "picked-a"
+    assert ensemble["analyze"].moderator == "picked-a"
     # analyze MUST be tournament — the ProviderConfig validator rejects
     # synthesize there, so a wrong merge would fail Config construction.
     assert ensemble["analyze"].merge == "tournament"

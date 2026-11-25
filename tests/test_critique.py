@@ -290,7 +290,7 @@ async def test_generate_critique_raises_on_missing_paper(
     outputs.mkdir()
     qid = "1700000700-x-aabbcc"
     # Quest dir exists but contains no paper.md (e.g. a quest that
-    # crashed during ideate). Critique should fail loudly.
+    # crashed during clarify). Critique should fail loudly.
     (outputs / qid).mkdir()
     # Patch chat so we'd know if it was incorrectly invoked.
     async def fake_chat(self, messages, **kw):  # noqa: ANN001

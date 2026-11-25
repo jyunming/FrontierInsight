@@ -385,7 +385,7 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
 # The profiles a standalone tool understands. For a tool the engine isn't running,
 # so all a profile means is "fan out": the models are what the user typed, joined
 # into the CSV the ``--{tool}-ensemble`` flag takes. FI does not pick them.
-_ENSEMBLE_PROFILES = frozenset({"cross_check_only", "full"})
+_ENSEMBLE_PROFILES = frozenset({"cross_check_only", "ideate_and_check", "full"})
 
 
 def _ensemble_argv_tail(

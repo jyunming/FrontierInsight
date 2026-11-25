@@ -190,11 +190,11 @@ async def test_engine_run_passes_initial_when_no_checkpoint(
                                        ("ideate", "making research ideas")])
 @pytest.mark.asyncio
 async def test_a_checkpoint_stopped_before_a_step_fi_no_longer_has_is_refused_plainly(
-    tmp_path: Path, node: str, said: str,
+    tmp_path: Path, node: str, said: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """An earlier FI's quest that stopped just before its idea step or its study cards: LangGraph reads the checkpoint
     as having nothing left to run (the node is gone), which would look like a finished quest. The resume is refused in
-    one sentence and nothing runs."""
+    one sentence (not as a crash) and nothing runs."""
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from langgraph.graph import END, START, StateGraph
 
@@ -220,13 +220,19 @@ async def test_a_checkpoint_stopped_before_a_step_fi_no_longer_has_is_refused_pl
     async with AsyncSqliteSaver.from_conn_string(str(engine.fi_dir / "state.sqlite")) as saver:
         with pytest.raises(RuntimeError):
             await old.compile(checkpointer=saver).ainvoke({"topic": "resume unit", "iteration": 0}, run_cfg)
+        saved = len([c async for c in saver.alist(run_cfg)])
     engine.executor.setup = AsyncMock()
     engine._record_environment = AsyncMock()  # type: ignore[method-assign]
     engine._connect_llm = AsyncMock()  # type: ignore[method-assign]
     engine._client = MagicMock(chat=AsyncMock(side_effect=AssertionError("no model call is made")), aclose=AsyncMock())
-    with pytest.raises(ValueError, match=f"stopped just before {said}, a step an earlier FI had and this one does not"):
-        await engine.run()
+    capsys.readouterr()
+    await engine.run()
+    out = capsys.readouterr().out
+    assert f"[FI] quest {qid} stopped just before {said}, a step an earlier FI had and this one does not" in out, out
+    assert "nothing was run" in out and not (engine.quest_root / "quest_failed.md").exists()
     engine._client.chat.assert_not_called()
+    async with AsyncSqliteSaver.from_conn_string(str(engine.fi_dir / "state.sqlite")) as saver:
+        assert len([c async for c in saver.alist(run_cfg)]) == saved, "nothing ran, so no checkpoint was added"
 
 
 # ---- provider warnings ---------------------------------------------------

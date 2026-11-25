@@ -162,7 +162,7 @@ async def test_a_gathered_call_that_met_the_limit_is_not_a_result(tmp_path: Path
     import asyncio
 
     eng = _engine(tmp_path, monkeypatch, _Limited())
-    got = await asyncio.gather(eng._chat("p", node="ideate"), return_exceptions=True)
+    got = await asyncio.gather(eng._chat("p", node="plan"), return_exceptions=True)
     assert isinstance(got[0], ProviderUnusable) and not isinstance(got[0], Exception)
 
 

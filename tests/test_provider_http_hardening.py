@@ -79,7 +79,7 @@ async def test_prompt_trim_no_op_when_under_cap():
     client = LLMClient(ep, http=fake_http, max_prompt_chars=10_000)
 
     small = "just a normal prompt"
-    await client.chat([{"role": "user", "content": small}], node="ideate")
+    await client.chat([{"role": "user", "content": small}], node="plan")
     sent = fake_http.post.call_args.kwargs["json"]["messages"][0]["content"]
     assert sent == small
 

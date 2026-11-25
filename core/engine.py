@@ -549,10 +549,12 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
                     if not from_step and (gone := await _removed_step_waiting(saver, run_config)):
-                        raise ValueError(
-                            f"quest {self.quest_id} stopped just before {gone}, a step an earlier FI had and this one "
-                            "does not (a study now starts from a commission, which gives its question and its study), "
-                            "so it cannot go on; nothing was run. Start the study again from a commission.")
+                        # Said like the other refusals of a resume (a plain line, nothing run), not as a crash.
+                        self._log.warning("[run] the checkpoint waits at a step this FI does not have (%s)", gone)
+                        print(f"[FI] quest {self.quest_id} stopped just before {gone}, a step an earlier FI had and this "
+                              "one does not (a study now starts from a commission, which gives its question and its "
+                              "study), so it cannot go on; nothing was run. Start the study again from a commission.")
+                        return self._collect_artifacts({})
                     if getattr(prior_snapshot, "values", None):
                         # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
                         stale = _equation_tests.remove_stale(self.quest_root / "code")

@@ -31,7 +31,7 @@ def test_temperature_for_node_gates_are_zero():
 
 
 def test_temperature_for_node_generative_are_default():
-    for gen in ("ideate", "write", "implement", "analyze", "design"):
+    for gen in ("plan", "write", "implement", "analyze", "design"):
         assert _temperature_for_node(gen) == 0.2, gen
     # Unknown / empty node falls back to the generative default.
     assert _temperature_for_node(None) == 0.2
@@ -75,7 +75,7 @@ async def test_chat_routes_gate_nodes_to_temperature_zero(tmp_path: Path):
     for node in (
         "evidence_gate", "review", "review_panel.methodologist",
         "claim_check", "cross_check", "relevance_guard",
-        "ideate", "write",
+        "plan", "write",
     ):
         await eng._chat("prompt", node=node)
 
@@ -86,7 +86,7 @@ async def test_chat_routes_gate_nodes_to_temperature_zero(tmp_path: Path):
     assert cap.temps["cross_check"] == 0.0
     assert cap.temps["relevance_guard"] == 0.0
     # Generative nodes are unchanged.
-    assert cap.temps["ideate"] == 0.2
+    assert cap.temps["plan"] == 0.2
     assert cap.temps["write"] == 0.2
 
 

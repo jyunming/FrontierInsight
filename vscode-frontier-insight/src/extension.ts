@@ -854,7 +854,7 @@ interface RunWhere {
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
 const RERUN_STEPS = ["skills", "code", "run", "figures", "analysis", "crosscheck", "evidence", "writing", "claims", "review"];
 // These replace the plan and need `--approve-as <name>`, which is given on the command line.
-const RERUN_STEPS_NEEDING_NAME = ["ideas", "literature", "plan", "design"];
+const RERUN_STEPS_NEEDING_NAME = ["literature", "plan", "design"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users

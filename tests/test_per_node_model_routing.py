@@ -59,10 +59,10 @@ def test_model_for_node_returns_none_when_no_node_models(tmp_path: Path) -> None
 
 def test_model_for_node_exact_match_wins(tmp_path: Path) -> None:
     eng = _mk_engine(tmp_path, node_models={
-        "ideate": "claude-opus-4-7",
+        "plan": "claude-opus-4-7",
         "review": "gpt-5",
     })
-    assert eng._model_for_node("ideate") == "claude-opus-4-7"
+    assert eng._model_for_node("plan") == "claude-opus-4-7"
     assert eng._model_for_node("review") == "gpt-5"
 
 
@@ -89,7 +89,7 @@ def test_model_for_node_specific_persona_overrides_base(tmp_path: Path) -> None:
 def test_model_for_node_miss_returns_none(tmp_path: Path) -> None:
     """A node name absent from `node_models` resolves to None so the
     LLMClient falls through to `endpoint.model`."""
-    eng = _mk_engine(tmp_path, node_models={"ideate": "x"})
+    eng = _mk_engine(tmp_path, node_models={"plan": "x"})
     assert eng._model_for_node("review") is None
 
 
