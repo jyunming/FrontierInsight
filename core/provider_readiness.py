@@ -218,7 +218,7 @@ def _own_gateway(provider: str, base_url: str, api_key_env: str) -> bool:
 
 
 #: When FI checks what a local check leaves open; said in those sentences.
-_WHEN = "when you launch from `fi demo`, `fi --new` or the web form, and by `fi --doctor --deep`"
+_WHEN = "when you launch from `fi demo`, and by `fi --doctor --deep`"
 
 
 def check_local(provider: str, *, model: str | None = None, base_url: str = "", api_key_env: str = "") -> Readiness:

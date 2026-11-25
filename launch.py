@@ -3425,7 +3425,8 @@ def _commission_refusal(args: argparse.Namespace) -> str | None:
 
     if any(getattr(args, m, None) for m in _SKILL_MODES_READING_CONFIG):
         return None
-    for path in list(args.fleet or []) or ([args.config] if args.config and not (args.resume or args.watch) else []):
+    resumed = args.resume or args.watch or args.rerun  # a quest's own commission is checked with its folder, later
+    for path in list(args.fleet or []) or ([args.config] if args.config and not resumed else []):
         try:
             raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):

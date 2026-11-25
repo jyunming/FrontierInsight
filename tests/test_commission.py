@@ -831,6 +831,20 @@ def test_an_old_quest_without_a_commission_is_not_resumed(tmp_path: Path) -> Non
     assert "`fi new`" in str(e.value)
 
 
+@pytest.mark.parametrize("flag", ["--resume", "--rerun", "--watch"])
+def test_the_early_check_leaves_a_resumed_quest_to_the_check_that_knows_its_folder(tmp_path: Path, flag: str) -> None:
+    """A quest that goes on is judged with its folder (it may have been started from a commission, or not); the check
+    before any service starts judges only a new study's config, so it never says "no study was started" for one."""
+    import launch
+
+    cfg = tmp_path / "q-old" / "config.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text("topic: How fast does a tank drain?\n", encoding="utf-8")
+    args = launch.parse_args(["--config", str(cfg), flag, "q-old"])
+    assert launch._commission_refusal(args) is None
+    assert "no study was started" in launch._commission_refusal(launch.parse_args(["--config", str(cfg)]))
+
+
 @pytest.mark.asyncio
 async def test_update_refuses_an_old_quest_without_a_commission_and_approves_nothing(
         tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
