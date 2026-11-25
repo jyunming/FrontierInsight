@@ -501,6 +501,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 self._log.warning("[commission] %s", self.config._commission_note)
             if self._step() is not None:
                 await asyncio.to_thread(self._step_stage)
+            elif (ran_as := self._step_started().get("step")):  # the quest's own record says what it is
+                raise ValueError(f"quest {self.quest_id} ran the {ran_as} step on its own, so it goes on only with "
+                                 f"`step: {{name: {ran_as}}}` in its config; nothing was run")
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -1834,6 +1837,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                    else f"its design step ended {receipt.get('ended')!r}, not done" if receipt.get("ended") != "done"
                    else "its design step was run for another commission" if receipt.get("commission_sha256")
                    != _commission.recorded_sha(self.quest_root)
+                   else untraced if (untraced := _rerun_from.receipt_not_traced(after, raw))
                    else "its plan.md is not the one its receipt names" if _rerun_from.files_sha(after, ["plan.md"]).get(
                        "plan.md") != (receipt.get("outputs") or {}).get("plan.md")
                    else "its receipt names none of the files it hands on" if not isinstance(receipt.get("handed_on"), dict)

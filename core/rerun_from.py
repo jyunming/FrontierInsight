@@ -264,6 +264,19 @@ def changed_since(folder: Path, recorded: dict[str, str]) -> str:
     return f"its {', '.join(diff[:3])}{' and more' if len(diff) > 3 else ''} changed since its receipt" if diff else ""
 
 
+def receipt_not_traced(folder: Path, raw: bytes) -> str:
+    """Why the receipt bytes ``raw`` of ``folder`` are not the ones its own sealed trace names (``""``: they are)."""
+    import hashlib
+
+    from . import audit_log
+
+    trace = Path(folder) / ".fi" / "audit.jsonl"
+    if not audit_log.verify(trace).ok:
+        return "its trace does not verify"
+    named = [e.get("sha256") for e in audit_log.read(trace) if e.get("kind") == "step_receipt"]
+    return "" if named and named[-1] == hashlib.sha256(raw).hexdigest() else "its receipt is not the one its trace names"
+
+
 def step_back_to(step: str, node: str) -> str:
     """The earlier step a study run as ``step`` would go back to when its graph sends it to ``node`` (``""``: forward):
     the step run alone that holds the node, else its ``--from`` step."""
@@ -271,6 +284,12 @@ def step_back_to(step: str, node: str) -> str:
     if node not in order or order.index(node) >= order.index(ALONE[step][0]):
         return ""
     return next((s for s, nodes in ALONE.items() if node in nodes), "") or resolve(node) or node
+
+
+# The fields each check's writer always writes (a receipt in needs/receipts/ is read by core/receipts.py instead).
+_RECORD_FIELDS = {".fi/known_values.json": ("commission_sha256", "values"), ".fi/gate_receipt.json": ("full", "computation", "files"),
+                  ".fi/code_review.json": ("reviews_total",), "needs/ORACLE_CHECK.json": ("status",),
+                  "needs/PROTOCOL_CHECK.json": ("status",), "needs/RUN_MANIFEST_CHECK.json": ("status",)}
 
 
 def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]:
@@ -292,6 +311,14 @@ def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]
         return {"judged": "not_applicable", "why": str(data.get("detail") or data.get("error") or "")}
     if data.get("skipped"):  # a check that was on and did not read (its own record says why): not a fact of the study
         return {"judged": "not_run", "why": str(data["skipped"])}
+    if record.startswith("needs/receipts/"):  # a receipt is read by its own reader
+        from . import receipts
+
+        problem = receipts.read(Path(quest_root), Path(record).stem)[2]
+        if problem:
+            return {"judged": "unreadable", "why": problem}
+    elif any(f not in data for f in _RECORD_FIELDS.get(record, ())):
+        return {"judged": "unreadable", "why": "its record lacks a field its writer always writes"}
     return {"judged": "ran", **({"status": str(data["status"])} if data.get("status") else {})}
 
 

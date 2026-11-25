@@ -410,6 +410,52 @@ async def test_a_design_with_no_simulation_is_refused_by_the_compute_step_even_w
     assert not _started(eng.quest_root), "the script was not run"
 
 
+@pytest.mark.asyncio
+async def test_a_step_quest_is_not_resumed_or_re_opened_as_a_whole_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    before = _started(design.quest_root)
+    whole = design.config.model_copy(update={"step": None})
+    for reopen in (False, True):
+        with pytest.raises(ValueError, match="ran the design step on its own, so it goes on only with"):
+            await Engine(whole, resume_quest_id=design.quest_id).run(reopen=reopen)
+    assert _started(design.quest_root) == before, "no node ran"
+
+
+def test_a_step_without_the_trace_is_refused_at_the_door(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="`engine.audit_trace` must stay on"):
+        Config(topic="", commission=_commission(tmp_path), step=StepConfig(name="design"),
+               engine=EngineConfig(audit_trace=False))
+
+
+@pytest.mark.asyncio
+async def test_a_compute_step_refuses_a_design_receipt_its_trace_does_not_name(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    design = await _design(tmp_path, monkeypatch)
+    audit = design.quest_root / "needs" / "receipts" / "design_audit.json"
+    audit.write_text(audit.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    receipt = _receipt(design.quest_root)  # the file and the receipt's own hash of it are both changed
+    receipt["handed_on"]["needs/receipts/design_audit.json"] = _sha(audit)
+    (design.quest_root / rerun_from.RECEIPT).write_text(json.dumps(receipt, indent=1), encoding="utf-8")
+    eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    with pytest.raises(ValueError, match="its receipt is not the one its trace names"):
+        await eng.run()
+    assert not _started(eng.quest_root)
+
+
+def test_a_check_record_that_is_not_a_record_of_its_check_is_unreadable(tmp_path: Path) -> None:
+    (tmp_path / "needs" / "receipts").mkdir(parents=True)
+    for rel in ("needs/receipts/design_audit.json", "needs/PROTOCOL_CHECK.json", ".fi/gate_receipt.json"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(json.dumps({"foo": 1}), encoding="utf-8")
+        assert rerun_from.judged(tmp_path, rel, None)["judged"] == "unreadable", rel
+    (tmp_path / "needs" / "PROTOCOL_CHECK.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    assert rerun_from.judged(tmp_path, "needs/PROTOCOL_CHECK.json", None) == {"judged": "ran", "status": "ok"}
+
+
 def test_a_check_record_that_says_nothing_is_unreadable_not_ran(tmp_path: Path) -> None:
     rec = tmp_path / "check.json"
     for text in ("{not json", "{}", "[1, 2]", ""):

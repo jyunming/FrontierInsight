@@ -1888,6 +1888,9 @@ class Config(BaseModel):
     def _step_needs_commission(self) -> "Config":
         if self.step is not None and self.commission is None:
             raise ValueError("`step` runs one step of a commissioned study, so the config must name its `commission`")
+        if self.step is not None and not self.engine.audit_trace:
+            raise ValueError("`step` keeps what each step was given and made in the quest's trace, so "
+                             "`engine.audit_trace` must stay on")
         return self
 
     @property
