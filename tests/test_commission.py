@@ -295,7 +295,7 @@ def test_a_commission_given_to_a_quest_that_already_has_a_plan_is_refused(tmp_pa
     root = tmp_path / "out" / "q2"
     root.mkdir(parents=True)
     (root / "plan.md").write_text("# a plan\n", encoding="utf-8")
-    with pytest.raises(commission.CommissionRefused, match="already has a plan.md"):
+    with pytest.raises(commission.CommissionRefused, match="q2 was started without a commission file"):
         commission.door(_commission(tmp_path / "order"), root)
 
 
@@ -929,3 +929,71 @@ async def test_analyze_takes_a_commission_and_refuses_a_bad_one_before_a_quest_f
                               "--no-axon-sidecar"])
     assert await launch.main_async(args) == 2
     assert "`doubts`" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+# --- the review's five points: a started quest, the settings baseline, the topic, finite limits ----------------------
+
+
+def test_a_quest_started_without_a_commission_cannot_take_one_before_its_plan(tmp_path: Path) -> None:
+    """A quest stopped before plan.md (in its setup questions, say) began without a commission: its own checkpoint says
+    it started, so a commission given on resume is refused, not taken as a new study's."""
+    from core import commission
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / ".fi" / "state.sqlite").write_bytes(b"")
+    with pytest.raises(commission.CommissionRefused, match="q-old was started without a commission file"):
+        commission.door(_commission(tmp_path / "order"), root)
+    commission.door(_commission(tmp_path / "order"), tmp_path / "out" / "q-new")  # a folder with no record: a new quest
+
+
+def test_a_commissioned_quest_records_its_settings_at_the_first_start_and_a_looser_one_asks_for_update(
+        tmp_path: Path) -> None:
+    from core import plan_settings
+    from core.config import Config
+
+    root = tmp_path / "q"
+    (root / ".fi").mkdir(parents=True)
+    first = Config(commission=_commission(tmp_path / "order"), rigor_profile="research")
+    assert plan_settings.check(root, root / ".fi", first) == []
+    assert (root / ".fi" / plan_settings.NAME).is_file(), "the commissioned quest's settings are its baseline"
+    looser = Config(commission=first.commission)
+    changed = plan_settings.check(root, root / ".fi", looser)
+    assert changed and any("how strictly the quest is checked" in line for line in changed)
+
+
+@pytest.mark.asyncio
+async def test_a_config_topic_that_is_not_the_commissions_question_is_refused(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    question = commission.read(path)["question"]
+    yaml = tmp_path / "quest.yaml"
+    yaml.write_text(f"topic: Something else entirely\ncommission: {path.as_posix()}\nprovider:\n  name: ollama\n"
+                    f"output:\n  output_dir: {(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    assert await launch.main_async(launch.parse_args(["--config", str(yaml)])) == 2
+    err = capsys.readouterr().err
+    assert "`topic:` is not the commission's question" in err and err.count("\n") == 1
+    assert not (tmp_path / "outputs").exists()
+    assert launch._check([str(yaml)]) == 2
+    commission.door(path, None, topic=f"  {question}  ")  # the same words are fine
+    commission.door(path, None, topic=None)
+
+
+@pytest.mark.parametrize("hours", [".inf", ".nan"])
+def test_hours_that_are_not_a_finite_number_fail_the_check_and_the_start_alike(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str], hours: str) -> None:
+    import launch
+    from core import commission
+
+    path = tmp_path / "order" / "commission.yaml"
+    path.parent.mkdir()
+    path.write_text(f"question: How fast does a tank drain?\nscope: one tank\nlimits: {{hours: {hours}, model_calls: 9}}\n"
+                    "known_values: []\nno_known_values: true\nsuccess: [{condition: c, verify: v}]\n"
+                    "failure: [{condition: c, verify: v}]\ndoubts: []\n", encoding="utf-8")
+    assert launch._check([str(path)]) == 2
+    assert "`limits.hours` is missing or is not a number above 0" in capsys.readouterr().out
+    with pytest.raises(commission.CommissionRefused, match="limits.hours"):
+        commission.door(path, None)

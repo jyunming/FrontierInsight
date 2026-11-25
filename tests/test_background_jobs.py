@@ -57,7 +57,7 @@ def _config(tmp_path: Path, *, jobs: bool = True, replicates: int = 1, pilot: bo
             commission: Path | None = None) -> Config:
     return Config(
         commission=commission,
-        topic="background job probe", title="background-job",
+        topic="" if commission else "background job probe", title="background-job",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, auto_accept_on_pass=True,
@@ -141,7 +141,10 @@ async def test_watch_re_checks_on_a_timer_and_the_quest_then_completes(
     assert jw.read_pending(first.fi_dir) is not None
 
     async def finish_soon() -> None:
-        await asyncio.sleep(1.6)
+        # Done once two checks have seen it running: counted, not timed, since one check (the job's own status script)
+        # can take most of a second on a busy machine.
+        while sum(ln.startswith("[watch]") for ln in lines) < 2:
+            await asyncio.sleep(0.05)
         (cluster / "done").write_text("1")
 
     lines: list[str] = []

@@ -16,9 +16,9 @@ bear on the checks, a research quest's reviewers all ending up on one model, is 
 ``Engine._review_models_stop`` before this record is read (also after the panel has reviewed once). The multi-model
 ensemble is not a model setting here: it decides how many models vote on a check, so a change to it still stops.
 
-Only interview-written configs are recorded (their header says so): a config written by hand was never shown on a
-confirm screen, so there is nothing to hold it to. FI no longer writes such a config, so a record is made only for a
-config copied from one.
+A commissioned study is recorded at its first start: the commission is the approval of what it fixes, and the config
+it first runs with is the baseline later starts are held to. An interview-written config (its header says so) is
+recorded too; any other config was never approved, so there is nothing to hold it to.
 """
 
 from __future__ import annotations
@@ -178,8 +178,8 @@ def record(fi_dir: Path, cfg: Any, quest_root: Path | None = None, *,
 def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
     """Compare ``cfg`` with the recorded settings and return the differences (empty: go on).
 
-    With nothing recorded yet: an interview-written config (``quest_root/config.yaml`` starts with the interview's
-    header) is recorded now, as it was approved on the confirm screen; any other config is left unrecorded. A record
+    With nothing recorded yet: a commissioned study's config, or an interview-written one (``quest_root/config.yaml``
+    starts with the interview's header), is recorded now as the baseline; any other config is left unrecorded. A record
     that is there but cannot be read (not JSON, another schema, its fields missing) is a difference of its own, never
     written again: rewriting it would approve whatever the config says now, weaker or not. Only ``--update``, which
     shows the settings to the person, records them again.
@@ -207,7 +207,9 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
             written_by_interview = (quest_root / "config.yaml").read_text(encoding="utf-8").startswith(INTERVIEW_MARK)
         except OSError:
             written_by_interview = False
-        if written_by_interview:
+        # A commissioned study: the commission is the approval of what it fixes, and the config it first runs with is
+        # the settings baseline, so a later change that loosens a check asks for --update like any other.
+        if written_by_interview or getattr(cfg, "commission", None):
             record(fi_dir, cfg, quest_root)
         return []
     now = settings_of(cfg)

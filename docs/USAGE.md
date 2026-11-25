@@ -363,7 +363,8 @@ FI runs the study as written and never changes it. It does not search the litera
 
 ```yaml
 # Required: the commission file that fixes the study (read against this file's folder; see "The commission file"
-# below). Its question is the topic, so this config needs no `topic:`. FI does not make ideas, choose a study or
+# below). Its question is the topic, so this config needs no `topic:` (one that says anything else is refused).
+# FI does not make ideas, choose a study or
 # search the literature, and reads only the full texts the commission supplies, whatever this file sets for those
 # steps (run.log names a setting not used). The run's time limit is the smaller of execution.timeout_s and the
 # commission's limits.hours (limits.model_calls is shown to the plan, not counted). A config without `commission:`

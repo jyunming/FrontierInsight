@@ -33,7 +33,8 @@ class CommissionRefused(ValueError):
 
 
 def _number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """A finite number (not a bool, not infinity, not NaN): the one rule `fi check` and the start both use."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _text(v: Any) -> bool:
@@ -297,10 +298,28 @@ def recorded_sha(quest_root: Path) -> str | None:
     return sha256(staged_path(quest_root)) if staged_path(quest_root).is_file() else None
 
 
-def door(path: Path | None, quest_root: Path | None) -> None:
+def topic_problem(path: Path, topic: Any) -> str | None:
+    """Why a config's ``topic:`` cannot go with the commission at ``path`` (it is not the commission's question), or
+    None: no topic, or the same text. The commission sets the question, so the config cannot ask another one."""
+    if not _text(topic):
+        return None
+    question = read(path).get("question")
+    if _text(question) and " ".join(str(topic).split()) == " ".join(str(question).split()):
+        return None
+    return ("the config's `topic:` is not the commission's question, and the commission sets the question; remove "
+            "`topic:` from the config (or make it the commission's question word for word)")
+
+
+def _started(quest_root: Path) -> bool:
+    """Whether the quest has a record of its own (its checkpoint, its trace or its plan): it has begun."""
+    root = Path(quest_root)
+    return any(p.is_file() for p in (root / ".fi" / "state.sqlite", root / ".fi" / "audit.jsonl", root / "plan.md"))
+
+
+def door(path: Path | None, quest_root: Path | None, *, topic: Any = None) -> None:
     """Before any model call: a new quest's commission is validated; a resumed quest's must be the one it began with.
     A study without a commission is refused, new or resumed (``Engine`` itself does not refuse: every start path calls
-    this first)."""
+    this first), and so is a config whose ``topic`` is not the commission's question (:func:`topic_problem`)."""
     had = recorded_sha(quest_root) if quest_root is not None else None
     name = Path(quest_root).name if quest_root is not None else ""
     if had is None and path is None:
@@ -310,9 +329,9 @@ def door(path: Path | None, quest_root: Path | None) -> None:
             "checks it" if quest_root is None
             else f"quest {name} was started without a commission file, and FI no longer goes on with a study that has "
             "none; start a new study from a commission (`fi new`)")
-    if had is None and path is not None and quest_root is not None and (Path(quest_root) / "plan.md").is_file():
-        raise CommissionRefused(f"quest {name} already has a plan.md that was not written from a commission, so the "
-                                f"commission {path} cannot be given to it; start a new quest with it")
+    if had is None and path is not None and quest_root is not None and _started(quest_root):
+        raise CommissionRefused(f"quest {name} was started without a commission file, so the commission {path} "
+                                "cannot be given to it now; start a new quest with it")
     if had is not None and path is None:
         raise CommissionRefused(f"quest {name} was started from a commission and the config given no longer names one; "
                                 "resume it with the config it was started with")
@@ -332,6 +351,8 @@ def door(path: Path | None, quest_root: Path | None) -> None:
                                 "they were, or start a new quest")
     if path is not None and had is None:
         validate(path)
+    if path is not None and (why := topic_problem(path, topic)) is not None:
+        raise CommissionRefused(why)
 
 
 def given_sources(literature: list[Any], data: dict[str, Any]) -> list[Any]:
@@ -522,9 +543,12 @@ def check(path: Path) -> tuple[bool, list[str]]:
         raw = read(path)
     except CommissionRefused:
         raw = {}
+    topic = None
     if raw.get("commission") and "question" not in raw:  # a config that names its commission: that file is checked
-        path = locate(raw["commission"], path.resolve().parent)
+        path, topic = locate(raw["commission"], path.resolve().parent), raw.get("topic")
     found = problems(path)
+    if not found and (why := topic_problem(path, topic)) is not None:
+        found = [why]
     if found:
         return False, [f"{p[:1].upper()}{p[1:]}." for p in found]
     sources = " and each passage is in its source" if (read(path).get("known_values") or []) else ""

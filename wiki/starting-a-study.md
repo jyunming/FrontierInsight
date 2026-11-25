@@ -7,7 +7,7 @@ updated: 2026-11-25
 
 Every study starts from a **commission**: a short file that says what FI is asked to find out. A config (YAML) names
 it with `commission: <file>`, read against the config's own folder; the commission's question becomes the topic, so
-the config needs no `topic:`.
+the config needs no `topic:`, and one that is not the question word for word is refused.
 
 ## What a commission holds
 
@@ -32,7 +32,7 @@ the config needs no `topic:`.
 
 `core/commission.py` `door` runs at every start (single, `--fleet`, `--watch`, the web start route, VS Code through
 `launch.py`), before any folder, service or model call. A config that names no commission is refused in one sentence
-that names `fi new`. An older quest started without a commission is not resumed (`--resume`, `--rerun`, `--watch`,
+that names `fi new`. An older quest started without a commission is not resumed, and cannot be given one later (`--resume`, `--rerun`, `--watch`,
 `--update`); reading a finished quest (`--trace`, `--why`, `--quality`, the web quest page) still works. The engine
 itself does not refuse.
 

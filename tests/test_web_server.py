@@ -832,3 +832,19 @@ async def test_the_server_keeps_answering_while_the_paper_compiles(
         release.set()
     assert listing.status_code == 200
     assert answered_mid_compile, "the request waited for the paper compile to finish"
+
+
+@pytest.mark.asyncio
+async def test_a_quest_started_from_the_web_keeps_the_config_it_ran_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume (the quest page's, or `--resume <id>`) reads the quest's own config.yaml: the web start writes it, with the
+    commission's whole path, as a start from the command line does."""
+    from core.config import Config
+
+    monkeypatch.setattr("core.engine.Engine.run", _engine_run_that_writes_a_paper())
+    app = make_app(tmp_path)
+    _quest_id, quest_root, _detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md"]))
+    saved = quest_root / "config.yaml"
+    assert saved.is_file()
+    assert Config.from_yaml(saved).commission == (tmp_path / "order" / "commission.yaml").resolve()

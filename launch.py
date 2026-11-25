@@ -2421,7 +2421,7 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     from core import commission as _commission
 
     try:  # the wait can be hours: the commission and the quest's copies are checked again before it goes on
-        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id)
+        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id, topic=cfg.topic)
     except _commission.CommissionRefused as e:
         print(f"[FI] {e}", file=sys.stderr)
         engine._log.warning("[watch] %s", e)
@@ -3433,7 +3433,8 @@ def _commission_refusal(args: argparse.Namespace) -> str | None:
             continue
         try:
             named = raw.get("commission") if isinstance(raw, dict) else None
-            _commission.door(_commission.locate(named, Path(path).resolve().parent) if named else None, None)
+            _commission.door(_commission.locate(named, Path(path).resolve().parent) if named else None, None,
+                             topic=raw.get("topic") if isinstance(raw, dict) else None)
         except _commission.CommissionRefused as e:
             return str(e)
     if args.analyze and args.commission:
@@ -3821,7 +3822,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Before any model call, and before run_one replaces a resumed quest's own config.yaml.
                     # The quest's full id: a shortened one was looked up above.
                     found_id = args.resume or args.watch
-                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None)
+                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None,
+                                     topic=cfg.topic)
                 except _commission.CommissionRefused as e:
                     print(f"[FI] {e}", file=sys.stderr)
                     return 2
@@ -3884,7 +3886,7 @@ async def main_async(args: argparse.Namespace) -> int:
         try:
             configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
             for _path, c in configs:
-                _commission.door(c.commission, None)  # every quest's commission before any starts
+                _commission.door(c.commission, None, topic=c.topic)  # every quest's commission before any starts
         except _commission.CommissionRefused as e:
             print(f"[FI] {e}", file=sys.stderr)
             return 2
@@ -4319,7 +4321,7 @@ async def _run_update(
         return 1
     try:
         cfg = Config.from_yaml(yaml_path)
-        _commission.door(cfg.commission, quest_root)
+        _commission.door(cfg.commission, quest_root, topic=cfg.topic)
     except _commission.CommissionRefused as e:
         print(f"[FI] {e}", file=sys.stderr)
         return 2

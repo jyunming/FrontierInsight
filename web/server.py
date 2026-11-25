@@ -3277,12 +3277,19 @@ def make_app(
         from core import commission as _commission
 
         try:  # a commission's files and passages, before any quest folder or model call
-            _commission.door(cfg.commission, None)
+            _commission.door(cfg.commission, None, topic=cfg.topic)
         except _commission.CommissionRefused as e:
             raise HTTPException(400, str(e)) from e
 
         engine = Engine(cfg, supervisor=app.state.supervisor)
         quest_id = engine.quest_id
+        # The quest's own config.yaml, as launch.run_one keeps it, so Resume (here or `--resume <id>`) and --update find
+        # the config it ran with; the commission's path is written whole, since the text came from no folder.
+        saved = engine.quest_root / "config.yaml"
+        if not saved.exists():
+            engine.quest_root.mkdir(parents=True, exist_ok=True)
+            saved.write_text(_yaml.safe_dump({**cfg_dict, "commission": str(cfg.commission)}, sort_keys=False),
+                             encoding="utf-8")
 
         async def gui_clarify_callback(questions: dict[str, Any]) -> dict[str, Any]:
             fut = registry.register_clarify(quest_id, questions)
