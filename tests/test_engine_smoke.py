@@ -900,7 +900,7 @@ async def test_a_commissioned_literature_review_sets_survey_mode_and_runs_no_exp
     from core import audit_log
 
     engine, cfg = _commissioned_run(tmp_path, monkeypatch, "review_literature")
-    assert cfg.engine.survey_mode is True and cfg.engine.no_simulation is False  # the config's own key is not what sets it
+    assert cfg.engine.survey_mode is True and cfg.engine.no_simulation is True  # both come from the commission's method
     art = await engine.run()
     ran = [e["node"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "node_started"]
     assert not {"implement_outline", "implement", "execute", "wait_for_data", "data_load"} & set(ran), ran
