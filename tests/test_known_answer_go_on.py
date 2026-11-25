@@ -1,19 +1,11 @@
-"""Going on although a known-answer check failed (core/accepted_checks.py): the person's named choice, or automatic for
-an exploration.
-
-A check that was measured and failed used to leave two ways on: fix the script, or (after the freeze) start a new
-quest, or change `engine.oracle_check` -- which, on a quest the interview wrote, stopped it a second time. Now one step,
-`--accept-checks <quest> --approve-as <you>` (the web page's button, `@fi /accept-checks`), marks the check unconfirmed
-and goes on. The choice binds to the check's conditions and to the code that measured it: a change to either and the
-check is judged again. It is never offered when nothing was measured. An exploration quest goes on by itself, recorded as
-automatic; a research quest still stops. Either way the evidence keeps a gap in plain words and the paper says so.
+"""Going on although a known-answer check failed (core/accepted_checks.py): FI goes on by itself, recorded as
+automatic, the check marked unconfirmed. A person is never offered the choice. The evidence keeps a gap in plain words
+and the paper says so.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +15,6 @@ from core import accepted_checks as ac, evidence, oracle_check as oc, todo
 from core.engine import Engine
 from tests.test_oracle_gate import _FAILING, _PROTOCOL, ORACLE, _cfg, _fake
 
-ROOT = Path(__file__).resolve().parent.parent
 REPORTED = {"checks": [{"name": ORACLE["name"], "value": 0.5}]}
 
 
@@ -65,131 +56,35 @@ def test_only_a_check_that_was_measured_and_failed_is_offered() -> None:
     assert nothing == [] and "cannot tell them apart" in why
 
 
-def test_the_web_page_offers_it_only_while_the_quest_is_stopped_there(tmp_path: Path) -> None:
-    """A stale record of the stop at the checks must not show the failed-check choice while the quest is stopped at the
-    plan: the endpoint would record the plan's choice, and the person would have read one thing and signed another."""
-    quest = tmp_path / "q-1"
-    _stopped_record(quest)
-    assert ac.failing_pending(quest) is not None
-    (quest / ".fi" / "pause.json").write_text(json.dumps({"kind": "plan"}), encoding="utf-8")
-    assert ac.failing_pending(quest) is None
-    (quest / ".fi" / "pause.json").unlink()
-    assert ac.failing_pending(quest) is not None
-    ac.write_pending(quest, [{"name": "a", "why": "w", "expected": 1.0, "fingerprint": "f"}], plan_version=1)
-    assert ac.failing_pending(quest) is None, "with no live stop, the plan's own record decides, as accept() does"
-
-
 # --- the three surfaces record a name, the conditions and the code version ------------------------------------------
 
 
-def test_the_cli_records_the_name_the_conditions_and_the_code_version(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    import launch
+# --- a person is never offered the choice -------------------------------------------------------------------------
 
+
+def test_a_person_cannot_go_on_with_a_failed_check_and_the_engine_has_no_such_path(tmp_path: Path) -> None:
+    """An old stop at the checks no longer takes a person's choice: the command says the quest is not stopped for
+    unsourced checks and writes nothing; the engine and the module have no path that reads such a choice."""
     quest = tmp_path / "q-1"
-    _stopped_record(quest, version="abc" * 20)
-    assert launch._accept_checks("q-1", "", tmp_path) == 2, "a choice with no name is refused"
-    assert launch._accept_checks("q-1", "Jun", tmp_path) == 0
-    out = capsys.readouterr().out
-    for needle in ("Jun goes on although 1 known-answer check(s) failed", "expected 1 within ±0.05",
-                   "measured 0.5", "code/experiment.py (version abcabcabcabc)", "judged again"):
-        assert needle in out, needle
-    chosen = ac.failing_accepted(quest)["chosen"]["final size closed form"]
-    assert chosen["by"] == "Jun" and chosen["via"] == "cli" and chosen["script_version"] == "abc" * 20
-    assert chosen["fingerprint"] == ac.fingerprint(ORACLE) and chosen["measured"] == 0.5
-    # The unsourced-checks stop is not what this quest stopped at: nothing written there.
-    assert ac.accepted(quest) is None
+    _stopped_record(quest)
+    ok, message = ac.accept(quest, "Jun", via="cli")
+    assert not ok and "not stopped for checks without a stated source" in message
+    assert not (quest / "needs" / "FAILED_CHECKS_ACCEPTED.json").exists()
+    assert not any(hasattr(ac, n) for n in ("accept_failing", "failing_pending", "failing_accepted", "went_on_by"))
+    assert not hasattr(Engine, "_chosen_go_on")
 
 
-def test_nothing_measured_is_refused_with_the_reason(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    import launch
-
-    _stopped_record(tmp_path / "q-1", offered=False, why_not="nothing was measured for 'x'")
-    assert launch._accept_checks("q-1", "Jun", tmp_path) == 1
-    assert "not offered at this stop: nothing was measured for 'x'" in capsys.readouterr().out
-    assert ac.failing_accepted(tmp_path / "q-1") is None
-
-
-def test_the_web_page_records_it_through_the_same_endpoint(tmp_path: Path) -> None:
-    try:
-        from fastapi.testclient import TestClient
-    except Exception:  # pragma: no cover
-        pytest.skip("fastapi not installed")
-    from web.server import make_app
-
-    _stopped_record(tmp_path / "q1")
-    client = TestClient(make_app(tmp_path))
-    assert client.post("/api/quests/q1/plan/accept-checks", json={"who": ""}).status_code == 400
-    ok = client.post("/api/quests/q1/plan/accept-checks", json={"who": "Ana"})
-    assert ok.status_code == 200 and "Ana goes on although" in ok.json()["message"]
-    assert ac.failing_accepted(tmp_path / "q1")["chosen"]["final size closed form"]["via"] == "web"
-    page = (ROOT / "web" / "static" / "quest.html").read_text(encoding="utf-8")
-    assert "a.id === 'go_on_failing'" in page and "Go on with it marked unconfirmed" in page
-    assert "failed.script_version" in page, "the box repeats the code the choice is bound to"
-    assert "fi_accepted.failing_pending(quest_root)" in (ROOT / "web" / "server.py").read_text(encoding="utf-8")
-
-
-def test_vs_code_turns_the_card_action_into_accept_checks(tmp_path: Path) -> None:
-    ext = ROOT / "vscode-frontier-insight"
-    skills = (ext / "src" / "skills.ts").read_text(encoding="utf-8")
-    # The command reads the stop's offer and shows the conditions and the code before it asks for the name, and runs
-    # the same launch.py --accept-checks.
-    assert 'record.go_on' in skills and "failed.script_version" in skills and "failed.why_not" in skills
-    assert '["--accept-checks", questId, "--approve-as", who.trim()' in skills
-    compiled, source = ext / "out" / "stop-card.js", ext / "src" / "stop-card.ts"
-    node = shutil.which("node")
-    if node is None or not compiled.is_file() or compiled.stat().st_mtime < source.stat().st_mtime:
-        pytest.skip("node, or a compiled vscode-frontier-insight/out/stop-card.js as new as its source, is not here")
-    pause = {"kind": "oracle", "card": {"actions": [{"id": "go_on_failing", "label": "Mark the check unconfirmed and go on",
-                                                     "detail": "d", "vscode": "@fi /accept-checks q-1"}]}}
-    script = ("const m = require(process.argv[1]); const p = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-              "console.log(JSON.stringify(m.cardButtons(m.cardOf(p), 'q-1')));")
-    done = subprocess.run([node, "-e", script, str(compiled)], input=json.dumps(pause), capture_output=True,
-                          text=True, encoding="utf-8", timeout=60)
-    assert done.returncode == 0, done.stderr
-    assert json.loads(done.stdout) == [{"title": "Mark the check unconfirmed and go on",
-                                        "query": "@fi /accept-checks q-1", "send": True, "tooltip": "d"}]
-
-
-# --- the choice binds to the check's conditions and the code -------------------------------------------------------
-
-
-def test_a_changed_expected_value_or_changed_code_undoes_the_choice(tmp_path: Path) -> None:
-    quest = tmp_path / "q-1"
-    _stopped_record(quest, version="v1")
-    assert ac.accept(quest, "Jun", via="cli")[0]
-    (check,) = _offer()
-    assert ac.went_on_by(quest, check, "v1")["by"] == "Jun"
-    assert ac.went_on_by(quest, check, "v2") is None
-    assert ac.no_longer_applies(quest, check, "v2") == "the code that measures it changed since"
-    (moved,) = ac.offer(oc.problems([{**ORACLE, "expected": 0.9}], REPORTED, 0), [{**ORACLE, "expected": 0.9}],
-                        oc.judged([{**ORACLE, "expected": 0.9}], REPORTED))[0]
-    assert ac.went_on_by(quest, moved, "v1") is None
-    assert "expected value, tolerance, case or measure changed" in ac.no_longer_applies(quest, moved, "v1")
-
-
-def test_the_engine_judges_again_when_the_script_or_the_check_changed(tmp_path: Path) -> None:
+def test_the_measuring_code_version_follows_the_script_and_its_helper_modules(tmp_path: Path) -> None:
     engine = Engine(_cfg(tmp_path))
     script = engine.quest_root / "code" / "experiment.py"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(_FAILING, encoding="utf-8")
-    _stopped_record(engine.quest_root, version=engine._measuring_code_version(script))
-    assert ac.accept(engine.quest_root, "Jun", via="cli")[0]
-    found, judged = oc.problems([ORACLE], REPORTED, 1), oc.judged([ORACLE], REPORTED)
-    (went,) = engine._chosen_go_on(found, [ORACLE], judged, script)
-    assert went["by"] == "Jun" and went["via"] == "cli"
-    changed = {**ORACLE, "tolerance": 0.06}
-    assert engine._chosen_go_on(oc.problems([changed], REPORTED, 1), [changed], oc.judged([changed], REPORTED), script) == []
     # A helper module beside the script is part of the code that measured the check; FI's own scripts are not.
     before = engine._measuring_code_version(script)
     (script.parent / "run.py").write_text("# FI's own runner\n", encoding="utf-8")
     assert engine._measuring_code_version(script) == before
     (script.parent / "helpers.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     assert engine._measuring_code_version(script) != before
-    script.write_text(_FAILING + "\n# edited\n", encoding="utf-8")
-    assert engine._chosen_go_on(found, [ORACLE], judged, script) == []
-    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "no longer applies: the code that measures it changed since; it is judged again" in log
-    assert "no longer applies: its expected value, tolerance, case or measure changed since" in log
 
 
 # --- the evidence, the to-do card and the paper ---------------------------------------------------------------------

@@ -718,6 +718,8 @@ class RunChecksMixin:
                 return oracle_code, None  # the text is read: nothing to rewrite, or nothing it could rewrite
             again = await self._oracle_gate(state, py, env, seed_path)  # type: ignore[attr-defined]
             oracle_code = again if again is not None else seed_path.read_text(encoding="utf-8")
+            if (back := self._returned_stop()) is not None:  # type: ignore[attr-defined]
+                return oracle_code, back
             self._check_equation_labels(state)  # type: ignore[attr-defined]
             self._check_code_layout(state)  # type: ignore[attr-defined]
         if self._typed_text_unread(seed_path):

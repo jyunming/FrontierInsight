@@ -251,7 +251,6 @@ def build(
     repairs: int = 2,
     kept: str | None = None,
     stderr_tail: str = "",
-    go_on: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The card for a stop at the known-answer checks (see the module docstring). Pure: reads ``script`` to say where a
     number is computed, nothing else."""
@@ -423,7 +422,7 @@ def build(
                       if c["status"] not in ("failed", "not_run") and not c.get("error") else [])
     side = leaning(checks, triage, proposals, kept=kept, has_oracles=bool(oracles))
     actions = _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
-                       repairs=repairs, kept=kept, quest_root=quest_root, script=script, go_on=go_on)
+                       repairs=repairs, kept=kept, quest_root=quest_root, script=script)
     return {
         "type": TYPE,
         "summary": summary,
@@ -436,10 +435,7 @@ def build(
         "leaning": side,
         "why": _why(side, checks, triage, proposals),
         "actions": actions,
-        "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + (
-            # Why "mark it unconfirmed and go on" is not among the ways on: said, so nobody looks for it.
-            [f"Going on with a check marked unconfirmed is not offered here: {go_on['why_not']}."]
-            if isinstance(go_on, dict) and not go_on.get("offered") and go_on.get("why_not") and oracles else []) + [
+        "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + [
             # After the freeze a proposal cannot be applied from here: say the one way it can be used.
             (f"This research quest cannot take the {_whose(p)} proposed change (its protocol is frozen); to use it, "
              "start a new quest whose plan states it: " if research else
@@ -748,7 +744,7 @@ def _revise_text(checks: list[dict[str, Any]], oracles: list[dict[str, Any]]) ->
 
 def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str, Any]], *, frozen: bool,
              research: bool, interview_made: bool, repairs: int, kept: str | None, quest_root: Path,
-             script: Path, go_on: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+             script: Path) -> list[dict[str, Any]]:
     resume_cli = f"python launch.py --resume {quest_id}"
     actions: list[dict[str, Any]] = []
     nothing_measured = bool(checks) and all(c["status"] == "not_measured" for c in checks)
@@ -836,26 +832,6 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
                 "web": "Ask for this change (the Plan box), then Resume",
                 "vscode": f"@fi /plan {quest_id} {text}",
             })
-    # 4. Mark the failed check unconfirmed and go on: one step, with a name, bound to the check's conditions and to the
-    # version of the code that measured it (core/accepted_checks.py). Offered only when every check still failing was
-    # measured; otherwise a note says why not. (It replaces the advice to set `engine.oracle_check: warn`, which on a
-    # quest the interview wrote stopped the quest a second time to ask about the changed setting.)
-    if isinstance(go_on, dict) and go_on.get("offered") and go_on.get("checks"):
-        from .accepted_checks import conditions_text, short_version
-
-        listed = "; ".join(f"'{c.get('name')}': {conditions_text(c)}" for c in go_on["checks"])
-        script_at = f"{go_on.get('script') or _rel(script, quest_root)} (version {short_version(go_on.get('script_version'))})"
-        actions.append({
-            "id": "go_on_failing", "label": "Mark the check unconfirmed and go on",
-            "detail": (f"Go on although the check failed, with your name recorded: {listed}; measured by {script_at}. "
-                       "The check stays failed and marked unconfirmed: the result does not count as checked against "
-                       "known answers (never publication-ready), and the paper says so. If the check's expected value, "
-                       "tolerance, case or measure changes, or that code changes (by you, or by a later fix FI makes), "
-                       "the check is judged again."),
-            "cli": f"python launch.py --accept-checks {quest_id} --approve-as <you>",
-            "web": "Go on with it marked unconfirmed",
-            "vscode": f"@fi /accept-checks {quest_id}",
-        })
     return actions
 
 

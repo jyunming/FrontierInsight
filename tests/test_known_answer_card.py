@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from core import accepted_checks, oracle_card, oracle_check as oc, todo
+from core import oracle_card, oracle_check as oc, todo
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 
@@ -244,34 +244,16 @@ def test_two_checks_with_one_name_are_named_on_the_card_without_changing_the_ver
 # --- after the freeze ------------------------------------------------------------------------------------------------------
 
 
-def _rk4_offer() -> dict[str, Any]:
-    reported = {"checks": [{"name": RK4["name"], "value": 3.33241e-07, "measured_by": "engine"}], "engine_measured": True}
-    checks, why_not = accepted_checks.offer(oc.problems([RK4], reported, 0), [RK4], _judged(3.33241e-07))
-    assert checks and not why_not
-    return {"offered": True, "why_not": "", "checks": checks, "script": "code/simulate.py",
-            "script_version": "0123456789abcdef" * 4}
-
-
-def test_after_the_freeze_a_measured_failure_is_offered_the_named_go_on_never_a_setting_change(tmp_path: Path) -> None:
-    """The advice to set `engine.oracle_check: warn` led to a second stop on a quest the interview wrote (the changed
-    setting needs approving): the card now offers one named step instead, which repeats the check's conditions and the
-    code that measured it, frozen or not, research or not."""
+def test_a_card_never_offers_to_go_on_with_a_failed_check_and_never_advises_warn(tmp_path: Path) -> None:
+    """FI goes on with a failed check by itself, so the card offers no such step and never advises `engine.oracle_check:
+    warn` (which on a quest the interview wrote needs the changed setting approved)."""
     for n, kw in enumerate(({"frozen": True, "interview_made": True}, {"frozen": True}, {"frozen": True, "research": True},
                             {})):
-        made = _rk4_card(tmp_path / str(n), go_on=_rk4_offer(), **kw)
-        assert "oracle_check: warn" not in json.dumps(made) and not any(a["id"] == "go_on_recorded" for a in made["actions"])
-        go_on = next(a for a in made["actions"] if a["id"] == "go_on_failing")
-        assert go_on["cli"] == "python launch.py --accept-checks q-1 --approve-as <you>"
-        assert go_on["vscode"] == "@fi /accept-checks q-1" and go_on["web"]
-        for needle in ("expected 1.637e-08", "case dt=0.1, t_end=1", "measure `err`", "measured 3.33241e-07",
-                       "code/simulate.py (version 0123456789ab)", "unconfirmed", "judged again"):
-            assert needle in go_on["detail"], needle
+        made = _rk4_card(tmp_path / str(n), **kw)
+        assert "oracle_check: warn" not in json.dumps(made) and "accept-checks" not in json.dumps(made)
+        assert not any(a["id"] in ("go_on_failing", "go_on_recorded") for a in made["actions"])
         if kw.get("frozen"):
             assert not any(a["id"] == "revise_check" for a in made["actions"]), "a frozen protocol is not changed here"
-        text = "\n".join(todo.card_lines(made, markdown=False))
-        assert "--accept-checks q-1 --approve-as <you>" in text
-    research = _rk4_card(tmp_path / "c2", frozen=True, research=True, go_on=_rk4_offer())
-    assert "marked unconfirmed" in json.dumps(research) and "fix the script" not in json.dumps(research)
     # Before the freeze a research quest may still change the check through the plan, and is never offered warn.
     open_research = _rk4_card(tmp_path / "d", research=True)
     assert [a["id"] for a in open_research["actions"]] == ["resume", "edit", "revise_check"]
@@ -296,13 +278,6 @@ def test_resume_says_what_it_really_does_for_a_check_with_no_numbers(tmp_path: P
                                attempts=[{"problems": found}], frozen=True)
     assert [a["id"] for a in frozen["actions"]] == ["amend"]
     assert "cli" not in frozen["actions"][0], "nothing on the card only resumes into the same stop"
-    # Nothing was measured, so there is no failure to go on with: the card says so instead of offering it.
-    _checks, why_not = accepted_checks.offer(found, [blank], [])
-    offered = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[blank],
-                                attempts=[{"problems": found}], frozen=True,
-                                go_on={"offered": False, "why_not": why_not, "checks": []})
-    assert not any(a["id"] == "go_on_failing" for a in offered["actions"])
-    assert any(n.startswith("Going on with a check marked unconfirmed is not offered here") for n in offered["notes"])
     made = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[blank],
                              attempts=[{"problems": found}], frozen=True, interview_made=True)
     assert made["actions"][0]["cli"] == "python launch.py --update q-1", "the changed setting is approved, not resumed"

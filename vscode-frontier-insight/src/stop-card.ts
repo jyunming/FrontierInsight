@@ -5,8 +5,7 @@
  * `.fi/pause.json`, and the same card as text into `NEXT_STEP.md`, which the chat already shows. This module turns the
  * card's `actions` into chat buttons, so each way on is one click, as it is on the web page: "Let FI try again" sends
  * `@fi /resume <id>`; a change to a check puts `@fi /plan <id> <the card's words>` in the chat box to read before
- * sending; "Mark the check unconfirmed and go on" sends `@fi /accept-checks <id>` (which shows the check's conditions
- * and asks for a name first); an amendment route puts `@fi /update <id>` there. An action this module does not know gets no
+ * sending; an amendment route puts `@fi /update <id>` there. An action this module does not know gets no
  * button (its command is still in the card's text), so the card can grow without the extension breaking.
  *
  * Pure (no `vscode` import), so it can be run under plain node in the tests.
@@ -62,10 +61,6 @@ export function cardButtons(card: StopCard | null, questId: string): CardButton[
             out.push({ title, query: `@fi /plan ${questId} ${oneLine(a.prefill)}`, send: false, tooltip });
         } else if (a.id === "amend" && typeof a.vscode === "string" && a.vscode.startsWith("@fi /update ")) {
             out.push({ title, query: `@fi /update ${questId}`, send: false, tooltip });
-        } else if (a.id === "go_on_failing") {
-            // Mark the failed check unconfirmed and go on: the command repeats the check's conditions and the code
-            // that measured it, then asks for the person's name before anything is recorded.
-            out.push({ title, query: `@fi /accept-checks ${questId}`, send: true, tooltip });
         }
     }
     return out;

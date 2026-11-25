@@ -1113,6 +1113,11 @@ class AnalyzeStageMixin:
             ended = ("the settings of the plan were still more than FI lists"
                      if (state.get("exec_result") or {}).get("too_long_tried") else
                      "the experiment would still take longer than the time allowed")
+        if reason == "returned":
+            # A commissioned study a check before the run handed back (Engine._returned_stop): its sentence says why.
+            problem = str((state.get("exec_result") or {}).get("returned") or "").strip().rstrip(".")
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("returned_tried") or []] or [problem]
+            ended = "FI handed the study back before it ran"
         # A study whose kept search cannot be used says, in its own words, what happened and what to do
         # (core/optimise.py): those words are the whole report, with nothing added to them.
         own_words = reason == "no_search" and bool((state.get("exec_result") or {}).get("no_search_advice"))
@@ -1164,6 +1169,10 @@ class AnalyzeStageMixin:
             problem = _commission.too_long_problem(fit, said)
             own_words = True
             record = self._return_to_qc("scope_exceeds_cap", problem, {**fit, "measured": said}, tried,  # type: ignore[attr-defined]
+                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")})
+        elif reason == "returned" and isinstance(back := (state.get("exec_result") or {}).get("returned_for"), dict):
+            own_words = True
+            record = self._return_to_qc(back["reason"], problem, back.get("evidence"), tried,  # type: ignore[attr-defined]
                                         **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")})
         else:
             try:

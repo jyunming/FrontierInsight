@@ -4684,7 +4684,7 @@ class CodeStageMixin:
         guard: tuple[str, str | None, set[str], dict[str, str]] | None = None
         attempt = 0
         test_run_read = False  # the first measurement of the checks has been read as a test run of them
-        went_on: list[dict[str, Any]] = []  # the failed checks the quest goes on with (a person's choice, or automatic)
+        went_on: list[dict[str, Any]] = []  # the failed checks the quest goes on with (automatic)
         while True:
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
             oracles = _oracle.declared(protocol)
@@ -4793,12 +4793,6 @@ class CodeStageMixin:
                         ", ".join(repr(n) for n in flipped),
                     )
                     continue
-            if found and oracles and not incomplete and self.config.engine.oracle_check == "block":
-                # A person chose to go on although these checks failed, bound to the checks as they are and to this
-                # code: honoured before anything (a plan change, a repair) could change either and undo the choice.
-                went_on = self._chosen_go_on(found, run_oracles, attempts[-1]["judged"], seed_path)
-                if went_on:
-                    break
             if oracles and not incomplete and not test_run_read:
                 # The first measurement of the checks is a test run of them: a definition mismatch goes back to the plan
                 # once, before any repair of the script is spent on it; when the plan changed the checks they are
@@ -4934,12 +4928,14 @@ class CodeStageMixin:
                     and n not in self._oracle_undecided}
             if outcome == "applied" and held:
                 guard = (code_before, new_code_before, held, package_before)
-        # What the stop may offer: "mark it unconfirmed and go on", only when every problem is a check that was measured
-        # and failed (core/accepted_checks.py::offer), bound to the checks' conditions and to this version of the code.
-        go_on_checks, go_on_why_not = (_accepted.offer(found, run_oracles, attempts[-1].get("judged") or [])
-                                       if found else ([], ""))
+        # The checks that were measured and failed, when every problem is one (core/accepted_checks.py::offer), bound to
+        # the checks' conditions and to this version of the code.
+        go_on_checks, _why_not = (_accepted.offer(found, run_oracles, attempts[-1].get("judged") or [])
+                                  if found else ([], ""))
         version = self._measuring_code_version(seed_path)
-        if found and not went_on and self._goes_on_by_itself():
+        # A commissioned study whose failing check has three numbers that disagree is handed back, not gone on with.
+        returned = self._three_numbers_disagree(oracles, attempts) if found else None
+        if found and self._goes_on_by_itself() and returned is None:
             # Whether a check is right is not a question a person is asked: when FI could neither fix the simulation
             # nor correct the check from an independent value, it goes on by itself with each failed check marked
             # unconfirmed (one that measured nothing too), recorded as automatic and bound, as a person's choice was, to
@@ -5019,9 +5015,7 @@ class CodeStageMixin:
             **({"explained": explained} if explained else {}),
             **({"corrected": self._corrections_read()} if self._corrections_read() else {}),
             **({"fitted_to_test_run": fitted} if (fitted := self._fitted_to_test_run(oracles)) else {}),
-            **({"go_on": {"offered": bool(go_on_checks), "why_not": go_on_why_not, "checks": go_on_checks,
-                          "script": self._rel_to_quest(seed_path), "script_version": version}}
-               if status == "stopped" else {}),
+            **({"returned": returned["reason"]} if returned else {}),
         })
         if self_check_calls or self_check_runs:
             line = _oracle_triage.cost_line(self_check_calls, self_check_runs)
@@ -5059,7 +5053,7 @@ class CodeStageMixin:
                 "the check counts as failed);" if disputed_failing else "",
             )
             return new_code
-        # Not reached with the checks on: the gate goes on by itself above (``_goes_on_by_itself``).
+        # Reached with the checks on only by a commissioned study handed back (``_three_numbers_disagree``).
         return new_code
 
     def _multiple_hints(self, oracles: list[dict[str, Any]], measured: list[dict[str, Any]],
@@ -5149,6 +5143,50 @@ class CodeStageMixin:
         or the check is wrong is FI's to work out, never a person's; what FI could not confirm is marked unconfirmed,
         so the result counts as exploratory whatever the quest was set up for (a research quest included)."""
         return self.config.engine.oracle_check == "block"
+
+    def _three_numbers_disagree(self, oracles: list[dict[str, Any]], attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """A commissioned study whose failing known-answer check has three numbers that disagree, each by its own error
+        (core/oracle_challenge.py::three_disagree), before the protocol is frozen and with a referee written by another
+        model than the simulation: the hand-back the gate pass returns (:meth:`_returned_stop`), else None. A study run
+        directly goes on with the check marked unconfirmed, as before."""
+        if (not self._commissioned() or not self._goes_on_by_itself() or _frozen.load(self.quest_root) is not None
+                or not self._referee_independent()):
+            return None
+        from . import commission as _commission
+
+        referees = {str(t.get("check")): t for a in attempts for t in a.get("triage") or []
+                    if isinstance(t, dict) and t.get("kind") == "referee"}
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        for j in attempts[-1].get("judged") or []:
+            name = str(j.get("name") or "").strip()
+            found = _oracle_challenge.three_disagree(declared[name], j, referees.get(name)) if name in declared else None
+            if found is None:
+                continue
+            oracle = declared[name]
+            reason = _commission.mismatch_reason(oracle, self._commission_data())
+            proposal = self._oracle_proposals.get(name) or {}
+            evidence = {"detector": "known_answer_three_way",
+                        "check": {k: oracle.get(k) for k in ("name", "kind", "case", "measure", "tolerance") if k in oracle},
+                        **found, **({"a_models_note": [{"from": "repair", "text": str(proposal.get("reason") or "")}]}
+                                    if proposal.get("reason") and proposal.get("source") != "numeric" else {})}
+            back = {"reason": reason, "problem": _commission.known_answer_problem(name, found, reason), "evidence": evidence,
+                    "tried": [f"measured the check on its case: {found['numbers']['simulation']['value']:.6g}",
+                              f"repaired the simulation ({sum(1 for a in attempts if a.get('repair'))} repair(s))",
+                              "had an independent script compute it from the definitions: "
+                              f"{found['numbers']['reference']['value']:.6g}"]}
+            self._log.warning("[oracle] %s", back["problem"])
+            self._pending_return = back
+            return back
+        return None
+
+    def _returned_stop(self) -> dict[str, Any] | None:
+        """The stop before the study of a commissioned study a check of this gate pass handed back, once; else None."""
+        back = self.__dict__.pop("_pending_return", None)
+        if not back:
+            return None
+        stop = self._stop_before_run(back["problem"], "returned", tried=back["tried"])
+        stop["exec_result"]["returned_for"] = {"reason": back["reason"], "evidence": back["evidence"]}
+        return stop
 
     def _fitted_to_test_run(self, oracles: list[dict[str, Any]]) -> list[str]:
         """The checks the plan changed after FI's test run so that they pass on its own numbers, still in the protocol."""
@@ -5382,8 +5420,7 @@ class CodeStageMixin:
 
     def _measuring_code_version(self, seed_path: Path) -> str:
         """The version of the code that measured the known-answer checks: the script the checks ran, the helper modules beside it and the model's
-        package in ``code/`` (core/accepted_checks.py::script_version). A choice to go on with a failed check is bound to
-        it."""
+        package in ``code/`` (core/accepted_checks.py::script_version). A failed check FI goes on with is bound to it."""
         files: dict[str, str] = {}
         code = self.quest_root / "code"
         # The seed and the helper modules beside it it may import (FI's own scripts and the other main script are not
@@ -5398,34 +5435,6 @@ class CodeStageMixin:
                 continue
         files.update({f"code/{rel}": text for rel, text in self._package_snapshot().items()})
         return _accepted.script_version(files)
-
-    def _chosen_go_on(self, found: list[str], oracles: list[dict[str, Any]], judged: list[dict[str, Any]],
-                      seed_path: Path) -> list[dict[str, Any]]:
-        """The failed checks a person chose to go on with, when that choice covers every problem ``found`` names and each
-        check is as it was then, measured by the same code; else ``[]`` (and run.log says which choice no longer
-        applies, and why: the check is judged again)."""
-        checks, _why_not = _accepted.offer(found, oracles, judged)
-        if not checks or _accepted.failing_accepted(self.quest_root) is None:
-            return []
-        version = self._measuring_code_version(seed_path)
-        out: list[dict[str, Any]] = []
-        covered = True
-        for check in checks:
-            entry = _accepted.went_on_by(self.quest_root, check, version)
-            if entry is None:
-                covered = False
-                why = _accepted.no_longer_applies(self.quest_root, check, version)
-                said = self.__dict__.setdefault("_go_on_lapsed_said", set())
-                if why and (check["name"], why) not in said:  # once per check and reason, not on every repair round
-                    said.add((check["name"], why))
-                    self._log.warning("[oracle] the choice to go on with the check %r no longer applies: %s; it is "
-                                      "judged again", check["name"], why)
-                    print(f"[FI] the choice to go on with the known-answer check {check['name']!r} no longer applies "
-                          f"({why}): it is judged again.")
-                continue
-            out.append({**check, "by": entry.get("by"), "via": entry.get("via"), "at": entry.get("at"),
-                        "script": entry.get("script"), "script_version": version})
-        return out if covered else []
 
     async def _record_criteria(self, state: QuestState, *, attempt: str | None = None, result: Any = None,
                                repaired: bool = False) -> None:

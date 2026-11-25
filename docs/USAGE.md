@@ -254,8 +254,7 @@ out, not yours: you are never asked to compare numbers, set a tolerance or fix a
 
   A recheck by the same model that wrote the plan is never counted as independent evidence; the record says when that
   was the only one. The numbers (expected and measured value, tolerance, case, the line of the script that computes it,
-  what FI tried) are in `needs/ORACLE_CHECK.json` and `.fi/run.log`. A choice a person made under an earlier version of
-  FI (`--accept-checks <quest_id> --approve-as <your name>`) is still honoured.
+  what FI tried) are in `needs/ORACLE_CHECK.json` and `.fi/run.log`.
 
 **What FI checks itself.** A failing check is often the check's own fault: an expected value worked out wrongly, a tolerance tighter than the method can reach at its step, or one random run judged against a tolerance smaller than its own noise. So before it rewrites the script for a failing check, FI looks for itself. `needs/ORACLE_CHECK.json` and `run.log` record what it found:
 

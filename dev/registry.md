@@ -506,6 +506,11 @@ same PR that adds, splits or renames one.
   for one of `RETURN_REASONS`: `scope_exceeds_cap` (`_node_stuck_no_findings` on `too_long`, with
   `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no
   cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
+  The plan overturned before the study (`mismatch_reason` picks `plan_contradicts_sources` or `known_value_mismatch`):
+  `oracle_challenge.three_disagree` (three numbers of a failing check, each by its own error, `mc_error.BAND_SE`; a pair
+  with no error at all by the check's tolerance) read by `Engine._three_numbers_disagree` at the end of `_oracle_gate`,
+  which keeps `_pending_return`; `_gate_pass` / `_typed_results_stable` turn it into the `returned` stop
+  (`_returned_stop`, `_STOPPED_BEFORE_THE_STUDY`), written by `_node_stuck_no_findings` with `known_answer_problem`.
 - `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
   (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value (a value too common to hide, 0, 1 or one digit by `decisive`, is not computed): `excerpt` of the staged
   full text (a little before the passage and what follows it; a text whose equations were lost is not judged), `withhold` (the value withheld from the request in every form, its digits as the passage writes them: `written`), one program

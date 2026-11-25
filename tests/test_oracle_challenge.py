@@ -168,8 +168,26 @@ def test_the_numerical_script_must_compute_from_the_definitions_alone() -> None:
     assert script and not why
     for bad in ("import simulate", "from code.model import f", "import sys; sys.path.insert(0, 'code')"):
         assert ch.numeric_script(f"```python\n{bad}\n```")[0] == "", bad
-    assert ch.numeric_value('noise\nNUMERIC_JSON: {"value": 0.75, "how": "a sum of 10^6 terms"}') == (0.75, "a sum of 10^6 terms")
+    assert ch.numeric_value('noise\nNUMERIC_JSON: {"value": 0.75, "how": "a sum of 10^6 terms"}') == (0.75, "a sum of 10^6 terms", None)
     assert ch.numeric_value("nothing")[0] is None
+
+
+def test_the_referee_gives_its_own_error_as_a_number_or_none() -> None:
+    line = 'NUMERIC_JSON: {"value": 0.75, "how": "h", "error": %s}'
+    assert ch.numeric_value(line % "2.5e-3") == (0.75, "h", 0.0025)
+    assert ch.numeric_value(line % "0") == (0.75, "h", 0.0)
+    for bad in ("-1e-3", "NaN", "Infinity", '"small"', "true", "null", "[1]"):
+        assert ch.numeric_value(line % bad) == (0.75, "h", None), bad
+    # the error is never read out of the free text
+    assert ch.numeric_value('NUMERIC_JSON: {"value": 1, "how": "error = 1e-6"}')[2] is None
+
+
+def test_the_referee_record_keeps_the_error_and_an_old_one_without_it_still_loads(tmp_path) -> None:
+    from core import oracle_triage as tr
+    rec = {"referee": {"fp": {"name": "c", "value": 0.75, "error": 0.0025, "how": "h"}, "old": {"name": "c", "value": 0.5, "how": "h"}}}
+    tr.write(tmp_path, rec)
+    got = tr.read(tmp_path)["referee"]
+    assert got["fp"]["error"] == 0.0025 and "error" not in got["old"] and got["old"]["value"] == 0.5
 
 
 def test_the_number_computed_numerically_decides_and_can_find_both_wrong() -> None:

@@ -416,8 +416,9 @@ def numeric_script(reply: Any) -> tuple[str, str]:
     return script + "\n", ""
 
 
-def numeric_value(stdout: str) -> tuple[float | None, str]:
-    """``(the value, how)`` from the script's last ``NUMERIC_JSON:`` line, or ``(None, why)``."""
+def numeric_value(stdout: str) -> tuple[float | None, str, float | None]:
+    """``(the value, how, its error)`` from the script's last ``NUMERIC_JSON:`` line, or ``(None, why, None)``. The
+    error is the script's own numerical error bound as a number (finite, >= 0); absent (``None``) when not given."""
     from . import oracle_triage as _triage
 
     for line in reversed(str(stdout or "").splitlines()):
@@ -425,11 +426,13 @@ def numeric_value(stdout: str) -> tuple[float | None, str]:
             try:
                 data = json.loads(line[len(NUMERIC_LINE):])
             except ValueError:
-                return None, "its last line could not be read"
+                return None, "its last line could not be read", None
             value = _triage.num(data.get("value")) if isinstance(data, dict) else None
             how = " ".join(str((data or {}).get("how") or "").split())[:400] if isinstance(data, dict) else ""
-            return (value, how) if value is not None else (None, "it gave no finite value")
-    return None, f"it printed no `{NUMERIC_LINE}` line"
+            error = _triage.num(data.get("error")) if isinstance(data, dict) else None
+            error = error if error is not None and error >= 0 else None
+            return (value, how, error) if value is not None else (None, "it gave no finite value", None)
+    return None, f"it printed no `{NUMERIC_LINE}` line", None
 
 
 def settle_numeric(oracle: dict[str, Any], challenge: dict[str, Any], verdict: dict[str, Any] | None,
@@ -511,6 +514,34 @@ def referee_expected(oracle: dict[str, Any]) -> float | None:
         return None
     expected, limit, _mode = _oracle.limit_of(oracle)
     return expected if limit is not None and math.isfinite(expected) else None
+
+
+def three_disagree(oracle: dict[str, Any], judged: dict[str, Any], referee: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A failing check whose three numbers disagree pairwise, each judged by its own error: the simulation's measured value
+    (its trials' standard error, ``mc.se``), the plan's expected value (exact: a derivation has no error) and the referee's
+    number (its own ``error``). Only a referee that sided with neither working by the check's tolerance (``unsettled``)
+    counts, never on a check that is 0 by its form; a number with no error given has an unknown error, and nothing is
+    found. ``{"numbers", "gaps"}`` when every pair is more than ``mc_error.BAND_SE`` of its standard errors apart, else None;
+    a pair whose errors are both 0 is apart only beyond the check's own tolerance (no difference is beyond a zero error)."""
+    mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else {}
+    numeric = (referee or {}).get("numeric") if isinstance((referee or {}).get("numeric"), dict) else {}
+    plan, sim, sim_err = referee_expected(oracle), _triage_num(judged.get("value")), _triage_num(mc.get("se"))
+    ref, ref_err = _triage_num(numeric.get("value")), _triage_num(numeric.get("error"))
+    if (judged.get("passed_by_engine") is not False or (referee or {}).get("outcome") != "unsettled" or zero_by_form(oracle)
+            or plan is None or sim is None or ref is None or sim_err is None or ref_err is None or min(sim_err, ref_err) < 0):
+        return None
+    from .mc_error import BAND_SE
+
+    gaps: dict[str, dict[str, Any]] = {}
+    for key, a, b, err in (("simulation_vs_plan", sim, plan, sim_err), ("reference_vs_plan", ref, plan, ref_err),
+                           ("simulation_vs_reference", sim, ref, math.hypot(sim_err, ref_err))):
+        if (_within(oracle, a, b) if err == 0 else abs(a - b) <= BAND_SE * err):
+            return None
+        gaps[key] = {"gap": abs(a - b), "standard_errors": abs(a - b) / err if err else None}
+    return {"numbers": {"plan": plan, "simulation": {"value": sim, "error": sim_err},
+                        "reference": {"value": ref, "error": ref_err,
+                                      **{k: numeric[k] for k in ("how", "model", "script") if k in numeric}}},
+            "gaps": gaps}
 
 
 def _triage_num(value: Any) -> float | None:
