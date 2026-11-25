@@ -366,6 +366,14 @@ topic: |
 # success or failure as a condition. known_values may be empty only with "no_known_values": true. The passage is the
 # sentence of the source that states the value (at least 25 characters); the source file is .pdf, .md or .txt with
 # at least 200 characters of text, and holds the passage. See docs/capabilities-reference.md.
+# Before the plan, FI checks each known value with a program a model writes from its source; when a second program
+# is needed, the model set for the numeric referee step writes it. If that is the same model as the first, both
+# can make the same mistake, so set that step to another model family, for example:
+#   provider:
+#     name: claude_cli
+#     model: sonnet
+#     node_providers:
+#       oracle_review.numeric: {name: codex_cli, model: gpt-6.1-terra}
 # commission: commission.json
 
 # Optional: short identifier used in folder names. Defaults to a

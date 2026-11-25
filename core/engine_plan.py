@@ -28,10 +28,41 @@ from .engine_base import (  # noqa: F401
     node_provider_for, os, re, resolve_endpoint_async, step_provider_config, step_provider_lines,
 )
 from . import commission as _commission
+from . import known_values as _known_values
+from .oracle_challenge import NUMERIC_NODE, numeric_timeout
 
 
 class PlanStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
+
+    async def _known_values_first(self, state: QuestState) -> dict[str, Any] | None:
+        """A commissioned study's known values, each computed from its source before the plan (core/known_values.py);
+        ``None`` without a commission or known values. A value two independent programs agree is not what the commission
+        says hands the study back (``needs/STUCK.json``, ``known_value_mismatch``): the record then holds ``returned``."""
+        if not self._commissioned() or not self._commission_data().get("known_values"):  # type: ignore[attr-defined]
+            return None
+        self._progress("Computing the commission's known values from their sources")
+
+        async def ask(prompt: str, second: bool) -> str:  # the second program by the model of the numeric referee
+            return await self._chat(prompt, node=NUMERIC_NODE if second else "plan")
+
+        async def execute(path: Path) -> tuple[int, str, str]:
+            return await self._run_in_env([self._rel_to_quest(path)], apart=True,
+                                          timeout_s=numeric_timeout(self.config.execution.timeout_s))
+
+        record = await _known_values.check(self._commission_data(), self.quest_root,  # type: ignore[attr-defined]
+                                           template=self._prompts["known_value_program"], ask=ask, execute=execute)
+        for v in record.get("values") or []:
+            self._log.info("[plan] known value %r: %s (%s)", v["name"], v["verdict"], v["why"])
+        wrong = _known_values.mismatches(record)
+        if wrong:
+            returned = self._return_to_qc(  # type: ignore[attr-defined]
+                "known_value_mismatch", _known_values.problem(wrong), _known_values.evidence(wrong),
+                [f"computed {v['name']!r} from its source with two independent programs FI ran" for v in wrong])
+            self._log.warning("[plan] %s; handed back before the plan (needs/STUCK.json)", returned["problem"])
+            print(f"[FI] quest {self.quest_id}: {returned['say']}")
+            record = {**record, "returned": returned}
+        return record
 
     async def _node_plan(self, state: QuestState) -> QuestState:
         """Review the literature and write the plan (``plan.md``) before the experiment is designed.
@@ -84,13 +115,17 @@ class PlanStageMixin:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
 
+        known = await self._known_values_first(state)
+        if known is not None and known.get("returned"):
+            return {"stuck": known["returned"]}  # handed back before the plan: the graph ends here (_route_after_plan)
         # The rules for a search for the best design only when the topic or the person's answer points that way: a
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
         await self._read_topic_before_the_prompt(state)
         seek = self._seeks_best_design(state)
         card = state.get("scope_card")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + self._study_type_part(state, seek=seek)
-                  + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else ""))
+                  + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else "")
+                  + _known_values.plan_block(known))
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
         design = obj
@@ -200,6 +235,11 @@ class PlanStageMixin:
         if self._runs_code(state) and self._client is not None and isinstance(normalized.get("protocol"), dict):
             normalized, contract_notes = await self._ask_contract_parts(normalized)
             repaired_notes += contract_notes
+        unchecked: list[str] = []  # the known values the draft has no check for: FI adds one (said in plan.md)
+        if known is not None:  # the checks of the known values: their numbers and sources are FI's, from the commission
+            data = self._commission_data()  # type: ignore[attr-defined]
+            unchecked = _commission.oracle_gaps(data, normalized.get("protocol"))
+            normalized = _known_values.fill_checks(normalized, data, _known_values.labels(state.get("literature") or [], data))
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
         audit += repaired_notes
@@ -228,9 +268,7 @@ class PlanStageMixin:
             source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
             audit += model_notes
             audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
-        if self._commissioned():  # type: ignore[attr-defined]
-            # Recorded only: making FI write these checks itself is a later step.
-            audit += _commission.oracle_gaps(self._commission_data(), normalized.get("protocol"))  # type: ignore[attr-defined]
+        audit += unchecked
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit,
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,

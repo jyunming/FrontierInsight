@@ -392,6 +392,8 @@ async def test_the_plan_is_shown_what_the_commission_fixes_and_plan_md_names_a_k
     prompts: list[str] = []
 
     async def chat(messages: list[dict[str, str]], **_kw: Any) -> str:
+        if messages[-1]["content"].startswith("# Compute a Known Value"):
+            return "(no program)"  # the known value is left unconfirmed (tests/test_known_values.py)
         prompts.append(messages[-1]["content"])
         return json.dumps({**_draft({"n": [1, 2, 4]}, 4), "plan": EXTRA}) if len(prompts) == 1 else _NO_OBJECTIONS
 
@@ -633,6 +635,16 @@ def test_a_number_that_is_one_side_of_a_fraction_is_not_the_value() -> None:
     assert commission.number_in_text(1, "a ratio of 1 to 2 at rest")
     assert commission.number_in_text(0.25, "a drain constant of 0.25/h at rest"), "a unit written with / is no fraction"
     assert commission.number_in_text(10, "a flow of 10 / min at rest")
+
+
+def test_an_exponent_is_read_on_its_own_line_only_and_one_no_float_holds_is_no_number() -> None:
+    from core import commission
+
+    header = "Revista, vol. 45, e20230014, 2023\n\ne20230014-4\nThe period of a made-up swing"
+    assert commission.number_in_text(2023, header), "the year of a page header is the year, not 2023e20230014"
+    assert not commission.number_in_text(1.01741, header)
+    assert commission.number_in_text(0.0015, "a drain of 1.5 e-3 per hour") and commission.number_in_text(0.002, "2 x 10^-3")
+    assert not commission.number_in_text(2.0, "a drain of 2e400 per hour"), "an exponent no float holds is no number"
 
 
 def _staged_and_read(tmp_path: Path, files: tuple[str, ...]) -> tuple[dict[str, str], int]:

@@ -1192,7 +1192,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
     # block the design step then adopts.
     assert ("select_skills", "plan") in plain_edges
-    assert ("plan", "design") in plain_edges
+    # ... conditional since a commissioned study whose known value FI computed otherwise is handed back at the plan.
+    assert next(iter(g.branches["plan"].values())).ends == {"design": "design", "returned": END}
     assert ("implement", "execute") in plain_edges
     # `execute → execute_reflect` replaces the old `execute → analyze`
     # edge, plus a conditional `execute_reflect → execute | analyze`.

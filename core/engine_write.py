@@ -6,6 +6,7 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 
 from __future__ import annotations
 
+from . import commission as _commission
 from .engine_base import (  # noqa: F401
     _ANY_HEADING_RE, _REFERENCES_HEADING_LINE_RE,
     Any, Callable, DEFAULT_PAPER_FORMAT, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_NOTE, Path, QuestState,
@@ -1778,7 +1779,16 @@ class WriteStageMixin:
         # the pages the paper lists, its Further reading in the supplement among them (every paper keeps it there)
         listed = set(web_pages_listed(paper) or []) | set(_supplement.further_labels(self.quest_root))
         sources: dict[str, _cs.Source] = {}
+        # A commissioned study's known values name the source they were verified in; those passages open that source's
+        # window for the judge (a supplied source is in the literature under its staged file name).
+        data = self._commission_data() if self._commissioned() else {}
+        staged = _commission.staged_names(data)
+        wanted: dict[str, list[str]] = {}
+        for kv in data.get("known_values") or []:
+            wanted.setdefault(staged.get(str((kv.get("source") or {}).get("file")), ""), []).append(str(kv.get("passage") or "").strip())
+        given: dict[str, str] = {}
         for label, meta, item in _labelled_sources(literature, audience):
+            given[label] = "\n".join(p for p in wanted.get(Path(str(meta.get("path") or "")).name, []) if p)
             text, _readings = _split_figure_readings(_item_content(item))
             who = meta.get("authors") or []
             sources[label] = _cs.Source(
@@ -1801,8 +1811,10 @@ class WriteStageMixin:
             head = f"[{label}] {src.title} ({src.kind()})"
             if not src.text.strip():
                 return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
-            return head + "\nText:\n" + _format_lit_excerpt(
-                src.text, src.title, query=" ".join(sentences), budget=_CITATION_SOURCE_CHARS).strip()
+            first = given.get(label, "")
+            rest = _format_lit_excerpt(src.text, src.title, query=" ".join(sentences),
+                                       budget=max(_CITATION_SOURCE_CHARS - len(first), 0)).strip()
+            return head + "\nText:\n" + (first + "\n\n" + rest if first else rest)
 
         def judge_prompt(asked: list[tuple[str, Any, str]], srcs: dict[str, _cs.Source]) -> str:
             by_label: dict[str, list[str]] = {}

@@ -1119,7 +1119,7 @@ class ImproveStageMixin:
             "that does not rely on the script's own numbers being right (a closed form the simulation must reproduce, a "
             "limiting case with a known answer, a conservation law or invariant every run must satisfy, a small case whose "
             "exact answer can be computed another way, or a second independent implementation). Each entry has a `name`, a "
-            "`kind` (one of special_case, invariant, symmetry, second_implementation, convergence_rate, published_value), "
+            "`kind` (one of special_case, invariant, symmetry, second_implementation, convergence_rate), "
             "a `check` saying what the script measures on which small case, a NUMERIC `expected` (the value the "
             "measurement must agree with, worked out here from the closed form, the limit or the invariant; 0 for an "
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
