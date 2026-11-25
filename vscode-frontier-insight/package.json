@@ -78,16 +78,8 @@
             "description": "Weekly project-manager digest across your quests: completed, in-progress, themes, diff vs prior digest, suggested next quests. Optional integer arg = window in days (default 7). Example: @fi /digest 14"
           },
           {
-            "name": "portfolio",
-            "description": "All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at outputs/_portfolio/<YYYY-MM-DD>.md."
-          },
-          {
             "name": "critique",
             "description": "Adversarial second-pass review of a completed quest. Pass the quest_id. Reads paper.md + code + prior in-quest review, then asks a (different) model to find what the in-quest reviewer missed. Lands at outputs/<quest_id>/critique.md."
-          },
-          {
-            "name": "proposal",
-            "description": "Pre-quest planning doc: background, hypothesis, plan, success criteria, risks. Writes a markdown proposal + companion YAML to outputs/_drafts/. Use to scope a quest BEFORE committing compute. Example: @fi /proposal Compare RK4 vs Verlet on the Kepler problem"
           },
           {
             "name": "analyze",
@@ -120,10 +112,6 @@
           {
             "name": "install-tectonic",
             "description": "Install the tectonic LaTeX binary (~70 MB) into tools/ so paper.pdf works without an admin install of MiKTeX. Self-bootstrapping; runs `python launch.py --install-tectonic` in a terminal."
-          },
-          {
-            "name": "drafts",
-            "description": "List proposal-draft YAMLs in outputs/_drafts/ with a one-click /start hint for each. Mirrors `python launch.py --list-drafts` and the web /interview drafts picker."
           },
           {
             "name": "axon-status",

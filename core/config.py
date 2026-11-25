@@ -628,7 +628,7 @@ _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review
 # Legacy flag location (section, old key) → canonical ``pauses`` field. Read by
 # Config's root validator so old YAML keeps working without touching read sites.
 # Keys a config may still set although the setting is gone: accepted, no effect, said once in the log.
-_RETIRED_KEYS = frozenset({"engine.attempt_memory"})
+_RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check"})
 
 _LEGACY_PAUSE_FLAGS = (
     ("engine", "clarify_mode", "clarify"),
@@ -1484,11 +1484,6 @@ class KnowledgeConfig(BaseModel):
     # table of contents or an unrelated paper that shares the search terms
     # from a real on-topic source; this can. Off → floor only.
     literature_screen: bool = True
-    # Novelty note. After the literature step, one call says whether the retrieved sources already answer the
-    # study's question and what the study adds. It is only disclosed: the plan prompt gets one line, the writer's
-    # introduction gets the framing, and FI keeps the answer in .fi/literature_novelty.json. It never stops the quest
-    # or changes the design. Every quoted sentence is checked against the source's text. Off -> no call, no note.
-    novelty_check: bool = True
     # Foundational works. A search engine matches every word of a query, so
     # the original method papers and textbooks a topic rests on rarely come
     # back: a damped-oscillator integrator quest found none of Verlet (1967),
@@ -1820,7 +1815,7 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
 # What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
     "pauses": {"clarify": "off", "scope": "off", "papers": False},
-    "knowledge": {"novelty_check": False, "foundational_works": False, "requery_on_low_relevance": False},
+    "knowledge": {"foundational_works": False, "requery_on_low_relevance": False},
     "engine": {"evidence_gate_max_broaden": 0, "enable_analyze_reroute": False},
 }
 

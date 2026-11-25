@@ -100,7 +100,6 @@ $chosen_idea
 ## Prior work
 $literature_block
 
-$novelty_block
 ## Prior review feedback (if iteration > 0)
 $review_feedback
 

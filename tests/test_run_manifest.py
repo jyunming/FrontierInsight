@@ -1075,7 +1075,8 @@ def test_values_the_trials_never_produced_are_found_value_by_value(tmp_path: Pat
         timeout_s=60, run_id="r1",
     ))
     trial_runner._save_run(root, "k", run)  # what TrialsRunner does after every run of the trials
-    recorded, altered = trial_runner.recorded_values(root)
+    per_cell, altered = trial_runner.recorded_values_by_cell(root)
+    recorded = trial_runner.pooled(per_cell)
     assert altered == [] and sum(recorded["final_size"].values()) == 40
     summary = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
     honest = {c["key"]: {"final_size_values": c["metrics"]["final_size"]["values"]} for c in summary["cells"]}
@@ -1098,7 +1099,7 @@ def test_values_the_trials_never_produced_are_found_value_by_value(tmp_path: Pat
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["cells"][0]["rows"][0]["values"]["final_size"] = 123.456
     record_path.write_text(json.dumps(record), encoding="utf-8")
-    _recorded, altered = trial_runner.recorded_values(root)
+    _per_cell, altered = trial_runner.recorded_values_by_cell(root)
     assert len(altered) == 1 and altered[0].startswith("1 trial(s)")
     assert not record_path.exists(), "a record changed on disk is not reused: the trials run again"
 

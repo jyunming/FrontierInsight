@@ -702,7 +702,6 @@ same PR that adds, splits or renames one.
   `agents/figures_read.md`, step `figures`) reads the relevant ones into each source's text.
 - `core/arxiv_gate.py` — the one shared queue/backoff/cache for every arXiv connection.
 - `core/source_failures.py` — per-quest retrieval-failure bookkeeping, surfaced as `[FI] source failures: ...`.
-- `core/novelty.py` — the note on whether the retrieved sources already answer the study's question (disclosure only): `check` (the model's answer against the sources it was given: an unknown source id, or a quote not in that source's text after `normalise`, is dropped and counted), `design_line` / `design_block` (the plan prompt's line), `write_block` (the introduction framing and the checked source numbers), `read_record` / `write_record` (`.fi/literature_novelty.json`). Wired by `Engine._literature_novelty`, called at the end of `Engine._node_literature` (node name `literature_novelty`, prompt `agents/literature_novelty.md`, state field `literature_novelty`; `knowledge.novelty_check`, default on); `_design_prompt` and `_write_whole_paper` fill `$novelty_block`. Never a stop: a failed call leaves no record.
 - `core/scope_cards.py` — the study cards offered before the plan (pure, no model call): `normalize` (the reply checked against the literature FI read; a line citing a source FI did not read is removed and said), `distinct_enough`, `has_widest`, `question` (the clarify answer channel's shape), `read_answer` (a number, `e <n>`, an edited card, a sentence, or nobody), `write_record` / `read_record` (`.fi/scope.json`; a staged answer is `.fi/scope_answer.json`), `plan_note`, `gaps` (the card's results and settings the plan has no name for; a reading, never a stop). Wired by `Engine._node_scope` (graph node `scope`, between `pause_after_literature` and `select_skills`; once per quest; `pauses.scope: ask|off`; prompt `agents/scope.md`; `_scope_answer` reads the staged file, else the clarify callback within `pauses.timeout_s`), `Engine._study_type_asked` (a chosen card's `study_type` first) and `_node_plan` (appends `plan_note`). The answer channels are `launch.py:_pick_scope_callback` (the terminal's `_cli_pick_card` under `--interactive`, the VS Code bridge's quick pick, or the web quest page), with the staged `.fi/scope_answer.json` read first. The rerun step is `studies` (`core/rerun_from.py`). `core/quality_report.py` says which study was picked (or that nobody picked, with the cards) and the removed literature lines; `Engine._run_checks_note` tells the writer each gap of the plan against the chosen card.
 - `core/figure_sources.py` — license-clean web-figure enrichment for the no-simulation path.
 - `core/citations.py` — BibTeX / CSL-JSON rendering of the reference list.
@@ -1025,9 +1024,9 @@ same PR that adds, splits or renames one.
   `.venv/`, or does the full ask-and-install-and-relaunch dance); see `docs/capabilities-reference.md#getting-started`
   for the exact decision tree. Every `vscode-frontier-insight` spawn of `launch.py` opts out (`FI_SKIP_BOOTSTRAP=1`)
   in favor of its own `frontierInsight.pythonPath` contract.
-- `core/critique.py`, `core/digest.py`, `core/portfolio.py`, `core/proposal.py`, `core/analyze_cli.py`,
+- `core/critique.py`, `core/digest.py`, `core/analyze_cli.py`,
   `core/summarizer.py`, `core/state_dump.py` — the one-shot CLI tools (`fi tools <name>`, see `launch.py:
-  _TOOL_SUBCOMMANDS`); `core/proposal_seed.py` seeds an interview from a saved proposal.
+  _TOOL_SUBCOMMANDS`).
 - `web/server.py` — the FastAPI status server (quest list, log stream, evidence, trace, amendment banner, ...).
   The Settings page's knowledge-base card: `_knowledge_config_info` (`GET /api/knowledge/info`, settings only) and
   `_knowledge_inventory` (`POST /api/knowledge/inventory`, opens the store; on request, in a thread, time-limited).

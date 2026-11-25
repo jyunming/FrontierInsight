@@ -20,10 +20,8 @@ commands:
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the model behind the numbers, the design) in the editor, next to your other tabs, to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
-| `@fi /proposal <topic>` | Pre-quest planning doc. Writes both a markdown proposal and a companion YAML under `outputs/_drafts/`. Use to scope a research question BEFORE committing compute to a full quest. | **1** |
 | `@fi /analyze <data-path> <topic>` | No-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `auto_collect_data → wait_for_data → data_load → analyze → write → review`. Inverse of `/proposal` — when you already have the dataset and just want a paper analyzing it. | **~6** |
 | `@fi /digest [days]` | Weekly project-manager digest across your quests: completed, in-progress, themes, ✅/🆕/⚠️/🛑/❓ diff vs prior digest, suggested next quests. Default window: 7 days. | **1** (or 0 if window is empty) |
-| `@fi /portfolio` | All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next quests. | **1** (or 0 if no quests on disk) |
 | `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
 | `@fi /rename <quest_id> <new title>` | Changes a finished or paused quest's title (see [Changing a quest's title](#changing-a-quests-title)). | **0** |
 | `@fi /help` | Lists the commands. | **0** |
@@ -58,7 +56,6 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `literature_query` | 1 per literature pass (a resume that runs the same pass again reuses them) | Turns the topic into keyword search queries. |
 | `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
 | `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
-| `literature_novelty` | 1 per literature pass with sources (`knowledge.novelty_check`, on) | Says whether the sources already answer the question and what the study adds; disclosed only. |
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
@@ -118,14 +115,8 @@ fi --config outputs/<quest_id>/config.yaml --resume <quest_id>
 # Summarize a folder:
 fi --summarize ./papers --summarize-kind literature
 
-# Pre-quest planning doc (writes both <id>-proposal.md + <id>.yaml):
-fi --proposal "Compare RK4 vs Verlet on the Kepler problem with eccentric orbits"
-
 # Weekly PM digest across your quests:
 fi --digest --days 7
-
-# All-time portfolio synthesis (no time window):
-fi --portfolio
 
 # Adversarial second-pass review of a finished quest:
 fi --critique 1778452404-euv-mor-photon-shot-noise-ler-e6bfe5 \
@@ -307,10 +298,8 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest | **0** (embeddings only; no LLM) |
 | `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 | **0** (GUI is read-only over existing outputs) |
 | `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` | **1** |
-| `--proposal <topic>` | one topic string | pre-quest planning doc + companion YAML under `outputs/_drafts/` | **1** |
 | `--analyze <data-path>` | one directory + `--analyze-topic "<topic>"` | no-simulation quest on pre-staged data (files copied into the new quest's `data/`); routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review` | **~6** |
 | `--digest` | none | weekly PM digest, pairs with `--days N` (default 7) | **1** (or 0 if window is empty) |
-| `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
 | `--why <quest_id> [stop\|review\|evidence\|reasons\|<step>]` | quest_id, then what to ask | why the quest stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or (`reasons`) the reasons the model gave at every step. A step's answer also says whether `.fi/thinking.jsonl` holds the model's reasoning for it and how many characters (the text stays in the file). A reason the model wrote, and a reasoning summary it returned, are its own account of itself, not its hidden reasoning. Web: **Why?** and **Model's reasons** on the quest page; VS Code: `@fi /why`. See [docs/trace.md](trace.md) | 0 |
@@ -331,11 +320,9 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
 | `--days N` | digest | digest window in days, default 7 |
 | `--digest-provider <name>` | digest | LLM provider for the digest |
-| `--portfolio-provider <name>` | portfolio | LLM provider for the portfolio synthesis |
 | `--critique-provider <name>` | critique | LLM provider; set DIFFERENT from quest's original for max adversarial effect |
-| `--proposal-provider <name>` | proposal | LLM provider for the proposal |
-| `--axon-config <yaml>` | ingest, summarize, digest, portfolio, critique, proposal | optional AxonConfig path |
-| `--output-root <dir>` | serve, summarize, digest, portfolio, critique, proposal | quest output dir / scan root |
+| `--axon-config <yaml>` | ingest, summarize, digest, critique | optional AxonConfig path |
+| `--output-root <dir>` | serve, summarize, digest, critique | quest output dir / scan root |
 | `--host`, `--port` | serve | bind elsewhere than 127.0.0.1:8765 |
 
 ## YAML config schema
@@ -527,7 +514,6 @@ knowledge:
   requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
                                     # Your own search queries instead of FI's: write them in <quest folder>/inputs/search_queries.txt, one per line (first three used, # lines skipped); remove the file to go back to FI's. Listed in .fi/literature_queries.json.
   literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened. Every source's grade and why it was kept or dropped is listed in .fi/literature_queries.json.
-  novelty_check: true               # One call after the literature step says whether the retrieved sources already answer your question and what the study adds. Only disclosed: the plan gets one line, the paper's introduction gets the framing; it never stops the quest or changes the design. Every quoted sentence is checked against the source. Saved in .fi/literature_novelty.json.
   foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
@@ -1142,3 +1128,9 @@ Stamp out N YAMLs each varying one knob (model, panel, depth), then:
 ```bash
 fi --fleet variants/*.yaml --max-concurrent 4
 ```
+
+---
+
+## Removed
+
+FI no longer makes topics itself: `--proposal`, `--portfolio`, `--list-drafts`, `@fi /proposal`, `@fi /portfolio`, `@fi /drafts`, the web `/tools/proposal` and `/tools/portfolio` pages and the drafts picker, and the setting `knowledge.novelty_check` were removed. A study starts from a question you give it (a commission file, or `fi --new`); a config that still sets `knowledge.novelty_check` loads, and the log says the setting no longer does anything.

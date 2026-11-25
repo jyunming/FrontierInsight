@@ -10,10 +10,8 @@
 
 (function () {
   const TOOLS_FALLBACK = [
-    { name: 'proposal',  label: 'Proposal'  },
     { name: 'critique',  label: 'Critique'  },
     { name: 'digest',    label: 'Digest'    },
-    { name: 'portfolio', label: 'Portfolio' },
     { name: 'summarize', label: 'Summarize' },
     { name: 'analyze',   label: 'Analyze'   },
     { name: 'fleet',     label: 'Fleet'     },

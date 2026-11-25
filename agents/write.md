@@ -165,7 +165,6 @@ $analysis_block
 ## Prior work
 $literature_block$foundational_block
 
-$novelty_block
 ## Figures available (refer to each by its number)
 $figure_list
 

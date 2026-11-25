@@ -119,7 +119,7 @@
       grid.appendChild(makeModelPicker());
       // Every LLM tool now accepts --<tool>-ensemble. The fan-out
       // shape differs across tools (single-shot wrap for digest /
-      // portfolio / summarize / critique / proposal; per-node
+      // summarize / critique; per-node
       // node_ensemble for analyze) but the form-level UX is identical:
       // pick a profile, server expands to the provider's trio.
       if (spec.needs_llm) {
@@ -405,7 +405,7 @@
 
   // Live job-status poller. After a tool submit we hit /api/jobs/<id>
   // every 2s to refresh the in-page log tail and status pill, so the
-  // user can actually see whether the proposal/critique/etc. is making
+  // user can actually see whether the critique/digest/etc. is making
   // progress instead of staring at a static "Job started" message.
   function pollJob(jobId) {
     const logEl = document.getElementById('job-log');

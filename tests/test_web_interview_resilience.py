@@ -152,8 +152,7 @@ def test_answers_are_kept_and_given_back(tmp_path: Path) -> None:
     # A restarted server still has them.
     back = TestClient(_app(tmp_path / "out", [])).get(f"/api/interview/draft/{DRAFT}").json()
     assert back["form"] == {"topic": "Heat flow in a fin"} and back["rev"] == 3
-    assert not list((tmp_path / "out" / "_drafts").glob("*.yaml")), "kept answers are not a proposal draft"
-    assert TestClient(_app(tmp_path / "out", [])).get("/api/drafts").json()["drafts"] == []
+    assert not list((tmp_path / "out" / "_drafts").glob("*.yaml")), "kept answers are not a finished config"
 
 
 def test_kept_answers_are_removed_once_the_quest_is_launched(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ Optional fleet hardening:
     --profile              dump a per-quest viztracer trace if viztracer is installed
 
 `python launch.py --help` shows the handful of commands most quests need; `fi tools --help` lists the
-rarer one-shot utilities (a weekly digest, a cross-quest portfolio, an adversarial critique, ...), and
+rarer one-shot utilities (a weekly digest, an adversarial critique, ...), and
 `--help-all` shows every flag, old and new spellings both working identically.
 """
 
@@ -271,23 +271,20 @@ def _check_mode(
 #: unchanged (a value right after the subcommand name lands exactly where that flag already expects one, and a flag's
 #: own qualifiers — ``--digest-provider``, ``--critique-model``, ...  — keep their names). Nothing here changes what a
 #: flag does or removes it: ``--digest`` still works on its own, same as always. This only gives the ~15 report /
-#: portfolio / one-shot utilities their own place, one level down from the handful of commands most quests need
+#: one-shot utilities their own place, one level down from the handful of commands most quests need
 #: (``--config``, ``--new``, ``--serve``, ``--resume``, ...), which is what ``fi --help`` now shows by default.
 _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "summarize": ("--summarize", "Summarize a folder of mixed content into one report. `fi tools summarize <folder>`."),
     "digest": ("--digest", "A weekly project-manager digest across your quests. `fi tools digest [--days N]`."),
-    "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
     "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
     "quality": ("--quality", "Where a quest went wrong, who caught it, what was fixed and what it cost; with several quests, a table to compare settings. `fi tools quality <quest_or_folder>...`."),
     "rename": ("--rename", "Change the title of a finished or paused quest. `fi tools rename <quest_id> <new title>`."),
     "quests": ("--quests", "Every quest FI has run on this computer, from any folder: its short id, where it is, its title and folder. `fi tools quests [--prune]`."),
-    "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
     "tidy-knowledge": ("--tidy-knowledge", "Remove out-of-date copies of quest results (accepted vs preliminary), and quests that are now preliminary from cited papers' entries, in the knowledge layer. `fi tools tidy-knowledge [check]`."),
     "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
     "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
-    "list-drafts": ("--list-drafts", "List proposal drafts `fi tools proposal` wrote. `fi tools list-drafts`."),
     "export-models": ("--export-models", "Download the knowledge-layer models for an air-gapped machine. `fi tools export-models <dir>`."),
     "install-tectonic": ("--install-tectonic", "Install the LaTeX binary paper.pdf needs. `fi tools install-tectonic`."),
     "install-tectonic-from": ("--install-tectonic-from", "... from a local archive, no network or admin needed. `fi tools install-tectonic-from <path>`."),
@@ -359,7 +356,7 @@ usage: fi [-h] [--help-all] demo | --config CONFIG | --new | --update QUEST_ID |
 
 Run a research quest end to end: literature, an experiment, the paper, and the checks that hold it to what
 it found. `fi --help-all` lists every flag; `fi tools --help` lists the less common one-shot commands
-(a weekly digest, a cross-quest portfolio, an adversarial critique, ...).
+(a weekly digest, an adversarial critique, ...).
 
 Run a quest
   demo                   Start here: writes a small example quest (fi-demo.yaml) in this folder, checks your
@@ -385,7 +382,7 @@ Skills (what FI has learned about driving one piece of software on this machine)
                           network. Add --deep to also check sign-in and the network (can take a minute).
 
 Less common
-  tools <name>           A weekly digest, a cross-quest portfolio, an adversarial critique, and more:
+  tools <name>           A weekly digest, an adversarial critique, and more:
                           `fi tools --help` for the list.
   --help-all             Every flag, including each tool's own provider / model / ensemble options.
 """
@@ -562,16 +559,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "future quests can retrieve prior-week context.",
     )
     mode.add_argument(
-        "--portfolio",
-        action="store_true",
-        help="Generate a cross-quest portfolio synthesis across every "
-             "quest under --output-root (no time window). Writes "
-             "outputs/_portfolio/<YYYY-MM-DD>.md with topic clusters, "
-             "near-duplicate detection, meta-paper candidates, coverage "
-             "gaps, and prioritized next-quest suggestions. Ingests "
-             "into Axon as kind=fi_portfolio.",
-    )
-    mode.add_argument(
         "--critique",
         type=str,
         help="Adversarial second-pass review of a completed quest. "
@@ -586,18 +573,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "family from the one that wrote the paper.",
     )
     mode.add_argument(
-        "--proposal",
-        type=str,
-        help="Pre-quest planning doc. Pass a topic string (1-3 "
-             "paragraphs). The LLM produces a structured proposal "
-             "(background, hypothesis, plan, success criteria, "
-             "risks, scope limits, recommended next step) for the "
-             "user to review BEFORE committing compute to the full "
-             "quest. Writes outputs/_drafts/<id>-proposal.md plus a "
-             "companion outputs/_drafts/<id>.yaml ready to feed into "
-             "--config. Ingests as kind=fi_proposal.",
-    )
-    mode.add_argument(
         "--analyze",
         type=Path,
         help="Run a no-simulation quest with pre-staged data. Pass a "
@@ -609,7 +584,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "data_load → analyze → cross_check → write → review. "
              "Requires --analyze-topic to describe what to analyze. "
              "Use when you already have the dataset and just want a "
-             "paper analyzing it — the inverse of --proposal.",
+             "paper analyzing it.",
     )
     mode.add_argument(
         "--doctor",
@@ -1011,15 +986,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "person decides, so there is no anonymous approver.",
     )
     mode.add_argument(
-        "--list-drafts",
-        action="store_true",
-        help="List proposal drafts (YAML companions) that ``--proposal`` "
-             "previously wrote to ``outputs/_drafts/``. Pairs with "
-             "``--config <yaml>`` to launch the chosen quest. Web UI "
-             "exposes the same surface as the 'Continue a draft' "
-             "picker on /interview; VSCode chat as ``@fi /drafts``.",
-    )
-    mode.add_argument(
         "--new",
         action="store_true",
         help="Run the interactive interview to set up a new quest. "
@@ -1098,20 +1064,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "See --summarize-model for the conventions.",
     )
     p.add_argument(
-        "--portfolio-provider",
-        type=str,
-        default="vscode_extension",
-        help="Provider for --portfolio. Same conventions as "
-             "--digest-provider.",
-    )
-    p.add_argument(
-        "--portfolio-model",
-        type=str,
-        default="",
-        help="Override the per-provider default model for --portfolio. "
-             "See --summarize-model for the conventions.",
-    )
-    p.add_argument(
         "--critique-provider",
         type=str,
         default="vscode_extension",
@@ -1128,58 +1080,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "See --summarize-model for the conventions.",
     )
     p.add_argument(
-        "--proposal-provider",
-        type=str,
-        default="vscode_extension",
-        help="Provider for --proposal. Same conventions as the other "
-             "PM-command providers — vscode_extension when launched "
-             "from chat, headless CLI providers otherwise.",
-    )
-    p.add_argument(
-        "--proposal-model",
-        type=str,
-        default="",
-        help="Override the per-provider default model for --proposal. "
-             "See --summarize-model for the conventions.",
-    )
-    p.add_argument(
-        "--proposal-ensemble",
-        type=str,
-        default="",
-        metavar="M1,M2,M3",
-        help="Multi-model ensemble for --proposal. Comma-separated "
-             "list of model identifiers. Each model independently "
-             "drafts a proposal; a moderator picks the best (default) "
-             "or merges (with --proposal-ensemble-merge synthesize). "
-             "Cost: N+1 LLM calls. Worth it because the proposal "
-             "frames every downstream quest decision. Example: "
-             "--proposal-ensemble gpt-5.5,claude-opus-4-7,gemini-2.5-pro",
-    )
-    p.add_argument(
-        "--proposal-ensemble-merge",
-        type=str,
-        choices=("tournament", "synthesize"),
-        default="tournament",
-        help="How to combine the ensemble candidates. tournament "
-             "(default): moderator picks the single best plan, "
-             "preserving the winner's voice. synthesize: moderator "
-             "merges all N into one coherent plan that flags any "
-             "disagreement between candidates.",
-    )
-    p.add_argument(
-        "--proposal-ensemble-moderator",
-        type=str,
-        default="",
-        help="Model to perform the merge step. Defaults to the first "
-             "model in --proposal-ensemble.",
-    )
-    p.add_argument(
         "--critique-ensemble",
         type=str,
         default="",
         metavar="M1,M2,M3",
         help="Multi-model ensemble for --critique. Same shape as "
-             "--proposal-ensemble but default merge is synthesize — "
+             "--digest-ensemble: default merge is synthesize — "
              "adversarial critique benefits from preserving every "
              "critic's perspective, not picking one winner.",
     )
@@ -1202,10 +1108,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     # Ensemble flags for the other LLM-using single-shot tools share
     # the same {--<tool>-ensemble, --<tool>-ensemble-merge,
-    # --<tool>-ensemble-moderator} shape as proposal / critique above.
+    # --<tool>-ensemble-moderator} shape as critique above.
     # Defaults intentionally differ per tool:
     #   * digest: synthesize (WeekDiff narrative preserves disagreement).
-    #   * portfolio: tournament (one canonical thesis about clusters).
     #   * summarize: tournament (the produced summary is the artifact).
     #   * analyze: tournament (engine-level node_ensemble is built per-node
     #     so the CLI flag picks a single merge that gets applied to the
@@ -1215,16 +1120,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ``ProviderConfig._check_node_ensemble_node_specific_constraints``
     # because its downstream parser expects JSON. So the
     # ``--analyze-ensemble-merge`` flag MUST exclude ``synthesize``;
-    # only ``tournament`` is admissible. The other 3 tools take both.
+    # only ``tournament`` is admissible. The other 2 tools take both.
     _MERGE_CHOICES = {
         "digest":    ("tournament", "synthesize"),
-        "portfolio": ("tournament", "synthesize"),
         "summarize": ("tournament", "synthesize"),
         "analyze":   ("tournament",),
     }
     for _tool, _merge_default in (
         ("digest", "synthesize"),
-        ("portfolio", "tournament"),
         ("summarize", "tournament"),
         ("analyze", "tournament"),
     ):
@@ -3607,12 +3510,11 @@ async def main_async(args: argparse.Namespace) -> int:
             return 2
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
-    # Skipped for the install-tectonic / list-drafts modes that
+    # Skipped for the install-tectonic mode that
     # never touch Axon, plus when --no-axon-sidecar is passed.
     _axon_inert_modes = bool(
         getattr(args, "install_tectonic", False)
         or getattr(args, "install_tectonic_from", None) is not None
-        or getattr(args, "list_drafts", False)
         or getattr(args, "export_models", None) is not None
         or getattr(args, "doctor", False)
         or getattr(args, "install_marp", False)
@@ -3691,9 +3593,6 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.export_models is not None:
             return _export_models(args.export_models)
-
-        if args.list_drafts:
-            return _list_drafts(args.output_root)
 
         if args.approve_amendment:
             return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
@@ -3834,20 +3733,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 ensemble_moderator=args.digest_ensemble_moderator,
             )
 
-        if args.portfolio:
-            return await _run_portfolio(
-                output_root=args.output_root,
-                provider_name=args.portfolio_provider,
-                provider_model=args.portfolio_model,
-                axon_config_path=args.axon_config,
-                vscode_bridge_port=args.vscode_bridge_port,
-                vscode_bridge_socket=args.vscode_bridge_socket,
-                supervisor=supervisor,
-                ensemble_models=args.portfolio_ensemble,
-                ensemble_merge=args.portfolio_ensemble_merge,
-                ensemble_moderator=args.portfolio_ensemble_moderator,
-            )
-
         if args.critique:
             located = _locate_quest(args.critique, args.output_root)
             if located is None:
@@ -3865,21 +3750,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 ensemble_models=args.critique_ensemble,
                 ensemble_merge=args.critique_ensemble_merge,
                 ensemble_moderator=args.critique_ensemble_moderator,
-            )
-
-        if args.proposal:
-            return await _run_proposal(
-                topic=args.proposal,
-                output_root=args.output_root,
-                provider_name=args.proposal_provider,
-                provider_model=args.proposal_model,
-                axon_config_path=args.axon_config,
-                vscode_bridge_port=args.vscode_bridge_port,
-                vscode_bridge_socket=args.vscode_bridge_socket,
-                supervisor=supervisor,
-                ensemble_models=args.proposal_ensemble,
-                ensemble_merge=args.proposal_ensemble_merge,
-                ensemble_moderator=args.proposal_ensemble_moderator,
             )
 
         if args.analyze:
@@ -4237,80 +4107,10 @@ async def _run_digest(
     return 0
 
 
-async def _run_portfolio(
-    *,
-    output_root: Path,
-    provider_name: str,
-    provider_model: str = "",
-    axon_config_path: Path | None,
-    vscode_bridge_port: int,
-    vscode_bridge_socket: str = "",
-    supervisor: ProxySupervisor,
-    ensemble_models: str = "",
-    ensemble_merge: str = "tournament",
-    ensemble_moderator: str = "",
-) -> int:
-    """Top-level wiring for ``python launch.py --portfolio``.
-
-    Same provider + Axon plumbing as ``_run_digest``; dispatches to
-    :func:`core.portfolio.generate_portfolio`. Returns 0 on success,
-    1 on any failure that prevented writing the portfolio file.
-    """
-    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
-    from core.portfolio import generate_portfolio
-
-    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
-    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
-
-    knowledge = None
-    try:
-        from core.knowledge import Knowledge
-        knowledge = Knowledge(KnowledgeConfig(
-            enabled=True,
-            axon_config=axon_config_path if axon_config_path else None,
-            seed_source_catalog=False,
-        ))
-    except Exception as e:  # pragma: no cover
-        print(
-            f"[FI] --portfolio: Axon unavailable ({e!r}); portfolio will "
-            f"still be written but not ingested.",
-            file=sys.stderr,
-        )
-
-    ensemble = _parse_ensemble_flag(
-        ensemble_models, ensemble_merge, ensemble_moderator,
-    )
-    if ensemble is not None:
-        print(
-            f"[FI] portfolio synthesis (provider={provider.name}; "
-            f"ensemble={ensemble.models!r}, merge={ensemble.merge})",
-        )
-    else:
-        print(f"[FI] portfolio synthesis (provider={provider.name})")
-    try:
-        art = await generate_portfolio(
-            output_root, provider=provider,
-            supervisor=supervisor, knowledge=knowledge,
-            ensemble=ensemble,
-        )
-    except Exception as e:
-        print(f"[FI] --portfolio failed: {e!r}", file=sys.stderr)
-        return 1
-
-    print(f"[FI] portfolio -> {art.portfolio_path}")
-    print(
-        f"[FI] {art.completed_count + art.in_progress_count} quests; "
-        f"{art.completed_count} completed, "
-        f"{art.in_progress_count} in-progress; "
-        f"ingested_to_axon={art.ingested_to_axon}",
-    )
-    return 0
-
-
 def _parse_ensemble_flag(
     models_csv: str, merge: str, moderator: str,
 ) -> "NodeEnsembleConfig | None":  # type: ignore[name-defined]
-    """Convert ``--{proposal,critique}-ensemble M1,M2,M3`` flag triple
+    """Convert ``--critique-ensemble M1,M2,M3`` flag triple
     into a NodeEnsembleConfig, or None when the flag was omitted.
 
     Empty / whitespace-only strings → None (no ensemble; default
@@ -4424,7 +4224,7 @@ async def _run_analyze(
     passthrough → wait_for_data passthrough since data exists →
     data_load → analyze → write → review) handles the rest.
 
-    Unlike the single-shot tools (digest / portfolio / summarize)
+    Unlike the single-shot tools (digest / summarize)
     that wrap a single LLM call, ``--analyze`` runs a multi-node
     engine quest. The CLI ``--analyze-ensemble`` flag therefore
     populates ``cfg.provider.node_ensemble`` for the ``analyze`` and
@@ -5187,77 +4987,6 @@ async def _run_update(
         apply_vscode_bridge_override=_apply_vscode_bridge_override,
         apply_vscode_bridge_socket_override=_apply_vscode_bridge_socket_override,
     )
-
-
-async def _run_proposal(
-    *,
-    topic: str,
-    output_root: Path,
-    provider_name: str,
-    axon_config_path: Path | None,
-    vscode_bridge_port: int,
-    vscode_bridge_socket: str = "",
-    supervisor: ProxySupervisor,
-    ensemble_models: str = "",
-    ensemble_merge: str = "tournament",
-    ensemble_moderator: str = "",
-    provider_model: str = "",
-) -> int:
-    """Top-level wiring for ``python launch.py --proposal "<topic>"``.
-
-    Returns 0 on success, 1 on validation or LLM failure.
-    """
-    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
-    from core.proposal import generate_proposal
-
-    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
-    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
-
-    knowledge = None
-    try:
-        from core.knowledge import Knowledge
-        knowledge = Knowledge(KnowledgeConfig(
-            enabled=True,
-            axon_config=axon_config_path if axon_config_path else None,
-            seed_source_catalog=False,
-        ))
-    except Exception as e:  # pragma: no cover
-        print(
-            f"[FI] --proposal: Axon unavailable ({e!r}); proposal will still "
-            f"be written but not ingested.",
-            file=sys.stderr,
-        )
-
-    # Build optional ensemble config from CLI flags.
-    ensemble = _parse_ensemble_flag(
-        ensemble_models, ensemble_merge, ensemble_moderator,
-    )
-    if ensemble is not None:
-        print(f"[FI] proposal (provider={provider.name}; "
-              f"ensemble: {len(ensemble.models)} models, merge={ensemble.merge})")
-    else:
-        print(f"[FI] proposal (provider={provider.name})")
-    try:
-        art = await generate_proposal(
-            topic, output_root, provider=provider,
-            supervisor=supervisor, knowledge=knowledge,
-            ensemble=ensemble,
-        )
-    except ValueError as e:
-        print(f"[FI] --proposal: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"[FI] --proposal failed: {e!r}", file=sys.stderr)
-        return 1
-
-    print(f"[FI] proposal -> {art.proposal_path}")
-    print(f"[FI] companion YAML -> {art.yaml_path}")
-    print(f"[FI] ingested_to_axon={art.ingested_to_axon}")
-    print(
-        f"[FI] To run the quest: python launch.py --config "
-        f"{art.yaml_path}",
-    )
-    return 0
 
 
 # Tectonic LaTeX engine — single self-bootstrapping binary used as a
@@ -7406,50 +7135,6 @@ def _restore_skill(name: str) -> int:
     return 1
 
 
-def _list_drafts(output_root: Path) -> int:
-    """Top-level handler for ``python launch.py --list-drafts``.
-
-    Prints a table of proposal YAMLs in ``outputs/_drafts/`` so the
-    user can pick one to feed into ``--config`` without remembering
-    paths. Mirrors the Web `/api/drafts` + /interview drafts picker
-    and the VSCode `@fi /drafts` chat command.
-    """
-    drafts_dir = output_root / "_drafts"
-    if not drafts_dir.is_dir():
-        print(f"[FI] no drafts directory at {drafts_dir}", file=sys.stderr)
-        print("    Run `--proposal \"<topic>\"` to create one.")
-        return 0
-    files = sorted(
-        drafts_dir.glob("*.yaml"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
-    if not files:
-        print(f"[FI] no proposal drafts in {drafts_dir}")
-        print("    Run `--proposal \"<topic>\"` to create one.")
-        return 0
-    print(f"[FI] {len(files)} proposal draft(s) in {drafts_dir}:\n")
-    import yaml as _yaml
-    for p in files[:40]:
-        try:
-            doc = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        except Exception:
-            doc = {}
-        title = (doc.get("title") or "").strip() or "(no title)"
-        topic = (doc.get("topic") or "").strip().replace("\n", " ")
-        topic_short = topic[:80] + ("…" if len(topic) > 80 else "")
-        mtime = time.strftime(
-            "%Y-%m-%d %H:%M",
-            time.localtime(p.stat().st_mtime),
-        )
-        print(f"  {mtime}  {title}")
-        if topic_short:
-            print(f"              {topic_short}")
-        print(f"              python launch.py --config {p}")
-        print()
-    return 0
-
-
 def _load_dotenvs() -> None:
     """The ``.env`` in the folder FI runs in, then the one in FI's own folder (next to this file), when they differ.
 
@@ -7499,7 +7184,7 @@ def _load_dotenv(path: str = ".env") -> None:
 
 def _force_utf8_streams() -> None:
     """Reconfigure stdout/stderr/stdin to UTF-8 so non-ASCII output (the
-    `--help` text has arrows/em-dashes; draft titles and `--list-drafts`
+    `--help` text has arrows/em-dashes; draft titles
     can be Traditional Chinese) doesn't crash on a Windows cp1252 console
     with ``UnicodeEncodeError: 'charmap' codec can't encode character``.
     No-op on POSIX (already UTF-8). Must run BEFORE argparse prints help
@@ -7537,7 +7222,7 @@ def _quiet_network_logs() -> None:
 def main() -> int:
     # UTF-8 the console FIRST: argparse prints --help (arrows/em-dashes)
     # and exits inside parse_args(), before any other code runs, so a
-    # cp1252 Windows console would crash on --help / --list-drafts unless
+    # cp1252 Windows console would crash on --help unless
     # the streams are reconfigured up here.
     _force_utf8_streams()
     _quiet_network_logs()

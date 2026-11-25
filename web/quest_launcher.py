@@ -382,7 +382,7 @@ class QuestLauncher:
     ) -> LaunchedQuest:
         """Spawn ``python launch.py <argv_tail>`` for a tool that
         doesn't produce a regular quest (e.g. ``--digest``,
-        ``--portfolio``, ``--ingest``, ``--proposal``,
+        ``--ingest``,
         ``--critique``, ``--install-tectonic``). ``job_id`` is the
         synthetic identifier the launcher tracks the subprocess
         under — typically ``"digest-<timestamp>"`` or similar.
@@ -391,7 +391,7 @@ class QuestLauncher:
         the LaunchedQuest tuple even though there's no quest dir;
         the front-end consults ``status_for(job_id)`` to know when
         the subprocess has finished + show a link to the produced
-        artifact (under ``outputs/_digests/``, ``outputs/_drafts/``,
+        artifact (under ``outputs/_digests/``,
         etc., depending on the tool).
         """
         self._reap_finished()

@@ -421,6 +421,14 @@ def test_a_config_that_still_sets_the_retired_attempt_memory_key_loads(tmp_path:
     assert "engine.attempt_memory no longer does anything" in caplog.text
 
 
+def test_a_config_that_still_sets_the_removed_novelty_check_loads_and_says_it_does_nothing(tmp_path: Path, caplog) -> None:
+    p = _write(tmp_path, "topic: t\nknowledge:\n  novelty_check: true\n")
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)
+    assert cfg.topic == "t" and not hasattr(cfg.knowledge, "novelty_check")
+    assert "knowledge.novelty_check no longer does anything" in caplog.text
+
+
 def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
     # Typos of real reliability knobs — the exact silent-revert footgun.
     p = _write(

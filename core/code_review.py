@@ -1757,21 +1757,6 @@ def _read_declared(path: Path) -> Any:
         return None
 
 
-def read_declared_results(quest_root: Path) -> list[str] | None:
-    """The names :func:`write_declared_results` kept; ``None`` when there is no record (a quest from before it) or when it
-    was made for another frozen protocol than the one now (a warning is logged)."""
-    from . import frozen_protocol as _frozen
-
-    record = _read_declared(Path(quest_root) / DECLARED_RESULTS)
-    if not isinstance(record, dict) or not isinstance(record.get("names"), list):
-        return None
-    frozen = _frozen.protocol_of(Path(quest_root))
-    if record.get("protocol_sha") and frozen and record["protocol_sha"] != _frozen.sha256(frozen):
-        _LOG.warning("[code_review] %s was made for another protocol than the frozen one; it is ignored", DECLARED_RESULTS)
-        return None
-    return [str(n) for n in record["names"]]
-
-
 def not_obtained(record: dict[str, Any], issue: dict[str, Any], result: Any, declared: list[str] | None) -> list[str]:
     """The declared results an issue is about when FI's record of the run says no value was worked out for them
     (``declared``: :func:`declared_names` with that record) and the run's results hold no number for any of them under any

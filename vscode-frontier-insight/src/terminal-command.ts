@@ -173,8 +173,8 @@ export function updateTerminalCommand(opts: {
     // listed `frontierInsight.outputDir` instead, so without the flag a
     // user with a custom output directory gets "no quest directory at
     // <repo>\outputs\<id>" for a quest FI itself just offered them.
-    // Every other spawn (--digest / --portfolio / --critique /
-    // --proposal / --analyze) already passes the root; this one didn't.
+    // Every other spawn (--digest / --critique /
+    // --analyze) already passes the root; this one didn't.
     if (opts.outputRoot) args.push("--output-root", opts.outputRoot);
     return buildLaunchCommand({
         pythonPath: opts.pythonPath,
