@@ -1385,6 +1385,17 @@ def _outcome(q: _Quest) -> dict[str, Any]:
         decide = _one(q.pause.get("decide"), 200)
         out.update(kind="paused", line=f"Paused: {_one(q.pause.get('headline'), 200)}."
                    + (f" It waits for you: {decide}" if decide else ""), needs_person=True)
+    receipt = _dict(_json(root / "needs" / "STEP_RECEIPT.json"))
+    if out["kind"] == "unknown" and receipt.get("step"):
+        # One step of a commissioned study run on its own (core/rerun_from.py ALONE) ends without a paper by design.
+        ended, name = str(receipt.get("ended") or ""), str(receipt["step"])
+        failed = [("design check" if c == "design_audit" else c.replace("_", " ")) for c, v in
+                  _dict(receipt.get("checks")).items() if isinstance(v, dict) and v.get("status") == "fail"]
+        out.update(kind="step_ended", step=name, line=f"The {name} step was run on its own and " + (
+            "finished" + (f" with its {' and '.join(failed)} not passed" if failed else "") + "; its receipt "
+            "(needs/STEP_RECEIPT.json) says what it was given, what it made and what its checks judged."
+            if ended == "done" else f"stopped: {_one(receipt.get('stopped_because'), 300)}." if ended == "stopped"
+            else f"ended {ended}."))
     return out
 
 

@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 
 STAGED_NAME = "commission.json"  # the quest's frozen copy, in inputs/
-RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exceeds_cap")
+# The fourth: a study run one step at a time (Config.step) whose step would go back to an earlier one (its ``step``).
+RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exceeds_cap", "needs_earlier_step")
 GIVEN_STEPS = ("ideas", "literature", "studies")  # the --from steps the commission gives
 GIVEN_STAGES = {"ideate": "", "scope": "", "literature": "Reading the sources the commission gives."}
 MIN_TEXT_CHARS = 200  # the floor of a paper dropped in inputs/papers/

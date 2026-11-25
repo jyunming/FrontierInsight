@@ -1820,6 +1820,28 @@ _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+class StepConfig(BaseModel):
+    """One step of a commissioned study run on its own, in its own quest folder (core/rerun_from.py ``ALONE``): ``design``
+    writes plan.md from the commission; ``compute`` takes the design a finished ``design`` step left in the folder
+    ``after`` (and a script in its code/, if there is one) and runs it. It stops where the step ends."""
+
+    model_config = {"extra": "forbid"}
+    name: Literal["design", "compute"]
+    after: Path | None = None
+
+    @field_validator("after", mode="before")
+    @classmethod
+    def _expand_after(cls, v: Any) -> Any:
+        return Path(str(v)).expanduser() if v not in (None, "") else None
+
+    @model_validator(mode="after")
+    def _after_for_compute(self) -> "StepConfig":
+        if (self.name == "compute") != (self.after is not None):
+            raise ValueError("`step.after` names the folder of the finished design step: `compute` needs it, "
+                             "`design` takes none")
+        return self
+
+
 def _set_in(block: Any, key: str) -> Any:
     """The value a config section (a dict, or a model passed in code) was given for ``key``; None when not given."""
     if isinstance(block, BaseModel):
@@ -1854,6 +1876,17 @@ class Config(BaseModel):
     result_use: Literal["", "explore", "research", "decision"] = ""
     # A commission file (core/commission.py) the study starts from instead of a topic; relative to this config's folder.
     commission: Path | None = None
+    # Run only one step of the commissioned study (``StepConfig``); none: the whole study, as always.
+    step: StepConfig | None = None
+
+    @model_validator(mode="after")
+    def _step_needs_commission(self) -> "Config":
+        if self.step is not None and self.commission is None:
+            raise ValueError("`step` runs one step of a commissioned study, so the config must name its `commission`")
+        if self.step is not None and not self.engine.audit_trace:
+            raise ValueError("`step` keeps what each step was given and made in the quest's trace, so "
+                             "`engine.audit_trace` must stay on")
+        return self
 
     @property
     def effective_result_use(self) -> str:
@@ -2045,6 +2078,10 @@ class Config(BaseModel):
 
                 data = {**data, "commission": str(_commission.locate(data["commission"], Path(path).resolve().parent))}
                 _commission.validate(Path(data["commission"]), sources=False)
+            if isinstance(data.get("step"), dict) and data["step"].get("after"):
+                after = Path(str(data["step"]["after"])).expanduser()  # like the commission: read against this folder
+                data = {**data, "step": {**data["step"], "after": str(
+                    after if after.is_absolute() else Path(path).resolve().parent / after)}}
         return cls.model_validate(data)
 
 

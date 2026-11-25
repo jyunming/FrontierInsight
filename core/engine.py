@@ -162,6 +162,24 @@ from .engine_review import ReviewStageMixin
 from . import commission as _commission
 
 
+class _StepGraph(StateGraph):
+    """The quest graph of a study run one step at a time (``Config.step``): every edge from one of the step's nodes to a
+    node outside them goes to END instead, and ``exits`` keeps where each route led (source, route) -> node."""
+
+    keep: frozenset[str] = frozenset()
+
+    def add_edge(self, start_key: Any, end_key: str) -> Any:
+        if isinstance(start_key, str) and start_key in self.keep and end_key not in self.keep:
+            end_key = END
+        return super().add_edge(start_key, end_key)
+
+    def add_conditional_edges(self, source: str, path: Any, path_map: Any = None) -> Any:
+        if source in self.keep and isinstance(path_map, dict):
+            self.exits.update({(source, k): v for k, v in path_map.items() if v not in self.keep})
+            path_map = {k: (v if v in self.keep else END) for k, v in path_map.items()}
+        return super().add_conditional_edges(source, path, path_map)
+
+
 class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, ImproveStageMixin, RunStageMixin, AnalyzeStageMixin, WriteStageMixin, ReviewStageMixin,
              RunChecksMixin, StaticChecksMixin, ResultChecksMixin, AgentBuildMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
@@ -481,6 +499,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             if self._commissioned() and self.config._commission_note:
                 self._log.warning("[commission] %s", self.config._commission_note)
+            if self._step() is not None:
+                await asyncio.to_thread(self._step_stage)
+            elif (ran_as := self._step_started().get("step")):  # the quest's own record says what it is
+                raise ValueError(f"quest {self.quest_id} ran the {ran_as} step on its own, so it goes on only with "
+                                 f"`step: {{name: {ran_as}}}` in its config; nothing was run")
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -543,6 +566,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                   f"`--resume {self.quest_id} --from` with no step lists the steps it did reach.")
                             return self._collect_artifacts({})
                         replaced_sha = ""
+                        if self._step() is not None:  # a redo of a step starts inside it
+                            self._step_inside((await graph.aget_state(fork_config)).next)
                         if _rerun_from.needs_approval(from_step):
                             if not (approved_by or "").strip():
                                 self._log.warning("[run] --from %s replaces the frozen protocol and needs --approve-as", from_step)
@@ -618,6 +643,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                         # consumes a loop slot and guarantees the prior review
                         # JSON is embedded (the design node skips it at
                         # iteration==0).
+                        if self._step() is not None:  # a resume goes on only inside the step it was started as
+                            if reopen and not prior_snapshot.next:
+                                raise ValueError(f"quest {self.quest_id} ran one step on its own and is not re-opened: "
+                                                 "run that step again in a new quest folder; nothing was run")
+                            self._step_inside(prior_snapshot.next)
                         if reopen and not prior_snapshot.next:
                             forget_papers_asked(self.fi_dir, declined=False)
                             self._set_aside_stuck_record()
@@ -648,6 +678,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                             )
                     else:
                         payload = initial
+                        if self._step() is not None and (seeded := await self._step_seed()) is not None:
+                            # A step that does not start the graph: its state is written as the node before it finished.
+                            await graph.aupdate_state(run_config, {**initial, **seeded[0]}, as_node=seeded[1])
+                            payload = None
 
                     # Clear any stale ``quest_failed.md`` NOW, at the start of
                     # this run — not only on the pause/completion paths below.
@@ -1044,6 +1078,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                         break
                     # No more of the quest's code runs in this call: the values its tests compare with are written now.
                     await self._deliver_check_values(final_state if isinstance(final_state, dict) else {})
+                    if self._step() is not None:
+                        await asyncio.to_thread(self._step_finish, final_state if isinstance(final_state, dict) else {},
+                                                data_paused)
             finally:
                 # Guard against early failure: if ``resolve_endpoint_async``
                 # raised (unknown provider / proxy spawn failure / etc.),
@@ -1096,7 +1133,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 # the prior failure was recovered — leaving the file
                 # would mislead ("paused for data, but also failed?").
                 self._clear_stale_quest_failed_diagnostic()
-                self._write_evidence(final_state)
+                if self._step() is None:  # a step alone claims no evidence level (its receipt says what it judged)
+                    self._write_evidence(final_state)
                 self._record_stop(final_state, await self._attempt_context(final_state, kind="in_progress"))
                 return self._collect_artifacts(final_state)
 
@@ -1104,7 +1142,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # Finishing is two steps: everything the quest keeps is written first (the evidence, the attempt records),
             # then the seal naming their hashes is the trace's last event. The evidence is assessed before the seal it
             # cannot yet see; readers check that seal (core/evidence.py::verify_seal).
-            evidence_record = self._write_evidence(final_state, sealing=True)
+            evidence_record = self._write_evidence(final_state, sealing=True) if self._step() is None else None
             end_context = await self._attempt_context(final_state, kind="quest_end")
 
             def _quest_record() -> dict[str, Any]:
@@ -1764,6 +1802,153 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._audit("returned", return_reason=reason, problem=problem)
         return record
 
+    # ---- one step of the study run on its own (Config.step, core/rerun_from.py ALONE) ---------------------------------
+
+    def _step(self) -> Any:
+        """The one step of the study this quest runs on its own (``Config.step``), or None: the whole study."""
+        return getattr(getattr(self, "config", None), "step", None)
+
+    def _step_started(self) -> dict[str, Any]:
+        """The trace's record of what this step was given (empty before it was staged)."""
+        events = _audit_log.read(self.audit.path) if self.audit.path.is_file() else []
+        return next((e for e in reversed(events) if e.get("kind") == "step_started"), {})
+
+    def _step_stage(self) -> None:
+        """Once, before anything runs: what the step is given, recorded in the trace. ``compute`` first checks the receipt
+        of the design step in ``step.after`` (it ended, for this commission, with the plan.md that folder holds), then
+        copies the plan and its records (``rerun_from.HANDED_ON``)."""
+        step, previous, started = self._step(), {}, self._step_started()
+        if started:  # a resume: it goes on as the step it was started as
+            if started.get("step") != step.name:
+                raise ValueError(f"quest {self.quest_id} ran the {started.get('step')} step, so it cannot go on as the "
+                                 f"{step.name} step; nothing was run")
+            return
+        if any(e.get("kind") == "node_started" for e in _audit_log.read(self.audit.path)):
+            raise ValueError(f"quest {self.quest_id} was started as a whole study, so it cannot go on as the {step.name} "
+                             "step alone; nothing was run")
+        if step.name == "compute":
+            after = Path(step.after)
+            try:
+                raw = (after / _rerun_from.RECEIPT).read_bytes()
+                receipt = json.loads(raw)
+            except (OSError, ValueError):
+                raw, receipt = b"", {}
+            why = ("it has no readable receipt of a design step" if receipt.get("step") != "design"
+                   else f"its design step ended {receipt.get('ended')!r}, not done" if receipt.get("ended") != "done"
+                   else "its design step was run for another commission" if receipt.get("commission_sha256")
+                   != _commission.recorded_sha(self.quest_root)
+                   else untraced if (untraced := _rerun_from.receipt_not_traced(after, raw))
+                   else "its plan.md is not the one its receipt names" if _rerun_from.files_sha(after, ["plan.md"]).get(
+                       "plan.md") != (receipt.get("outputs") or {}).get("plan.md")
+                   else "its receipt names none of the files it hands on" if not isinstance(receipt.get("handed_on"), dict)
+                   else _rerun_from.changed_since(after, receipt["handed_on"]))
+            if why:
+                raise ValueError(f"the compute step runs the design of a finished design step, and {after} cannot give "
+                                 f"one: {why}; nothing was run")
+            _rerun_from.hand_on(after, self.quest_root)
+            previous = {"after": str(after), "previous_receipt_sha256": hashlib.sha256(raw).hexdigest(),
+                        "after_quest": receipt.get("quest_id") or after.name, "design_sha256": receipt.get("design_sha256")}
+        given = _rerun_from.files_sha(self.quest_root, ["inputs", *(_rerun_from.HANDED_ON if step.name == "compute" else [])])
+        self._audit("step_started", step=step.name, inputs=given, **previous)
+
+    def _step_inside(self, next_nodes: Any) -> None:
+        """Refuse to go on when the quest's next node is not one of its step's (``rerun_from.ALONE``)."""
+        step = self._step()
+        outside = [n for n in (next_nodes or ()) if n not in _rerun_from.ALONE[step.name]]
+        if outside:
+            raise ValueError(f"quest {self.quest_id} would go on at {', '.join(outside)}, which is not part of the "
+                             f"{step.name} step, so it cannot go on as that step; nothing was run")
+
+    async def _step_seed(self) -> tuple[dict[str, Any], str] | None:
+        """The state a step that does not start the graph begins from, and the node it is written as. ``compute``: the
+        state the design step ended with (its checkpoint), holding the design its receipt names; a script handed on in
+        code/ (experiment.py) is run as it is, so no code is written."""
+        if self._step().name != "compute":
+            return None
+        started = self._step_started()
+        # The folder is the config's: the trace keeps paths with the home folder written as ~, so its copy is not one.
+        after = Path(self._step().after)
+        if _audit_log.redact_text(str(after)) != started.get("after"):
+            raise ValueError(f"the compute step was started after {started.get('after')}, not after {after}; "
+                             "nothing was run")
+        opened = await self._open_readonly_graph(after / ".fi")
+        values: dict[str, Any] = {}
+        if opened is not None:
+            graph, conn = opened
+            try:
+                values = dict((await graph.aget_state({"configurable": {"thread_id": started["after_quest"]}})).values or {})
+            finally:
+                await conn.close()
+        if not values.get("design") or _attempts._json_sha(values["design"]) != started.get("design_sha256"):
+            raise ValueError(f"the state the design step in {after} ended with does not hold the design its receipt names; "
+                             "nothing was run")
+        values = {k: v for k, v in values.items() if k not in ("quest_root", "model_call_counts", "record_anchor", "stuck")}
+        if self._route_after_design(values) != "implement":  # the design's own route decides, not the files handed on
+            raise ValueError(f"the design in {after} is a study with no simulation, and the compute step runs a "
+                             "simulation only; nothing was run")
+        script = self.quest_root / "code" / "experiment.py"
+        if script.is_file():
+            return {**values, **_FRESH_SCRIPT, "code": script.read_text(encoding="utf-8")}, "implement"
+        return values, "design"
+
+    def _step_finish(self, state: dict[str, Any], paused: bool) -> None:
+        """When the step ends: a route out of it back to an earlier step hands the study back (``needs_earlier_step``,
+        with what that route read), since the caller decides; then the receipt (``rerun_from.RECEIPT``) says how the step
+        ended, what it was given and made, what its checks judged, and the sha256 of the previous step's receipt."""
+        step = self._step()
+        stuck_path = self.quest_root / "needs" / "STUCK.json"
+        last = next((e for e in reversed(_audit_log.read(self.audit.path)) if e.get("kind") == "route_decision"), {})
+        target = getattr(self, "_step_exits", {}).get((last.get("node"), last.get("chosen")))
+        back = _rerun_from.step_back_to(step.name, target) if target and not paused else ""
+        if back and not stuck_path.is_file():
+            why = str((state.get("evidence_assessment") or {}).get("rationale") or "")
+            self._return_to_qc("needs_earlier_step", f"needs an earlier step: {back} (FI's {last['node']} step would send "
+                               f"the study back to it{': ' + why if why else ''})",
+                               {"step": back, "from": last["node"], "route": last["chosen"], "facts": last.get("facts") or {}},
+                               [f"the {step.name} step, up to its {last['node']} step"], step=back)
+        try:
+            stuck = json.loads(stuck_path.read_text(encoding="utf-8")) if stuck_path.is_file() else {}
+        except (OSError, ValueError):
+            stuck = {"kind": "unreadable"}
+        ended = "paused" if paused else "returned" if stuck.get("return_reason") else "stopped" if stuck else "done"
+        why = str(stuck.get("problem") or stuck.get("say") or "") if ended == "stopped" else ""
+        if ended == "done" and step.name == "compute" and not state.get("result_json"):
+            # A compute step is done only with a result: one whose script gave none stopped, and says why.
+            rc, gave_up = (state.get("exec_result") or {}).get("returncode"), str(state.get("exec_give_up_reason") or "")
+            ended, why = "stopped", ("the run gave no result: " + (
+                f"the script still failed after its repairs (exit code {rc})" if rc not in (0, None)
+                else f"the script printed no result (exit code {rc})") + (f"; {gave_up.strip()[:300]}" if gave_up.strip() else ""))
+        started, design = self._step_started(), state.get("design")
+        self._seed_call_counts(state)
+        checks = {name: _rerun_from.judged(self.quest_root, rel, getattr(self.config.engine, key, None) if key else None)
+                  for name, (rel, key) in _rerun_from.STEP_CHECKS[step.name].items()}
+        if "known_values" in checks and not self._commission_data().get("known_values"):
+            checks["known_values"] = {"judged": "not_applicable", "why": "the commission gives no known values"}
+        record = {
+            "step": step.name, "quest_id": self.quest_id, "ended": ended,
+            **({"return_reason": stuck["return_reason"], "problem": stuck.get("problem")} if ended == "returned" else {}),
+            **({"stopped_because": why} if ended == "stopped" else {}),
+            "previous_receipt_sha256": started.get("previous_receipt_sha256"), "after": started.get("after"),
+            "commission_sha256": _commission.recorded_sha(self.quest_root),
+            # What it was given: the files handed on as they were at its start, and inputs/ as it is now (a person can
+            # add to it during a pause).
+            "inputs": {**{k: v for k, v in (started.get("inputs") or {}).items() if not k.startswith("inputs/")},
+                       **_rerun_from.files_sha(self.quest_root, ["inputs"])},
+            "outputs": _rerun_from.files_sha(self.quest_root, _rerun_from.STEP_OUTPUTS[step.name]),
+            "design_sha256": _attempts._json_sha(design) if design else None,
+            # The model calls this step made (a caller adds the steps up against the commission's limit).
+            "model_calls": sum(int(n or 0) for n in (self.__dict__.get("_model_call_counts") or {}).values()),
+            # What the compute step may take from this folder, as it is now (it refuses a folder changed since).
+            **({"handed_on": _rerun_from.files_sha(self.quest_root, _rerun_from.BOUND)} if step.name == "design" else {}),
+            # What the run measured (its RESULT_JSON, FI's own record of it): the numbers are in no other file.
+            **({"result": state.get("result_json") or None} if step.name == "compute" else {}), "checks": checks,
+        }
+        text = json.dumps(record, indent=1)
+        (self.quest_root / _rerun_from.RECEIPT).parent.mkdir(parents=True, exist_ok=True)
+        (self.quest_root / _rerun_from.RECEIPT).write_bytes(text.encode("utf-8"))  # the bytes its hash names
+        self._audit("step_receipt", step=step.name, ended=ended, sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self._log.info("[step] the %s step %s; its receipt is %s", step.name, ended, _rerun_from.RECEIPT)
+
     def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
         """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""
         served = _crash_kind.served_by(exc)
@@ -2031,10 +2216,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         finally:
             await conn.close()
 
-    async def _open_readonly_graph(self) -> tuple[Any, Any] | None:
+    async def _open_readonly_graph(self, fi_dir: Path | None = None) -> tuple[Any, Any] | None:
         import aiosqlite
 
-        path = self.fi_dir / "state.sqlite"
+        path = (fi_dir or self.fi_dir) / "state.sqlite"
         if not path.is_file():
             return None
         # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
@@ -2067,6 +2252,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
         g: StateGraph[QuestState] = StateGraph(QuestState)
+        if getattr(self.config, "step", None) is not None:  # one step alone (core/rerun_from.py ALONE): it ends where its nodes end
+            g = _StepGraph(QuestState)
+            g.keep, g.exits = frozenset(_rerun_from.ALONE[self.config.step.name]), {}
+            self._step_exits = g.exits
         g.add_node("clarify", self._audited("clarify", self._node_clarify_then_phased))
         g.add_node("ideate", self._audited("ideate", self._node_ideate))
         g.add_node("literature", self._audited("literature", self._node_literature))

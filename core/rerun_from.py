@@ -194,6 +194,134 @@ LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "studi
                               "plan": "select_skills", "design": "plan"}
 
 
+# ---- one step of a commissioned study run on its own (``step:`` in the config) ----------------------------------------
+
+# The steps a study can be run as one at a time, each in its own quest folder: the graph nodes each is made of. Where the
+# graph would leave a step's nodes, the step ends. ``design`` runs from the start: under a commission the nodes before
+# ``select_skills`` do no work of their own (the commission gives the question, the study and the sources). ``compute``
+# starts from the state the design step's folder holds; it also holds the gate and the stop that a run which could not
+# start goes to, so the repair of its code stays inside it and a way back to the design leaves it.
+ALONE: dict[str, tuple[str, ...]] = {
+    "design": ("clarify", "ideate", "literature", "pause_after_literature", "scope", "select_skills", "plan", "design"),
+    "compute": ("implement_outline", "implement", "execute", "execute_reflect", "improve", "auto_collect_data",
+                "wait_for_data", "data_load", "web_plots", "web_figures", "evidence_gate", "stuck_no_findings"),
+}
+# The receipt each step leaves: what it was given, what it made and what its checks judged (``Engine._step_finish``).
+RECEIPT = "needs/STEP_RECEIPT.json"
+# What the compute step copies from the design step's folder: the plan and its records (and code a caller put there).
+HANDED_ON = [p for p in OUTPUTS["plan"] if p not in _EVIDENCE + _PAPER + _RUN_RECORDS] + [
+    "needs/DESIGN_HISTORY.json", "needs/PLAN_HISTORY.json", ".fi/plan_versions", ".fi/known_values.json"]
+# What a design step's receipt binds of what it hands on (code/ is the caller's to add a script to).
+BOUND = [p for p in HANDED_ON if p != "code"]
+STEP_OUTPUTS: dict[str, tuple[str, ...]] = {
+    "design": ("plan.md", "needs/receipts/design_audit.json", "needs/DESIGN_HISTORY.json", ".fi/known_values.json"),
+    "compute": ("code", "results.json", "raw", "figures", "needs/FROZEN_PROTOCOL.json", *_RUN_RECORDS,
+                ".fi/gate_receipt.json", ".fi/code_review.json"),
+}
+# Each step's checks: the record FI's own check leaves, and the engine setting that turns it off (None: no such setting).
+STEP_CHECKS: dict[str, dict[str, tuple[str, str | None]]] = {
+    "design": {"design_audit": ("needs/receipts/design_audit.json", None), "known_values": (".fi/known_values.json", None)},
+    "compute": {"code_review": (".fi/code_review.json", None), "checks_before_the_run": (".fi/gate_receipt.json", None),
+                "known_answer_checks": ("needs/ORACLE_CHECK.json", "oracle_check"),
+                "protocol_check": ("needs/PROTOCOL_CHECK.json", "protocol_check"),
+                "run_manifest_check": ("needs/RUN_MANIFEST_CHECK.json", "run_manifest_check")},
+}
+
+
+def files_sha(quest_root: Path, patterns: list[str] | tuple[str, ...]) -> dict[str, str]:
+    """Each file the patterns name (a folder: every file in it), relative with ``/``, -> its sha256."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for rel in patterns:
+        for found in _matches(Path(quest_root), rel):
+            path = Path(quest_root) / found
+            for f in sorted(path.rglob("*")) if path.is_dir() else [path]:
+                if f.is_file() and ".git" not in f.relative_to(quest_root).parts:
+                    out[f.relative_to(quest_root).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def hand_on(after: Path, quest_root: Path) -> list[str]:
+    """Copy what the design step's folder ``after`` hands on into ``quest_root``; the paths copied."""
+    copied = []
+    for pattern in HANDED_ON:
+        for rel in _matches(Path(after), pattern):
+            src, dst = Path(after) / rel, Path(quest_root) / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+            copied.append(rel)
+    return copied
+
+
+def changed_since(folder: Path, recorded: dict[str, str]) -> str:
+    """How the files ``BOUND`` names in ``folder`` differ from the sha256s a receipt recorded (``""``: they do not)."""
+    now = files_sha(folder, BOUND)
+    diff = [k for k in sorted(set(now) | set(recorded)) if now.get(k) != recorded.get(k)]
+    return f"its {', '.join(diff[:3])}{' and more' if len(diff) > 3 else ''} changed since its receipt" if diff else ""
+
+
+def receipt_not_traced(folder: Path, raw: bytes) -> str:
+    """Why the receipt bytes ``raw`` of ``folder`` are not the ones its own sealed trace names (``""``: they are)."""
+    import hashlib
+
+    from . import audit_log
+
+    trace = Path(folder) / ".fi" / "audit.jsonl"
+    if not audit_log.verify(trace).ok:
+        return "its trace does not verify"
+    named = [e.get("sha256") for e in audit_log.read(trace) if e.get("kind") == "step_receipt"]
+    return "" if named and named[-1] == hashlib.sha256(raw).hexdigest() else "its receipt is not the one its trace names"
+
+
+def step_back_to(step: str, node: str) -> str:
+    """The earlier step a study run as ``step`` would go back to when its graph sends it to ``node`` (``""``: forward):
+    the step run alone that holds the node, else its ``--from`` step."""
+    order = list(NODES)
+    if node not in order or order.index(node) >= order.index(ALONE[step][0]):
+        return ""
+    return next((s for s, nodes in ALONE.items() if node in nodes), "") or resolve(node) or node
+
+
+# The fields each check's writer always writes (a receipt in needs/receipts/ is read by core/receipts.py instead).
+_RECORD_FIELDS = {".fi/known_values.json": ("commission_sha256", "values"), ".fi/gate_receipt.json": ("full", "computation", "files"),
+                  ".fi/code_review.json": ("reviews_total",), "needs/ORACLE_CHECK.json": ("status",),
+                  "needs/PROTOCOL_CHECK.json": ("status",), "needs/RUN_MANIFEST_CHECK.json": ("status",)}
+
+
+def judged(quest_root: Path, record: str, setting: str | None) -> dict[str, str]:
+    """What one check of a step judged, from the record it leaves: ``ran`` (with its status), ``not_applicable`` (the
+    record's status says so), ``off`` (its setting), ``not_run`` (on, and no record, or a record saying it skipped) or
+    ``unreadable`` (a record that cannot be read, is empty or is not an object)."""
+    import json
+
+    path = Path(quest_root) / record
+    if not path.is_file():
+        return {"judged": "off" if setting == "off" else "not_run"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict) or not data:  # a record that says nothing is not a check that ran
+        return {"judged": "unreadable"}
+    if data.get("status") == "not_applicable":
+        return {"judged": "not_applicable", "why": str(data.get("detail") or data.get("error") or "")}
+    if data.get("skipped"):  # a check that was on and did not read (its own record says why): not a fact of the study
+        return {"judged": "not_run", "why": str(data["skipped"])}
+    if record.startswith("needs/receipts/"):  # a receipt is read by its own reader
+        from . import receipts
+
+        problem = receipts.read(Path(quest_root), Path(record).stem)[2]
+        if problem:
+            return {"judged": "unreadable", "why": problem}
+    elif any(f not in data for f in _RECORD_FIELDS.get(record, ())):
+        return {"judged": "unreadable", "why": "its record lacks a field its writer always writes"}
+    return {"judged": "ran", **({"status": str(data["status"])} if data.get("status") else {})}
+
+
 def in_quest(path: Any, quest_root: Path) -> str:
     """``path`` as it is in ``quest_root``: a quest folder that was copied or moved keeps the absolute paths of its old
     folder in its checkpoints (the paper's path, written by the writing step), so a rerun from a later step would read
@@ -535,7 +663,7 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
         dest = quest_root / ".fi" / "previous" / f"{stamp}-{n}"
         n += 1
     moved: list[str] = []
-    for pattern in dict.fromkeys(OUTPUTS[step]):
+    for pattern in dict.fromkeys([*OUTPUTS[step], RECEIPT]):  # a step's receipt is of the run being redone
         for rel in _matches(quest_root, pattern):
             src = quest_root / rel
             if not src.exists() or rel in moved:
