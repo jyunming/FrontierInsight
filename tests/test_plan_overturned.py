@@ -19,7 +19,8 @@ from tests.test_commission import _commission
 from tests.test_oracle_gate import _HEAD, _PROTOCOL, _TAIL, _cfg, _fake, _record
 
 # Measured 0.734 (its trials agree to 0), expected 0.655 within 0.05, and an independent recomputation
-# 0.699 +- 0.002: within the tolerance of both sides, yet each pair is many errors apart.
+# 0.699 +- 0.002: within the tolerance of both sides, yet the two pairs with the recomputation are many of its errors
+# apart, and the pair with no error at all (measured and expected) is beyond the check's tolerance.
 CHECK = {"name": "drain level at the reference time", "kind": "closed_form", "check": "the level at the reference time",
          "expected": 0.655, "tolerance": 0.05, "tolerance_mode": "absolute", "case": {"n": 4}, "measure": "level"}
 JUDGED = {"name": CHECK["name"], "value": 0.734, "expected": 0.655, "passed_by_engine": False, "measured_by": "engine",
@@ -40,6 +41,9 @@ def test_three_numbers_each_beyond_the_others_own_errors_disagree() -> None:
     assert found["numbers"]["plan"] == 0.655 and found["numbers"]["reference"]["error"] == 0.002
     assert found["gaps"]["reference_vs_plan"]["standard_errors"] == pytest.approx(22.0)
     assert found["gaps"]["simulation_vs_reference"]["standard_errors"] == pytest.approx(17.5)
+    assert found["gaps"]["simulation_vs_plan"]["standard_errors"] is None, "no error: judged by the tolerance"
+    near = _with(JUDGED, value=0.700, mc={"verdict": "fail", "se": 0.0})  # 0.045 from the expected value, inside 0.05
+    assert ch.three_disagree(CHECK, near, _with(REFEREE, numeric={"value": 0.678, "error": 0.002})) is None
 
 
 @pytest.mark.parametrize("why,judged,referee", [
@@ -51,6 +55,8 @@ def test_three_numbers_each_beyond_the_others_own_errors_disagree() -> None:
     ("the referee agrees with the simulation within their errors", JUDGED,
      _with(REFEREE, numeric={"value": 0.729, "error": 0.002})),
     ("a wide referee error covers both", JUDGED, _with(REFEREE, numeric={"value": 0.699, "error": 0.02})),
+    ("a referee error of 0 is judged by the tolerance, and 0.699 is within 0.05 of 0.655", JUDGED,
+     _with(REFEREE, numeric={"value": 0.699, "error": 0.0})),
 ])
 def test_nothing_is_found_when_an_error_is_unknown_or_two_numbers_agree(why: str, judged: dict[str, Any],
                                                                          referee: dict[str, Any] | None) -> None:

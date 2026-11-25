@@ -521,7 +521,8 @@ def three_disagree(oracle: dict[str, Any], judged: dict[str, Any], referee: dict
     (its trials' standard error, ``mc.se``), the plan's expected value (exact: a derivation has no error) and the referee's
     number (its own ``error``). Only a referee that sided with neither working by the check's tolerance (``unsettled``)
     counts, never on a check that is 0 by its form; a number with no error given has an unknown error, and nothing is
-    found. ``{"numbers", "gaps"}`` when every pair is more than ``mc_error.BAND_SE`` of its standard errors apart, else None."""
+    found. ``{"numbers", "gaps"}`` when every pair is more than ``mc_error.BAND_SE`` of its standard errors apart, else None;
+    a pair whose errors are both 0 is apart only beyond the check's own tolerance (no difference is beyond a zero error)."""
     mc = judged.get("mc") if isinstance(judged.get("mc"), dict) else {}
     numeric = (referee or {}).get("numeric") if isinstance((referee or {}).get("numeric"), dict) else {}
     plan, sim, sim_err = referee_expected(oracle), _triage_num(judged.get("value")), _triage_num(mc.get("se"))
@@ -534,7 +535,7 @@ def three_disagree(oracle: dict[str, Any], judged: dict[str, Any], referee: dict
     gaps: dict[str, dict[str, Any]] = {}
     for key, a, b, err in (("simulation_vs_plan", sim, plan, sim_err), ("reference_vs_plan", ref, plan, ref_err),
                            ("simulation_vs_reference", sim, ref, math.hypot(sim_err, ref_err))):
-        if abs(a - b) <= BAND_SE * err or a == b:
+        if (_within(oracle, a, b) if err == 0 else abs(a - b) <= BAND_SE * err):
             return None
         gaps[key] = {"gap": abs(a - b), "standard_errors": abs(a - b) / err if err else None}
     return {"numbers": {"plan": plan, "simulation": {"value": sim, "error": sim_err},
