@@ -12,7 +12,7 @@ from .engine_base import (  # noqa: F401
     _DRAFTED_PARTS_ASKED, _DRAFTED_SEARCH_ASKED, _FIGURES_PER_CALL, _FIGURE_PICK_BATCH, _FIGURE_READING_CHARS,
     _FILLED_AFTER_READ, _FILL_MARKER, _GRID_ASKED, _GRID_ASKED_AGAIN, _LEDGER_ASKED, _LEDGER_PARTS,
     _ModelAnswerProblem, _ONCE_PARTS, _PART_ASKED, _PART_HEADING, _PLAN_DIRECTIVE, _PartsRefused,
-    _PlanEditedMeanwhile, _REDESIGN_OWNED_PARTS, _REFERENCE_FORMS, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS,
+    _PlanBeyondTheBlock, _PlanEditedMeanwhile, _REDESIGN_OWNED_PARTS, _REFERENCE_FORMS, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS,
     _SCHEMA_RETRY_ASKS, _SEARCH_ASKED, _SEARCH_ASKS, _SEARCH_CALLS, _SEARCH_CALLS_PER_ASK, _SEARCH_REFUSED,
     _STUDY_TYPE_DIRECTIVE, _TOPIC_ASKED, _TOPIC_DESIGN_ASKED, _accepted, _append_design_revision,
     _append_figure_readings, _attempts, _audit_log, _audit_open, _code_delta, _code_layout, _contract,
@@ -612,6 +612,26 @@ class PlanStageMixin:
                 return 0, 0
         return 0, 0
 
+    @staticmethod
+    def _design_block_mark(plan_text: str) -> str:
+        """A short hash of the design block of ``plan_text`` as written: what stays the same when only FI's own notes
+        (the sections it writes beside the block) change the plan's hash."""
+        raw = _plan.raw_design_block(plan_text)
+        return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+    def _search_refused_beyond_the_block(self, plan_text: str) -> str:
+        """The reason the plan's model's last block was refused for something other than the block (kept in the
+        search record with the design block's mark), when ``plan_text``'s design block is still the one it was refused beside
+        and the same model asks; else ``""``."""
+        try:
+            record = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if (isinstance(record, dict) and record.get("beyond_block") and record.get("model") == self._plan_model_name()
+                and record["beyond_block"] == self._design_block_mark(plan_text)):
+            return str(record.get("problem") or "refused")
+        return ""
+
     def _search_problem(self, sha: str, file: str | None = None) -> str:
         """Why the plan's model's last answer was not used, as the reader that refused it said (kept in the same record;
         empty for another plan or model, and when the last answer was used)."""
@@ -919,6 +939,14 @@ class PlanStageMixin:
             gaps = await gaps
         if not gaps or not path.is_file():
             return design, plan_sha
+        if file == _SEARCH_ASKED and (said := self._search_refused_beyond_the_block(path.read_text(encoding="utf-8"))):
+            # The plan was refused beside the block for something that is not the block, and its design block is as it was:
+            # another block cannot change that, so the model is not asked again (FI's notes change the plan's hash, so the
+            # record is tied to the design block itself).
+            self._log.warning("[plan] FI does not ask the plan's model for %s again: the plan with its block in it was "
+                              "refused for something other than the block (%s), and the plan's design is unchanged",
+                              short, _one_line(said, 300))
+            return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
         last_problem = self._search_problem(plan_sha, file)  # why the last answer was not used (kept on disk)
         last_block = self._search_refused_block(plan_sha, file) if last_problem else ""  # ... and the block it refused
@@ -972,6 +1000,7 @@ class PlanStageMixin:
             self._answer_block = None  # the block of the answer, set by a keep that reads one (:meth:`_keep_only_the_search`)
             schema = False
             repeated = False
+            beyond = ""
             try:
                 await self._complete_plan_parts(ask, path, expect=text, keep=keep, note=note)
                 refused = list(getattr(self, "_answer_refused", []) or [])
@@ -993,6 +1022,13 @@ class PlanStageMixin:
             except _ModelAnswerProblem as e:
                 outcome = "no complete answer"
                 self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
+            except _PlanBeyondTheBlock as e:
+                # The block was read; the rest of the plan with it in is what cannot be: the reason, not another ask.
+                outcome = "refused beyond the block"
+                last_problem = _one_line(re.sub(r";? ?plan\.md is unchanged\.?$", "", str(e)), _REFUSAL_CHARS)
+                beyond = self._design_block_mark(text)
+                self._log.warning("[plan] the plan step's answer to complete %s was read, but the plan with it cannot be "
+                                  "read for a reason that is not the block, so FI will not ask again: %s", short, e)
             except ValueError as e:
                 outcome = "not usable"
                 schema = True
@@ -1017,7 +1053,10 @@ class PlanStageMixin:
             self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
                                       {**(extra or {}), **({"problem": last_problem, "schema": schema,
                                                             **({"refused_block": last_block} if last_block else {})}
-                                                           if last_problem else {})})
+                                                           if last_problem else {}),
+                                       **({"beyond_block": beyond} if beyond else {})})
+            if outcome == "refused beyond the block":
+                return design, plan_sha  # the stop that follows says what is missing
             if outcome == "same refusal again":
                 # The same reason twice: the model repeats an answer the plan's rules cannot take, so another call would
                 # cost a few minutes and return the same refusal. The stop that follows says what is missing.
@@ -2838,7 +2877,7 @@ class PlanStageMixin:
             return None
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
-            raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
+            raise _PlanBeyondTheBlock(f"the plan with your block in it cannot be read: {parsed.error}")
         if left_out or left_out_parts:
             merged_text = _plan.add_to_section(merged_text, _PART_HEADING,
                                                ["", *[f"- {n}" for n in [*left_out, *left_out_parts]]])
@@ -2980,8 +3019,14 @@ class PlanStageMixin:
         wanted, missing, _why = self._search_problems(state, design)
         if not (wanted and missing) or self._search_asked(plan_sha):
             return design, plan_sha  # a search that can start, or this plan was asked already (the stop says so)
-        self._log.warning("[design] the plan changed after its search was completed, and the search can no longer start "
-                          "(%s); FI asks the plan's model for it again", "; ".join(_one_line(m, 200) for m in missing[:3]))
+        try:
+            completed = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8")).get("outcome") == "kept"
+        except (OSError, ValueError, AttributeError):
+            completed = False
+        what = ("the plan changed after its search was completed, and the search can no longer start" if completed
+                else "the plan still has no search FI can run")
+        self._log.warning("[design] %s (%s); FI asks the plan's model for it again", what,
+                          "; ".join(_one_line(m, 200) for m in missing[:3]))
         return await self._ask_plan_for_the_search(state, design, plan_sha)
 
     def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:

@@ -2213,6 +2213,11 @@ class _PartsRefused(ValueError):
     """The plan's model's answer to a request for some parts of the plan was not used (FI's reason is the message)."""
 
 
+class _PlanBeyondTheBlock(ValueError):
+    """A search block the plan's model wrote was read, but the plan with the block in it cannot be read for something
+    that is not the block (FI's reason is the message): asking the model for the block again cannot change that."""
+
+
 class _PlanEditedMeanwhile(Exception):
     """plan.md was changed (by a person) while the plan's model was answering: the model's answer is not written."""
 
