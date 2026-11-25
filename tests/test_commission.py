@@ -1123,7 +1123,7 @@ def test_the_door_refuses_a_mode_in_the_config_the_commission_does_not_give_and_
     refused = Config.from_yaml(_yaml_with(tmp_path / "a", {}, f"{key}: true"))
     with pytest.raises(commission.CommissionRefused) as e:
         commission.door(refused.commission, None, topic=refused.topic, asked=refused.modes_asked())
-    assert f"`{key}: true`" in str(e.value) and f"`method: {method}`" in str(e.value) and "\n" not in str(e.value)
+    assert f"`engine.{key}: true`" in str(e.value) and f"`method: {method}`" in str(e.value) and "\n" not in str(e.value)
     wrong = Config.from_yaml(_yaml_with(tmp_path / "b", {"method": "simulate"}, f"{key}: true"))
     with pytest.raises(commission.CommissionRefused) as e2:
         commission.door(wrong.commission, None, topic=wrong.topic, asked=wrong.modes_asked())
