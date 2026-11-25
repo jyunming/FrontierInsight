@@ -3288,8 +3288,9 @@ def make_app(
         saved = engine.quest_root / "config.yaml"
         if not saved.exists():
             engine.quest_root.mkdir(parents=True, exist_ok=True)
-            saved.write_text(_yaml.safe_dump({**cfg_dict, "commission": str(cfg.commission)}, sort_keys=False),
-                             encoding="utf-8")
+            output = {**(cfg_dict.get("output") or {}), "output_dir": str(cfg.output.output_dir)}  # the server's root
+            saved.write_text(_yaml.safe_dump({**cfg_dict, "commission": str(cfg.commission), "output": output},
+                                             sort_keys=False), encoding="utf-8")
 
         async def gui_clarify_callback(questions: dict[str, Any]) -> dict[str, Any]:
             fut = registry.register_clarify(quest_id, questions)

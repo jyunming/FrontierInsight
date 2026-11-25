@@ -150,10 +150,12 @@ async def test_watch_re_checks_on_a_timer_and_the_quest_then_completes(
     lines: list[str] = []
     watcher = Engine(cfg, resume_quest_id=first.quest_id)
     finisher = asyncio.create_task(finish_soon())
-    outcome = await jw.watch(
-        watcher.poll_job, fi_dir=watcher.fi_dir, every_s=1, max_wait_s=60, out=lines.append,
-    )
-    await finisher
+    try:
+        outcome = await jw.watch(
+            watcher.poll_job, fi_dir=watcher.fi_dir, every_s=1, max_wait_s=60, out=lines.append,
+        )
+    finally:  # a watch that ended early (a failure, the time limit) shows its own assertion, not a hang
+        finisher.cancel()
 
     assert outcome == jw.DONE
     checks = [ln for ln in lines if ln.startswith("[watch]")]

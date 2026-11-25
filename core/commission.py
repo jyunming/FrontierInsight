@@ -37,6 +37,12 @@ def _number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def hours_ok(v: Any) -> bool:
+    """A time limit in hours FI can use: a finite number above 0 whose seconds are finite too (the start counts in
+    seconds). The one rule `fi check` and the start (``Config._apply_commission``) both use."""
+    return _number(v) and v > 0 and math.isfinite(float(v) * 3600)
+
+
 def _text(v: Any) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
@@ -106,8 +112,8 @@ def form_problems(data: dict[str, Any]) -> list[str]:
     if limits is None:
         out.append("the commission has no `limits` (`hours` and `model_calls`)")
     else:
-        if not (_number(limits.get("hours")) and limits["hours"] > 0):
-            out.append("`limits.hours` is missing or is not a number above 0")
+        if not hours_ok(limits.get("hours")):
+            out.append("`limits.hours` is missing, is not a number above 0, or is too large to count")
         if not (_number(limits.get("model_calls")) and float(limits["model_calls"]).is_integer() and limits["model_calls"] > 0):
             out.append("`limits.model_calls` is missing or is not a whole number above 0")
     known = data.get("known_values")

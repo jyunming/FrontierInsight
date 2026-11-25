@@ -982,7 +982,7 @@ async def test_a_config_topic_that_is_not_the_commissions_question_is_refused(
     commission.door(path, None, topic=None)
 
 
-@pytest.mark.parametrize("hours", [".inf", ".nan"])
+@pytest.mark.parametrize("hours", [".inf", ".nan", "1.0e+308"])
 def test_hours_that_are_not_a_finite_number_fail_the_check_and_the_start_alike(
         tmp_path: Path, capsys: pytest.CaptureFixture[str], hours: str) -> None:
     import launch
@@ -994,6 +994,48 @@ def test_hours_that_are_not_a_finite_number_fail_the_check_and_the_start_alike(
                     "known_values: []\nno_known_values: true\nsuccess: [{condition: c, verify: v}]\n"
                     "failure: [{condition: c, verify: v}]\ndoubts: []\n", encoding="utf-8")
     assert launch._check([str(path)]) == 2
-    assert "`limits.hours` is missing or is not a number above 0" in capsys.readouterr().out
+    assert "`limits.hours` is missing, is not a number above 0, or is too large to count" in capsys.readouterr().out
     with pytest.raises(commission.CommissionRefused, match="limits.hours"):
         commission.door(path, None)
+
+
+@pytest.mark.parametrize("hours", ["1.0e+308"])
+def test_hours_too_large_to_count_in_seconds_are_refused_when_the_config_is_read(tmp_path: Path, hours: str) -> None:
+    """The start counts the time limit in seconds: an hour count whose seconds overflow is refused in one sentence when
+    the config is read, never an OverflowError."""
+    from core import commission
+    from core.config import Config
+
+    order = tmp_path / "order"
+    order.mkdir()
+    (order / "commission.yaml").write_text(
+        f"question: How fast does a tank drain?\nscope: one tank\nlimits: {{hours: {hours}, model_calls: 9}}\n"
+        "known_values: []\nno_known_values: true\nsuccess: [{condition: c, verify: v}]\n"
+        "failure: [{condition: c, verify: v}]\ndoubts: []\n", encoding="utf-8")
+    config = tmp_path / "study.yaml"
+    config.write_text("commission: order/commission.yaml\n", encoding="utf-8")
+    with pytest.raises(commission.CommissionRefused, match="too large to count"):
+        Config.from_yaml(config)
+    built = Config(commission=order / "commission.yaml")  # the web start builds it from the text: no crash either
+    assert built.execution.timeout_s < 10 ** 12
+
+
+@pytest.mark.asyncio
+async def test_a_first_start_that_stops_at_the_reviewer_check_is_resumed_as_a_commissioned_quest(
+        tmp_path: Path) -> None:
+    """Research with every reviewer on one model stops before anything runs; the quest it leaves is still the
+    commission's (staged before the run's first record), so the resume is not refused as an old one."""
+    from core import commission
+    from core.config import Config
+    from core.engine import Engine
+
+    path = _commission(tmp_path / "order")
+    cfg = Config.model_validate({
+        "commission": str(path), "rigor_profile": "research", "provider": {"name": "openai", "model": "m-main"},
+        "knowledge": {"enabled": False}, "output": {"output_dir": str(tmp_path / "out")},
+    })
+    engine = Engine(cfg)
+    await engine.run()
+    assert json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review_models"
+    commission.door(path, engine.quest_root, topic=cfg.topic)  # accepted: no CommissionRefused
+

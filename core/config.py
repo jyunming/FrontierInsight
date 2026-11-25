@@ -1999,7 +1999,7 @@ class Config(BaseModel):
         if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
             data["topic"] = found["question"].strip()
         hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
-        cap = max(1, int(float(hours) * 3600)) if _commission._number(hours) and hours > 0 else None
+        cap = max(1, int(float(hours) * 3600)) if _commission.hours_ok(hours) else None
         given = _set_in(data.get("execution"), "timeout_s")
         forced = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
         # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.

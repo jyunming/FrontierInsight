@@ -847,4 +847,6 @@ async def test_a_quest_started_from_the_web_keeps_the_config_it_ran_with(
     _quest_id, quest_root, _detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md"]))
     saved = quest_root / "config.yaml"
     assert saved.is_file()
-    assert Config.from_yaml(saved).commission == (tmp_path / "order" / "commission.yaml").resolve()
+    kept = Config.from_yaml(saved)
+    assert kept.commission == (tmp_path / "order" / "commission.yaml").resolve()
+    assert Path(kept.output.output_dir).resolve() == tmp_path.resolve(), "the server's outputs folder, not the YAML's"
