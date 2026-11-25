@@ -552,3 +552,42 @@ def test_the_slowdown_beside_others_is_timed_with_each_process_on_its_share_of_t
                                                  deterministic=True, timeout_s=10, env={"PATH": "p"}, thresholds={}))
     assert factor == 1.0 and seen == [None, "4", "4", "4", "4"]
 
+
+
+# ---- the time range: said at the start, kept in the record, and told once when a running study leaves it ------------------
+
+
+def _long_estimate(timed: int, cells: int) -> est.Estimate:
+    return est.Estimate(seconds=4 * 3600.0 / est.SAFETY, at_least=False, complete=True, cells=cells, trials=cells, timed=timed)
+
+
+def test_a_long_estimate_is_said_with_the_range_it_could_take() -> None:
+    line = est.says(_long_estimate(1, 100), 10 * 3600.0)
+    assert "FI timed 1 of the study's 100 settings, so it could take from 5 minutes to 8 h" in line
+    wide, narrow = est.time_range(4 * 3600.0, 1, 100), est.time_range(4 * 3600.0, 100, 100)
+    assert wide is not None and narrow is not None and wide[0] < narrow[0] and wide[1] == narrow[1] == 8 * 3600.0
+
+
+def test_a_short_estimate_says_no_range() -> None:
+    short = est.Estimate(seconds=600.0, at_least=False, complete=True, cells=10, trials=10, timed=2)
+    assert "could take" not in est.says(short, 3600.0) and est.time_range(600.0, 2, 10) is None
+
+
+def test_the_record_carries_the_range(tmp_path: Path) -> None:
+    assert est.write_record(tmp_path, {"estimate_s": 4 * 3600.0, "timed": 1, "cells": 100})
+    low, high = est.read_record(tmp_path)["range_s"]
+    assert 0 < low < 4 * 3600.0 < high
+    assert est.write_record(tmp_path, {"estimate_s": 600.0, "timed": 1, "cells": 100})
+    assert "range_s" not in est.read_record(tmp_path)
+
+
+def test_a_running_study_that_leaves_the_range_is_told_once() -> None:
+    said: set[str] = set()
+    inside = est.progress_line(30, 100, 30, 100, 3600.0, range_s=[1800.0, 20000.0], said=said)   # projects 3 h 20 min
+    assert "outside" not in inside and not said
+    early = est.progress_line(5, 100, 5, 100, 10.0, range_s=[1800.0, 20000.0], said=said)         # under 20% done
+    assert "outside" not in early
+    slow = est.progress_line(30, 100, 30, 100, 36000.0, range_s=[1800.0, 20000.0], said=said)     # projects 33 h 20 min
+    assert "FI now expects about 33 h in all, which is outside the 30 minutes to 5 h 33 min it said at the start" in slow
+    assert "outside" not in est.progress_line(40, 100, 40, 100, 48000.0, range_s=[1800.0, 20000.0], said=said)
+    assert "outside" not in est.progress_line(30, 100, 30, 100, 36000.0)  # no range said: nothing to leave

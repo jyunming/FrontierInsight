@@ -2197,6 +2197,7 @@ class TrialsRunner:
         self.left_out_settings: list[str] = []
         self._plan_seen: list[dict[str, Any]] | None = None
         self._plan_started = 0.0
+        self._range_said: set[str] = set()  # the line saying the study left the time range is said once
 
     def _note_plan(self, plan: list[dict[str, Any]]) -> None:
         self._plan_seen, self._plan_started = plan, time.monotonic()
@@ -2220,7 +2221,8 @@ class TrialsRunner:
             done_trials += seen
             done_cells += seen >= len(task["trials"])
         return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
-                                       time.monotonic() - self._plan_started)
+                                       time.monotonic() - self._plan_started,
+                                       range_s=_estimate.read_record(self.quest_root).get("range_s"), said=self._range_said)
 
     def _without_left_out(self, summary: Path) -> Path:
         """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
