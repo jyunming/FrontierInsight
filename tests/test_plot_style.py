@@ -20,7 +20,6 @@ from core.plot_style import (
     FI_TEAL_CMAP_NAME,
     FONT_SCALE,
     HOUSE_TICK_PT,
-    apply_style,
     fi_rcparams,
     figure_facecolor,
     write_boot,
@@ -122,17 +121,6 @@ def _restore_rcparams():
         yield
     finally:
         matplotlib.rcParams.update(snapshot)
-
-
-def test_apply_style_registers_cmap_and_sets_brand_cycle(_restore_rcparams) -> None:
-    import matplotlib
-
-    apply_style("briefing")
-    assert FI_TEAL_CMAP_NAME in matplotlib.colormaps
-    first = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"][0]
-    assert first == FI_COLOR_CYCLE[0]
-    assert matplotlib.rcParams["axes.facecolor"] == "#f8f7f3"
-    assert matplotlib.rcParams["axes.spines.top"] is False
 
 
 # ---- the load-bearing test: applies in a real subprocess ----------------

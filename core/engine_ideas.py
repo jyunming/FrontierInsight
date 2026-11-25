@@ -13,7 +13,7 @@ from .engine_base import (  # noqa: F401
     _fault_record, _format_clarify, _format_lit, _format_lit_excerpt, _format_lit_from_state, _frozen,
     _ingest_user_dropped_papers, _is_abstract_only, _is_open_access, _is_scholarly_record, _item_content,
     _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, _literature_query_prompt,
-    _literature_text_gaps, _merge_round_robin, _normalize_title, _novelty, _ok_calls, _one_line, _optim, _pairs,
+    _literature_text_gaps, _merge_round_robin, _normalize_title, _ok_calls, _one_line, _optim, _pairs,
     _papers_dir_has_files, _papers_to_ask, _parse_json_lenient, _person_queries, _phased, _plan, _query_set_key,
     _query_set_standing, _read_query_sets, _reading, _receipts, _record_query_set, _retractions,
     _search_record_has_abstract, _sf_snapshot, _simulatability_answer, _source_text, _spell_out_title_options,
@@ -99,45 +99,10 @@ class IdeasStageMixin:
                 **self._resolve_modes({}),
             }
 
-        # Proposal short-circuit: when this quest was started from a
-        # ``/proposal``-generated YAML (detected by a ``*-proposal.md``
-        # pinned in ``knowledge.local_papers``), parse the proposal's
-        # structured H2 sections directly into ``clarify_answers``
-        # and skip the clarify LLM call entirely. The user already
-        # approved the hypothesis + success criteria when they ran
-        # ``/proposal``; re-asking is wasted compute.
-        #
-        # Gated on ``mode == "auto"`` only — ``interactive`` mode's
-        # contract is "let the human confirm / override every slot",
-        # so silently bypassing the prompt because a proposal MD
-        # happens to be pinned would surprise users. In interactive
-        # mode the regular ``interrupt()`` path still runs; the
-        # human can copy values from the proposal MD into the modal
-        # if they want.
-        if mode == "auto":
-            seeded = self._maybe_seed_clarify_from_proposal()
-            if seeded is not None:
-                proposal_path, answers = seeded
-                # Even when seeded from a proposal, YAML-pinned
-                # clarify_overrides still win — the interview /
-                # --update path is meant to override proposal defaults.
-                answers = {**answers, **dict(self.config.engine.clarify_overrides)}
-                self._log.info(
-                    "[clarify] mode=auto; seeded from proposal %s "
-                    "(skipped LLM call)",
-                    proposal_path.name,
-                )
-                return {
-                    "clarify_questions": {},
-                    "clarify_answers": answers,
-                    "clarify_done": True,
-                    **self._resolve_modes(answers),
-                }
-
         # When the interview / --update has pinned EVERY known clarify
         # slot in YAML AND mode is auto, the LLM call is pure waste —
         # the answers are already known. Skip it. The 8-slot list
-        # matches _CLARIFY_LABELS + the proposal-seed contract.
+        # matches _CLARIFY_LABELS.
         overrides = dict(self.config.engine.clarify_overrides)
         # ``known_slots`` defines when ``clarify_mode=auto`` can
         # short-circuit (all answers known from clarify_overrides, no
@@ -306,24 +271,6 @@ class IdeasStageMixin:
             "clarify_done": True,
             **modes,
         }
-
-    def _maybe_seed_clarify_from_proposal(
-        self,
-    ) -> tuple[Path, dict[str, Any]] | None:
-        """Check ``knowledge.local_papers`` for a ``*-proposal.md`` and
-        parse it into a clarify_answers shape. Returns
-        ``(proposal_path, answers)`` when a proposal is found and
-        parses cleanly; ``None`` otherwise.
-
-        Imported lazily so a quest with no local_papers (the common
-        case) doesn't pay the import cost. The proposal_seed module
-        is pure-Python with no heavy deps so the import is cheap
-        once paid."""
-        local_papers = list(self.config.knowledge.local_papers or [])
-        if not local_papers:
-            return None
-        from core.proposal_seed import seed_clarify_from_local_papers
-        return seed_clarify_from_local_papers(local_papers)
 
     def _log_topic_shape_mismatch(
         self, answers: dict[str, Any], *, no_simulation_resolved: bool,
@@ -1317,9 +1264,6 @@ class IdeasStageMixin:
             "literature_query_derived": derived,
             "literature_query_set": query_set,
         }
-        novelty = await self._literature_novelty(state, merged, this_iter)
-        if novelty:
-            out["literature_novelty"] = novelty
         return out
 
     async def _commission_literature(self, state: QuestState) -> QuestState:
@@ -1341,57 +1285,6 @@ class IdeasStageMixin:
                   for label, meta, _item in _labelled_sources(state.get("literature") or [])
                   if meta.get("source") == "user_supplied" and Path(str(meta.get("path") or "")).name in by_name}
         return _commission.prompt_block(data, labels)
-
-    async def _literature_novelty(self, state: QuestState, merged: list, iteration: int) -> dict[str, Any] | None:
-        """One call: do the retrieved sources already answer the study's question, and what does the study add?
-        Disclosed only (core/novelty.py): the checked answer goes to ``.fi/literature_novelty.json`` and into the plan and
-        writer prompts. It never stops the quest; a call that fails or gives nothing usable leaves no record."""
-        if not self.config.knowledge.novelty_check or not merged:
-            return None
-        try:
-            audience = self.config.output.audience  # the labels the writer cites by, so the checked ids can be cited
-            sources = []
-            for label, meta, item in _labelled_sources(merged, audience):
-                full = _item_content(item)
-                title = str(meta.get("title") or meta.get("source") or "")
-                sources.append({
-                    "id": label, "title": title, "year": meta.get("year") or "", "text": full,
-                    "excerpt": " ".join(_format_lit_excerpt(full, title, budget=_novelty.EXCERPT_CHARS).split()),
-                })
-            if not sources:
-                return None
-            chosen = state.get("chosen_idea") or {}
-            question = " ".join(str(chosen.get(k) or "").strip() for k in ("title", "rationale")).strip() or state["topic"]
-            prompt = self._prompts["literature_novelty"].substitute(
-                topic=state["topic"][:1500], question=question[:1200],
-                # Retrieved text is material to read, never instructions (core/source_text.py).
-                sources=_source_text.fence(_novelty.format_sources(sources)),
-            )
-            self.__dict__.setdefault("_last_call_id", {}).pop("literature_novelty", None)
-            raw = await self._chat(prompt, node="literature_novelty")
-            call_id = self.__dict__.get("_last_call_id", {}).get("literature_novelty")
-            record, counts = _novelty.check(_parse_json_lenient(raw, node="literature_novelty"), sources)
-            if record is None:
-                self._log.warning("[literature] the note on what the sources already answer could not be read; "
-                                  "the quest goes on without it")
-                return None
-            dropped = counts["dropped_unknown_source"] + counts["dropped_quote_not_found"]
-            self._log.info(
-                "[literature] sources already answer the question: %s; %d of %d evidence quotes checked and kept"
-                "%s", record["already_answered"], counts["kept"], counts["given"],
-                f" ({dropped} dropped: {counts['dropped_unknown_source']} unknown source, "
-                f"{counts['dropped_quote_not_found']} quote not in the source)" if dropped else "")
-            if not record["backed"]:
-                self._log.info("[literature] no quote backs the %r answer, so it is kept in the record only",
-                               record["already_answered"])
-            _novelty.write_record(self.quest_root, record, call_id=call_id, iteration=iteration,
-                                  model=(self._chat_provenance("literature_novelty") or {}).get("model")
-                                  or self._model_for_node("literature_novelty") or self.config.provider.model)
-            return record
-        except Exception as e:  # noqa: BLE001 - a note that cannot be made never stops a quest
-            self._log.warning("[literature] could not make the note on what the sources already answer (%s: %s); "
-                              "the quest goes on without it", type(e).__name__, str(e)[:200])
-            return None
 
     def _design_feedback(self, state: QuestState) -> str:
         """What a later design pass is told: the review, FI's precision record, the person's words, the points that need a
@@ -1552,7 +1445,6 @@ class IdeasStageMixin:
             # replays of a real quest (0 of 5 at the full budget): short
             # excerpts cost it the context a sound design rests on.
             literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
-            novelty_block=_novelty.design_block(state.get("literature_novelty")),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             time_note=self._time_note(state),

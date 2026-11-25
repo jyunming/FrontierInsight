@@ -1665,7 +1665,7 @@ def test_ingest_distinct_files_with_same_basename_dont_collide(
 
 def test_mint_doc_id_uses_paper_id_and_rel_path_for_disambiguation() -> None:
     """``_mint_doc_id`` previously only checked the top-level
-    quest_id / proposal_id / etc. keys, so ``fi_summary_input`` docs
+    quest_id / critique_id / etc. keys, so ``fi_summary_input`` docs
     that share a summary_id but live at different paths would all
     collide to the same id. New behaviour: composite key including
     ``paper_id``, ``rel_path``, and ``tag`` discriminators."""

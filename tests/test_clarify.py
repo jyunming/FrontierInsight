@@ -280,13 +280,11 @@ The primary metric is relative energy drift ranked monotonically.
 
 
 @pytest.mark.asyncio
-async def test_clarify_auto_seeded_from_proposal_skips_llm_call(
+async def test_clarify_auto_asks_the_model_even_when_a_proposal_file_is_pinned(
     tmp_path: Path,
 ) -> None:
-    """When ``knowledge.local_papers`` contains a ``*-proposal.md``,
-    the clarify node parses the proposal directly and skips the LLM
-    call entirely — saving one premium request per quest started
-    from a ``/proposal``-generated YAML."""
+    """FI no longer reads a ``*-proposal.md`` pinned in ``knowledge.local_papers`` as a ready set of
+    answers: such a file is an ordinary local paper, so the clarify call is made as for any other."""
     from unittest.mock import AsyncMock
 
     proposal = tmp_path / "1778800000-test-aabbcc-proposal.md"
@@ -294,66 +292,21 @@ async def test_clarify_auto_seeded_from_proposal_skips_llm_call(
 
     cfg = _mk_cfg(tmp_path, "auto", local_papers=[proposal])
     eng = Engine(cfg)
-    chat_mock = AsyncMock(return_value="{}")
+    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
     eng._client = type("Stub", (), {"chat": chat_mock})()
 
     patch = await eng._node_clarify({"topic": "anything"})
 
-    chat_mock.assert_not_awaited(), (
-        "the proposal short-circuit must SKIP the clarify LLM call"
-    )
-    assert patch["clarify_done"] is True
-    assert patch["clarify_answers"]["simulatability"] == "yes"
-    # Bonus slot — downstream nodes can read the hypothesis verbatim.
-    assert "RK4" in patch["clarify_answers"]["_proposal_hypothesis"]
-    # The resolver consumed the seeded answers — simulatability=yes
-    # means SIMULATE, not no-simulation.
-    assert patch["no_simulation_resolved"] is False
-
-
-@pytest.mark.asyncio
-async def test_clarify_interactive_does_not_seed_from_proposal(
-    tmp_path: Path,
-) -> None:
-    """``interactive`` mode's contract is "let the human confirm /
-    override every slot". Silently skipping the prompt because a
-    proposal MD happens to be pinned would surprise users — they
-    pinned the proposal as context for retrieval, NOT as a license
-    to bypass the clarify modal. The short-circuit is gated on
-    ``mode == "auto"`` only; ``interactive`` still calls the LLM
-    to generate questions, then ``interrupt()`` for the human."""
-    from unittest.mock import AsyncMock
-
-    proposal = tmp_path / "1778800000-test-aabbcc-proposal.md"
-    proposal.write_text(_PROPOSAL_FOR_SEED, encoding="utf-8")
-
-    cfg = _mk_cfg(tmp_path, "interactive", local_papers=[proposal])
-    eng = Engine(cfg)
-    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
-    eng._client = type("Stub", (), {"chat": chat_mock})()
-
-    try:
-        # In interactive mode the engine eventually hits
-        # ``interrupt()``. We don't care to drive a resume here —
-        # we just need to assert chat WAS called (the short-circuit
-        # MUST NOT engage).
-        await eng._node_clarify({"topic": "anything"})
-    except Exception:
-        # ``interrupt()`` raises in some test runtimes; only the
-        # pre-interrupt chat-call matters.
-        pass
-    chat_mock.assert_awaited(), (
-        "interactive mode must still call the LLM to generate "
-        "questions even when a proposal MD is pinned"
-    )
+    chat_mock.assert_awaited_once()
+    assert "_proposal_hypothesis" not in patch["clarify_answers"]
 
 
 @pytest.mark.asyncio
 async def test_clarify_auto_falls_through_to_llm_when_no_proposal(
     tmp_path: Path,
 ) -> None:
-    """A non-proposal local_paper (or no local_papers at all) leaves
-    the normal LLM clarify path in place — no false short-circuit."""
+    """A local_paper (or no local_papers at all) leaves
+    the normal LLM clarify path in place."""
     from unittest.mock import AsyncMock
 
     other = tmp_path / "just-some-paper.md"

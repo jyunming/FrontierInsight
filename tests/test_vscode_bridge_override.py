@@ -145,9 +145,9 @@ def test_socket_override_respects_every_non_vscode_provider(
 
 # --- PM-command extras helper -----------------------------------------------
 #
-# ``_set_vscode_bridge_extras`` is the helper that the five PM-command
-# runners (``_run_summarize`` / ``_run_digest`` / ``_run_portfolio`` /
-# ``_run_critique`` / ``_run_proposal``) call to wire the bridge port +
+# ``_set_vscode_bridge_extras`` is the helper that the PM-command
+# runners (``_run_summarize`` / ``_run_digest`` /
+# ``_run_critique``) call to wire the bridge port +
 # socket into their freshly-built ``ProviderConfig``. The guard added in
 # PR #134 to ``_apply_vscode_bridge_override`` /
 # ``_apply_vscode_bridge_socket_override`` was missed here, so a user

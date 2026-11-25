@@ -99,7 +99,7 @@ from .engine_base import (  # noqa: F401
     _literature_text_gaps, _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
     _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mask_prose, _matching_brace_end, _math_folded,
     _math_safe_cut, _mc_error, _merge_round_robin, _metric_spec, _names_a_verdict,
-    _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls, _novelty,
+    _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls,
     _number_list, _numeric, _object_among_prose, _object_spans, _objection_key, _ok_call_ids, _ok_calls, _one_line,
     _optim, _optimise, _optimise_refine, _optimise_search, _oracle, _oracle_card, _oracle_challenge, _oracle_triage,
     _oracle_with_reader_flags, _outcome_of, _outside_run, _own_modules, _package_block_text, _page_limit_note, _pairs,

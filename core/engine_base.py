@@ -122,7 +122,6 @@ from . import improve as _improve
 from . import in_run as _in_run
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
-from . import novelty as _novelty
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
@@ -303,7 +302,6 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "cross_check",
     "relevance_guard",
     "literature_screen",
-    "literature_novelty",  # a judgement of the sources, not a draft
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
@@ -374,9 +372,6 @@ class QuestState(TypedDict, total=False):
     # counts, and outcome label ("confirmed" / "swapped" /
     # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
-    #: Whether the retrieved sources already answer the study's question (core/novelty.py): the checked record, or absent
-    #: when the call was off, failed or gave nothing usable. Disclosed only; kept also in .fi/literature_novelty.json.
-    literature_novelty: dict[str, Any]
     # How chosen_idea was picked: "ensemble", "tournament", "reflection" or "model" (the ideate node's own pick).
     idea_selection: str
     literature: list[dict[str, Any]]
@@ -906,7 +901,7 @@ def _design_parts_listing(design: Any) -> str:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify", "ideate", "ideate_reflect", "ideate_tournament", "literature_novelty",
+        "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
         "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over

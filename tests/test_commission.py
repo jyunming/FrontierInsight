@@ -172,7 +172,7 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
     _commission(tmp_path / "order")
     yaml = tmp_path / "order" / "quest.yaml"
     yaml.write_text("commission: commission.json\npauses:\n  scope: ask\nengine:\n  clarify_mode: auto\n"
-                    "knowledge:\n  novelty_check: false\n", encoding="utf-8")
+                    "knowledge:\n  foundational_works: false\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     with caplog.at_level("WARNING", logger="frontier_insight.config"):
         cfg = Config.from_yaml(yaml)
@@ -181,8 +181,8 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
     assert cfg.pauses.scope == "off" and cfg.pauses.clarify == "off", "a step the commission gives stays off"
     said = [r.getMessage() for r in caplog.records if "are not used" in r.getMessage()]
     assert len(said) == 1 and "pauses.scope" in said[0] and "engine.clarify_mode" in said[0], said
-    assert "novelty_check" not in said[0], "a setting the commission agrees with is not named"
-    assert cfg.pauses.papers is False and cfg.knowledge.novelty_check is False
+    assert "foundational_works" not in said[0], "a setting the commission agrees with is not named"
+    assert cfg.pauses.papers is False
     assert cfg.knowledge.foundational_works is False and cfg.knowledge.requery_on_low_relevance is False
     assert cfg.engine.evidence_gate_max_broaden == 0 and cfg.engine.enable_analyze_reroute is False
     assert cfg.execution.timeout_s == 2 * 3600, "the commission's hours are the run's time limit when the config is silent"
@@ -352,7 +352,7 @@ async def test_ideate_and_literature_do_no_work_of_their_own_and_say_nothing_of_
     [entry] = out["literature"]
     assert entry["metadata"]["source"] == "user_supplied" and PASSAGE in entry["content"]
     assert entry["metadata"]["title"] == "A made-up tank note" and entry["metadata"]["doi"] == "10.0000/tank.1"
-    assert "literature_novelty" not in out and eng._client.chat.call_count == 0
+    assert eng._client.chat.call_count == 0
 
 
 @pytest.mark.asyncio

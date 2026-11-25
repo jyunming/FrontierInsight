@@ -305,7 +305,7 @@ def test_update_carries_the_output_root_the_quest_was_picked_from() -> None:
     `frontierInsight.outputDir`, so without the flag a user with a
     custom output directory got "no quest directory at
     <repo>\\outputs\\<id>" for a quest FI had just offered them. Every
-    other spawn (--digest / --portfolio / --critique / --proposal /
+    other spawn (--digest / --critique /
     --analyze) already passed the root."""
     cmds = _build()["commands"]
     assert r'--output-root "C:\Users\me\My Outputs"' in cmds["ps_update"]

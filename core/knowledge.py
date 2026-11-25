@@ -4875,8 +4875,8 @@ class Knowledge:
         True iff the call succeeded.
 
         Used by the post-quest write-back path (``add_quest_artifacts``)
-        and by every PM-command (``/proposal``, ``/digest``,
-        ``/portfolio``, ``/critique``, ``/summarize``) to land their
+        and by every PM-command (``/digest``,
+        ``/critique``, ``/summarize``) to land their
         respective ``fi_*`` documents. Tolerates a disabled or missing
         Axon brain — returns False silently in those cases.
 
@@ -4906,9 +4906,8 @@ class Knowledge:
         """Stable doc id derived from metadata when possible so
         re-ingesting the same logical doc updates rather than
         duplicates. Order of preference: explicit ``id`` in metadata,
-        ``quest_id`` (post-quest writebacks), ``proposal_id`` (from
-        /proposal), ``critique_id``, ``digest_id``, ``summary_id``,
-        ``portfolio_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
+        ``quest_id`` (post-quest writebacks), ``critique_id``,
+        ``digest_id``, ``summary_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
         when none are present."""
         md = metadata or {}
         # Stable-key preference list. For per-quest writebacks the
@@ -4922,8 +4921,8 @@ class Knowledge:
         # under one id and the later one overwrites the earlier"
         # failure mode.
         primary_keys = (
-            "id", "quest_id", "proposal_id", "critique_id",
-            "digest_id", "summary_id", "portfolio_id",
+            "id", "quest_id", "critique_id",
+            "digest_id", "summary_id",
         )
         primary: str | None = None
         for key in primary_keys:

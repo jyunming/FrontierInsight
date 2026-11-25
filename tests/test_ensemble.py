@@ -534,7 +534,7 @@ async def test_singleshot_propagates_merger_ensemble_error() -> None:
     with pytest.raises(EnsembleError) as exc:
         await run_singleshot_with_ensemble(
             prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
-            default_merge="tournament", node="proposal",
+            default_merge="tournament", node="critique",
         )
     # Error must be the merger's 26-cap, NOT silently swallowed by
     # the fallback (which would have called fake_chat with model=None

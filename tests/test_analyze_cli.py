@@ -158,7 +158,7 @@ def test_prepare_analyze_quest_empty_dir_returns_zero(tmp_path: Path) -> None:
 def test_mint_quest_id_drops_non_ascii_topic_chars() -> None:
     """``str.isalnum()`` would have admitted non-ASCII letters
     (CJK / Cyrillic / accented Latin) into the slug, producing a
-    quest_id the digest/critique/portfolio tools' ASCII regex
+    quest_id the digest/critique tools' ASCII regex
     rejects. New behaviour: ``[a-z0-9-]+`` only."""
     qid = mint_quest_id("日本語 with English", now_epoch=1778800000)
     middle = qid[len("1778800000-"):-7]

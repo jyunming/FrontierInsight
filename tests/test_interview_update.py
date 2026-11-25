@@ -257,7 +257,7 @@ def test_stage_state_keys_cover_every_invalidated_stage() -> None:
 
 
 def test_rewrite_yaml_preserves_local_papers(tmp_path: Path) -> None:
-    """``knowledge.local_papers`` is set by --proposal seeding and
+    """``knowledge.local_papers`` is set by a seeded config and
     must survive an --update round-trip."""
     quest_root = tmp_path / "quest-prop"
     quest_root.mkdir()

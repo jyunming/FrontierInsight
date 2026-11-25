@@ -983,8 +983,8 @@ def make_app(
     from web.interview_routes import register_interview_routes
     register_interview_routes(app, output_root)
 
-    # Tools routes — /tools/<name> (form pages for proposal, critique,
-    # digest, portfolio, summarize, analyze, fleet, ingest), backed
+    # Tools routes — /tools/<name> (form pages for critique,
+    # digest, summarize, analyze, fleet, ingest), backed
     # by web/tools_routes.py:TOOL_SPECS as the source of truth.
     from web.tools_routes import register_tools_routes
     register_tools_routes(app, output_root)
@@ -1031,7 +1031,7 @@ def make_app(
         """Live job-tracking page. Shows running + recent tool / system /
         quest subprocess jobs the launcher knows about, with a live
         log-tail view. Hit by the tools form after submit so the user can
-        watch their proposal/critique/etc. actually run."""
+        watch their critique/digest/etc. actually run."""
         page = static_dir / "jobs.html"
         if not page.exists():
             return HTMLResponse(
@@ -1986,7 +1986,7 @@ def make_app(
     @app.get("/api/jobs")
     async def list_jobs() -> JSONResponse:
         """List all subprocess jobs the launcher has spawned (tools,
-        --install-tectonic, --new/--update/--proposal quest launches),
+        --install-tectonic, --new/--update quest launches),
         merging:
           (1) the launcher's live registry (alive jobs with pid/age)
           (2) on-disk launch.log files (everything ever logged —
@@ -2110,88 +2110,6 @@ def make_app(
                 key=lambda j: j.get("age_seconds", 0) if j["alive"] else -j.get("log_mtime", 0),
                 reverse=False,
             ),
-        })
-
-    @app.get("/api/drafts")
-    async def list_drafts() -> JSONResponse:
-        """List draft quest YAMLs the proposal tool dropped in
-        ``outputs/_drafts/``. Each entry includes the parsed topic
-        + title so the /interview UI can show a one-click picker
-        for "continue this proposal as a new quest." Most-recent
-        first."""
-        drafts_dir = app.state.output_root / "_drafts"
-        if not drafts_dir.is_dir():
-            return JSONResponse({"drafts": []})
-        items: list[dict[str, Any]] = []
-        for p in sorted(
-            drafts_dir.glob("*.yaml"),
-            key=lambda f: f.stat().st_mtime,
-            reverse=True,
-        )[:40]:
-            try:
-                txt = p.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            # Parse JUST the fields the picker needs — topic + title.
-            # Doing a full YAML load here is fine; the files are tiny.
-            try:
-                import yaml as _yaml
-                doc = _yaml.safe_load(txt) or {}
-            except Exception:
-                doc = {}
-            items.append({
-                "filename": p.name,
-                "mtime": p.stat().st_mtime,
-                "size": p.stat().st_size,
-                "topic": (doc.get("topic") or "").strip()[:200],
-                "title": (doc.get("title") or "").strip()[:200],
-                "provider": (doc.get("provider") or {}).get("name") if isinstance(doc.get("provider"), dict) else None,
-                "companion_md": str(p.with_name(p.stem + "-proposal.md").name)
-                    if (drafts_dir / (p.stem + "-proposal.md")).is_file() else None,
-            })
-        return JSONResponse({"drafts": items})
-
-    @app.get("/api/drafts/{filename}")
-    async def get_draft(filename: str) -> JSONResponse:
-        """Return the parsed contents of a single draft YAML so the
-        /interview page can pre-fill its form fields when the user
-        clicks "Load draft" on a proposal output.
-
-        Also returns the companion proposal markdown (``<stem>-proposal.md``)
-        when present, so the interview page can render the full
-        background/hypothesis/plan/risks alongside the form. The YAML
-        alone only holds the *runnable* config (topic, title, provider,
-        execution params, …); the rich proposal text lives in the MD.
-        """
-        # Path-traversal guard: only allow simple filenames inside
-        # outputs/_drafts/, never path components like '..'.
-        if "/" in filename or "\\" in filename or filename.startswith(".") or not filename.endswith(".yaml"):
-            raise HTTPException(400, f"bad filename: {filename!r}")
-        draft = app.state.output_root / "_drafts" / filename
-        if not draft.is_file():
-            raise HTTPException(404, f"draft {filename!r} not found")
-        try:
-            txt = draft.read_text(encoding="utf-8", errors="replace")
-            import yaml as _yaml
-            doc = _yaml.safe_load(txt) or {}
-        except Exception as e:
-            raise HTTPException(500, f"could not parse draft: {e}")
-        # Companion proposal markdown (same stem with -proposal.md suffix)
-        # — bundled in the response so the picker only does one round
-        # trip to load both the YAML config + the readable plan.
-        proposal_md = draft.with_name(draft.stem + "-proposal.md")
-        md_text: str | None = None
-        if proposal_md.is_file():
-            try:
-                md_text = proposal_md.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                md_text = None
-        return JSONResponse({
-            "filename": filename,
-            "raw": txt,
-            "parsed": doc,
-            "proposal_md": md_text,
-            "proposal_md_filename": proposal_md.name if md_text else None,
         })
 
     @app.get("/api/jobs/{job_id}")

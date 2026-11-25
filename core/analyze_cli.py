@@ -1,9 +1,8 @@
 """``fi --analyze <data_path>`` — start a no-simulation quest with
 pre-staged data.
 
-The inverse of ``fi --proposal``: rather than asking the engine to
-plan an experiment, the user already has data and wants FI to write
-a paper analyzing it. Workflow:
+The user already has data and wants FI to write a paper analyzing it,
+rather than asking the engine to plan an experiment. Workflow:
 
 1. User runs ``fi --analyze ./my_data --analyze-topic "Compare ..."``.
 2. We mint a new quest_id, create ``<output_root>/<quest_id>/data/``,

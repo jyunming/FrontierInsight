@@ -206,7 +206,6 @@ The active chat model is captured automatically into `provider.model`. **The mod
 - `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk script) for an **already-finished** quest **without re-running the research**. Pick the quest + format, or pass them (`@fi /generate <id> paper_pdf`). It runs `launch.py --emit` here in the chat (no terminal); the quest's existing `paper.md` + figures are reused, so a markdown-only quest can get a PDF later for the cost of one render. The formats that call the model (slides / poster / talk script) make their calls through this chat, as `/resume` does. Mirrors the web quest page's **Outputs** panel.
 - `@fi /ingest <paths>` — load PDFs / Markdown / TXT into the Axon corpus as prior work. Its output is shown here in the chat.
 - `@fi /install-tectonic` — install the tectonic LaTeX binary (~70 MB) into `tools/` so `paper.pdf` works without an admin install of MiKTeX. Its output is shown here in the chat.
-- `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
 - `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable, and report which endpoint answered. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking). Quests started from this chat use that same service for the knowledge base (`knowledge.axon_mode: http`, the default): they switch it to FI's `frontier-insight` project for one operation and back, and if it cannot be reached the quest runs without the knowledge base and says why in its log.
 - `@fi /probe [all]` — ask the model selected in the Chat picker whether text FI did not send (a hidden system prompt, tool definitions, a persona) appears to be in its context. `@fi /probe all` does the same for every model VS Code lists, after a confirmation that says how many requests will be sent. Behavioural evidence only; see [Does a model carry a hidden system prompt?](#does-a-model-carry-a-hidden-system-prompt). `@fi /probe image` sends the selected model one small test image (a red square and a blue circle), built the way FI sends the figures it reads and the screenshots it checks, and says whether the model named what it shows; if the request fails, it says whether FI would recognise the error as *this model cannot read images* (the quest stops and asks) or not.
 - `@fi /follow <quest_id>` — each step of a running quest as it happens, until it stops for you, finishes or fails.
@@ -614,21 +613,13 @@ those used to leave an empty quest folder with nothing in it to
 read. Stopping the quest yourself writes nothing: cancelling it,
 or shutting the machine down, is not a crash to report.
 
-## Pre-quest proposal
-
-```
-@fi /proposal Compare RK4 vs Verlet on the Kepler problem with eccentric orbits
-```
-
-Inverts the flow: get a 1-page LLM-written proposal *first* (TL;DR, background, hypothesis, plan, success criteria, risks, scope limits, recommended next step) before committing compute to a full quest. Writes `outputs/_drafts/<id>-proposal.md` (the planning doc) plus `outputs/_drafts/<id>.yaml` (a minimal config you can feed to `/start` once the plan looks right). Ingested as `kind=fi_proposal`.
-
 ## Analyze pre-staged data
 
 ```
 @fi /analyze ./my_data Compare ridership trends across the three regions
 ```
 
-The inverse of `/proposal`: when you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `ideate` / `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `ideate` / `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
 
 Quote the path if it contains spaces: `@fi /analyze "C:/My Data" Find common failure modes`.
 
@@ -639,14 +630,6 @@ Quote the path if it contains spaces: `@fi /analyze "C:/My Data" Find common fai
 ```
 
 The in-quest review is biased — same model wrote the paper and reviewed it. `/critique` runs a fresh adversarial pass with "you have never seen this paper before" framing. For maximum effect, pick a different model family in your Copilot Chat picker from the one that wrote the paper — the produced `critique.md` records both providers so you can see post-hoc which was which. Lands at `outputs/<quest_id>/critique.md` with Verdict / Methodology challenges (quoted objections) / Statistical issues / Reproducibility gaps / Alternative explanations / "What the in-quest review missed" / Recommended follow-up experiments. Ingested as `kind=fi_critique`.
-
-## Cross-quest portfolio synthesis
-
-```
-@fi /portfolio
-```
-
-Walks every quest under `outputs/` (no time window) and writes `outputs/_portfolio/<YYYY-MM-DD>.md`. Unlike `/digest`, this is the all-time view — run it monthly or when scoping the next research push. The LLM gets the full corpus plus deterministic stats (total / completed / cadence / provider breakdown) and produces topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, and prioritized next-quest suggestions. Ingested as `kind=fi_portfolio`.
 
 ## Weekly project-manager digest
 

@@ -1,12 +1,10 @@
-"""FastAPI routes for the eight CLI tools exposed in the web UI.
+"""FastAPI routes for the six CLI tools exposed in the web UI.
 
 Each tool maps to a CLI subcommand the user could also run from the
 terminal:
 
-* ``/tools/proposal`` → ``python launch.py --proposal "<topic>"``
 * ``/tools/critique`` → ``python launch.py --critique <quest_id>``
 * ``/tools/digest``   → ``python launch.py --digest --days N``
-* ``/tools/portfolio``→ ``python launch.py --portfolio``
 * ``/tools/summarize``→ ``python launch.py --summarize <dir>``
 * ``/tools/analyze``  → ``python launch.py --analyze <dir> --analyze-topic "<topic>"``
 * ``/tools/fleet``    → ``python launch.py --fleet a.yaml b.yaml ...``
@@ -15,7 +13,7 @@ terminal:
 The pattern is repetitive (form → validate → spawn subprocess via
 :class:`web.quest_launcher.QuestLauncher` → return job_id), so we
 drive both the UI and the backend from a single :data:`TOOL_SPECS`
-dict. Adding a ninth tool is one entry here plus a CLI flag.
+dict. Adding a seventh tool is one entry here plus a CLI flag.
 
 File-taking tools accept EITHER multipart upload (browser-native,
 files written into ``outputs/_uploads/<job_id>/``) OR a server-side
@@ -58,9 +56,9 @@ class ToolSpec:
     name: str
     label: str
     blurb: str
-    cli_flag: str       # e.g. "--proposal" or "--digest"
+    cli_flag: str       # e.g. "--critique" or "--digest"
     fields: tuple[ToolField, ...]
-    artifact_dir: str | None = None  # relative to output_root, e.g. "_drafts" — for "View output" link
+    artifact_dir: str | None = None  # relative to output_root, e.g. "_digests" — for "View output" link
     accepts_files: bool = False
     # When True, the form gets a provider + model picker (driven
     # by the same schema as the interview's provider/model
@@ -73,22 +71,6 @@ class ToolSpec:
 
 
 TOOL_SPECS: tuple[ToolSpec, ...] = (
-    ToolSpec(
-        name="proposal",
-        label="Proposal — plan before you run",
-        blurb="Get a 1-page planning doc (background, hypothesis, plan, success criteria, risks) before committing compute. Produces an outputs/_drafts/<id>-proposal.md plus a companion YAML ready to feed into the main quest.",
-        cli_flag="--proposal",
-        artifact_dir="_drafts",
-        fields=(
-            ToolField(
-                name="topic",
-                label="Topic",
-                prompt="The research question or topic to plan for. 1–3 paragraphs is the sweet spot.",
-                kind="longtext",
-                placeholder="Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
-            ),
-        ),
-    ),
     ToolSpec(
         name="critique",
         label="Critique — adversarial second-pass review",
@@ -118,14 +100,6 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 default=7,
             ),
         ),
-    ),
-    ToolSpec(
-        name="portfolio",
-        label="Portfolio — cross-quest synthesis",
-        blurb="Walks every quest under outputs/ (no time window), surfaces topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, and prioritized next-quest suggestions. Writes outputs/_portfolio/<YYYY-MM-DD>.md.",
-        cli_flag="--portfolio",
-        artifact_dir="_portfolio",
-        fields=(),  # no inputs — just press the button
     ),
     ToolSpec(
         name="summarize",
@@ -162,7 +136,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="analyze",
         label="Analyze — no-simulation quest with pre-staged data",
-        blurb="The inverse of /proposal: you already have a dataset and want FI to write a paper analyzing it. Files are copied into the new quest's data/ dir; the engine routes wait_for_data → data_load → analyze → cross_check → write → review.",
+        blurb="You already have a dataset and want FI to write a paper analyzing it. Files are copied into the new quest's data/ dir; the engine routes wait_for_data → data_load → analyze → cross_check → write → review.",
         cli_flag="--analyze",
         accepts_files=True,
         fields=(
@@ -440,15 +414,12 @@ def _ensemble_argv_tail(
     csv = ",".join(named)
     # Per-tool default merge mirrors the launch.py argparse defaults
     # exactly so behaviour doesn't drift between CLI and serve users:
-    #   proposal: tournament — one canonical plan.
     #   critique: synthesize — preserve adversarial disagreement.
     #   digest:   synthesize — preserve WeekDiff disagreement.
-    #   portfolio/summarize/analyze: tournament — one canonical synthesis.
+    #   summarize/analyze: tournament — one canonical synthesis.
     _MERGE_DEFAULTS = {
-        "proposal":  "tournament",
         "critique":  "synthesize",
         "digest":    "synthesize",
-        "portfolio": "tournament",
         "summarize": "tournament",
         "analyze":   "tournament",
     }
@@ -569,20 +540,13 @@ def _build_argv(
     # provider's curated 3-model trio (mirrors what the interview's
     # YAML emitter does for engine-side node_ensemble).
     # Every LLM tool accepts --<tool>-ensemble now: single-shot
-    # fan-out for digest / portfolio / summarize / critique / proposal,
+    # fan-out for digest / summarize / critique,
     # engine-level node_ensemble for analyze. Map the profile picker
     # to the CSV the CLI expects.
-    _ENSEMBLE_TOOLS = {"proposal", "critique", "digest", "portfolio",
-                       "summarize", "analyze"}
+    _ENSEMBLE_TOOLS = {"critique", "digest", "summarize", "analyze"}
     ensemble_tail: list[str] = []
     if spec.needs_llm and name in _ENSEMBLE_TOOLS:
         ensemble_tail = _ensemble_argv_tail(name, provider, payload)
-
-    if name == "proposal":
-        topic = (payload.get("topic") or "").strip()
-        if not topic:
-            raise ValueError("topic is required")
-        return ["--proposal", topic, *provider_tail, *ensemble_tail]
 
     if name == "critique":
         quest_id = (payload.get("quest_id") or "").strip()
@@ -593,9 +557,6 @@ def _build_argv(
     if name == "digest":
         days = int(payload.get("days") or 7)
         return ["--digest", "--days", str(days), *provider_tail, *ensemble_tail]
-
-    if name == "portfolio":
-        return ["--portfolio", *provider_tail, *ensemble_tail]
 
     if name == "summarize":
         folder = (payload.get("folder") or "").strip()
