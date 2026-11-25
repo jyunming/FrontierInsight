@@ -79,3 +79,33 @@ def test_a_control_the_scan_has_is_kept_by_the_merge(tmp_path: Path) -> None:
     design = plan.parse(text).design
     assert design is not None and [c["name"] for c in design["protocol"]["controls"]] == ["still air"]
     assert "was left out of `protocol.controls`" not in text
+
+
+def _held_plan(controls: list[Any]) -> str:
+    design = copy.deepcopy(HEAT_SINK)
+    design["protocol"] = {"grid": {"air_speed_m_s": [1.0, 2.0, 3.0]}, "runs_per_setting": 3,
+                          "metrics": [{**METRIC, "reference": {"formula": "10", "when": {"air_speed_m_s": 2.0}}}],
+                          "controls": controls}
+    design["study_type"] = "find_best_design"
+    return plan.render("Find the fin spacing that minimises the base temperature of a heat sink", {}, design)
+
+
+def test_what_the_scan_lacked_comes_back_when_the_scan_setting_is_asked_back(tmp_path: Path) -> None:
+    """Before: the control (and the metric's reference) were left out at the first merge and stayed out when the plan's model
+    gave the setting back in its next answer. Now they are held aside and judged again at each merge."""
+    eng = _engine(tmp_path, [])
+    path = plan.plan_path(eng.quest_root)
+    first = eng._keep_only_the_search(_held_plan([CONTROL]), {"study_type": "find_best_design", "protocol": {
+        "optimisation": {**_block(heat_load_W=[30, 40], air_speed_m_s=[1.0, 2.0, 3.0]), "fixed": {"heat_load_W": 40}}}})
+    design = plan.parse(first).design
+    assert "controls" not in design["protocol"] and "reference" not in design["protocol"]["metrics"][0]
+    assert "the control 'still air' was left out" in first and "the reference value of `base_rise` was left out" in first
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(first, encoding="utf-8")
+    second = eng._keep_only_the_search(first, {"study_type": "find_best_design", "protocol": {
+        "optimisation": {**_block(heat_load_W=[30, 40], air_speed_m_s=[1.0, 2.0, 3.0]),
+                         "fixed": {"heat_load_W": 40, "air_speed_m_s": 2.0}}}})
+    design = plan.parse(second).design
+    assert [c["name"] for c in design["protocol"]["controls"]] == ["still air"]
+    assert design["protocol"]["metrics"][0]["reference"]["formula"] == "10"
+    assert "the control 'still air' was left out" not in second and "the reference value of `base_rise` was left out" not in second

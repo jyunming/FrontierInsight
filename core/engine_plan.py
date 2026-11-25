@@ -32,6 +32,47 @@ from . import known_values as _known_values
 from .oracle_challenge import NUMERIC_NODE, numeric_timeout
 
 
+
+NL = chr(10)
+
+
+def _held_back_in(protocol: dict[str, Any], held: dict[str, Any]) -> dict[str, Any]:
+    """``protocol`` with the controls and metric references an earlier merge left out put back, for the reader to judge again
+    (one the plan has already is not doubled; a reference is put back only on a metric that has none)."""
+    out = dict(protocol)
+    controls = out.get("controls")
+    rows = list(controls) if isinstance(controls, list) else [controls] if isinstance(controls, dict) else []
+    names = {str(c.get("name") or "").strip() for c in rows if isinstance(c, dict)}
+    rows += [c for c in held.get("controls") or [] if str(c.get("name") or "").strip() not in names]
+    if rows:
+        out["controls"] = rows
+    metrics = out.get("metrics")
+    if isinstance(metrics, list) and held.get("references"):
+        out["metrics"] = [({**m, "reference": held["references"][str(m.get("id"))]}
+                           if isinstance(m, dict) and "reference" not in m and str(m.get("id")) in held["references"] else m)
+                          for m in metrics]
+    return out
+
+
+def _left_out_between(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """The controls and metric references of ``before`` that ``after`` (the same protocol read by the design reader) lacks."""
+    kept = {str(c.get("name") or "").strip() for c in after.get("controls") or [] if isinstance(c, dict)}
+    rows = before.get("controls") if isinstance(before.get("controls"), list) else []
+    controls = [c for c in rows if isinstance(c, dict) and str(c.get("name") or "").strip() not in kept]
+    have = {str(m.get("id")) for m in after.get("metrics") or [] if isinstance(m, dict) and "reference" in m}
+    references = {str(m.get("id")): m["reference"] for m in before.get("metrics") or []
+                  if isinstance(m, dict) and "reference" in m and str(m.get("id")) not in have}
+    return {"controls": controls, "references": references}
+
+
+def _restored_between(held: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """The names (controls) and ids (references) of what was held aside that ``after`` has again."""
+    kept = {str(c.get("name") or "").strip() for c in after.get("controls") or [] if isinstance(c, dict)}
+    have = {str(m.get("id")) for m in after.get("metrics") or [] if isinstance(m, dict) and "reference" in m}
+    return ([n for n in (str(c.get("name") or "").strip() for c in held.get("controls") or []) if n in kept]
+            + [i for i in held.get("references") or {} if i in have])
+
+
 class PlanStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -2849,6 +2890,9 @@ class PlanStageMixin:
         self._clear_search_refused()
 
         left_out_parts: list[str] = []
+        held_aside = self._held_aside()
+        aside_now: dict[str, Any] = {"controls": [], "references": {}}
+        came_back: list[str] = []
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
@@ -2863,10 +2907,18 @@ class PlanStageMixin:
             # What the plan wrote beside the scan was judged against the plan's own grid, which is gone: an entry that names
             # a setting the search's scan does not have (a control, a metric's reference) is read as the design reader reads
             # it, left out alone and said in the plan, never the whole block refused for it.
+            # What an earlier merge had to leave out (a control on a setting the scan lacked then) comes back to be judged
+            # again, so a scan setting asked back of the plan's model brings back what names it.
+            now = _held_back_in(now, held_aside)
             repaired, notes = _plan.repair_protocol(now)
-            if repaired is not None and notes:
-                left_out_parts.extend(notes)
-                self._log.warning("[plan] with the search's scan in place of the plan's grid: %s", "; ".join(notes)[:600])
+            if repaired is not None:
+                aside_now.update(_left_out_between(now, repaired))
+                for name in _restored_between(held_aside, repaired):
+                    came_back.append(name)
+                fresh = [n for n in notes if n not in before_text]  # a note the plan already says is not said twice
+                if fresh:
+                    left_out_parts.extend(fresh)
+                    self._log.warning("[plan] with the search's scan in place of the plan's grid: %s", "; ".join(fresh)[:600])
                 now = repaired
             out = {**design, "protocol": now}
             out["study_type"] = "find_best_design"
@@ -2878,10 +2930,36 @@ class PlanStageMixin:
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
             raise _PlanBeyondTheBlock(f"the plan with your block in it cannot be read: {parsed.error}")
+        if came_back:  # said "left out" before, in the plan: it is in again, so the sentence goes
+            merged_text = NL.join(line for line in merged_text.split(NL) if not any(
+                line.lstrip().startswith(("- the control " + repr(n) + " was left out", f"- the reference value of `{n}` was left out"))
+                for n in came_back))
+        self._keep_aside(aside_now)
         if left_out or left_out_parts:
             merged_text = _plan.add_to_section(merged_text, _PART_HEADING,
                                                ["", *[f"- {n}" for n in [*left_out, *left_out_parts]]])
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
+
+    _HELD_ASIDE = "held_beside_the_scan.json"
+
+    def _held_aside(self) -> dict[str, Any]:
+        """The controls and metric references an earlier merge of a search block left out because the scan lacked a setting
+        they name (``.fi/held_beside_the_scan.json``): ``{"controls": [entries as written], "references": {id: reference}}``."""
+        try:
+            record = json.loads((self.fi_dir / self._HELD_ASIDE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        record = record if isinstance(record, dict) else {}
+        return {"controls": [c for c in record.get("controls") or [] if isinstance(c, dict)],
+                "references": {str(k): v for k, v in (record.get("references") or {}).items()}}
+
+    def _keep_aside(self, now: dict[str, Any]) -> None:
+        """Write what the merge just left out (the record is replaced: what came back is no longer held)."""
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / self._HELD_ASIDE).write_text(json.dumps(now, ensure_ascii=False, default=str), encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't keep the entries left out of the plan: %r", e)
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
         """``(requests, model, iteration)`` of the last time FI asked the design step's model to write a drafted design's
