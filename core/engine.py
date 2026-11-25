@@ -1866,7 +1866,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         if self._step().name != "compute":
             return None
         started = self._step_started()
-        after = Path(started["after"])
+        # The folder is the config's: the trace keeps paths with the home folder written as ~, so its copy is not one.
+        after = Path(self._step().after)
+        if _audit_log.redact_text(str(after)) != started.get("after"):
+            raise ValueError(f"the compute step was started after {started.get('after')}, not after {after}; "
+                             "nothing was run")
         opened = await self._open_readonly_graph(after / ".fi")
         values: dict[str, Any] = {}
         if opened is not None:

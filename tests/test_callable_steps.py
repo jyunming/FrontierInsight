@@ -155,6 +155,21 @@ async def test_the_compute_step_alone_starts_from_the_design_and_its_repairs_sta
 
 
 @pytest.mark.asyncio
+async def test_a_compute_step_after_a_design_folder_under_the_home_folder_finds_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    # The quest folders lie under the home folder (as on a Linux runner), which the trace writes as ~.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    design = await _design(tmp_path, monkeypatch)
+    eng = Engine(_config(tmp_path, design.config.commission, {"name": "compute", "after": design.quest_root}, "compute"))
+    await eng.run()
+    receipt = _receipt(eng.quest_root)
+    assert receipt["after"].startswith("~") and receipt["ended"] == "done"
+    assert receipt["previous_receipt_sha256"] == _sha(design.quest_root / rerun_from.RECEIPT)
+
+
+@pytest.mark.asyncio
 async def test_a_compute_step_stopped_part_way_goes_on_from_where_it_stopped(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core.engine import Engine
