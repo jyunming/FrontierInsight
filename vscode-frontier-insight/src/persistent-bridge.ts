@@ -16,8 +16,8 @@
  *   Windows → ``\\\\.\\pipe\\fi-bridge-{USERNAME}`` (per-user)
  *
  * Scope is deliberately narrow: it handles ``lm_request`` only.
- * The dashboard has its own clarify panel, log stream, and progress
- * UI, so ``clarify_request`` from a --serve quest never flows
+ * The dashboard has its own log stream and progress
+ * UI, so a review request from a --serve quest never flows
  * through this bridge.
  */
 import * as vscode from "vscode";

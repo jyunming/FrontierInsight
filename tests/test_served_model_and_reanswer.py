@@ -239,7 +239,7 @@ def test_the_cli_s_short_name_and_its_full_id_are_not_called_two_models(tmp_path
     for model, served, warned in (("haiku", HAIKU, False), ("opus[1m]", "claude-opus-4-7", False), ("haiku", FABLE, True)):
         cfg = Config(
             topic="t", title="t", provider=ProviderConfig(name="claude_cli", model=model),
-            engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+            engine=EngineConfig(max_iterations=1, review_loop=False),
             execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
             output=OutputConfig(output_dir=tmp_path / model.replace("[", "_").replace("]", "_") / served),
         )
@@ -314,7 +314,7 @@ RAMBLING = "Let me think about this design carefully. " * 1600
 def _engine(tmp_path: Path, replies: list[str], *, research: bool = False) -> tuple[Engine, AsyncMock]:
     cfg = Config(
         topic="integrators", title="integrators", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )

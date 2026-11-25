@@ -62,7 +62,7 @@ def _engine(tmp_path: Path, *, replicates: int) -> Engine:
         topic="replication", title="rep",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
+            max_iterations=1, review_loop=False,
             execute_replicates=replicates, pilot_run=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),

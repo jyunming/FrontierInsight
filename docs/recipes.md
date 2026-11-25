@@ -157,25 +157,24 @@ Run it: `python launch.py --config my_quest.yaml`
 
 A quest runs on its own and only stops when it genuinely needs you. Every stop is one of just **two kinds of interaction**:
 
-- **ANSWER** — the quest asks you something (the setup questions; accept / reject / refine at the end).
+- **ANSWER** — the quest asks you something (accept / reject / refine at the end).
 - **SUPPLY** — the quest needs files (a dataset, or a paper to read).
 
-There are five places it can stop, all configured in one place — the `pauses:` section of your YAML:
+There are four places it can stop, all configured in one place — the `pauses:` section of your YAML:
 
 ```
    you set up ──▶ the quest runs on its own, stopping only when it needs you:
 
-   clarify ─ literature ─ design ─ (build·run │ gather data) ─ analyse ─ write ─ review
-      ▲          ▲           ▲            ▲                                        ▲
-   ANSWER      SUPPLY      SUPPLY       SUPPLY                                  ANSWER
-   setup       paywalled   any papers   a dataset                             accept /
-   questions   papers it   or data                                            reject /
-               listed                                                         refine
+   literature ─ design ─ (build·run │ the data you gave) ─ analyse ─ write ─ review
+       ▲           ▲                ▲                                        ▲
+     SUPPLY      SUPPLY           SUPPLY                                  ANSWER
+     papers      any papers       a dataset                             accept /
+     it needs    or data                                                reject /
+                                                                        refine
 ```
 
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
-| **clarify** (start) | ANSWER | answer the setup questions (what you want to see, the title, the baseline, ...) | on by default when someone can answer (the terminal with `--interactive`, the web quest page, VS Code for a quest on the VS Code chat model); `pauses.clarify: ask` always stops, `auto` lets the agent answer, `off` skips ([USAGE.md](USAGE.md#setup-questions)) |
 | **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
 | **the plan** | SUPPLY | read `plan.md` (what the literature says, the gap, the design), edit it or ask for a change (`--revise-plan`); the design block in it is what runs | `pauses.plan: ask` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` \| `all` |
@@ -189,14 +188,13 @@ There are five places it can stop, all configured in one place — the `pauses:`
 3. You **resume**: `fi --resume <quest-id>` on the CLI, or click **Resume** in the Web GUI / VSCode, where an *Action needed* banner shows the same thing.
 
 ```yaml
-# A quest that involves you at both ends and lets you feed it papers mid-run:
+# A quest that lets you feed it papers mid-run and asks you at the end:
 pauses:
-  clarify: ask            # answer setup questions before it starts
   supply: before_build    # one drop-in point for your own papers/data
   review: ask             # accept / reject / refine before the paper is final
 ```
 
-> Legacy flag names (`engine.clarify_mode`, `engine.human_feedback_gate`, `engine.pause_for_user_input`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
+> Legacy flag names (`engine.human_feedback_gate`, `engine.pause_for_user_input`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
 
 The sections below cover each pause in more detail.
 
@@ -475,31 +473,11 @@ Beyond charting numbers, `knowledge.fetch_web_figures` (off by default) embeds a
 python launch.py --serve --output-root ./outputs
 ```
 
-Then open <http://127.0.0.1:8765/>. You'll see every quest, live log, paper preview, and figure browser. If a quest is paused waiting for clarifying questions, a panel appears for you to answer.
-
-### Let the agent ask you 5 clarifying questions before it runs
-
-Add to your YAML:
-```yaml
-pauses:
-  clarify: ask
-```
-
-Run with `--interactive`:
-```bash
-python launch.py --config my_quest.yaml --interactive
-```
-
-The agent asks its setup questions one at a time (the banner says "5 questions", but there are usually more: one per open slot); press Enter to accept each suggested default, or type your own answer.
+Then open <http://127.0.0.1:8765/>. You'll see every quest, live log, paper preview, and figure browser. If a quest is paused for your review, a panel appears for you to answer.
 
 ### Topics that need real data, not a Python script
 
-Some research questions can't honestly be answered by a self-contained Python experiment — cultural comparisons, historical analyses, qualitative cross-case studies, policy reviews. For those, set:
-
-```yaml
-engine:
-  no_simulation: true
-```
+Some research questions can't honestly be answered by a self-contained Python experiment — cultural comparisons, historical analyses, qualitative cross-case studies, policy reviews. For those, put `method: analyze_data` in the commission file (a config that sets `engine.no_simulation: true` without it is refused).
 
 The engine skips `implement → execute` entirely and waits for your data: drop your own files into `outputs/<id>/data/` and run `python launch.py --config <yaml> --resume <quest_id>`. The `web_plots` step then turns any quantitative data into source-attributed figures, and the quest continues through `analyze → cross_check → write → review`.
 
@@ -508,10 +486,6 @@ To carry on from a pause:
 ```bash
 python launch.py --config <yaml> --resume <quest_id>
 ```
-
-The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `pauses.clarify` is `auto` or `ask` (or left unset) — setting `no_simulation: true` in YAML is just the explicit override.
-
-The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred).
 
 ### Make the PDF compile a hard gate
 
@@ -569,7 +543,6 @@ provider:
   name: vscode_extension
   model: gpt-5                                 # global default
   node_models:
-    clarify:     gpt-4o-mini
     cross_check: gpt-4o-mini
     write:       claude-3-5-sonnet
     review:      gpt-5

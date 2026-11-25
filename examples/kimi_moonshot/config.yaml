@@ -26,7 +26,6 @@ provider:
 engine:
   max_iterations: 1
   review_loop: false
-  clarify_mode: "off"
   review_panel: []
 execution:
   sandbox: venv

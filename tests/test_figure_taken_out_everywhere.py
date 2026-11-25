@@ -24,7 +24,7 @@ DRAFT = ("# T\n\n## Results\n\nFigure 1 shows a.\n\nFigure 2 shows b.\n\nFigure 
 def _engine(tmp_path: Path) -> Engine:
     cfg = Config(
         topic="a test topic", title="figure-taken-out", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"))
     eng = Engine(cfg)

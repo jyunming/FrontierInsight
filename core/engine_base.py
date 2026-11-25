@@ -38,11 +38,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict, get_args
 
-# User-supplied async function that collects answers to clarify-node
-# questions. Receives the ``clarify_questions`` dict and must return
-# the answers dict (same keys, resolved values).
-ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-
 # Human-feedback gate callback. Receives the review snapshot dict
 # (verdict / score / strengths / weaknesses / suggestions / paper_md_path)
 # and returns ``{"action": <accept|reject|refine>, "feedback": "..."}``.
@@ -178,6 +173,7 @@ from . import stop_power as _stop_power
 from . import stats as _stats
 from .config import (
     DEFAULT_PAPER_FORMAT,
+    paper_format_with_old_venue,
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
     SCIENTIFIC_PAPER_FORMATS,
@@ -341,11 +337,8 @@ class QuestState(TypedDict, total=False):
     # Range assertions contributed by the selected skills, merged with the
     # design's own by ``_assertion_violations``.
     _skill_assertions: list[dict[str, Any]]
-    # Clarify-node state. Both dicts share the same 5 keys
-    # (`comparative_baseline`, `empirical_vs_theoretical`,
-    # `success_metric`, `budget`, `output_kinds`); `clarify_questions`
-    # carries `{question, default}` per slot, `clarify_answers` carries
-    # the resolved values (default or user-overridden).
+    # Kept so a checkpoint of an earlier FI still reads: the setup questions FI put to the person then and their
+    # answers (read by ``.get()``, empty since FI asks none). ``clarify_done`` is the first node's own mark.
     clarify_questions: dict[str, Any]
     clarify_answers: dict[str, Any]
     clarify_done: bool
@@ -629,19 +622,17 @@ class QuestState(TypedDict, total=False):
     # Python; instead it pauses after `design`, asks the user to drop
     # real-world data into `<quest_root>/data/`, then resumes with
     # `data_load` synthesizing the result_json from those files.
-    # Resolved at the clarify node: True if `engine.no_simulation: true`
-    # in YAML OR the clarify answer for `empirical_vs_theoretical` is
-    # "empirical". See `_resolve_no_simulation_from_clarify`.
+    # Set by the first node (`clarify`) from the commission's `method`
+    # (`analyze_data` or `review_literature`).
     no_simulation_resolved: bool
     # survey mode — a descriptive literature / history synthesis with NO
     # experiment AND NO dataset. A stronger form of no_simulation: the
     # engine skips the experiment (implement/execute) AND the data path
     # (wait_for_data/data_load/web_plots), routing
     # design → web_figures → analyze so the paper synthesises the
-    # literature directly. Resolved at clarify: True if `engine.survey_mode:
-    # true` in YAML OR the clarify agent classified `topic_shape == 'survey'`
-    # (a history/overview/"evolution of X" topic). Survey implies
-    # no_simulation_resolved. See `_resolve_survey_from_clarify`.
+    # literature directly. Set by the first node (`clarify`) from the
+    # commission's `method: review_literature`. Survey implies
+    # no_simulation_resolved.
     survey_mode_resolved: bool
     # Populated by the wait_for_data node's interrupt-resume payload.
     # List of absolute paths the user dropped into `<quest_root>/data/`.
@@ -880,7 +871,6 @@ def _design_parts_listing(design: Any) -> str:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify",
         "design", "design_self_critique",   # second-pass methodology audit
         "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over
@@ -3578,12 +3568,11 @@ _CLARIFY_LABELS = {
 
 
 def _format_clarify(state: QuestState) -> str:
-    """Render the resolved clarify-answer slots as a small bulleted block
-    for downstream prompts. Returns an empty-marker string when clarify
-    was skipped (mode=off) so the prompt still parses cleanly."""
+    """Render the setup answers of an earlier FI's checkpoint as a small bulleted block for downstream prompts. FI asks
+    none now, so this is the empty marker on every new study (the prompt still parses cleanly)."""
     answers = state.get("clarify_answers") or {}
     if not answers:
-        return "(none — clarify mode is off)"
+        return "(none — no setup questions were asked)"
     lines: list[str] = []
     for key, label in _CLARIFY_LABELS.items():
         if key not in answers:
@@ -3595,101 +3584,6 @@ def _format_clarify(state: QuestState) -> str:
             value = ", ".join(str(v) for v in value) or "(empty)"
         lines.append(f"- **{label}**: {value}")
     return "\n".join(lines) or "(no answers recorded)"
-
-
-def _clean_title(value: Any) -> str:
-    """A title the user or agent gave, tidied: one line, no wrapping quotes, at most 120 characters."""
-    if not isinstance(value, str):
-        return ""
-    text = " ".join(value.split()).strip("\"'`“”‘’ ")
-    if text.startswith("<") and text.endswith(">"):
-        return ""
-    return text[:120].rstrip()
-
-
-def _simulatability_answer(sim: Any) -> tuple[str, str]:
-    """``(decision, reason)`` of a ``simulatability`` answer in any of its shapes: a slot dict ``{default, reason}``,
-    a bare string, or a bool (PyYAML reads an unquoted ``yes`` / ``no`` as ``True`` / ``False``, the commonest way
-    the slot is written in a YAML; ``True`` means "yes"). The decision is lower-cased and stripped, not yet parsed."""
-    reason = ""
-    if isinstance(sim, dict):
-        reason = str(sim.get("reason", "") or "").strip()
-        sim = sim.get("default", "")
-    if isinstance(sim, bool):
-        return ("yes" if sim else "no"), reason
-    if sim is None:
-        return "", reason
-    return str(sim).strip().lower(), reason
-
-
-_SIMULATABILITY_LEAD = re.compile(
-    # "No idea", "no clue", "no preference" are not a "no".
-    r"^\W*(yes|uncertain|no(?!\s+(?:idea|clue|opinion|preference|comment|answer|way\s+to\s+tell)\b))\b",
-    re.IGNORECASE,
-)
-
-
-def _leading_simulatability_word(text: str) -> str:
-    """``yes`` / ``no`` / ``uncertain`` when ``text`` starts with that word ("Yes, but more than 100 lines" is "yes";
-    "not sure" and "no idea" are none of them), else ``""``."""
-    m = _SIMULATABILITY_LEAD.match(str(text or ""))
-    return m.group(1).lower() if m else ""
-
-
-def _spell_out_title_options(questions: dict[str, Any]) -> None:
-    """Put the suggested titles into the title question's own words, so every interface (terminal, web, VS Code)
-    shows them without knowing about a separate options field; the first suggestion is the default."""
-    slot = questions.get("title")
-    if not isinstance(slot, dict):
-        return
-    options = [t for t in (_clean_title(o) for o in (slot.pop("options", None) or [])) if t][:5]
-    if options and not _clean_title(slot.get("default")):
-        slot["default"] = options[0]
-    slot["suggestions"] = options
-    if options:
-        slot["question"] = (
-            f"{slot.get('question') or 'What should this study be called?'} "
-            f"Suggestions: {' | '.join(options)} (or type your own)")
-
-
-def _default_clarify_questions(topic: str) -> dict[str, Any]:
-    """Minimal fallback when the LLM produces unparseable JSON. Keeps
-    the same 5-slot shape so downstream code doesn't branch."""
-    topic_hint = topic[:80].replace("\n", " ")
-    return {
-        "comparative_baseline": {
-            "question": f"What existing method or dataset should this study be compared against, for: {topic_hint}?",
-            "default": "(none specified — agent will pick a sensible baseline)",
-        },
-        "empirical_vs_theoretical": {
-            "question": "Does this study run code and measure something, or derive results analytically?",
-            "default": "empirical",
-        },
-        "success_metric": {
-            "question": "What number changing in what direction would count as the headline result?",
-            "default": "(none specified — agent will pick a metric)",
-        },
-        "budget": {
-            "question": "Soft cap on experiment wall-clock?",
-            "default": "a few minutes on a laptop CPU",
-        },
-        "output_kinds": {
-            "question": "Which deliverables matter for this study?",
-            "default": ["paper_md"],
-        },
-        "study_depth": {
-            "question": "How deep should this study go? (brief preprint / journal-length / comprehensive review)",
-            "default": "journal-length",
-        },
-        "paper_venue": {
-            "question": "Which paper template should we use? (article / generic / neurips / iclr / ieee_access / nature_mi)",
-            "default": DEFAULT_PAPER_FORMAT,
-        },
-        "topic_shape": {
-            "question": "What's the intellectual shape of this topic? (experimental / survey / review / case_study / opinion)",
-            "default": "experimental",
-        },
-    }
 
 
 def _format_reflect_history(history: list[dict[str, Any]]) -> str:
@@ -9112,10 +9006,9 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
     variables = design.get("variables", {})
     return (
         f"# Drop your data here\n\n"
-        f"This quest is running in **no-simulation mode** "
-        f"(`engine.no_simulation: true` OR clarify answered "
-        f"`empirical_vs_theoretical: empirical`). The engine has\n"
-        f"finished the planning half (clarify → literature → "
+        f"This study analyses data you give it "
+        f"(its commission says `method: analyze_data`). FI has\n"
+        f"finished the planning half (the sources and the "
         f"design) and is paused waiting for you to supply real-world "
         f"data.\n\n"
         f"## What to drop into this folder\n\n"
@@ -9154,15 +9047,6 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
         f"through `analyze → cross_check → write → review` exactly like "
         f"a simulation-driven quest would.\n"
     )
-
-
-def _json_file_is_answer(path: Path) -> bool:
-    """Whether ``path`` holds a non-empty JSON object (a staged answer that can be used)."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and bool(data)
 
 
 def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:

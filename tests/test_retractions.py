@@ -312,7 +312,7 @@ def test_the_claim_check_does_not_accept_a_retracted_source(tmp_path: Path) -> N
 def _lit_engine(tmp_path: Path) -> Engine:
     eng = Engine(Config(
         topic="vaccines and autism", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, web_search=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

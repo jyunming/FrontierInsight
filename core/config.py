@@ -70,9 +70,19 @@ SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
+
+
+def paper_format_with_old_venue(configured: str, clarify_answers: Any) -> str:
+    """The paper format a quest writes, renders and page-checks in. A format written in the config (any but the default
+    one) wins; otherwise the ``paper_venue`` that a study an earlier FI began was asked at its start (normalised: trimmed,
+    lower case, a known format only); otherwise the configured one. A new study carries no venue (nothing asks it).
+    The one rule the write persona, the page check and the final render all use."""
+    if configured != DEFAULT_PAPER_FORMAT:
+        return configured
+    venue = str(clarify_answers.get("paper_venue") or "").strip().lower() if isinstance(clarify_answers, dict) else ""
+    return venue if venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS else configured
 # The paper template a quest gets when nobody chose one: FI's plain one-column
-# article. A config left at this value also means "no template chosen yet", so
-# the clarify step's ``paper_venue`` pick may replace it.
+# article.
 DEFAULT_PAPER_FORMAT: PaperFormat = "article"
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 # How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template
@@ -267,7 +277,7 @@ class ProviderConfig(BaseModel):
     # (``implement``, ``execute_reflect``) routinely outrun the 300 s
     # default on complex topics under Sonnet 4.6 extended thinking;
     # bumping them here avoids tenacity retries that all hit the same
-    # wall. Cheap nodes (``clarify``, ``literature_query``) keep the default —
+    # wall. Cheap nodes (``literature_query``) keep the default —
     # tightening their budget catches real hangs faster.
     #
     # Maps engine-node name → seconds. Lookup misses fall back to
@@ -354,8 +364,7 @@ class ProviderConfig(BaseModel):
     #   - HTTP direct (openai/codex/gemini/ollama/vllm):
     #     same — overrides the request body's `model`.
     #
-    # Useful for picking a cheap model for low-value nodes (clarify,
-    # cross_check) and a strong one for the demanding ones (write,
+    # Useful for picking a cheap model for low-value nodes (cross_check) and a strong one for the demanding ones (write,
     # review). On `copilot_cli` and its proxy siblings, all three
     # models share one OAuth and one premium-request budget.
     #
@@ -594,7 +603,6 @@ class NodeEnsembleConfig(BaseModel):
     moderator: str | None = None
 
 
-ClarifyMode = Literal["off", "auto", "interactive"]
 HumanFeedbackGate = Literal["off", "after_review"]
 # Pause-drop-anytime points. The engine pauses with an interrupt at the
 # selected stage(s); the user drops files into ``<quest_root>/inputs/papers/``
@@ -611,19 +619,16 @@ PauseForUserInput = Literal[
 # Every place the quest can stop and wait for a human is one of two
 # interactions — ANSWER (the quest asks; you reply) or SUPPLY (the quest
 # needs files; you drop them in) — and all of them are configured under one
-# coherent ``pauses:`` section. The legacy flags (engine.clarify_mode,
-# engine.human_feedback_gate, engine.pause_for_user_input,
+# coherent ``pauses:`` section. The legacy flags (engine.human_feedback_gate, engine.pause_for_user_input,
 # engine.auto_accept_on_pass, engine.human_feedback_timeout_s,
 # knowledge.pause_for_user_papers) still parse and are merged into ``pauses``
 # by Config's root validator, so existing YAML keeps working.
-ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
 # Legacy value → canonical value, applied field-by-field in PausesConfig.
-_CLARIFY_ALIASES = {"interactive": "ask"}
 _REVIEW_ALIASES = {"after_review": "ask"}
 _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review"}
 
@@ -639,10 +644,11 @@ _RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check", "
                            "knowledge.relevance_min_keep", "knowledge.requery_on_low_relevance", "knowledge.requery_max",
                            "knowledge.literature_screen", "knowledge.foundational_works",
                            # FI no longer searches by topic, so it has no list of paywalled papers to stop for.
-                           "pauses.papers", "knowledge.pause_for_user_papers"})
+                           "pauses.papers", "knowledge.pause_for_user_papers",
+                           # The setup questions are gone: the commission says the question, the scope and the ``method``.
+                           "pauses.clarify", "engine.clarify_mode", "engine.clarify_overrides"})
 
 _LEGACY_PAUSE_FLAGS = (
-    ("engine", "clarify_mode", "clarify"),
     ("engine", "human_feedback_gate", "review"),
     ("engine", "pause_for_user_input", "supply"),
     ("engine", "auto_accept_on_pass", "auto_accept_on_pass"),
@@ -655,12 +661,6 @@ class PausesConfig(BaseModel):
     """When (and how) the quest stops to involve a human. See the README
     section *When the quest needs you* for the full model."""
 
-    # ANSWER — pre-flight clarifying questions before the research starts.
-    #   "off"  skip · "auto" agent self-answers · "ask" pause for the human.
-    # Left unset, the quest talks the topic over with you first when someone can answer (the terminal
-    # ``--interactive``, the web page, VS Code) and lets the agent answer for itself when nobody can (a
-    # headless run or a fleet). Set it to ``off`` to skip the discussion.
-    clarify: ClarifyPause | None = None
     # Retired: FI no longer searches the literature by topic, so it has no paywalled papers to stop for. Kept so
     # an older config still loads (it logs that the line no longer does anything).
     papers: bool = True
@@ -688,16 +688,6 @@ class PausesConfig(BaseModel):
     # wait forever.
     timeout_s: float = Field(default=1800.0, ge=0)
 
-    @field_validator("clarify", mode="before")
-    @classmethod
-    def _norm_clarify(cls, v: Any) -> Any:
-        # YAML 1.1 "Norway problem": an unquoted `off` parses as the boolean
-        # False before we see it — coerce it back so hand-edited `pauses:`
-        # blocks don't need to remember the quotes.
-        if v is False:
-            return "off"
-        return _CLARIFY_ALIASES.get(v, v)
-
     @field_validator("review", mode="before")
     @classmethod
     def _norm_review(cls, v: Any) -> Any:
@@ -713,7 +703,7 @@ class PausesConfig(BaseModel):
     @field_validator("plan", mode="before")
     @classmethod
     def _norm_plan(cls, v: Any) -> Any:
-        # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
+        # The unquoted-`off` Norway problem again, as for ``review``.
         return "off" if v is False else v
 
 
@@ -779,18 +769,6 @@ class EngineConfig(BaseModel):
     # CLI ``--interactive`` gate, whose blocking ``input()`` implies a human
     # is present.
     human_feedback_timeout_s: float = Field(default=1800.0, ge=0)
-    # Pre-flight clarification (`clarify` node before `literature`).
-    #
-    #   "off"         — skip the node entirely. Default for tests and fleet.
-    #   "auto"        — agent generates the questionnaire AND auto-answers
-    #                   it from the topic alone (no human loop). Useful
-    #                   when you want stronger framing than the bare topic
-    #                   gives, without an interactive pause.
-    #   "interactive" — agent generates the questionnaire; the engine
-    #                   raises a LangGraph `interrupt()` so a CLI prompt
-    #                   (`launch.py --interactive`) or the web UI's
-    #                   clarify panel can collect answers from the user.
-    clarify_mode: ClarifyMode = "off"
     # Execute-repair loop (`execute_reflect` node between
     # `execute` and `analyze`). When the experiment script returns
     # rc!=0 or no RESULT_JSON, the reflect node generates a patched
@@ -1010,7 +988,9 @@ class EngineConfig(BaseModel):
     review_panel: list[str] = Field(default_factory=list)
     # When True, the engine treats the topic as one that needs
     # real-world data the user will collect themselves — not one the
-    # LLM should simulate via a Python experiment. The flow becomes:
+    # LLM should simulate via a Python experiment. A commissioned study says it with the commission's
+    # ``method: analyze_data`` (which sets this); a config that sets it without that is refused (core/commission.py).
+    # The flow becomes:
     # clarify → literature → design → wait_for_data, at which
     # point the engine writes ``<quest_root>/data/README.md``
     # explaining what to drop into the dir and exits cleanly (rc=0).
@@ -1020,10 +1000,6 @@ class EngineConfig(BaseModel):
     # ``core/summarizer.py`` patterns), synthesizes a result_json,
     # and hands off to analyze → cross_check → write → review.
     #
-    # When unset (default False), the clarify node may STILL set the
-    # in-state ``no_simulation_resolved`` flag from its
-    # ``empirical_vs_theoretical`` answer — auto-detection from
-    # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
     # Survey mode — a descriptive literature / history synthesis with NO
     # experiment AND NO dataset (e.g. "the evolution/history of X", an
@@ -1032,11 +1008,8 @@ class EngineConfig(BaseModel):
     # data path (wait_for_data/data_load/
     # web_plots), routing ``design → web_figures → analyze`` so the paper
     # synthesises the cited literature directly (illustrative license-clean
-    # images are still embedded). Setting this implies ``no_simulation``.
-    # When unset (default False), the clarify node may STILL turn it on when
-    # the clarify agent classifies ``topic_shape == 'survey'`` — auto-detection
-    # from clarify is the second entry point. YAML flag wins when set.
-    # See ``Engine._resolve_survey_from_clarify``.
+    # images are still embedded). Setting this implies ``no_simulation``. A commissioned study says it with the
+    # commission's ``method: review_literature`` (which sets this).
     survey_mode: bool = False
     # Local-data-first mode for the ``--analyze`` workflow: the user has
     # already supplied the data, so the retrieval nodes (literature,
@@ -1104,20 +1077,6 @@ class EngineConfig(BaseModel):
     # stuck codex_cli call once wedged a run for hours when the
     # provider-level timeout didn't fire).
     web_plots_timeout_s: float = Field(default=360.0, gt=0)
-    # User-pinned answers to the clarify slots, hand-written into the
-    # YAML (the setup interview of earlier FI versions wrote them). When
-    # present, the clarify node merges these into ``clarify_answers``
-    # AFTER it computes its own auto-answers, so user pins always win.
-    # When every clarify slot is pinned AND ``clarify_mode == "auto"``,
-    # the clarify LLM call is skipped entirely (cost saving). When the
-    # mode is ``interactive`` the LLM still fires so the human can
-    # see the agent's questions, but pinned slots come pre-answered.
-    # Keys are the clarify slot names — ``comparative_baseline`` /
-    # ``empirical_vs_theoretical`` / ``simulatability`` /
-    # ``success_metric`` / ``budget`` / ``output_kinds`` /
-    # ``study_depth`` / ``paper_venue``. Values are whatever shape the
-    # downstream prompts expect (strings, lists for output_kinds).
-    clarify_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionConfig(BaseModel):
@@ -1677,7 +1636,7 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
 
 # What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
-    "pauses": {"clarify": "off", "papers": False},
+    "pauses": {"papers": False},
     "engine": {"enable_analyze_reroute": False},
 }
 
@@ -1713,6 +1672,9 @@ def _set_in(block: Any, key: str) -> Any:
 
 class Config(BaseModel):
     _commission_note: str = PrivateAttr(default="")  # the settings a commission overrode (_apply_commission)
+    # What the config's own ``engine`` section said about the two modes, before the commission's ``method`` set them
+    # (empty when it has no commission); ``commission.door`` refuses a mode the commission does not give.
+    _modes_asked: dict[str, bool] = PrivateAttr(default_factory=dict)
     topic: str
     title: str | None = None
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -1850,9 +1812,10 @@ class Config(BaseModel):
     @model_validator(mode="wrap")
     @classmethod
     def _apply_commission(cls, data: Any, handler: Any) -> Any:
-        """A commission's question as the topic, ``_COMMISSION_DEFAULTS`` whatever the config says (a setting it
-        overrides is named in ``_commission_note``, which the log and the quest's run.log carry), and its hours as the
-        cap of the execution time limit."""
+        """A commission's question as the topic, its ``title`` as the title (a ``title`` in the config wins), its ``method``
+        as the two run modes (``engine.no_simulation`` / ``engine.survey_mode``), ``_COMMISSION_DEFAULTS`` whatever the
+        config says (a setting it overrides is named in ``_commission_note``, which the log and the quest's run.log
+        carry), and its hours as the cap of the execution time limit."""
         if not isinstance(data, dict) or not data.get("commission"):
             return handler(data)
         from core import commission as _commission
@@ -1861,6 +1824,8 @@ class Config(BaseModel):
         found = _commission.read(data["commission"])  # its keys are checked at the door (core/commission.py)
         if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
             data["topic"] = found["question"].strip()
+        if not str(data.get("title") or "").strip() and isinstance(found.get("title"), str) and found["title"].strip():
+            data["title"] = found["title"].strip()
         hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
         cap = max(1, int(float(hours) * 3600)) if _commission.hours_ok(hours) else None
         given = _set_in(data.get("execution"), "timeout_s")
@@ -1868,12 +1833,17 @@ class Config(BaseModel):
         # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
         ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
                    and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
+        engine_given = {k: _set_in(data.get("engine"), k) is True for k in ("no_simulation", "survey_mode", "analyze_local_first")}
+        modes = _commission.modes(found)  # None: no ``method``, so the config's own two keys stand (``door`` refuses them)
+        if modes is not None:
+            forced["engine"].update(no_simulation=modes[0], survey_mode=modes[1])
         for section, values in forced.items():
             block = data.get(section)
             ignored += [f"{section}.{k}" for k, v in values.items() if _set_in(block, k) not in (None, v)]
             data[section] = (block.model_copy(update=values) if isinstance(block, BaseModel)
                              else {**dict(block or {}), **values})
         config = handler(data)
+        config._modes_asked = engine_given
         # The cap on the value as validated, so every form the field accepts ("7200", 7200.0) is capped.
         if cap is not None and (given is None or config.execution.timeout_s > cap):
             ignored += ["execution.timeout_s"] if given is not None else []
@@ -1883,6 +1853,13 @@ class Config(BaseModel):
                                        f"so these settings of the config are not used: {', '.join(ignored)}.")
             logging.getLogger("frontier_insight.config").warning("%s", config._commission_note)
         return config
+
+    def modes_asked(self) -> dict[str, bool]:
+        """The config's own ``engine.no_simulation`` / ``engine.survey_mode`` as it was written, for ``commission.door``:
+        what the YAML said (a commission's ``method`` may have replaced it since), else what the engine section holds."""
+        return dict(self._modes_asked) or {"no_simulation": self.engine.no_simulation,
+                                          "survey_mode": self.engine.survey_mode,
+                                          "analyze_local_first": self.engine.analyze_local_first}
 
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:
@@ -1894,7 +1871,7 @@ class Config(BaseModel):
         user believes they enabled. This checks the top level and the six known
         sub-sections one level deep. It deliberately does NOT recurse into
         free-form dict fields (``node_models``, ``node_cli_timeout_s``,
-        ``node_http_timeout_s``, ``node_ensemble``, ``clarify_overrides``,
+        ``node_http_timeout_s``, ``node_ensemble``,
         ``extra``, …) whose keys are arbitrary."""
         unknown: list[str] = []
         for k in data:

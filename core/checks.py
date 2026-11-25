@@ -303,10 +303,6 @@ CHECKS: tuple[Check, ...] = (
           'execute', 'model_code', 'note',
           "FI's reading finds no use of a grid setting: one line in plan.md and run.log; every setting is kept "
           'and run.'),
-    Check('clarify_topic_shape_mismatch', 'core.engine', 'Engine._log_topic_shape_mismatch',
-          'clarify', 'model_judge', 'note',
-          'Clarify says the topic is a review/case study/opinion but the engine resolved to run an experiment; '
-          'only a run.log warning, design and write keep the experiment minimal.'),
     Check('topic_items_name_match', 'core.topic_requirements', 'match',
           'plan', 'model_text', 'note',
           "Looks for each factor, quantity, formula and search the topic text asks for among the plan's grid, "

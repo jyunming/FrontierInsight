@@ -124,7 +124,6 @@ async def test_run_one_records_the_quest_in_the_index_with_its_folder_and_title(
         return art
 
     monkeypatch.setattr(launch, "_maybe_profiled", fake_maybe)
-    monkeypatch.setattr(launch, "_pick_clarify_callback", lambda *a, **kw: None)
     monkeypatch.setattr(launch, "_run_generators", AsyncMock(return_value={}))
     await launch.run_one(cfg, supervisor=MagicMock(), source_yaml_path=src)
     entry = quest_index.load()[engine.quest_id]

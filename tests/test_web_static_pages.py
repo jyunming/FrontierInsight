@@ -1283,7 +1283,7 @@ def test_paused_quest_is_needs_you_not_complete(tmp_path: Path) -> None:
 
 
 def test_quest_pending_signals(tmp_path: Path) -> None:
-    """_quest_pending recognises the unified pause markers + the clarify
+    """_quest_pending recognises the unified pause markers + the review
     snapshot, and reports None when nothing is pending."""
     from web.server import _quest_pending
     import json as _json
@@ -1298,46 +1298,14 @@ def test_quest_pending_signals(tmp_path: Path) -> None:
     (q / "NEXT_STEP.md").write_text("# Action needed", encoding="utf-8")
     assert _quest_pending(q) == "paused"
     (q / "NEXT_STEP.md").unlink()
-    # clarify questions without an answer → clarify.
-    (q / ".fi" / "clarify_questions.json").write_text("{}", encoding="utf-8")
-    assert _quest_pending(q) == "clarify"
-    (q / ".fi" / "clarify_answer.json").write_text("{}", encoding="utf-8")
+    # a review snapshot without an answer → review.
+    (q / ".fi" / "human_review.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) == "review"
+    (q / ".fi" / "human_review_answer.json").write_text("{}", encoding="utf-8")
     assert _quest_pending(q) is None
-
-
-def test_clarify_disk_fallback_endpoints(tmp_path: Path) -> None:
-    """A subprocess clarify pause has no in-process future, so the web reads the
-    questions from .fi/clarify_questions.json and writes the answers to
-    .fi/clarify_answer.json for the next --resume to consume."""
-    import json as _json
-    output_root = tmp_path / "outputs"
-    output_root.mkdir()
-    qid = "1782000002-test-quest-clarify"
-    fi = output_root / qid / ".fi"
-    fi.mkdir(parents=True)
-    client = TestClient(make_app(output_root))
-
-    # No questions on disk → not pending.
-    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
-
-    (fi / "clarify_questions.json").write_text(
-        _json.dumps({"success_metric": {"prompt": "How to measure success?",
-                                        "default": "accuracy"}}),
-        encoding="utf-8",
-    )
-    r = client.get(f"/api/quests/{qid}/clarify").json()
-    assert r["pending"] is True and r["source"] == "disk"
-    assert "success_metric" in r["questions"]
-    # get_quest also reports the pause from disk.
-    assert client.get(f"/api/quests/{qid}").json()["pending_clarify"] is True
-
-    # Submitting writes the answer file (no in-process future for a subprocess).
-    p = client.post(f"/api/quests/{qid}/clarify",
-                    json={"answers": {"success_metric": "F1"}})
-    assert p.status_code == 200 and p.json()["in_process_resolved"] is False
-    assert _json.loads((fi / "clarify_answer.json").read_text())["success_metric"] == "F1"
-    # With the answer staged, the gate is no longer pending.
-    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
+    # setup questions left by an earlier FI are no pause now.
+    (q / ".fi" / "clarify_questions.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) is None
 
 
 def test_generalized_upload_targets(tmp_path: Path) -> None:

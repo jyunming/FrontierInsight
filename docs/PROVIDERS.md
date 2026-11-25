@@ -181,7 +181,6 @@ provider:
   name: vscode_extension
   model: gpt-5                  # global default
   node_models:
-    clarify:        gpt-4o-mini
     cross_check:    gpt-4o-mini
     write:          claude-3-5-sonnet
     review:         gpt-5
@@ -555,7 +554,7 @@ with `knowledge.source_routing: manual` and slides and a poster:
 
 | Quest shape | Requests |
 |---|---|
-| Engine settings of the measured runs (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
+| Engine settings of the measured runs (single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
 | Slides, poster, talk script | +1 each |
 | Design through review running a second time | 27–33 in four runs of the same quest on older engine versions, not counting slides and poster |
 | `knowledge.source_routing: auto` (the default) | +1 per cross-check lookup |

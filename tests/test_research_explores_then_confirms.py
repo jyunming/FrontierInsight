@@ -297,7 +297,7 @@ def test_a_quest_that_runs_an_experiment_is_not_marked(tmp_path: Path) -> None:
     import asyncio
 
     async def clarify(state):  # noqa: ANN001
-        return {**engine._resolve_modes({}), "clarify_answers": {}}
+        return {"no_simulation_resolved": False, "survey_mode_resolved": False, "clarify_done": True}
 
     engine._node_clarify = clarify  # type: ignore[method-assign]
     asyncio.run(engine._node_clarify_then_phased({}))

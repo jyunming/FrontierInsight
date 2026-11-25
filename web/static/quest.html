@@ -130,7 +130,7 @@
   </div>
 
   <!-- Unified "Action needed" banner — shown whenever the quest paused for
-       you (any of clarify / papers / supply / data / review). Sourced from the
+       you (any of papers / supply / data / review). Sourced from the
        single NEXT_STEP.md every pause writes. -->
   <div id="next-step-banner" class="hidden fi-banner fi-banner-warning">
     <div class="flex flex-col gap-3 w-full">
@@ -301,11 +301,6 @@
           <span class="material-symbols-outlined text-[16px]">play_arrow</span> Save &amp; re-execute
         </button>
       </div>
-    </div>
-    <!-- Clarify panel -->
-    <div id="clarify-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
-      <div class="fi-banner fi-banner-info"><b>Paused for clarification.</b> Fill in the answers below to resume.</div>
-      <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
     </div>
     <!-- Human-review panel -->
     <div id="human-review-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
@@ -504,20 +499,14 @@
     renderTitle(data);
     const badge = document.getElementById('status-badge');
     const baseCls = 'flex items-center gap-2 cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase';
-    if (data.alive && data.pending_clarify) {
-      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning glow-pulse"></span><span class="text-status-warning">Waiting for your answers</span>';
-      badge.className = baseCls + ' bg-surface-mid';
-    } else if (data.alive) {
+    if (data.alive) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span><span class="text-status-success">Running</span>';
-      badge.className = baseCls + ' bg-surface-mid';
-    } else if (data.pending_clarify) {
-      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (clarify)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_human_review) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'known-answer check', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', clarify: 'setup', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'known-answer check', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
@@ -578,11 +567,11 @@
       startLogStream();
     }
     // Resume / Re-run shows for any non-running quest with a saved config that
-    // ISN'T at an ANSWER pause (clarify / review resume via their own submit
+    // ISN'T at an ANSWER pause (review resumes via its own submit
     // panels). That covers supply pauses (drop files → Resume), crashed /
     // incomplete quests, AND finished quests — so a setting changed via Update
     // can be re-run. Never without config.yaml.
-    const answerPause = data.pending_clarify || !!data.pending_human_review;
+    const answerPause = !!data.pending_human_review;
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
     // Redoing a step is open at an ANSWER pause too (a paper waiting for review can be written again): the menu shows,
@@ -612,12 +601,6 @@
     const showAdd = data.has_config && !data.alive;
     addSec.classList.toggle('hidden', !showAdd);
     addSec.classList.toggle('flex', showAdd);
-    if (data.pending_clarify) {
-      loadClarifyPanel();
-    } else {
-      const sec = document.getElementById('clarify-section');
-      sec.classList.add('hidden'); sec.classList.remove('flex');
-    }
     if (data.pending_human_review) {
       renderHumanReviewPanel(data.pending_human_review);
     } else {
@@ -886,12 +869,10 @@
     } catch (e) { statusEl.textContent = 'Upload failed.'; }
   }
 
-  // ANSWER pause: reveal + scroll to whichever form is pending (clarify/review).
+  // ANSWER pause: reveal + scroll to the review form when it is pending.
   function jumpToAnswerForm() {
-    const target = !document.getElementById('clarify-section').classList.contains('hidden')
-      ? 'clarify-section'
-      : (!document.getElementById('human-review-section').classList.contains('hidden')
-          ? 'human-review-section' : null);
+    const target = !document.getElementById('human-review-section').classList.contains('hidden')
+      ? 'human-review-section' : null;
     if (target) document.getElementById(target).scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
@@ -1554,68 +1535,6 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
     };
     source.onerror = () => { source.close(); };
-  }
-
-  async function loadClarifyPanel() {
-    const sec = document.getElementById('clarify-section');
-    sec.classList.remove('hidden'); sec.classList.add('flex');
-    const form = document.getElementById('clarify-form');
-    if (form.dataset.loaded === '1') return;
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data.pending) return;
-    const qs = data.questions || {};
-    form.innerHTML = '';
-    for (const [key, val] of Object.entries(qs)) {
-      const fs = document.createElement('fieldset');
-      const legend = document.createElement('legend'); legend.textContent = key; fs.appendChild(legend);
-      const prompt = document.createElement('div'); prompt.className = 'prompt'; prompt.textContent = val.question || key; fs.appendChild(prompt);
-      const input = document.createElement('input'); input.type = 'text'; input.name = key;
-      input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
-      input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
-      fs.appendChild(input);
-      // Suggested answers (the title question's candidate titles) become buttons that fill the box; typing your own still works.
-      if (Array.isArray(val.suggestions) && val.suggestions.length) {
-        const row = document.createElement('div'); row.className = 'clarify-suggestions flex flex-wrap gap-2 mt-2';
-        for (const s of val.suggestions) {
-          const b = document.createElement('button'); b.type = 'button'; b.textContent = String(s);
-          b.className = 'text-left px-3 py-1 rounded border border-white/20 font-label-sm text-label-sm';
-          b.onclick = () => { input.value = String(s); };
-          row.appendChild(b);
-        }
-        fs.appendChild(row);
-      }
-      form.appendChild(fs);
-    }
-    const submit = document.createElement('div');
-    submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Resume with these answers</button>';
-    form.appendChild(submit);
-    form.dataset.loaded = '1';
-  }
-  async function submitClarify(ev) {
-    ev.preventDefault();
-    const form = document.getElementById('clarify-form');
-    const answers = {};
-    for (const inp of form.querySelectorAll('input[name]')) {
-      const val = inp.value;
-      answers[inp.name] = inp.dataset.islist === '1' ? val.split(',').map(s => s.trim()).filter(Boolean) : val;
-    }
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
-    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
-    form.dataset.loaded = '0';
-    const payload = await res.json().catch(() => ({}));
-    // Subprocess / CLI quest (no in-process future): the answers were staged on
-    // disk — kick off the --resume so the quest continues without a separate click. A run still waiting for them
-    // (started from this page) reads the answers itself.
-    if (payload && payload.in_process_resolved === false && !payload.run_waiting) {
-      try {
-        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
-        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
-      } catch (_) {}
-    }
-    refresh();
-    return false;
   }
 
   // A verdict no reviewer gave (review_status other than "ok") is said so, with each panelist that did not review.

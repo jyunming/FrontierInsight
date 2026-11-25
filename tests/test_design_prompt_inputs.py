@@ -35,7 +35,7 @@ def _cfg(tmp_path: Path) -> Config:
         topic="SIR final outbreak size",
         title="sir",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, passage_ranking="lexical"),
         output=OutputConfig(output_dir=tmp_path / "out"),

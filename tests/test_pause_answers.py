@@ -41,7 +41,7 @@ def _review_engine(tmp_path: Path) -> Engine:
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
-        pauses={"clarify": "off", "review": "ask"},
+        pauses={"review": "ask"},
     )
     return _ReviewOnlyEngine(cfg)
 

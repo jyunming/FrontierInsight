@@ -119,7 +119,6 @@ def _make_engine_with_replicates(tmp_path: Path, n: int) -> Engine:
         engine=EngineConfig(
             max_iterations=1, review_loop=False,
             execute_replicates=n,
-            clarify_mode="off",
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),

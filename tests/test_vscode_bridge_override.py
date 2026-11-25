@@ -50,7 +50,7 @@ def _mk_cfg(tmp_path: Path, *, provider_name: str = "") -> Config:
         topic="x",
         title="x",
         provider=ProviderConfig(name=provider_name) if provider_name else ProviderConfig(),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

@@ -1,7 +1,7 @@
 """FastAPI server smoke tests.
 
 Uses FastAPI's TestClient (no real network). The server reads quest
-state from disk and routes clarify-resume via an in-process registry;
+state from disk and routes the review decision via an in-process registry;
 both are testable without spawning real Engine.run() background tasks.
 """
 
@@ -159,27 +159,6 @@ def test_every_aliased_sub_step_tag_resolves_to_the_node_that_logs_it(tag: str, 
 # --- _QuestRegistry --------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_quest_registry_resolves_clarify_future() -> None:
-    """The registry connects POST /clarify to the engine's clarify
-    callback. We simulate the engine awaiting the future; the resolver
-    sets the result and the future unblocks."""
-    reg = _QuestRegistry()
-    fut = reg.register_clarify("q1", {"comparative_baseline": {"q": "?", "default": "x"}})
-    assert reg.pending_clarify("q1") is not None
-
-    answers = {"comparative_baseline": "user-chosen"}
-    ok = reg.resolve_clarify("q1", answers)
-    assert ok is True
-    assert reg.pending_clarify("q1") is None
-    assert await fut == answers
-
-
-def test_quest_registry_resolve_unknown_quest_returns_false() -> None:
-    reg = _QuestRegistry()
-    assert reg.resolve_clarify("does-not-exist", {"x": 1}) is False
-
-
 # --- FastAPI app endpoint smoke -------------------------------------------
 
 
@@ -255,7 +234,7 @@ def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
     assert set(body["figures"]) == {"result.png", "loss.png"}
     assert body["summary"]["provider"] == "openai"
     assert body["alive"] is False  # no real Engine task registered
-    assert body["pending_clarify"] is False
+    assert "pending_clarify" not in body
 
 
 def test_app_quest_detail_404_for_unknown_quest(tmp_path: Path) -> None:
@@ -372,53 +351,6 @@ def test_app_paper_endpoint_404_when_paper_missing(tmp_path: Path) -> None:
     app = make_app(tmp_path)
     client = TestClient(app)
     assert client.get("/api/quests/qnopaper/paper").status_code == 404
-
-
-def test_app_clarify_get_returns_no_pending_when_nothing_registered(tmp_path: Path) -> None:
-    _mk_quest_dir(tmp_path, "qc")
-    app = make_app(tmp_path)
-    client = TestClient(app)
-    r = client.get("/api/quests/qc/clarify")
-    assert r.status_code == 200
-    assert r.json() == {"pending": False, "questions": None}
-
-
-def test_app_clarify_post_resolves_pending(tmp_path: Path) -> None:
-    """Pre-populate the registry with a pending clarify future, then
-    POST answers and assert the registry resolves it. Mirrors the live
-    flow: Engine awaits → user submits in GUI → graph resumes."""
-    app = make_app(tmp_path)
-    reg = app.state.registry
-    fut = reg.register_clarify("qc", {"x": {"q": "?", "default": "a"}})
-
-    client = TestClient(app)
-    r = client.post(
-        "/api/quests/qc/clarify",
-        json={"answers": {"x": "chosen"}},
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["in_process_resolved"] is True
-    # The future has been set.
-    assert fut.done()
-    assert fut.result() == {"x": "chosen"}
-
-
-def test_app_clarify_post_409_when_no_pending(tmp_path: Path) -> None:
-    app = make_app(tmp_path)
-    client = TestClient(app)
-    r = client.post("/api/quests/q/clarify", json={"answers": {"a": "b"}})
-    assert r.status_code == 409
-
-
-def test_app_clarify_post_400_on_missing_answers_key(tmp_path: Path) -> None:
-    app = make_app(tmp_path)
-    reg = app.state.registry
-    reg.register_clarify("qc", {"x": {"q": "?", "default": "a"}})
-    client = TestClient(app)
-    r = client.post("/api/quests/qc/clarify", json={"wrong_key": {}})
-    assert r.status_code == 400
 
 
 def test_app_start_400_on_invalid_yaml(tmp_path: Path) -> None:

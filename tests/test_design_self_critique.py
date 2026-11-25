@@ -33,7 +33,7 @@ def _mk_cfg(tmp_path: Path) -> Config:
         title="opc",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
+            max_iterations=1, review_loop=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),

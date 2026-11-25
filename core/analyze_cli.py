@@ -170,20 +170,17 @@ def build_analyze_config(
       ``external_fallback: []`` — NO external retrieval, web or academic.
       (The literature node only reads the sources the commission gives.)
     * ``review_loop: false`` — one write+review pass, not a revise cycle.
-    * ``clarify_mode: off`` — the commission is the source of truth here
-      (its question becomes the topic)."""
+    * The commission is the source of truth here (its question becomes the topic)."""
     from core import commission as _commission
 
-    question = str(_commission.read(commission).get("question") or "")
     return Config(
         commission=commission,
-        title=title or _slug(question, max_chars=60),
+        title=title,  # the commission's own title applies (``Config``); with none the writer proposes one
         provider=ProviderConfig(name=provider_name),  # type: ignore[arg-type]
         engine=EngineConfig(
             framework="langgraph",
             max_iterations=1,
             review_loop=False,
-            clarify_mode="off",
             no_simulation=True,
             analyze_local_first=True,
             cross_check_per_finding_k=0,

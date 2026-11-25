@@ -159,7 +159,7 @@ def test_the_listed_sources_are_read_back_from_the_plan() -> None:
 def _cfg(tmp_path: Path) -> Config:
     return Config(
         topic="the best illumination source for a line pattern", title="src", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"), pauses=PausesConfig(plan="off"),
     )

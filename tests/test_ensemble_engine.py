@@ -57,7 +57,7 @@ def _engine_with_ensemble(
     cfg = Config(
         topic="t", title="t",
         provider=ProviderConfig(name="openai", node_ensemble=ensemble),
-        engine=EngineConfig(clarify_mode="off"),
+        engine=EngineConfig(),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),

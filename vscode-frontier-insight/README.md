@@ -242,7 +242,7 @@ In the chat panel you'll see progress messages:
 🧪 Starting quest: fi-demo.yaml
   [FI] start quest_id=...-fi-demo-integrators-xxx provider=openai
   → clarify
-  [clarify] mode=auto; agent self-answered 10 slots
+  [clarify] study mode: experiment
   → literature
   [literature] retrieved 5 docs
   ...
@@ -251,11 +251,7 @@ In the chat panel you'll see progress messages:
 ✅ Quest finished. Paper: outputs/.../paper/paper.md
 ```
 
-That example YAML names `provider: openai`, so its model calls go to OpenAI rather than the chat model, and nobody can be asked its setup questions in VS Code, so the agent answers them itself. A YAML with `provider.name: vscode_extension` asks them in input boxes (below).
-
-### Answer the setup questions
-
-When a quest on the VS Code chat model starts (a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
+That example YAML names `provider: openai`, so its model calls go to OpenAI rather than the chat model. A quest asks no setup questions: its commission file says what the study is.
 
 ### Review the result before it ships
 
@@ -268,7 +264,7 @@ Close the QuickPick or the refine box with Esc and the quest stops there instead
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
+Whenever a quest pauses for you — to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
 
 ### Fleet (multiple quests in parallel)
 
@@ -378,7 +374,7 @@ A quest that runs a simulation, deterministic or random, keeps the simulation (`
 
 `code/` is a small project you can run on its own: `README.md`, `requirements.txt` (the versions FI installed), `run.py` (`python code/run.py` runs the simulation, then the analysis, into `run_output/`, apart from the quest's results) and, for the two-script layout, `study.json`. Every change FI or a refine makes is one commit in a git history inside `code/` and one entry in `code/CHANGELOG.md`, marked Added, Changed, Fixed or Tidied, with a line saying whether the results changed (the checks of correctness before and after, and whether the study's results changed; filled in once the run after the change finishes); a `README.md`, `requirements.txt`, `run.py` or `study.json` you edited is never overwritten (the scripts themselves are rewritten when FI repairs or extends them). The data tables an accepted run wrote are also copied into `data/results/`.
 
-Explore, then confirm (`engine.phased`) is a setting in the quest's YAML (see [docs/rigor.md](../docs/rigor.md)). Another one to write there: `engine.clarify_overrides.study_type` (`measure` or `find_best_design`: it answers the one question about the kind of study in advance when the agent answers the setup questions itself; when you are asked them it is only the suggested answer, and only if that question is asked). The plan's *How we will judge whether the code got better* section is edited in `plan.md` like the rest of the design; FI appends each run's values to `.fi/criteria_history.jsonl`.
+Explore, then confirm (`engine.phased`) is a setting in the quest's YAML (see [docs/rigor.md](../docs/rigor.md)). The plan's *How we will judge whether the code got better* section is edited in `plan.md` like the rest of the design; FI appends each run's values to `.fi/criteria_history.jsonl`.
 
 A resume regenerates only the outputs actually missing on disk — a `paper.pdf` /
 slides / poster / talk that already rendered is left untouched — so re-running to
@@ -412,7 +408,7 @@ engine routes `design → web_figures → analyze → write`, skipping the
 whole data path — the paper is a narrative synthesis of the cited
 sources with license-clean illustrative images and no fabricated
 metrics. Survey mode is auto-suggested for "history/evolution/overview
-of X" topics and can also be turned on by the clarify step.
+of X" topics and is set by `method: review_literature` in the commission.
 
 **Web research** (`knowledge.web_search`, on by
 default): when on, the literature node searches the public web
@@ -591,7 +587,6 @@ this extension. For example, the YAML it writes:
 provider:
   name: vscode_extension       # set automatically when launched from this extension
   node_models:
-    clarify:       gpt-4o-mini       # cheap classification
     design:        claude-3-5-sonnet # broad thinker
     cross_check:   gpt-4o-mini
     write:         claude-3-5-sonnet # prose
@@ -669,7 +664,7 @@ budget** — same as if you typed each prompt manually into Copilot Chat.
 Measured per-quest burn, counted from the token log (`.fi/cost.jsonl`) of
 17 complete runs of one simulation quest (a deterministic vs stochastic SIR
 epidemic model) on gemma4 through Ollama, with the engine settings of those runs
-(`clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3`),
+(a single reviewer, `cross_check_per_finding_k: 3`),
 `knowledge.source_routing: manual`, and slides and a poster:
 
 - **23–28 premium requests per quest**: 21–26 for the research and the paper, plus one each for the slides and the poster. The spread comes from the model: 0–3 experiment repair calls, one cross-check call per key finding that found related literature (0–8), and a second write → claim check → review pass when the review asked for a rewrite (14 of the 17 runs).

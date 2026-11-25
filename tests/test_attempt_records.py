@@ -230,7 +230,7 @@ async def test_a_quest_that_fails_is_recorded_as_a_process_error(tmp_path: Path,
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     engine = Engine(Config.model_validate({
         "topic": "t", "provider": {"name": "openai", "model": "m"}, "knowledge": {"enabled": False},
-        "engine": {"clarify_mode": "off"}, "output": {"output_dir": str(tmp_path / "out")},
+        "engine": {}, "output": {"output_dir": str(tmp_path / "out")},
     }))
     with pytest.raises(Exception):
         await engine.run()

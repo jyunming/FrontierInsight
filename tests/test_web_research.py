@@ -40,7 +40,7 @@ def _engine(tmp_path: Path, **engine_kw) -> Engine:
         topic="t",
         title="t",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=True, clarify_mode="off", **engine_kw),
+        engine=EngineConfig(no_simulation=True, **engine_kw),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),

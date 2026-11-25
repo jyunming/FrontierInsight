@@ -1648,8 +1648,8 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
                                                      "why": " ".join(str(_dict(r).get("evidence") or "").split())}
                                                     for r in q.unsupported_standing
                                                     if str(_dict(r).get("claim") or "").strip()]}
-    # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
-    # not say so): the last design route records both. A quest with no such record falls back to the YAML.
+    # The study as the quest resolved it (the commission's method decides whether a quest needs no simulation, or is a survey):
+    # the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
     no_sim = bool(resolved.get("no_simulation", engine.get("no_simulation")))
     survey = bool(resolved.get("survey_mode", engine.get("survey_mode")))

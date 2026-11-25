@@ -1287,39 +1287,6 @@ class ReviewStageMixin:
                             usage=_served.get("usage") if isinstance(_served.get("usage"), dict) else None)
         return response
 
-    def _clear_clarify_snapshot(self) -> None:
-        """Remove the on-disk clarify question/answer files once the clarify
-        gate resolves, so the web's "questions present + no answer-file"
-        pending check stops showing a stale form. Mirrors the human-review
-        ``_consume_snapshot``. Best-effort; an unlink failure is not fatal."""
-        for name in ("clarify_questions.json", "clarify_answer.json"):
-            try:
-                (self.fi_dir / name).unlink()
-            except OSError:
-                pass
-
-    def _asked_clarify_questions(self, topic: str) -> dict[str, Any] | None:
-        """The questions already put to the person for ``topic``, when the clarify node paused on them; else None."""
-        try:
-            data = json.loads((self.fi_dir / self._CLARIFY_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(data, dict) or data.get("topic_sha256") != hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest():
-            return None
-        questions = data.get("questions")
-        return questions if isinstance(questions, dict) and questions else None
-
-    def _keep_asked_clarify_questions(self, topic: str, questions: dict[str, Any]) -> None:
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.fi_dir / (self._CLARIFY_ASKED + ".tmp")
-            tmp.write_text(json.dumps({"topic_sha256": hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest(), "questions": questions},
-                                      indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            os.replace(tmp, self.fi_dir / self._CLARIFY_ASKED)
-        except (OSError, TypeError, ValueError) as e:
-            # Not kept: the resume asks the model again, as before.
-            self._log.debug("[clarify] could not keep the asked questions: %r", e)
-
     async def _await_with_heartbeat(
         self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None, alarm: Any = None,
     ) -> Any:
@@ -1513,9 +1480,9 @@ class ReviewStageMixin:
         past the pause. Same staleness class as the ``quest_failed.md`` one.
 
         Crucially this does NOT clear the *answer* files
-        (``human_review_answer.json`` / ``clarify_answer.json``): those are the
-        INPUT this resume is about to consume (the human-feedback / clarify
-        nodes read them), and dropping them here would discard the user's
+        (``human_review_answer.json``): that is the
+        INPUT this resume is about to consume (the human-feedback
+        node reads it), and dropping it here would discard the user's
         decision. It also leaves the ``paused_at_<stage>.flag`` idempotency
         markers alone, since those are state ("already paused here"), not
         display. Any node that genuinely re-pauses re-writes its own marker, so
@@ -1531,7 +1498,7 @@ class ReviewStageMixin:
             self.fi_dir / "pause.json",
             self.fi_dir / _todo.TODO_NAME,
             self.fi_dir / "human_review.json",
-            self.fi_dir / "clarify_questions.json",
+            self.fi_dir / "clarify_questions.json",  # left by an earlier FI's setup questions: nothing shows it now
         ):
             try:
                 p.unlink(missing_ok=True)

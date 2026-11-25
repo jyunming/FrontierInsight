@@ -45,7 +45,7 @@ def _config(tmp_path: Path, *, split: bool = True, replicates: int = 1, **execut
     return Config(
         topic="split analysis", title="split",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=replicates, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=replicates),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=split, **execution),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(kinds=["paper_md"], output_dir=tmp_path / "out"),

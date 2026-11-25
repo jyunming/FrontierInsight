@@ -211,12 +211,8 @@ def _import_runtime() -> None:
     """The engine and the generators, as module globals (every command but the quick doctor needs them)."""
     global _acceptance, Config, Engine, QuestArtifacts, write_cost_summary, ProxySupervisor, ExternalSkillDirs
     global PaperGenerator, PosterGenerator, LABELS, check_and_redo, check_pdf, check_pptx, report_summary
-    global SlideGenerator, SpeechGenerator, _VALID_PAPER_FORMATS
+    global SlideGenerator, SpeechGenerator
     try:
-        from typing import get_args as _get_args
-
-        from core.config import PaperFormat as _PaperFormat
-        _VALID_PAPER_FORMATS = frozenset(_get_args(_PaperFormat))
         from core import acceptance as _acceptance
         from core.config import Config
         from core.engine import Engine, QuestArtifacts, write_cost_summary
@@ -1223,9 +1219,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--interactive",
         action="store_true",
-        help="Talk the topic over first: "
-             "pause at the clarify node and read answers from stdin. "
-             "Single-quest mode only — fleet runs are headless.",
+        help="Answer the review pause in the terminal (accept / reject / refine) instead of by `--resume`. "
+             "Single-quest mode only — fleet runs are headless. (It no longer asks setup questions: the "
+             "commission says what the study is.)",
     )
     p.add_argument(
         "--auto-accept-on-pass",
@@ -1670,147 +1666,6 @@ def _set_vscode_bridge_extras(
     provider.extra = extras
 
 
-def _pick_clarify_callback(
-    cfg: Config, engine: Engine, interactive: bool,
-) -> object:
-    """Select the right clarify-callback for this run.
-
-    * Terminal `--interactive`: collect answers from stdin via
-      ``_cli_clarify_callback``.
-    * `provider.name == "vscode_extension"`: route the questions
-      through the same bridge the LLM calls use, so the FI VSCode
-      extension can present them as modals and post answers back.
-    * Started or resumed by the web server (``FI_WEB_ANSWERS=1``): the
-      quest page shows the questions and writes the answers to disk
-      (``_web_page_clarify_callback``).
-    * Otherwise: no callback. If the YAML has
-      ``engine.clarify_mode = "interactive"`` and we return None, the
-      engine raises a clear RuntimeError at the clarify pause —
-      that's the surface we want users to hit, not a silent hang.
-    """
-    if interactive:
-        return _cli_clarify_callback
-    if cfg.provider.name == "vscode_extension":
-        # IMPORTANT: route the clarify call through the SAME bridge
-        # the LLMClient already uses. The extension-side TCP server
-        # only tracks one active socket (every new connection
-        # overwrites it), so two clients on the same port would have
-        # their responses cross-routed. Reading `engine._client._bridge`
-        # works because by the time clarify_callback fires, the
-        # clarify NODE has already made one LLM call (to generate the
-        # questions), which lazy-initialized the bridge.
-        # Defensive parse — hand-edited YAMLs can leave bridge_port as
-        # a non-numeric string. Treat that as "no callback wired"
-        # rather than crashing the run.
-        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
-        try:
-            port = int(extra.get("bridge_port", 0))
-        except (TypeError, ValueError):
-            port = 0
-        if port <= 0:
-            # No bridge to ask through: a quest the web server started still asks on its quest page.
-            return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s) if _web_can_answer() else None
-
-        async def callback(questions: dict[str, object]) -> dict[str, object]:
-            assert engine._client is not None, (
-                "_pick_clarify_callback was called before Engine.run() "
-                "created the LLMClient"
-            )
-            bridge = engine._client._bridge
-            if bridge is None:
-                # Defensive: shouldn't happen (clarify-node LLM call
-                # creates the bridge first), but if the engine ever
-                # routes around the LLMClient we'd hit this. Build a
-                # fresh client — it'll still go to the same port.
-                from core.vscode_bridge import VSCodeBridgeClient
-                bridge = VSCodeBridgeClient(host="127.0.0.1", port=port)
-                await bridge.connect()
-                engine._client._bridge = bridge
-            return await bridge.clarify(dict(questions))
-
-        return callback
-    if _web_can_answer():
-        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s)
-    return None
-
-
-# Set by the web server (web/quest_launcher.py) for a quest it starts or resumes as its own process: the person can
-# answer the setup questions on the quest page, so the run asks there instead of answering for itself.
-WEB_ANSWERS_ENV = "FI_WEB_ANSWERS"
-
-
-def _web_can_answer() -> bool:
-    return os.environ.get(WEB_ANSWERS_ENV) == "1"
-
-
-def _write_json_atomic(path: Path, data: object) -> None:
-    """Written whole (a reader never sees half a file); if Windows refuses the replace because the web page has the
-    file open, written in place instead."""
-    text = json.dumps(data, indent=2) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        path.write_text(text, encoding="utf-8")
-
-
-def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0):  # noqa: ANN202
-    """The setup questions for a quest the web server runs as its own process: written to
-    ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
-    ``.fi/clarify_answer.json``. While it waits, ``.fi/clarify_waiting.json`` holds this process's id, so the page
-    knows the answers reach a running quest (even after the server restarted) and does not start a second run. The
-    engine bounds the wait with ``pauses.timeout_s`` and then does what ``pauses.clarify`` says, as for a quest the
-    web server runs in-process."""
-    answer_path = fi_dir / "clarify_answer.json"
-    questions_path = fi_dir / "clarify_questions.json"
-    waiting_path = fi_dir / "clarify_waiting.json"
-
-    def staged() -> dict[str, object] | None:
-        try:
-            data = json.loads(answer_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None  # not there yet, or the page is still writing it
-        return data if isinstance(data, dict) else None
-
-    async def callback(questions: dict[str, object]) -> dict[str, object]:
-        answers = staged()  # a resume after the answers were given takes them without asking again
-        if answers is not None:
-            return answers
-        fi_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            # Only a hint for the page; ``until`` lets it ignore a marker a killed run left behind.
-            _write_json_atomic(waiting_path, {
-                "pid": os.getpid(), "until": time.time() + timeout_s + 60 if timeout_s > 0 else None})
-        except OSError:
-            pass
-        try:
-            _write_json_atomic(questions_path, questions)
-            log.info("[clarify] waiting for your answers to the setup questions on the quest page")
-            while True:
-                await asyncio.sleep(1.0)
-                answers = staged()
-                if answers is not None:
-                    return answers
-        except BaseException:
-            # The run stopped waiting (the time allowed ran out, or it was stopped): the page must not go on showing
-            # a question nobody waits on. A run killed outright leaves it for a resume, which asks it again.
-            if staged() is None:
-                try:
-                    questions_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
-        finally:
-            try:
-                waiting_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    return callback
-
-
 def _pick_human_feedback_callback(
     cfg: Config, engine: Engine, interactive: bool, who: str = "",
 ) -> object:
@@ -1866,47 +1721,6 @@ def _pick_human_feedback_callback(
 
         return callback
     return None
-
-
-async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, object]:
-    """Terminal-based clarify-question collector. Prints each question
-    with its agent-suggested default, reads one line of stdin per slot,
-    accepts the default on blank input. Used by `launch.py --interactive`."""
-    print()
-    print("=" * 72)
-    print("Pre-flight clarification — agent has 5 questions to sharpen the run.")
-    print("Press Enter to accept the default in parentheses.")
-    print("=" * 72)
-    answers: dict[str, object] = {}
-    for key, value in questions.items():
-        if not isinstance(value, dict):
-            continue
-        question = value.get("question", key)
-        default = value.get("default", "")
-        # Pretty-print the default — lists get joined.
-        default_str = (
-            ", ".join(str(x) for x in default) if isinstance(default, list)
-            else str(default)
-        )
-        print()
-        print(f"  [{key}] {question}")
-        try:
-            user_input = input(f"    answer ({default_str}): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            user_input = ""
-        # Preserve list-typed defaults by parsing comma-separated input.
-        if isinstance(default, list):
-            answers[key] = (
-                [s.strip() for s in user_input.split(",") if s.strip()]
-                if user_input else default
-            )
-        else:
-            answers[key] = user_input or default
-    print()
-    print("Thanks — proceeding with the autonomous loop.")
-    print("=" * 72)
-    print()
-    return answers
 
 
 async def _cli_human_feedback_callback(
@@ -2413,7 +2227,6 @@ async def run_one(
     reopen: bool = False,
     from_step: str | None = None,
     approved_by: str | None = None,
-    headless: bool = False,
     ask_byline: bool = False,
 ) -> dict[str, object]:
     # ``ask_byline``: a single quest run from a terminal (--config) may ask the paper byline once before the
@@ -2466,15 +2279,6 @@ async def run_one(
             print(f"[FI] the quest's config.yaml now matches {source_yaml_path} (the one it resumed with); "
                   f"the earlier one is kept as {kept.name}")
     _record_quest(Path(engine.quest_root), cfg, started=resume_quest_id is None)
-    # Pick the right clarify handler:
-    #   --interactive          → terminal Q&A
-    #   provider=vscode_extension → route through the bridge so the
-    #                            extension shows VSCode modals
-    #   started by the web server → the quest page shows the questions
-    #   otherwise              → None; clarify_mode=interactive crashes
-    #                            (the engine catches this and produces
-    #                            a clear RuntimeError).
-    callback = None if headless else _pick_clarify_callback(cfg, engine, interactive)
     # Wire the human-feedback gate callback when the gate is on. CLI
     # ``--interactive`` gets terminal prompts; ``vscode_extension``
     # provider gets a bridge round-trip. Headless runs (no flag, not
@@ -2487,7 +2291,7 @@ async def run_one(
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive, approved_by or "")
     try:
         art: QuestArtifacts = await _maybe_profiled(
-            engine, profile=profile, clarify_callback=callback,
+            engine, profile=profile,
             human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
             approved_by=approved_by,
         )
@@ -2646,33 +2450,19 @@ def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
         print(f"[FI] could not write the paper line to run.log: {exc!r}", file=sys.stderr)
 
 
-# `_VALID_PAPER_FORMATS` is derived from `core.config.PaperFormat` in `_import_runtime` (so adding a new template
-# stays a one-place change, and importing launch for the quick doctor runs no `core` import outside the bootstrap's
-# guard: the doctor loads core.config later, inside main()'s guarded import).
-
-
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
-    """Honor the `paper_venue` clarify slot: if the user's YAML left
-    `output.paper_format` at its default (`"article"`, read off the config
-    model) AND clarify picked a different template, apply the venue choice. We DON'T override an
-    explicit YAML setting (the user's hand-written value wins) and
-    we silently ignore unknown venue strings to avoid pydantic
-    rejecting them on a Config validator."""
-    venue = (
-        (art.raw_state or {}).get("clarify_answers", {}).get("paper_venue", "")
-    )
-    if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
+    """A study an earlier FI began may carry a `paper_venue` it was asked at the start: when the config left
+    `output.paper_format` at its default and that venue is another template, the final render uses the venue. A format
+    written in the config wins, and an unknown venue is ignored. A new study carries none (nothing asks it)."""
+    from core.config import paper_format_with_old_venue
+
+    answers = (art.raw_state or {}).get("clarify_answers")
+    if not (isinstance(answers, dict) and answers.get("paper_venue")):
+        return  # a new study carries none: the config is not read at all
+    venue = paper_format_with_old_venue(cfg.output.paper_format, answers)
+    if venue == cfg.output.paper_format:
         return
-    default = type(cfg.output).model_fields["paper_format"].default
-    if cfg.output.paper_format != default:
-        # User set an explicit format in YAML; honor that.
-        return
-    if venue == default:
-        return  # nothing to do
-    print(
-        f"[FI] paper_venue from clarify -> overriding paper_format: "
-        f"{default} -> {venue}",
-    )
+    print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {cfg.output.paper_format} -> {venue}")
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
 
@@ -3178,7 +2968,6 @@ async def _maybe_profiled(
     engine: Engine,
     *,
     profile: bool,
-    clarify_callback: object = None,
     human_feedback_callback: object = None,
     reopen: bool = False,
     from_step: str | None = None,
@@ -3186,7 +2975,6 @@ async def _maybe_profiled(
 ) -> QuestArtifacts:
     if not profile:
         return await engine.run(
-            clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3197,7 +2985,6 @@ async def _maybe_profiled(
     except ImportError:
         print("[FI] --profile requested but viztracer is not installed; skipping")
         return await engine.run(
-            clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3207,7 +2994,6 @@ async def _maybe_profiled(
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
     with VizTracer(output_file=str(trace_path)):
         art = await engine.run(
-            clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3323,7 +3109,7 @@ async def run_fleet(
                 _status_line(engine.quest_id, "start")
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
-                    source_yaml_path=yaml_path, headless=True,
+                    source_yaml_path=yaml_path,
                 )
                 state["running"] -= 1
                 state["done"] += 1
@@ -3373,7 +3159,8 @@ def _commission_refusal(args: argparse.Namespace) -> str | None:
         try:
             named = raw.get("commission") if isinstance(raw, dict) else None
             _commission.door(_commission.locate(named, Path(path).resolve().parent) if named else None, None,
-                             topic=raw.get("topic") if isinstance(raw, dict) else None)
+                             topic=raw.get("topic") if isinstance(raw, dict) else None,
+                             asked=raw.get("engine") if isinstance(raw, dict) else None)
         except _commission.CommissionRefused as e:
             return str(e)
     if args.analyze and args.commission:
@@ -3765,7 +3552,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     # The quest's full id: a shortened one was looked up above.
                     found_id = args.resume or args.watch
                     _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None,
-                                     topic=cfg.topic)
+                                     topic=cfg.topic, asked=cfg.modes_asked())
                 except _commission.CommissionRefused as e:
                     print(f"[FI] {e}", file=sys.stderr)
                     return 2
@@ -3828,7 +3615,7 @@ async def main_async(args: argparse.Namespace) -> int:
         try:
             configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
             for _path, c in configs:
-                _commission.door(c.commission, None, topic=c.topic)  # every quest's commission before any starts
+                _commission.door(c.commission, None, topic=c.topic, asked=c.modes_asked())  # every quest's commission before any starts
         except _commission.CommissionRefused as e:
             print(f"[FI] {e}", file=sys.stderr)
             return 2
@@ -4141,7 +3928,7 @@ async def _run_analyze(
     from core.analyze_cli import prepare_analyze_quest
 
     try:  # before the quest folder is made or a file copied
-        _commission.door(commission, None)
+        _commission.door(commission, None, asked={"analyze_local_first": True})  # the data is the person's: so must be `method`
     except _commission.CommissionRefused as e:
         print(f"[FI] {e}", file=sys.stderr)
         return 2

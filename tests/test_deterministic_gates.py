@@ -42,7 +42,7 @@ def _mk_cfg(tmp_path: Path) -> Config:
         topic="deterministic gate tests",
         title="dg",
         provider=ProviderConfig(name="openai", model="default"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

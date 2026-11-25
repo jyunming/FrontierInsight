@@ -1,409 +1,138 @@
-"""Clarify-node tests.
+"""The first node (``clarify``) and the helper that renders an earlier FI's setup answers.
 
-Three modes:
-  - ``off``         — node returns ``{"clarify_done": True,
-                      "no_simulation_resolved": <yaml-flag>}`` and no
-                      questions. Even with clarify off, the engine
-                      still has to surface a routing decision for
-                      ``_route_after_design``, hence the resolved flag.
-  - ``auto``        — LLM generates questions, agent self-answers from defaults.
-  - ``interactive`` — LLM generates questions, node calls ``interrupt()``;
-                      resuming with answers populates ``clarify_answers``.
-
-These tests do NOT call real LLMs — they monkeypatch the LLM client.
+The node asks nothing and calls no model: it sets the study's two run modes (no experiment, survey) from the
+commission's ``method``, which ``Config`` has put into ``engine.no_simulation`` / ``engine.survey_mode``. These tests do
+NOT call real LLMs.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
+from core import commission
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig,
     OutputConfig, ProviderConfig,
 )
-from core.engine import (
-    Engine, _default_clarify_questions, _format_clarify,
-)
+from core.engine import Engine, _format_clarify
 
 
-def _mk_cfg(
-    tmp_path: Path, clarify_mode: str,
-    *, local_papers: list[Path] | None = None,
-) -> Config:
+def _mk_cfg(tmp_path: Path, **engine: object) -> Config:
     return Config(
-        topic="EUV-MOR SE-yield study",
-        title="se-yield",
+        topic="a draining tank", title="tank",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode=clarify_mode,
-        ),
+        engine=EngineConfig(max_iterations=1, review_loop=False, **engine),  # type: ignore[arg-type]
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(
-            enabled=False,
-            local_papers=list(local_papers or []),
-        ),
+        knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
     )
 
 
-# --- helper-function unit tests --------------------------------------------
+def _commissioned(tmp_path: Path, **changes: object) -> Config:
+    from tests.test_commission import _commission
+
+    path = _commission(tmp_path / "order", **changes)
+    return Config(
+        commission=path, provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    )
 
 
-def test_format_clarify_empty_when_no_answers() -> None:
-    """No clarify_answers in state → marker string so the prompt still
-    parses cleanly (no $clarify_block placeholder left unsubstituted)."""
-    assert _format_clarify({}) == "(none — clarify mode is off)"
-    assert _format_clarify({"clarify_answers": {}}) == "(none — clarify mode is off)"
+# --- the helper that renders an earlier FI's setup answers --------------------------------------------------------------
 
 
-def test_format_clarify_renders_bulleted_block() -> None:
+def test_format_clarify_is_the_empty_marker_when_no_answers() -> None:
+    """No clarify_answers in state (every new study) -> a marker, so the prompt still parses cleanly."""
+    assert _format_clarify({}) == "(none — no setup questions were asked)"
+    assert _format_clarify({"clarify_answers": {}}) == "(none — no setup questions were asked)"
+
+
+def test_format_clarify_renders_bulleted_block_of_a_checkpoint_that_has_answers() -> None:
     state = {
         "clarify_answers": {
-            "comparative_baseline": "Inpria 2015 MOR",
+            "comparative_baseline": "the textbook case",
             "empirical_vs_theoretical": "empirical",
-            "success_metric": "F_SE ≈ 2.3 at 92 eV",
             "budget": "a few minutes on CPU",
             "output_kinds": ["paper_md", "slides"],
         }
     }
     out = _format_clarify(state)
-    # Each labeled slot lands as a bullet; lists become comma-joined.
-    assert "- **Comparative baseline**: Inpria 2015 MOR" in out
-    assert "- **Empirical / theoretical**: empirical" in out
+    assert "- **Comparative baseline**: the textbook case" in out
     assert "- **Time / compute budget**: a few minutes on CPU" in out
     assert "- **Desired output kinds**: paper_md, slides" in out
 
 
 def test_format_clarify_skips_unknown_slots() -> None:
-    """Unknown slot keys (forward-compat) don't crash and are silently
-    dropped from the rendering."""
-    out = _format_clarify(
-        {"clarify_answers": {"comparative_baseline": "x", "future_slot": "y"}}
-    )
-    assert "Comparative baseline" in out
-    assert "future_slot" not in out
+    out = _format_clarify({"clarify_answers": {"comparative_baseline": "x", "future_slot": "y"}})
+    assert "Comparative baseline" in out and "future_slot" not in out
 
 
-def test_default_clarify_questions_has_all_eight_slots() -> None:
-    q = _default_clarify_questions("any topic")
-    assert set(q) == {
-        "comparative_baseline", "empirical_vs_theoretical",
-        "success_metric", "budget", "output_kinds",
-        "study_depth", "paper_venue", "topic_shape",
-    }
-    for slot, value in q.items():
-        assert isinstance(value, dict)
-        assert "question" in value and "default" in value
-        # Non-empty default is the invariant the prompt enforces and the
-        # auto-answer path relies on.
-        assert value["default"] not in (None, "", [])
-    # study_depth default is one of the three documented levels — it's
-    # the value the write/review prompts grep for to calibrate length.
-    assert q["study_depth"]["default"] in (
-        "brief preprint", "journal-length", "comprehensive review",
-    )
-    # paper_venue default must be one of the templates the engine knows
-    # about — `_apply_paper_venue_override` silently drops unknown values.
-    assert q["paper_venue"]["default"] in (
-        "generic", "article", "neurips", "iclr", "ieee_access", "nature_mi",
-    )
-    # topic_shape default is one of the four documented shapes — design
-    # and write prompts pattern-match on the value.
-    assert q["topic_shape"]["default"] in (
-        "experimental", "review", "case_study", "opinion",
-    )
-
-
-# --- _node_clarify mode='off' ------------------------------------------------
+# --- the node ---------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_clarify_off_skips_node(tmp_path: Path, monkeypatch) -> None:
-    """clarify_mode='off' must not call the LLM and must produce no
-    questions/answers in state — keeps fleet runs and existing tests fast."""
-    cfg = _mk_cfg(tmp_path, "off")
-    eng = Engine(cfg)
-
-    chat_calls: list[str] = []
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        chat_calls.append(messages[-1]["content"][:30])
-        return "{}"
-    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-
+async def test_the_node_makes_no_model_call_and_a_commissioned_study_simulates_by_default(tmp_path: Path) -> None:
+    eng = Engine(_commissioned(tmp_path))
+    chat = AsyncMock(side_effect=AssertionError("the first node asks no model"))
+    eng._client = type("Stub", (), {"chat": chat})()
     patch = await eng._node_clarify({"topic": "x"})
-
-    # _node_clarify also returns the resolved
-    # ``no_simulation_resolved`` flag so the routing decision is
-    # visible at the state level (not just inferred from YAML/clarify
-    # downstream). With clarify_mode='off' and ``engine.no_simulation``
-    # unset, the resolved flag is False.
-    assert patch == {
-        "clarify_done": True,
-        "no_simulation_resolved": False,
-        "survey_mode_resolved": False,
-    }
-    assert chat_calls == []  # LLM was never invoked
-
-
-# --- _node_clarify mode='auto' ----------------------------------------------
-
-
-_FAKE_QUESTIONS = {
-    "comparative_baseline": {
-        "question": "What baseline?",
-        "default": "Inpria 2015 MOR cathodoluminescence",
-    },
-    "empirical_vs_theoretical": {
-        "question": "Which kind of study?",
-        "default": "empirical",
-    },
-    "success_metric": {
-        "question": "What metric?",
-        "default": "F_SE within ±10% of literature value",
-    },
-    "budget": {
-        "question": "How long?",
-        "default": "1 hour on CPU",
-    },
-    "output_kinds": {
-        "question": "Which deliverables?",
-        "default": ["paper_md"],
-    },
-}
+    assert patch == {"clarify_done": True, "no_simulation_resolved": False, "survey_mode_resolved": False}
+    chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_clarify_auto_fills_answers_from_defaults(
-    tmp_path: Path,
-) -> None:
-    """clarify_mode='auto': agent generates the questionnaire AND the
-    answers populate from each slot's `default` field. No human loop."""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "auto")
-    eng = Engine(cfg)
-    eng._client = type(
-        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))},
-    )()
-
-    patch = await eng._node_clarify({"topic": "EUV-MOR"})
-
-    assert patch["clarify_done"] is True
-    assert patch["clarify_questions"] == _FAKE_QUESTIONS
-    answers = patch["clarify_answers"]
-    assert answers["empirical_vs_theoretical"] == "empirical"
-    assert answers["budget"] == "1 hour on CPU"
-    assert answers["output_kinds"] == ["paper_md"]
-
-
-@pytest.mark.asyncio
-async def test_clarify_agent_simulatability_wins_over_heuristic_override(
-    tmp_path: Path,
-) -> None:
-    """audit #1: the interview pins ``simulatability`` from a FORMAT
-    heuristic into clarify_overrides. When the clarify agent actually runs
-    and judges the topic non-simulatable (a review), its judgment must win
-    back over the heuristic — otherwise a review-shaped topic gets
-    force-run as a toy experiment. (The hard ``engine.no_simulation: true``
-    YAML pin is a separate, absolute control.)"""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "auto")
-    # Heuristic override says SIMULATE; the agent will disagree. Only one
-    # slot pinned, so the auto short-circuit does NOT fire and the agent
-    # runs (the path where the override used to clobber its judgment).
-    cfg.engine.clarify_overrides = {"simulatability": "yes"}
-    eng = Engine(cfg)
-    questions = {
-        "simulatability": {"question": "Can a simulation answer this?",
-                           "default": "no"},
-        "topic_shape": {"question": "Shape?", "default": "review"},
-    }
-    eng._client = type(
-        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(questions))},
-    )()
-
-    patch = await eng._node_clarify(
-        {"topic": "A survey of EUV resist chemistries"})
-
-    # The agent's "no" wins back over the heuristic "yes".
-    assert patch["clarify_answers"]["simulatability"] == "no"
-    assert patch["clarify_answers"]["topic_shape"] == "review"
-    assert patch["no_simulation_resolved"] is True
-
-
-@pytest.mark.asyncio
-async def test_clarify_preference_override_still_wins(
-    tmp_path: Path,
-) -> None:
-    """The judgment-slot exception must NOT leak to ordinary preference
-    slots: a pinned ``study_depth`` still wins over the agent's guess."""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "auto")
-    cfg.engine.clarify_overrides = {"study_depth": "comprehensive"}
-    eng = Engine(cfg)
-    questions = {
-        "study_depth": {"question": "Depth?", "default": "quick"},
-        "simulatability": {"question": "Sim?", "default": "yes"},
-    }
-    eng._client = type(
-        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(questions))},
-    )()
+@pytest.mark.parametrize("method,no_sim,survey", [("simulate", False, False), ("analyze_data", True, False),
+                                                  ("review_literature", True, True)])
+async def test_the_commission_s_method_sets_the_two_modes(tmp_path: Path, method: str, no_sim: bool,
+                                                          survey: bool) -> None:
+    eng = Engine(_commissioned(tmp_path, method=method))
+    chat = AsyncMock(side_effect=AssertionError("the first node asks no model"))
+    eng._client = type("Stub", (), {"chat": chat})()
     patch = await eng._node_clarify({"topic": "x"})
-    assert patch["clarify_answers"]["study_depth"] == "comprehensive"
-
-
-_PROPOSAL_FOR_SEED = """\
-## TL;DR
-A short summary of the planned quest.
-
-## Background and prior work
-RK4 and Verlet are standard integrators.
-
-## Hypothesis
-
-> H: RK4 outperforms Euler on long-horizon energy drift.
-
-## Experimental plan
-
-- Numerical simulation across timesteps (~5-minute simulation on CPU).
-- Monte Carlo over 100 trials.
-
-## Success criteria
-
-The primary metric is relative energy drift ranked monotonically.
-"""
+    assert patch == {"clarify_done": True, "no_simulation_resolved": no_sim, "survey_mode_resolved": survey}
+    chat.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_clarify_auto_asks_the_model_even_when_a_proposal_file_is_pinned(
-    tmp_path: Path,
-) -> None:
-    """FI no longer reads a ``*-proposal.md`` pinned in ``knowledge.local_papers`` as a ready set of
-    answers: such a file is an ordinary local paper, so the clarify call is made as for any other."""
-    from unittest.mock import AsyncMock
-
-    proposal = tmp_path / "1778800000-test-aabbcc-proposal.md"
-    proposal.write_text(_PROPOSAL_FOR_SEED, encoding="utf-8")
-
-    cfg = _mk_cfg(tmp_path, "auto", local_papers=[proposal])
-    eng = Engine(cfg)
-    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
-    eng._client = type("Stub", (), {"chat": chat_mock})()
-
-    patch = await eng._node_clarify({"topic": "anything"})
-
-    chat_mock.assert_awaited_once()
-    assert "_proposal_hypothesis" not in patch["clarify_answers"]
+async def test_a_config_built_in_code_without_a_commission_keeps_its_own_two_keys(tmp_path: Path) -> None:
+    """``Engine`` itself refuses nothing (the start paths call ``commission.door``): the keys of the config are the modes."""
+    eng = Engine(_mk_cfg(tmp_path, no_simulation=True))
+    got = await eng._node_clarify({"topic": "x"})
+    assert (got["no_simulation_resolved"], got["survey_mode_resolved"]) == (True, False)
+    eng = Engine(_mk_cfg(tmp_path / "s", survey_mode=True))
+    got = await eng._node_clarify({"topic": "x"})
+    assert (got["no_simulation_resolved"], got["survey_mode_resolved"]) == (True, True)
 
 
 @pytest.mark.asyncio
-async def test_clarify_auto_falls_through_to_llm_when_no_proposal(
-    tmp_path: Path,
-) -> None:
-    """A local_paper (or no local_papers at all) leaves
-    the normal LLM clarify path in place."""
-    from unittest.mock import AsyncMock
-
-    other = tmp_path / "just-some-paper.md"
-    other.write_text("# Some random paper\n", encoding="utf-8")
-
-    cfg = _mk_cfg(tmp_path, "auto", local_papers=[other])
-    eng = Engine(cfg)
-    chat_mock = AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))
-    eng._client = type("Stub", (), {"chat": chat_mock})()
-
-    await eng._node_clarify({"topic": "some topic"})
-    chat_mock.assert_awaited_once(), (
-        "non-proposal local_papers must NOT short-circuit the LLM call"
-    )
+async def test_the_node_passes_through_when_already_done(tmp_path: Path) -> None:
+    """A resume after the node finished does not set the modes again (the checkpoint has them)."""
+    eng = Engine(_mk_cfg(tmp_path))
+    assert await eng._node_clarify({"topic": "x", "clarify_done": True}) == {}
 
 
 @pytest.mark.asyncio
-async def test_clarify_auto_falls_back_on_unparseable_llm_output(
-    tmp_path: Path,
-) -> None:
-    """If the LLM produces JSON that doesn't parse, we synthesize a
-    minimal default questionnaire so downstream nodes get something."""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "auto")
-    eng = Engine(cfg)
-    eng._client = type(
-        "Stub", (), {"chat": AsyncMock(return_value="not json at all — sorry about that")},
-    )()
-
-    patch = await eng._node_clarify({"topic": "some topic"})
-
-    # Even with garbage from the LLM, we still produce all 8 slots
-    # (7 originals + topic_shape).
-    assert set(patch["clarify_questions"]) == {
-        "comparative_baseline", "empirical_vs_theoretical",
-        "success_metric", "budget", "output_kinds", "study_depth",
-        "paper_venue", "topic_shape",
-    }
-    assert patch["clarify_done"] is True
+async def test_a_checkpoint_that_stopped_at_the_old_setup_questions_goes_on_without_answers(tmp_path: Path) -> None:
+    """A state an earlier FI left with its questions asked but not answered (``clarify_questions`` set, no
+    ``clarify_done``): the node does not ask them, sets the modes and the quest goes on."""
+    eng = Engine(_commissioned(tmp_path, method="analyze_data"))
+    patch = await eng._node_clarify({"topic": "x", "clarify_questions": {"budget": {"question": "?", "default": "1 h"}}})
+    assert patch["clarify_done"] is True and patch["no_simulation_resolved"] is True and "clarify_answers" not in patch
 
 
-# --- _node_clarify idempotency ----------------------------------------------
+def test_the_commission_s_title_is_the_study_s_title_and_the_config_s_title_wins(tmp_path: Path) -> None:
+    from tests.test_commission import _commission
 
-
-@pytest.mark.asyncio
-async def test_clarify_passes_through_when_already_done(
-    tmp_path: Path,
-) -> None:
-    """When ``clarify_done`` is True (e.g. resuming after a kill), the
-    node short-circuits and does NOT re-prompt the LLM. Idempotency is
-    what makes the SqliteSaver resume semantics work."""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "auto")
-    eng = Engine(cfg)
-    chat_mock = AsyncMock(return_value="{}")
-    eng._client = type("Stub", (), {"chat": chat_mock})()
-
-    patch = await eng._node_clarify({"topic": "x", "clarify_done": True})
-
-    assert patch == {}
-    chat_mock.assert_not_awaited()
-
-
-# --- _node_clarify mode='interactive' ---------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_clarify_interactive_raises_interrupt(
-    tmp_path: Path,
-) -> None:
-    """clarify_mode='interactive' calls LangGraph's ``interrupt()``.
-    Outside of a checkpointed graph context this raises ``GraphInterrupt``
-    (or its older alias) — which the CLI/GUI driver catches and
-    surfaces to the user. We assert the exception class is raised."""
-    from unittest.mock import AsyncMock
-
-    cfg = _mk_cfg(tmp_path, "interactive")
-    eng = Engine(cfg)
-    eng._client = type(
-        "Stub", (), {"chat": AsyncMock(return_value=json.dumps(_FAKE_QUESTIONS))},
-    )()
-
-    # `interrupt()` outside a checkpointed graph context raises a
-    # plain RuntimeError ("Called get_config outside of a runnable
-    # context"). Inside a compiled graph with an SqliteSaver it
-    # raises GraphInterrupt — but our unit-level call here is outside
-    # that context. Either case is acceptable; the assertion is that
-    # the node DOES pause-by-exception (not silently returns).
-    with pytest.raises((RuntimeError, BaseException)) as ei:
-        await eng._node_clarify({"topic": "EUV-MOR"})
-    name = type(ei.value).__name__
-    msg = str(ei.value).lower()
-    assert (
-        "Interrupt" in name
-        or "GraphInterrupt" in name
-        or "runnable context" in msg
-        or "interrupt" in msg
-    )
+    path = _commission(tmp_path / "order", title="Draining a tank")
+    assert Config(commission=path).title == "Draining a tank"
+    assert Config(commission=path, title="My own").title == "My own"
+    plain = _commission(tmp_path / "plain")
+    assert Config(commission=plain).title is None  # the existing fallback: the question
+    assert json.loads(Path(path).read_text(encoding="utf-8"))["title"] == "Draining a tank"
+    assert commission.method_of(commission.read(plain)) is None
