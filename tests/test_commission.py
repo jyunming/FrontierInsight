@@ -133,6 +133,17 @@ def test_a_valid_commission_has_no_problem(tmp_path: Path) -> None:
     assert commission.problems(_commission(tmp_path, known_values=[], no_known_values=True)) == []
 
 
+def test_a_number_json_dumps_writes_with_an_exponent_is_a_number(tmp_path: Path) -> None:
+    from core import commission
+
+    path = _commission(tmp_path, known_values=_known(tolerance=0.00005))
+    assert "5e-05" in path.read_text(encoding="utf-8"), "how another program's json.dumps writes it"
+    assert commission.problems(path) == []
+    as_yaml = tmp_path / "commission.yaml"
+    as_yaml.write_text("tolerance: 5e-05\nvalue: -2E3\nname: 1e5 cycles\n", encoding="utf-8")
+    assert commission.read(as_yaml) == {"tolerance": 5e-05, "value": -2000.0, "name": "1e5 cycles"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changes,named", [({"doubts": None}, "`doubts`"),
                                            ({"known_values": _known(passage="The drain constant is 0.25 per day, said nowhere")},

@@ -61,14 +61,24 @@ def _too_short(passage: str) -> int:
 
 
 def read(path: Path) -> dict[str, Any]:
+    """The commission at ``path``: JSON (as another program writes it), else YAML, where 5e-05 is a number too."""
     import yaml
 
+    class Loader(yaml.SafeLoader):  # YAML 1.1 reads an exponent without a dot (json.dumps's 5e-05) as text
+        pass
+
+    Loader.add_implicit_resolver("tag:yaml.org,2002:float", re.compile(r"^[-+]?\d+[eE][-+]?\d+$"), list("-+0123456789"))
     try:
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
     except OSError as e:
         raise CommissionRefused(f"the commission {Path(path)} cannot be read ({e.strerror or e})") from e
-    except yaml.YAMLError as e:
-        raise CommissionRefused(f"the commission {Path(path)} is not valid JSON") from e
+    try:
+        data = json.loads(text)
+    except ValueError:
+        try:
+            data = yaml.load(text, Loader=Loader)  # noqa: S506 - a SafeLoader with one more number form
+        except yaml.YAMLError as e:
+            raise CommissionRefused(f"the commission {Path(path)} is not valid JSON") from e
     if not isinstance(data, dict):
         raise CommissionRefused(f"the commission {Path(path)} is not a set of named keys")
     return data
