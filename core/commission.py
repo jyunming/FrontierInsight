@@ -20,9 +20,10 @@ RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exc
 GIVEN_STEPS = ("ideas", "literature", "studies")  # the --from steps the commission gives
 GIVEN_STAGES = {"ideate": "", "scope": "", "literature": "Reading the sources the commission gives."}
 MIN_TEXT_CHARS = 200  # the floor of a paper dropped in inputs/papers/
-# A number as a passage may write it: a sign, thousands separators, a bare leading point, an exponent (e-3, x 10^-3).
+# A number as a passage may write it: a sign, thousands separators, a bare leading point, an exponent (e-3, x 10^-3)
+# on the same line (a page header "2023" over a line "e20230014" is two numbers, not 2023e20230014).
 _NUMBER = re.compile(r"(?<![\w.])([-+−]?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.\d+|\d+)"
-                     r"(?:\s*(?:[eE]|[x×·]\s*10\^?)\s*([-+−]?\d+))?")
+                     r"(?:[^\S\r\n]*(?:[eE]|[x×·][^\S\r\n]*10\^?)[^\S\r\n]*([-+−]?\d+))?")
 
 
 class CommissionRefused(ValueError):
@@ -37,6 +38,17 @@ def _text(v: Any) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
+def number_value(m: re.Match[str]) -> float | None:
+    """The number a match of :data:`_NUMBER` writes, with its sign; ``None`` for one whose exponent no float holds
+    (it is no value of a commission)."""
+    sign, digits, exp = m.groups()
+    try:
+        found = float(digits.replace(",", "")) * 10.0 ** int((exp or "0").replace("−", "-"))
+    except OverflowError:
+        return None
+    return -found if sign in ("-", "−") else found
+
+
 def number_in_text(value: float, text: str) -> bool:
     """Whether ``text`` writes ``value`` with its sign (0.888 as 0.8880 or .888, 1200 as 1,200, 0.001 as 1e-3); a
     number that is one side of a fraction or ratio of two numbers written with "/" (1/2) is not that value, while a
@@ -45,9 +57,8 @@ def number_in_text(value: float, text: str) -> bool:
     for m in _NUMBER.finditer(text):
         if re.search(r"\d\s*/\s*$", text[:m.start()]) or re.match(r"\s*/\s*[-+−]?\.?\d", text[m.end():]):
             continue
-        sign, digits, exp = m.groups()
-        found = float(digits.replace(",", "")) * 10.0 ** int((exp or "0").replace("−", "-"))
-        if math.isclose(-found if sign in ("-", "−") else found, float(value), rel_tol=1e-9, abs_tol=0.0):
+        found = number_value(m)
+        if found is not None and math.isclose(found, float(value), rel_tol=1e-9, abs_tol=0.0):
             return True
     return False
 

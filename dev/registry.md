@@ -490,7 +490,7 @@ same PR that adds, splits or renames one.
 
 - `core/commission.py` — a study started from a commission file (`Config.commission`) instead of a topic. The file's
   rules live here only: `form_problems` (keys and types, a known value's `case`, a number tolerance, its value written
-  in its own passage, `number_in_text`, a passage as long as `_quote_in_source` needs), `source_problems` (each full
+  in its own passage, `number_in_text` / `number_value`: an exponent on the number's own line, none no float holds, a passage as long as `_quote_in_source` needs), `source_problems` (each full
   text exists, has 200 characters of text, holds its passage by `engine_base._quote_in_source`), `problems` /
   `validate` (both; what another program runs too). The door is `door`, called by `launch.py` before any `Engine` is
   built (`_commission_refusal` before the Axon sidecar for a new quest or a fleet; then a new quest validated, a resumed
@@ -508,7 +508,7 @@ same PR that adds, splits or renames one.
   cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
 - `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
   (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value: `excerpt` of the staged
-  full text (a little before the passage and what follows it; a text whose equations were lost is not judged), `withhold` (the value withheld from the request), one program
+  full text (a little before the passage and what follows it; a text whose equations were lost is not judged), `withhold` (the value withheld from the request in every form, its digits as the passage writes them: `written`), one program
   from `agents/known_value_program.md` (`program`: the fenced block, `oracle_challenge._FORBIDDEN`, 5-400 lines, no
   typed-in number near the value), run apart from the quest (`_run_in_env(apart=True)`), read from its `KNOWN_JSON`
   lines (`printed`) and judged (`judge`: two routes within 3x their combined error, each route within the larger of the

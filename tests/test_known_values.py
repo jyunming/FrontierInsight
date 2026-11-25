@@ -262,6 +262,24 @@ def test_the_value_is_masked_however_it_is_written_and_a_round_value_is_left() -
     assert known_values.withhold("a level of 0.5", 0.5) == "a level of 0.5"
 
 
+def test_a_page_header_is_not_read_as_a_huge_number_when_the_value_is_withheld() -> None:
+    assert known_values.withhold("2023\n\ne20230014", 1.01741) == "2023\n\ne20230014"
+    assert known_values.withhold("a drain of 2e400 or 1.0174 per hour", 1.01741) == f"a drain of 2e400 or {known_values.WITHHELD} per hour"
+
+
+def test_a_value_written_with_trailing_zeros_is_withheld_in_every_form() -> None:
+    kv = {"value": 0.4, "passage": "Table 2 gives a drain constant of 0.400 for the open tank."}
+    value = known_values.written(kv)
+    assert known_values.decisive(value) and known_values._half_unit(value) == 0.0005
+    shown = known_values.withhold("drains of 0.4, 0.40, 0.400, .4 and -0.4; not 0.41, 0.39 or 4.0", value)
+    assert shown.count(known_values.WITHHELD) == 5 and "0.41" in shown and "0.39" in shown and "4.0" in shown
+    assert known_values.written({"value": 0.5, "passage": "a level of 0.5 here"}) == known_values._decimal(0.5)
+    assert known_values.withhold("a level of 0.5", known_values.written({"value": 0.5, "passage": "0.5"})) == "a level of 0.5"
+    request = known_values.prompt(__import__("string").Template("$case | $passage | $excerpt"),
+                                  {**kv, "name": "drain", "case": "the open tank", "source": {}}, "the text: 0.400 and 0.4")
+    assert "0.4" not in request.replace(known_values.WITHHELD, ""), "the request never shows the value"
+
+
 @pytest.mark.asyncio
 async def test_a_program_that_could_not_be_asked_for_is_not_kept_so_the_next_pass_asks_again(tmp_path: Path) -> None:
     path = _commission(tmp_path / "order", 0.25, 0.01)

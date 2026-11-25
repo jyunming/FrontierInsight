@@ -35,33 +35,53 @@ Ask = Callable[[str, bool], Awaitable[str]]  # (prompt, second program) -> the r
 Execute = Callable[[Path], Awaitable[tuple[int, str, str]]]  # the program -> (returncode, stdout, stderr)
 
 
-def _decimal(value: float) -> Decimal:  # a commission's value is a finite number (core/commission.py)
-    return Decimal(repr(float(value))).normalize()
+def _decimal(value: float | Decimal) -> Decimal:  # a commission's value is a finite number (core/commission.py)
+    return value if isinstance(value, Decimal) else Decimal(repr(float(value))).normalize()
 
 
-def decisive(value: float) -> bool:
+def written(kv: dict[str, Any]) -> Decimal:
+    """A known value as its passage writes it: 0.400 keeps the three digits that the number read from the file (0.4)
+    lost; the number's own digits when the passage writes it with no more."""
+    value = float(kv["value"])
+    best = _decimal(value)
+    for m in _commission._NUMBER.finditer(str(kv.get("passage") or "")):
+        found = _commission.number_value(m)
+        if found is None or not math.isclose(abs(found), abs(value), rel_tol=1e-9, abs_tol=0.0):
+            continue
+        form = Decimal(m.group(2).replace(",", "")).scaleb(int((m.group(3) or "0").replace("−", "-")))
+        if len(form.as_tuple().digits) > len(best.as_tuple().digits):
+            best = form
+    return best
+
+
+def decisive(value: float | Decimal) -> bool:
     """Whether a number typed in a program can be told from a computed one: not 0 or 1, and two digits or more."""
     return abs(float(value)) not in (0.0, 1.0) and len(_decimal(value).as_tuple().digits) >= 2
 
 
-def _half_unit(value: float) -> float:
+def _half_unit(value: float | Decimal) -> float:
     """Half a unit of the value's last written digit (2.3846: 0.00005)."""
     return 0.5 * 10.0 ** int(_decimal(value).as_tuple().exponent)
 
 
-def withhold(text: Any, value: float) -> str:
-    """``text`` with every number that writes ``value`` (to two digits or more, either sign) replaced by
-    :data:`WITHHELD`; unchanged for a value that is not :func:`decisive` (withholding 0.5 would blank every 0.5)."""
+def withhold(text: Any, value: float | Decimal) -> str:
+    """``text`` with every number that writes ``value`` (either sign: the value itself in any form, 0.4 for 0.400, or
+    the value rounded to two digits or more) replaced by :data:`WITHHELD`; unchanged for a value that is not
+    :func:`decisive` (withholding 0.5 would blank every 0.5). ``value`` may be :func:`written`, whose digits count."""
     text = str(text or "")
     if not decisive(value):
         return text
 
     def one(m: re.Match[str]) -> str:
+        found = _commission.number_value(m)
+        if found is None:  # an exponent no float holds: not the value
+            return m.group(0)
         digits, exp = m.group(2).replace(",", ""), int((m.group(3) or "0").replace("−", "-"))
-        written = digits.replace(".", "").lstrip("0")
+        shown = digits.replace(".", "").lstrip("0")
         decimals = len(digits.split(".")[1]) if "." in digits else 0
-        near = abs(float(digits) * 10.0 ** exp - abs(float(value))) <= 0.5 * 10.0 ** (exp - decimals) * (1 + 1e-9)
-        return WITHHELD if len(written) >= 2 and near else m.group(0)
+        same = math.isclose(abs(found), abs(float(value)), rel_tol=1e-9, abs_tol=0.0)
+        near = abs(abs(found) - abs(float(value))) <= 0.5 * 10.0 ** (exp - decimals) * (1 + 1e-9)
+        return WITHHELD if same or (len(shown) >= 2 and near) else m.group(0)
 
     return _commission._NUMBER.sub(one, text)
 
@@ -81,14 +101,14 @@ def excerpt(text: str, passage: str) -> str:
 
 def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") -> str:
     """The request for the program (``agents/known_value_program.md``), with the value withheld everywhere in it."""
-    value = float(kv["value"])
+    value = written(kv)
     return template.substitute(
         name=withhold(kv.get("name"), value), case=withhold(kv.get("case"), value), passage=withhold(kv.get("passage"), value),
         title=withhold((kv.get("source") or {}).get("title"), value), excerpt=withhold(shown, value), line=LINE,
         again=again or "")
 
 
-def program(reply: Any, value: float, tolerance: float, given: str) -> tuple[str, str]:
+def program(reply: Any, value: float | Decimal, tolerance: float, given: str) -> tuple[str, str]:
     """``(the program, "")`` from the reply, or ``("", why)``: no fenced block, a forbidden call (reading or running
     anything, core/oracle_challenge.py), under 5 or over 400 lines, or a number within the tolerance of a
     :func:`decisive` value typed in that the request did not give (``given``: the withheld_text text it was shown)."""
@@ -106,7 +126,7 @@ def program(reply: Any, value: float, tolerance: float, given: str) -> tuple[str
         except SyntaxError as e:
             return "", f"the program is not valid Python ({e.msg}, line {e.lineno})"
         typed = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, (int, float))
-                 and not isinstance(n.value, bool) and abs(abs(float(n.value)) - abs(value)) <= tolerance
+                 and not isinstance(n.value, bool) and abs(abs(float(n.value)) - abs(float(value))) <= tolerance
                  and not _commission.number_in_text(n.value, given)]
         if typed:
             return "", "the program types in a number close to the value withheld; it must compute the value"
@@ -138,7 +158,7 @@ def _g(x: float) -> str:
     return f"{x:.6g}"
 
 
-def judge(routes: list[dict[str, Any]], value: float, tolerance: float) -> tuple[str, str]:
+def judge(routes: list[dict[str, Any]], value: float | Decimal, tolerance: float) -> tuple[str, str]:
     """``(verdict, why)``: ``match``, ``no_match`` or ``cannot_judge``. Two routes of one program disagree when they are
     further apart than three times their combined error (plus half a unit of the value's last digit); a route reproduces
     the value within the larger of the tolerance and three times its own error. One route alone is a match only for a
@@ -147,11 +167,11 @@ def judge(routes: list[dict[str, Any]], value: float, tolerance: float) -> tuple
         if abs(a["value"] - b["value"]) > 3 * math.hypot(a["error"], b["error"]) + _half_unit(value):
             return "no_match", (f"its {a['route']} route gives {_g(a['value'])} (error {_g(a['error'])}) and its "
                                 f"{b['route']} route {_g(b['value'])} (error {_g(b['error'])}), further apart than their errors")
-    off = [r for r in routes if abs(r["value"] - value) > max(tolerance, 3 * r["error"])]
+    off = [r for r in routes if abs(r["value"] - float(value)) > max(tolerance, 3 * r["error"])]
     if off:
         r = off[0]
         return "no_match", (f"its {r['route']} route gives {_g(r['value'])} (error {_g(r['error'])}), not "
-                            f"{_g(value)} within {_g(tolerance)}")
+                            f"{_g(float(value))} within {_g(tolerance)}")
     said = ", ".join(f"{r['route']} {_g(r['value'])}" for r in routes)
     if len(routes) < 2 and not decisive(value):
         return "cannot_judge", f"one route only ({said}), and the value is too round to tell a computed number from a typed one"
@@ -181,7 +201,7 @@ def _source_text(quest_root: Path, name: str) -> str:
 async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any, ask: Ask, execute: Execute,
                    second: bool) -> dict[str, Any]:
     """One program for one value: asked (once more, with the reason, when it cannot be used), run, and judged."""
-    value, tolerance = float(kv["value"]), float(kv["tolerance"])
+    value, tolerance = written(kv), float(kv["tolerance"])
     given = " ".join(withhold(kv.get(k), value) for k in ("case", "passage")) + " " + withhold(shown, value)
     note = _SECOND if second else ""
     script, why = "", ""

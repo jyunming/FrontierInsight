@@ -637,6 +637,16 @@ def test_a_number_that_is_one_side_of_a_fraction_is_not_the_value() -> None:
     assert commission.number_in_text(10, "a flow of 10 / min at rest")
 
 
+def test_an_exponent_is_read_on_its_own_line_only_and_one_no_float_holds_is_no_number() -> None:
+    from core import commission
+
+    header = "Revista, vol. 45, e20230014, 2023\n\ne20230014-4\nThe period of a made-up swing"
+    assert commission.number_in_text(2023, header), "the year of a page header is the year, not 2023e20230014"
+    assert not commission.number_in_text(1.01741, header)
+    assert commission.number_in_text(0.0015, "a drain of 1.5 e-3 per hour") and commission.number_in_text(0.002, "2 x 10^-3")
+    assert not commission.number_in_text(2.0, "a drain of 2e400 per hour"), "an exponent no float holds is no number"
+
+
 def _staged_and_read(tmp_path: Path, files: tuple[str, ...]) -> tuple[dict[str, str], int]:
     """The commission's sources at ``files`` staged into a quest: their staged names, and how many the reader read."""
     import logging
