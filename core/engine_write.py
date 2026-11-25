@@ -2929,8 +2929,7 @@ class WriteStageMixin:
 
         The render is ``PaperGenerator._compile_pdf``, so the template, the
         pandoc flags and the page-limit layout are the final paper's, in the
-        venue the final render uses (the clarify ``paper_venue`` when the
-        config keeps ``generic``). It runs in ``.fi/page_check/`` with the
+        venue the final render uses. It runs in ``.fi/page_check/`` with the
         quest's figures copied beside the source; nothing is written to the
         quest folder itself. Returns ``None``, with one warning per quest, when
         the pages cannot be counted: the paper renders through HTML
@@ -2947,10 +2946,6 @@ class WriteStageMixin:
                 "paper_style is briefing, which renders through HTML, not the LaTeX templates"
             )
         fmt = output.paper_format
-        answers = state.get("clarify_answers")
-        venue = answers.get("paper_venue") if isinstance(answers, dict) else None
-        if fmt == DEFAULT_PAPER_FORMAT and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
-            fmt = venue
         config = self.config.model_copy(update={"output": output.model_copy(update={
             "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
         })})

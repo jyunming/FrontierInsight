@@ -119,7 +119,7 @@ def _review_engine(tmp_path: Path, *, gate: str = "off") -> Engine:
         topic="t", title="t",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            clarify_mode="off", review_loop=True, max_iterations=2,
+            review_loop=True, max_iterations=2,
             human_feedback_gate=gate,  # type: ignore[arg-type]
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),

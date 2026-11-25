@@ -39,7 +39,7 @@ def _mk_engine(tmp_path: Path, *, node_models=None, provider_model="gpt-5") -> E
             node_models=node_models,
         ),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
+            max_iterations=1, review_loop=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
@@ -479,7 +479,7 @@ async def test_engine_hands_the_client_only_what_the_user_configured(
         topic="fallback wiring",
         title="fw",
         provider=ProviderConfig(name="codex_cli", model="gpt-5-codex", **provider_kw),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

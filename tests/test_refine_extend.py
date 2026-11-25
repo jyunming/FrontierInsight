@@ -25,7 +25,7 @@ STATE: dict[str, Any] = {
 def _engine(tmp_path: Path) -> Engine:
     return Engine(Config(
         topic="t", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(clarify_mode="off", review_loop=True, max_iterations=2),  # type: ignore[arg-type]
+        engine=EngineConfig(review_loop=True, max_iterations=2),  # type: ignore[arg-type]
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),
     ))

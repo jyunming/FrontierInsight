@@ -13,7 +13,7 @@ from __future__ import annotations
 # Every module-level name of the engine (imports, constants, QuestState, helpers) lives in core/engine_base.py; they
 # are imported here by name so that `from core.engine import X` and `core.engine.X` read the same objects.
 from .engine_base import (  # noqa: F401
-    AgentBuildMixin, Any, AsyncProcessTree, AsyncSqliteSaver, Awaitable, BridgeError, Callable, ClarifyCallback,
+    AgentBuildMixin, Any, AsyncProcessTree, AsyncSqliteSaver, Awaitable, BridgeError, Callable,
     Command, Config, Counter, DEFAULT_PAPER_FORMAT, DockerLimits, END, ExecutionResult, 
     FallbackLLMClient, GraphBubbleUp, GraphInterrupt, HumanFeedbackCallback, Knowledge,
     LLMClient, ModelAnswerTruncated, ModelUnavailable, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_KINDS,
@@ -51,7 +51,7 @@ from .engine_base import (  # noqa: F401
     _SAME_STATEMENT_SHARE, _SAME_STATEMENT_WORDS, _SCHEMA_RETRY_ASKS, _SEARCH_ASKED, _SEARCH_ASKS, _SEARCH_CALLS,
     _SEARCH_CALLS_PER_ASK, _SEARCH_PROTOCOL, _SEARCH_REFLECT_ANALYSIS, _SEARCH_REFLECT_SIMULATE, _SEARCH_REFUSED,
     _SEARCH_SIZE_KEYS, _SEEDING_CALLS, _SEED_KEYWORDS, _SEED_REPAIR_DIRECTIVE, _SENTENCE_END_RE, _SETTING_FIELDS,
-    _SIMULATABILITY_LEAD, _SIZE_PARTS, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE,
+    _SIZE_PARTS, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE,
     _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, 
     _SPACED_HYPHEN_BREAK_RE, _SPLIT_PROTOCOL, _SPLIT_REFLECT_ANALYSIS, _SPLIT_REFLECT_SIMULATE, _SPLIT_REPLY_REMINDER,
     _SPLIT_RERUN_NOTE, _SPREAD, _SPREAD_IN_PARENS_RE, _SPREAD_RE, _STATE_TEXT_CHARS, _STOPPED_BEFORE_THE_STUDY,
@@ -68,11 +68,11 @@ from .engine_base import (  # noqa: F401
     _checked, _ci_bounds, _citation_counts, _citation_labels, _citations_unchecked, _cite_labels, _citing_sentences,
     _claim_cell, _claim_choice, _claim_choice_problem, _claim_code_block, _claim_code_order,
     _claim_faults_from_sources, _claim_fi_record_block, _claim_findings_parts, _claim_keys, _claim_method_block,
-    _claim_result_units, _claim_results_block, _claim_source_block, _clean_title, _close_quest_logger, _code_delta,
+    _claim_result_units, _claim_results_block, _claim_source_block, _close_quest_logger, _code_delta,
     _code_findings, _code_layout, _code_names_replicate_seed, _code_project, _code_reach, _code_review,
     _coerce_dep_list, _compact_result_json_block, _confirmations, _constant_expr, _content_quality, _content_stems,
     _contract, _contract_parts, _crash_kind, _criteria, _cross_check_items, _cs, _declare_scope, _declared_metrics,
-    _default_clarify_questions, _deps_from_tail, _deps_to_warmup_modules, _depth_change, _design_parts,
+    _deps_from_tail, _deps_to_warmup_modules, _depth_change, _design_parts,
     _design_parts_listing, _disclosure, _discover_skill_names, _doc_dedup_keys, _dotted_name, _drawn_metrics,
     _elide_value_lists, _entries_as_written, _entry_identities, _equation_tests, _evidence, _evidence_gate_rule,
     _experiment_deps, _extend_directive, _extension_values, _extract_pdf, _extract_result_json, _fault_from_record,
@@ -92,8 +92,8 @@ from .engine_base import (  # noqa: F401
     _in_run, _ingest_user_dropped_papers, _input_numbers, _is_audience_appropriate,
     _is_bot_check_title, _is_citable, _is_degenerate_result, _is_fatal_provider_error, _is_metric_key,
     _is_not_a_paper, _is_os_environ, _is_preliminary_memory, _is_replicate_seed_literal,
-    _is_web_page, _item_content, _json_file_is_answer, _labelled_sources, _last_error_line,
-    _latex_esc, _layout_views, _leading_simulatability_word, _ledger, _list_user_data_files, _lit_query,
+    _is_web_page, _item_content, _labelled_sources, _last_error_line,
+    _latex_esc, _layout_views, _ledger, _list_user_data_files, _lit_query,
     _literature_entry, _literature_in_citation_order, _literature_key, 
     _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
     _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mask_prose, _matching_brace_end, _math_folded,
@@ -126,9 +126,8 @@ from .engine_base import (  # noqa: F401
     _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures,
     _script_has_random_source, _script_reads_replicate_seed, _script_reply,
     _second_impl, _seed_label, _seeds_only_constants, _series_at,
-    _set_model_call_archive, _shown_reach, _shrink_json_value, _simulatability_answer,
-    _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_text, _spaced_pattern,
-    _spell_out_title_options, _split_figure_readings, _split_run, _stamp_figure_credit, _stats, _step_passages,
+    _set_model_call_archive, _shown_reach, _shrink_json_value, _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_text, _spaced_pattern,
+    _split_figure_readings, _split_run, _stamp_figure_credit, _stats, _step_passages,
     _stop_power, _strip_outer_fence, _strip_plan_numbers, _strip_source_lists, _stripped, _study_size,
     _summarise_long_arrays, _take_out_unpointed, _take_refine_points, _take_refine_why,
     _temperature_for_node, _thin_source, _thinking, _title_only_sentences, _todo,
@@ -254,7 +253,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # Where .fi leads now (it may be kept elsewhere through a link): the improve loop touches its own copies only
         # while .fi still leads here, so a run that moves .fi cannot steer those writes (core/improve.py:own_dir).
         self._fi_real: Path = Path(os.path.realpath(self.fi_dir))  # realpath: a link loop does not raise
-        self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
         self._log = _quest_logger(self.quest_id, self.fi_dir)
         self.executor = make_executor(
@@ -349,7 +347,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     async def run(
         self,
         *,
-        clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
         reopen: bool = False,
         from_step: str | None = None,
@@ -359,14 +356,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
         ``from_step`` (see ``core/rerun_from.py``) runs it again from that step. The steps up to the design replace the
         frozen protocol, so they need ``approved_by`` (``--approve-as <you>``); without it nothing is changed.
-
-        ``clarify_callback`` is called only when ``engine.clarify_mode``
-        is ``"interactive"`` AND the clarify node fires an
-        ``interrupt()``. The callback receives the questions dict and
-        must return the answers dict; the engine then resumes the graph
-        with ``Command(resume=answers)``. When the callback is None and
-        clarify is interactive, the engine raises — set the mode to
-        ``"auto"`` or ``"off"`` for headless runs.
 
         The entire body is wrapped in a try/finally that calls
         ``_close_quest_logger(self.quest_id)`` on every exit path —
@@ -400,8 +389,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # before then is an earlier run's (launch.py prints only this run's).
         self._step_retries: dict[str, tuple[str, int]] = {}
         self._run_started_at = time.time()
-        self._clarify_answerable = (
-            clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
@@ -730,10 +717,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     except OSError:
                         pass
 
-                    # Run, handling interrupts as they fire. Two kinds:
-                    #   (a) clarify-interactive — pause to collect answers
-                    #       via clarify_callback, then resume the graph.
-                    #   (b) wait_for_data (no-simulation mode) — pause and
+                    # Run, handling interrupts as they fire. The one that matters most:
+                    #   wait_for_data (no-simulation mode) — pause and
                     #       EXIT cleanly with rc=0. User drops files
                     #       into <quest_root>/data/, then re-runs
                     #       `fi --resume <quest_id>` which lands here
@@ -1003,102 +988,12 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                 self.quest_id, self.quest_id, self.quest_id,
                             )
                             break
-                        # Clarify node raised `interrupt(...)`. Resolve answers
-                        # via (1) the in-process callback, (2) a pre-staged
-                        # on-disk answer file, or (3) clean pause-exit — the
-                        # same three-path pattern the human-review gate uses, so
-                        # a subprocess- / CLI-launched quest (no callback) pauses
-                        # cleanly instead of crashing.
-                        questions = intr_value.get("clarify_questions", {})
-                        clarify_answer_path = self.fi_dir / "clarify_answer.json"
-                        if clarify_callback is not None:
-                            try:
-                                self._log.info(
-                                    "[run] clarify interrupt fired with %d questions; "
-                                    "invoking callback", len(questions),
-                                )
-                                if self.human_feedback_timeout_s > 0:
-                                    answers = await asyncio.wait_for(
-                                        clarify_callback(questions),
-                                        timeout=self.human_feedback_timeout_s,
-                                    )
-                                else:
-                                    answers = await clarify_callback(questions)
-                                self._clear_clarify_snapshot()
-                                # LangGraph reads an empty dict as an (empty) map of interrupt ids, so nothing is
-                                # resumed and the pause re-fires forever; an empty answer is wrapped and the node
-                                # fills in the defaults.
-                                payload = Command(resume={"clarify_answers": answers or {}})
-                                continue
-                            except asyncio.TimeoutError:
-                                if _json_file_is_answer(clarify_answer_path):
-                                    # An answer written just as the wait ran out is used below, never dropped.
-                                    pass
-                                elif self.config.pauses.clarify is None:
-                                    # Nobody set "ask": an unattended start must not stall, so answer for itself.
-                                    self._log.warning(
-                                        "[run] nobody answered the setup questions within %ss — using the defaults",
-                                        self.human_feedback_timeout_s,
-                                    )
-                                    self._clear_clarify_snapshot()
-                                    payload = Command(resume={"clarify_answers": {}})
-                                    continue
-                                self._log.warning(
-                                    "[run] clarify callback timed out after %ss — "
-                                    "falling back to answer-file / pause-exit",
-                                    self.human_feedback_timeout_s,
-                                )
-                            except BridgeError as e:
-                                # The person dismissed the VS Code prompt: carry on with the defaults.
-                                self._log.warning("[run] setup questions dismissed (%s) — using the defaults", e)
-                                self._clear_clarify_snapshot()
-                                payload = Command(resume={"clarify_answers": {}})
-                                continue
-                        if clarify_answer_path.is_file():
-                            try:
-                                answers = json.loads(
-                                    clarify_answer_path.read_text(encoding="utf-8"),
-                                )
-                            except (OSError, json.JSONDecodeError) as e:
-                                # A corrupt answer file would re-fail on every
-                                # resume and strand the quest — drop it so the
-                                # user can re-stage a fresh answer.
-                                self._log.warning(
-                                    "[run] couldn't read %s: %r — discarding it "
-                                    "and pausing instead", clarify_answer_path, e,
-                                )
-                                try:
-                                    clarify_answer_path.unlink(missing_ok=True)
-                                except OSError:
-                                    pass
-                                answers = None
-                            if isinstance(answers, dict) and answers:
-                                self._log.info(
-                                    "[run] consuming pre-staged clarify answers",
-                                )
-                                self._clear_clarify_snapshot()
-                                payload = Command(resume=answers)
-                                continue
-                        # Genuine pause (no callback, no staged answer): persist
-                        # the questions so the web can render a form for this
-                        # subprocess quest. Only here — never on the resume path
-                        # above — so a consumed answer isn't re-shown as pending.
-                        try:
-                            self.fi_dir.mkdir(parents=True, exist_ok=True)
-                            (self.fi_dir / "clarify_questions.json").write_text(
-                                json.dumps(questions, indent=2) + "\n",
-                                encoding="utf-8",
-                            )
-                        except OSError as e:
-                            self._log.debug(
-                                "[clarify] questions snapshot write failed: %r", e,
-                            )
+                        # Any other stop that waits for the person (no node asks a question now): exit cleanly, as the
+                        # stops above do; NEXT_STEP.md, when the node wrote one, says what to do.
                         data_paused = True
                         self._log.info(
-                            "[FI] paused for clarify. Answer in the web / VSCode "
-                            "panel, or write your answers into %s and re-run "
-                            "`fi --resume %s`.",
-                            clarify_answer_path, self.quest_id,
+                            "[FI] paused: %s. See NEXT_STEP.md, then run `fi --resume %s`",
+                            descriptor.get("headline") or descriptor.get("kind") or "action needed", self.quest_id,
                         )
                         break
                     # No more of the quest's code runs in this call: the values its tests compare with are written now.
@@ -1201,13 +1096,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
             # snapshots so a finished quest never shows a stale "Action needed"
-            # (a clarify node re-executes on resume, re-writing its snapshot).
+            # (a node that paused re-executes on resume, re-writing its snapshot).
             for p in (
                 self.quest_root / "NEXT_STEP.md",
                 self.fi_dir / "pause.json",
-                self.fi_dir / "clarify_questions.json",
-                self.fi_dir / "clarify_answer.json",
-                self.fi_dir / self._CLARIFY_ASKED,
                 # The human-review snapshot too — the node re-writes it on the
                 # resume pass, so a finished quest could otherwise look like it's
                 # still waiting for review on the dashboard / quest page.
@@ -1754,15 +1646,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             elif summary and not summary.startswith("(") and not give_up:
                 self._claim(node, "execute_reflect", "repair", summary,
                             decision=f"repaired the script (attempt {attempt})")
-        elif node == "clarify":
-            questions = out.get("clarify_questions") if isinstance(out.get("clarify_questions"), dict) else {}
-            answers = out.get("clarify_answers") if isinstance(out.get("clarify_answers"), dict) else {}
-            for slot, q in questions.items():
-                if not isinstance(q, dict) or not isinstance(q.get("reason"), str):
-                    continue
-                answered = answers.get(slot)
-                self._claim(node, "clarify", f"setup/{slot}", q["reason"], decision=str(q.get("default") or ""),
-                            **({"answer_used": str(answered)} if answered not in (None, "") and str(answered) != str(q.get("default")) else {}))
 
     def _progress(self, text: str) -> None:
         """One line for whoever is watching the quest, not debugging it: the CLI console, VS Code's chat, and the web
@@ -2151,7 +2034,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         return [_rerun_from.step_info(step, reached=step in reached) for step in _rerun_from.STEPS]
 
     async def rerun_no_simulation(self) -> bool:
-        """Whether this quest takes the no-simulation path: what the clarify node resolved into the checkpoint, or what
+        """Whether this quest takes the no-simulation path: what the first node resolved into the checkpoint, or what
         the config says (a survey or a local-data analysis has no experiment either). No model call, nothing written."""
         cfg = self.config
         if cfg.engine.no_simulation or cfg.engine.survey_mode or cfg.engine.analyze_local_first:
@@ -2442,10 +2325,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         route to ``wait_for_data`` (the person's own data in ``data/``),
         then ``data_load`` → ``analyze``.
 
-        ``no_simulation_resolved`` is set by the clarify node from
-        either the ``engine.no_simulation`` YAML flag (wins) or the
-        ``empirical_vs_theoretical == 'empirical'`` clarify answer.
-        See ``_resolve_no_simulation_from_clarify``.
+        ``no_simulation_resolved`` is set by the first node (``clarify``) from the commission's ``method``.
 
         Note: this routing decision is made AFTER design runs, so the
         no-simulation flow still benefits from the LLM's experimental
@@ -2483,10 +2363,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         authoritative — routing is NOT overridden here; this only makes
         the divergence visible in run.log.
 
-        Distinct from ``_log_topic_shape_mismatch`` (which fires earlier,
-        at clarify time, and only for non-experimental shape + SIMULATE):
-        this is bidirectional and keyed on the richer
-        ``ResearchProtocol.topic_type``, so it also catches a future
+        Bidirectional and keyed on
+        ``ResearchProtocol.topic_type``, so it also catches an
         ``engineering`` topic that resolved to NO_SIMULATION. Pure + no
         LLM call; fail-open (never blocks routing on its own error)."""
         try:
@@ -2499,8 +2377,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._log.warning(
             "[route] topic_type=%r expects the %s path but the quest "
             "resolved to the %s path. Routing follows the resolved "
-            "no_simulation flag (config/clarify wins); set "
-            "``simulatability`` in clarify_overrides to align. Declared "
+            "no_simulation flag (the commission's ``method`` sets it); change "
+            "``method`` in the commission to align. Declared "
             "source policy for this type: %s.",
             protocol.topic_type, expected, actual_path, protocol.source_policy,
         )
@@ -3441,11 +3319,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     #: A reply up to this long is shown back with the request for a re-answer, so the model can restate what it said; a
     #: longer one (a real Haiku audit reply was 67,963 characters) is not repeated, and the request is answered afresh.
     _REANSWER_ECHO_CHARS = 12000
-
-    # The setup questions the clarify node put to the person, kept across its pause (see _node_clarify_questions).
-    # Not the web form's ``clarify_questions.json``: that one is cleared as soon as an answer is taken, before the
-    # node runs again, and its presence means "a form is waiting".
-    _CLARIFY_ASKED = "clarify_asked.json"
 
     _RUN_DATA_SUFFIXES = frozenset({
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",

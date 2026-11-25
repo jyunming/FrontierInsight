@@ -61,7 +61,6 @@ def cfg(tmp_path: Path) -> Config:
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=2, review_loop=False,
-            clarify_mode="off",
             exec_reflect_max_iterations=3,
             enable_analyze_reroute=True,
             # Default gate is "after_review"; auto-accept finalises

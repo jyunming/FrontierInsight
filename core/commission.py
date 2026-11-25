@@ -22,6 +22,10 @@ RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exc
 GIVEN_STEPS = ("literature",)  # the --from steps the commission gives
 GIVEN_STAGES = {"literature": "Reading the sources the commission gives."}
 MIN_TEXT_CHARS = 200  # the floor of a paper dropped in inputs/papers/
+# How the study gets its evidence (the commission's ``method``): ``simulate`` (the default when it is absent) runs an
+# experiment of FI's own; ``analyze_data`` analyses the data the person puts in data/; ``review_literature`` runs no
+# experiment and needs no data. Each maps to (no experiment, no data) flags of the run.
+METHODS = ("simulate", "analyze_data", "review_literature")
 # A number as a passage may write it: a sign, thousands separators, a bare leading point, an exponent (e-3, x 10^-3)
 # on the same line (a page header "2023" over a line "e20230014" is two numbers, not 2023e20230014).
 _NUMBER = re.compile(r"(?<![\w.])([-+−]?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.\d+|\d+)"
@@ -105,9 +109,29 @@ def read(path: Path) -> dict[str, Any]:
     return data
 
 
+def method_of(data: dict[str, Any]) -> str | None:
+    """The commission's ``method`` as written (None when it has none, or it is not a name FI knows)."""
+    method = data.get("method")
+    return method if isinstance(method, str) and method in METHODS else None
+
+
+def modes(data: dict[str, Any]) -> tuple[bool, bool] | None:
+    """What the commission's ``method`` sets for the run: ``(no_simulation, survey_mode)``, or None when it names no method.
+    ``review_literature`` is a survey, which is also a study with no experiment."""
+    method = method_of(data)
+    if method is None:
+        return None
+    return method != "simulate", method == "review_literature"
+
+
 def form_problems(data: dict[str, Any]) -> list[str]:
     """What is missing or of the wrong type in the commission ``data``, one plain sentence each."""
     out = [f"the commission has no `{k}` (a sentence)" for k in ("question", "scope") if not _text(data.get(k))]
+    if "method" in data and method_of(data) is None:
+        out.append(f"`method` is {data['method']!r}; it is one of {', '.join(f'`{m}`' for m in METHODS)} "
+                   "(or leave it out to run an experiment)")
+    if "title" in data and not _text(data["title"]):
+        out.append("`title` is empty or not text (a short phrase; leave it out to use the question)")
     limits = data.get("limits") if isinstance(data.get("limits"), dict) else None
     if limits is None:
         out.append("the commission has no `limits` (`hours` and `model_calls`)")
@@ -322,10 +346,34 @@ def _started(quest_root: Path) -> bool:
     return any(p.is_file() for p in (root / ".fi" / "state.sqlite", root / ".fi" / "audit.jsonl", root / "plan.md"))
 
 
-def door(path: Path | None, quest_root: Path | None, *, topic: Any = None) -> None:
+def mode_problem(path: Path, asked: Any) -> str | None:
+    """Why a config's ``engine.no_simulation`` / ``engine.survey_mode`` cannot go with the commission at ``path``, or None:
+    neither is on, or the commission's ``method`` says the same. ``asked`` is the config's ``engine`` section (a mapping)
+    or anything with those two attributes; a mode the config turns on is the commission's to say, not the config's."""
+    def on(name: str) -> bool:
+        return (asked.get(name) if isinstance(asked, dict) else getattr(asked, name, None)) is True
+
+    no_sim, survey = on("no_simulation"), on("survey_mode")
+    if not (no_sim or survey):
+        return None
+    key = "engine.survey_mode" if survey else "engine.no_simulation"
+    say = "review_literature" if survey else "analyze_data"
+    method = method_of(read(path))
+    if method is None:
+        return (f"the config sets `{key}: true`, and the commission says how the study is done; put `method: {say}` in "
+                "the commission (and remove the line from the config)")
+    if (survey and method != "review_literature") or (no_sim and method == "simulate"):
+        return (f"the config sets `{key}: true` but the commission says `method: {method}`; the commission decides, so "
+                "remove the line from the config or change the commission's method")
+    return None
+
+
+def door(path: Path | None, quest_root: Path | None, *, topic: Any = None, asked: Any = None) -> None:
     """Before any model call: a new quest's commission is validated; a resumed quest's must be the one it began with.
     A study without a commission is refused, new or resumed (``Engine`` itself does not refuse: every start path calls
-    this first), and so is a config whose ``topic`` is not the commission's question (:func:`topic_problem`)."""
+    this first), and so is a config whose ``topic`` is not the commission's question (:func:`topic_problem`) or whose
+    ``engine`` section (``asked``) turns on a mode the commission's ``method`` does not give (:func:`mode_problem`;
+    a new quest only, since a quest already begun has its modes in its checkpoint)."""
     had = recorded_sha(quest_root) if quest_root is not None else None
     name = Path(quest_root).name if quest_root is not None else ""
     if had is None and path is None:
@@ -358,6 +406,8 @@ def door(path: Path | None, quest_root: Path | None, *, topic: Any = None) -> No
     if path is not None and had is None:
         validate(path)
     if path is not None and (why := topic_problem(path, topic)) is not None:
+        raise CommissionRefused(why)
+    if path is not None and had is None and (why := mode_problem(path, asked)) is not None:
         raise CommissionRefused(why)
 
 
@@ -469,6 +519,13 @@ TEMPLATE = """\
 
 # The research question, in one sentence.
 question: ""
+
+# A short phrase to call the study by; leave it out and the question is used.
+# title: ""
+
+# How the study gets its evidence: simulate (FI runs an experiment; the default), analyze_data (you put the data in
+# the study's data/ folder) or review_literature (no experiment and no data: a review of the sources).
+method: simulate
 
 # What the study covers and what it leaves out: the cases, the ranges of the parameters, the methods compared.
 scope: ""

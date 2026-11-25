@@ -68,7 +68,7 @@ def _doc(content: str = POISON, **meta) -> RetrievedDoc:
 def _config(tmp_path: Path, **engine) -> Config:
     return Config(
         topic=TOPIC, title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off",
+        engine=EngineConfig(max_iterations=1, review_loop=False,
                             claim_grounding=True, **engine),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, web_search=False, passage_ranking="lexical"),

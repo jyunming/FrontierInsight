@@ -43,11 +43,11 @@ It can go back at several points, each bounded: a crashed script is fixed and ru
 
 ### Per-quest LLM call breakdown
 
-A single `/start` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; the engine settings of those runs — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
+A single `/start` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; the engine settings of those runs — a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
 
 | Node | Calls | Notes |
 |---|---|---|
-| `clarify` | 0–1 | One call unless `pauses.clarify: off`. It asks what you want to see and proposes titles. |
+| `clarify` | 0 | No model call: the first node sets from the commission's `method` whether the study runs an experiment, analyses your data or reviews the sources. |
 | `source_router` | 0, or 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
@@ -304,7 +304,7 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--memory-cap-mb N` | fleet | throttle new quest starts when RSS exceeds N MB |
 | `--profile` | quest | dump per-quest viztracer trace if viztracer installed |
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
-| `--interactive` | quest | talk the topic over first: read the clarify answers (what you want to see, the title, ...) from stdin. Without it a headless run lets the agent answer for itself |
+| `--interactive` | quest | answer the review pause (accept / reject / refine) in the terminal instead of with `--resume`. It asks no setup questions: the commission says what the study is |
 | `--resume <quest_id>` | quest | re-enter a checkpoint. Without `--config` it uses the `config.yaml` saved in the quest's folder; the id may be the short id, and the quest may be one started in another folder (see [Finding a quest from any folder](#finding-a-quest-from-any-folder)) |
 | `--quests` | list | every quest FI has run on this computer, from any folder (`fi tools quests`); `--prune` first forgets those whose folder is gone, `--json` prints JSON |
 | `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
@@ -324,6 +324,8 @@ Every study starts from a commission: one YAML file that says what FI is asked t
 | Key | What goes there |
 |---|---|
 | `question` | the research question, one sentence (it becomes the study's topic) |
+| `title` | optional: a short phrase to call the study by (a `title:` in the config wins); left out, the question is used |
+| `method` | how the study gets its evidence: `simulate` (FI runs an experiment; the default when left out, so every earlier commission stays valid), `analyze_data` (you put the data in the study's `data/` folder) or `review_literature` (no experiment and no data: a review of the sources you give). `fi check` refuses any other word. A config that sets `engine.no_simulation: true` or `engine.survey_mode: true` is refused unless the commission's `method` says the same |
 | `scope` | what the study covers and leaves out |
 | `limits` | `hours` and `model_calls` the study may use |
 | `known_values` | values already known, each with `name`, `value`, `tolerance`, `case` (the situation it applies to), `passage` (the sentence of the source that states it) and `source` (`title`, `file`: the full text as .pdf, .md or .txt, and `doi` when it has one). A bound ("at least 0.9") is not a known value: write it as a success or failure condition |
@@ -419,7 +421,6 @@ provider:
   # names. Reviewer-panel personas are routed via
   # `review_panel.<persona>`; the moderator via `review_moderator`.
   node_models:
-    clarify:       gpt-4o-mini
     write:         claude-3-5-sonnet
     review:        gpt-5
     oracle_review: claude-3-5-sonnet   # the second reading of the plan's checks; under research a model other than the plan's
@@ -460,7 +461,6 @@ engine:
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
   phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV table of at least 40 rows, in inputs/data/ or, for a quest that analyses data, data/; whole subjects/sites or the latest period, decided by the plan's `protocol.split`, plan.md's line "Rows that belong together:", or the table's columns; a research quest asks when it cannot tell), or else on new random seeds; only that confirm run can be publication-ready; costs one more full run (a data quest: one more reading of the held-back rows). Without a container the held-back rows are kept encrypted and the code is checked for paths out of the quest folder. Off here (the default profile); on by default under rigor_profile: research, where `phased: false` keeps it off and plan.md says the result is not confirmed on unseen data. A survey or --analyze says it does not apply. Each version is confirmed once: a retry keeps both verdicts and a failure counts; a version changed after its confirm run (improve, a repair, a re-run the review asked for) is confirmed on its own; every verdict is kept in .fi/confirmations.jsonl. (see docs/rigor.md)
   one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
-  # clarify_mode:                  # old name of pauses.clarify (off | auto | interactive = ask). Left out (the default), the quest asks its setup questions when someone can answer while it runs, else answers them itself; see Setup questions below
   exec_reflect_max_iterations: 3    # execute-repair loop bound
   pipeline_gate: false              # experimental, default off: true keeps a change to the code (a repair of a reader's finding, a crash repair, a speed-up) only if the analysis still runs from start to end on a small copy of the results the quest already recorded, and runs the first version the same way before the long run. It protects a quest that already has recorded results (a redesign, a resume, a re-implementation), not a first design; the outcome is in .fi/pipeline_gate.json
   improve_rounds: 3                 # after a run, when a check of correctness in the plan is not met: how many times (in the whole quest; a rerun --from the run or earlier starts again) FI may change the simulation, one small change at a time, keeping a change only when no check got worse by more than its own tolerance; a kept version runs once more in full. 0 = off. Under rigor_profile: research a change that made a check worse stops the quest for you
@@ -474,8 +474,8 @@ engine:
     - statistician
     - devil_advocate
     # available: methodologist, statistician, devil_advocate, reproducibility
-  no_simulation: false              # see "Topics that need real data" section below
-  survey_mode: false                # literature/history synthesis: NO experiment AND NO dataset (implies no_simulation). See "Survey mode" below
+  no_simulation: false              # leave to the commission: `method: analyze_data` sets it; set here without that, the study is refused. See "Topics that need real data" below
+  survey_mode: false                # leave to the commission: `method: review_literature` sets it (NO experiment AND NO dataset; implies no_simulation). See "Survey mode" below
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -836,12 +836,7 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 | `policy_brief` | ✅ 2-4 page brief for policymakers. Tight margins, header strip, dense layout. Picks the **policy analyst** persona — issue → context → single recommendation. |
 | `whitepaper` | ✅ 8-20 page industry analysis. Cover with whitepaper subtitle, modest TOC, sans-serif. Picks the **industry analyst** persona — problem → approach → evidence → conclusions. |
 
-The `clarify` node's `paper_venue` slot accepts both buckets. For
-non-simulatable topics (set via the new `simulatability` clarify
-slot or legacy `empirical_vs_theoretical: empirical`), the agent
-will default to `essay` instead of `article`. The write-persona
-swap is automatic — set `paper_format: policy_brief` in YAML and
-the `write` node loads the policy-analyst voice.
+Set `paper_format: policy_brief` in the YAML and the `write` node loads the policy-analyst voice.
 
 ### `--fleet` concurrency model
 
@@ -882,8 +877,8 @@ fi --resume 479b06
 
 The engine reads the `state.sqlite` checkpoint, detects what node
 last completed, and continues from there. No state is lost — the
-`paper.pdf` engine, the YAML's `provider` block, every clarify answer
-flows through as if the original run never crashed.
+`paper.pdf` engine and the YAML's `provider` block
+flow through as if the original run never crashed.
 
 ## Topics that need real data (not simulation)
 
@@ -892,30 +887,10 @@ Some research questions can't be answered with a Python script —
 balance, public-trust dynamics"* needs real surveys and observations,
 not invented numbers.
 
-**How the engine decides to enter no-simulation mode** (in this
-precedence — first match wins, decision is logged to `run.log` as
-`[clarify] simulatability resolved: ... source=<...>`):
-
-1. `engine.no_simulation: true` in YAML — explicit user override.
-   `source=yaml`.
-2. The clarify question `simulatability` — the agent asks
-   *"can a Python script meaningfully simulate this, or does it
-   need real-world data?"* with `default: yes | no | uncertain`
-   plus a one-line `reason`. `no` triggers no-simulation
-   (`source=clarify_simulatability`); `yes`/`uncertain` keeps the
-   simulation path. With `pauses.clarify: ask` you see the
-   agent's default + reason and can override; with `pauses.clarify:
-   auto` the default is accepted but the reason is still logged.
-   An answer in your own words counts by its first word: *"yes, but
-   more than 100 lines"* is `yes` (*"no idea"* is not a `no`).
-3. Legacy fallback: when that answer is missing, blank, or does not
-   start with yes / no / uncertain, an `empirical_vs_theoretical:
-   empirical` answer still triggers no-simulation
-   (`source=clarify_empirical_legacy`).
-4. Otherwise `simulatability` in `engine.clarify_overrides` (what the
-   setup questions wrote into your YAML), also when clarify is off
-   (`source=yaml_clarify_overrides`).
-5. Otherwise: simulate (`source=default`).
+**How a study enters no-simulation mode:** the commission says `method: analyze_data` (you put the data in the study's
+`data/` folder). That is the only way: FI does not guess it from the topic and asks no question. `run.log` says the
+mode in one line (`[clarify] study mode: ...`). A config that sets `engine.no_simulation: true` is refused at the
+door unless the commission's `method` agrees; leave the line out.
 
 ### Survey mode (a history / overview — no experiment AND no dataset)
 
@@ -923,12 +898,8 @@ Some topics are neither a simulation nor a data-analysis: *"the
 evolution of X"*, *"a history of Y"*, *"an overview of Z"*. These want
 a **descriptive synthesis of the published literature** — there is
 nothing to measure and no dataset to collect. That is **survey mode**,
-a stronger form of no-simulation. Turn it on any of three ways:
-
-* `engine.survey_mode: true` in YAML — explicit override (also forces
-  `no_simulation: true`).
-* Automatically — the clarify step classifies the topic shape as
-  `survey` (triggers: "history of", "evolution of", "overview of", …).
+a stronger form of no-simulation. Turn it on with `method: review_literature` in the commission (which also
+sets no-simulation). A config that sets `engine.survey_mode: true` is refused unless the commission says the same.
 
 In survey mode the graph skips BOTH the experiment (`implement` /
 `execute`) AND the whole data path (`wait_for_data` →
@@ -1026,31 +997,6 @@ provider:
   reasoning_effort: high          # Ollama takes low | medium | high
 ```
 
-### Setup questions
-
-Before it starts, a quest asks about ten setup questions (the `clarify` step): what you most want to see at the end,
-what the study should be called (three suggested titles; a `title:` in the YAML skips this one), the baseline to compare against, the success metric, the budget, the outputs, the depth, the venue,
-and whether a simulation can answer the topic. Each comes with the agent's own suggested answer; Enter keeps it.
-
-```yaml
-pauses:
-  clarify: ask        # always stop for the answers; auto: the agent answers itself; off: skip the step
-                      # left out (the default): ask when someone can answer while it runs, else answer itself
-```
-
-Who can answer, by interface:
-
-| Interface | How the questions reach you | Nobody answers |
-|---|---|---|
-| Terminal | `fi --config my.yaml --interactive` prompts on stdin. Without `--interactive` nobody can answer, so the agent answers itself, unless the YAML says `ask`. | with `ask`, the quest stops; the questions are in `<quest>/.fi/clarify_questions.json`; write a JSON object of question key → answer, one per question, to `<quest>/.fi/clarify_answer.json` and `fi --resume <id>`, or resume with `--interactive` to be asked |
-| Web (`fi --serve`) | a form on the quest page, marked *Waiting for your answers*, for a quest the page starts or resumes | the defaults after `pauses.timeout_s`; with `ask` the quest stops, and answering on the page resumes it |
-| VS Code | one input box per question, for a quest on the VS Code chat model (`@fi /start` / `@fi /resume` of a YAML with `provider.name: vscode_extension`). Esc on any box carries on with the defaults | the defaults after `pauses.timeout_s`; with `ask` the quest stops, and `@fi /resume <id>` asks again |
-
-A YAML that names its own provider (for example Kimi through `@fi /start`) is not on the bridge, so VS Code cannot
-show the boxes: it answers itself, or, with `ask`, stops for the answer file above. `pauses.timeout_s` defaults to
-1800 s; `0` waits with no limit. A web quest waiting for its answers counts as a running quest against the server's
-`--max-concurrent`. A `--fleet` run never asks.
-
 ### Fleet of variations
 
 Stamp out N YAMLs each varying one knob (model, panel, depth), then:
@@ -1063,4 +1009,4 @@ fi --fleet variants/*.yaml --max-concurrent 4
 
 ## Removed
 
-FI no longer makes topics itself: `--proposal`, `--portfolio`, `--list-drafts`, `@fi /proposal`, `@fi /portfolio`, `@fi /drafts`, the web `/tools/proposal` and `/tools/portfolio` pages and the drafts picker, and the setting `knowledge.novelty_check` were removed. A study starts from a commission file (`fi new` writes one to fill in); a config that still sets `knowledge.novelty_check` loads, and the log says the setting no longer does anything.
+FI no longer makes topics itself: `--proposal`, `--portfolio`, `--list-drafts`, `@fi /proposal`, `@fi /portfolio`, `@fi /drafts`, the web `/tools/proposal` and `/tools/portfolio` pages and the drafts picker, and the setting `knowledge.novelty_check` were removed. The setup questions at the start of a study (what you most want to see, the title, the baseline, the success metric, the venue, whether a simulation can answer the topic) were removed too: the commission gives the question, the scope, the success and failure conditions, the title and the `method`, and `--interactive`, the quest page, VS Code and `@fi` no longer ask anything at the start. A config that still sets `pauses.clarify`, `engine.clarify_mode` or `engine.clarify_overrides` loads, and the log says each does nothing. A study starts from a commission file (`fi new` writes one to fill in); a config that still sets `knowledge.novelty_check` loads, and the log says the setting no longer does anything.

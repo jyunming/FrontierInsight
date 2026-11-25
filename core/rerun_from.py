@@ -402,8 +402,8 @@ MAP_BLOCKS: dict[str, tuple[str, str, bool]] = {
 # be restarted from. The node's own name is shown small beside its title, so a person can match it to the log.
 NODES: dict[str, dict[str, str]] = {
     "clarify": {"block": "setup", "title": "Check the setup",
-                "sentence": "Reads your topic and settings, asks about anything unclear.",
-                "reads": "topic, config.yaml", "writes": "clarified topic"},
+                "sentence": "Sets from your commission whether the study runs an experiment, analyses your data or reviews the sources.",
+                "reads": "commission", "writes": "how the study runs"},
     "literature": {"block": "lit", "title": "Read the papers",
                    "sentence": "Reads the papers your commission gives. Nothing is searched for.",
                    "reads": "topic", "writes": "literature notes"},

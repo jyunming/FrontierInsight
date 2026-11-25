@@ -10,8 +10,6 @@ Endpoints
   figures, paper preview).
 * ``GET  /api/quests/{id}/log``           — log tail (most recent N lines).
 * ``GET  /api/quests/{id}/log/stream``    — SSE log tail (live).
-* ``GET  /api/quests/{id}/clarify``       — pending questions, if any.
-* ``POST /api/quests/{id}/clarify``       — submit answers; resumes graph.
 * ``POST /api/quests/start``              — start a new quest from a posted
   YAML body and run it inside this server process, followed by the same
   output pass as the CLI (paper.pdf, slides, poster, talk per
@@ -21,8 +19,8 @@ Endpoints
 The server is intentionally state-light: each quest's state lives on
 disk (``<quest_root>/.fi/{run.log, state.sqlite}`` + the
 ``frontier_insight_summary.json`` index). The server reads those for
-status; for ``clarify`` resume it routes the answers into the live
-``Engine.run()`` task via an in-process registry of clarify futures.
+status; for the review pause it routes the decision into the live
+``Engine.run()`` task via an in-process registry of futures.
 """
 
 from __future__ import annotations
@@ -63,10 +61,10 @@ from generation._visual_check import report_summary
 
 class _QuestRegistry:
     """In-process registry of live quest tasks and their pending
-    clarify futures. Each quest run gets one entry from start until
-    its task either finishes or errors. The clarify panel POSTs
-    answers; the registry resolves the matching future so the
-    Engine's clarify callback returns and the graph proceeds.
+    review futures. Each quest run gets one entry from start until
+    its task either finishes or errors. The review panel POSTs
+    the decision; the registry resolves the matching future so the
+    Engine's human-feedback callback returns and the graph proceeds.
 
     Also tracks the in-memory `Engine` reference so the
     detail endpoint can surface the most-recent `review_panel`
@@ -77,13 +75,10 @@ class _QuestRegistry:
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._clarify_questions: dict[str, dict[str, Any]] = {}
-        self._clarify_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._configs: dict[str, Config] = {}
         self._final_states: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, list[dict[str, str]]] = {}
-        # Mirror of the clarify-future plumbing for the human-review
-        # gate. When the in-process engine pauses at the human_feedback
+        # When the in-process engine pauses at the human_feedback
         # node, the registered future is what the POST endpoint
         # resolves with the user's decision so the engine resumes.
         self._human_review_snapshots: dict[str, dict[str, Any]] = {}
@@ -108,35 +103,6 @@ class _QuestRegistry:
 
     def errors(self, quest_id: str) -> list[dict[str, str]] | None:
         return self._errors.get(quest_id)
-
-    def register_clarify(
-        self, quest_id: str, questions: dict[str, Any],
-    ) -> asyncio.Future[dict[str, Any]]:
-        # Production callers always invoke this from within an async
-        # handler, where `get_running_loop()` is the correct call
-        # (`get_event_loop()` is deprecated in 3.12+ for non-running
-        # fetches). Tests that call this synchronously fall through
-        # to `new_event_loop()` so the registry still works without
-        # asyncio.run() ceremony around every test fixture.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._clarify_questions[quest_id] = questions
-        self._clarify_futures[quest_id] = fut
-        return fut
-
-    def pending_clarify(self, quest_id: str) -> dict[str, Any] | None:
-        return self._clarify_questions.get(quest_id)
-
-    def resolve_clarify(self, quest_id: str, answers: dict[str, Any]) -> bool:
-        fut = self._clarify_futures.pop(quest_id, None)
-        self._clarify_questions.pop(quest_id, None)
-        if fut is None or fut.done():
-            return False
-        fut.set_result(answers)
-        return True
 
     def register_human_review(
         self, quest_id: str, snapshot: dict[str, Any],
@@ -303,23 +269,6 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
-def _clarify_run_waiting(quest_root: Path) -> bool:
-    """Whether a quest started from the web page as its own process is running and waiting for its setup answers
-    (``.fi/clarify_waiting.json``, written by ``launch.py`` ``_web_page_clarify_callback``). Read from the quest
-    folder rather than the launcher's memory, so it still holds after the server restarted."""
-    from core.axon_sidecar import _pid_is_running
-
-    try:
-        marker = json.loads((quest_root / ".fi" / "clarify_waiting.json").read_text(encoding="utf-8"))
-        pid = int(marker["pid"])
-        until = marker.get("until")
-        if until is not None and time.time() > float(until):
-            return False  # left behind by a run that was killed while it waited
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
-        return False
-    return _pid_is_running(pid)
-
-
 def _quest_pending(quest_root: Path) -> str | None:
     """The pause a quest is waiting on (its kind), or ``None`` when it isn't
     paused.
@@ -329,7 +278,7 @@ def _quest_pending(quest_root: Path) -> str | None:
     finished". These markers are the real signal, and the dashboard + the quest
     page both read this one helper so they always agree. Reliable for new
     quests (``NEXT_STEP.md`` / ``.fi/pause.json``, both deleted on completion)
-    and older ones (the on-disk review / clarify snapshots with no answer)."""
+    and older ones (the on-disk review snapshot with no answer)."""
     fi = quest_root / ".fi"
     pause_json = fi / "pause.json"
     if pause_json.is_file():
@@ -343,9 +292,6 @@ def _quest_pending(quest_root: Path) -> str | None:
     if ((fi / "human_review.json").is_file()
             and not (fi / "human_review_answer.json").is_file()):
         return "review"
-    if ((fi / "clarify_questions.json").is_file()
-            and not (fi / "clarify_answer.json").is_file()):
-        return "clarify"
     return None
 
 
@@ -1364,9 +1310,6 @@ def make_app(
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         quest_id = quest_root.name  # the full id, also when a shortened one was given
-        if _clarify_run_waiting(quest_root):
-            # It is running, waiting for its setup answers on the quest page: a second run would share its files.
-            raise HTTPException(409, "this quest is still running and waiting for your answers on its page")
         if _quest_alive(quest_id, quest_root):
             # A second run of one quest overwrites the first one's files (a quest started from a terminal included).
             raise HTTPException(409, f"Quest {quest_id} is still running; resume it once it has stopped or finished.")
@@ -1411,8 +1354,6 @@ def make_app(
                 argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else []),
                            "--output", str(quest_root.parent)],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
-                # A resumed quest that has not had its setup questions yet asks them on the quest page.
-                extra_env={"FI_WEB_ANSWERS": "1"},
                 cwd=cwd,
             )
         except QuestLauncherFull as e:
@@ -1832,7 +1773,7 @@ def make_app(
     @app.get("/api/quests/{quest_id}/next-step")
     async def next_step(quest_id: str) -> JSONResponse:
         """The unified *Action needed* descriptor for a paused quest. Every
-        pause (clarify / papers / supply / data / review) writes one
+        pause (papers / supply / data / review) writes one
         ``NEXT_STEP.md`` at the quest root saying why it stopped and what to
         do; a finished quest deletes it. So its presence == "waiting for you",
         and its content is the single thing the banner needs to render."""
@@ -1867,8 +1808,7 @@ def make_app(
                 interaction = "answer"
             elif "SUPPLY" in markdown:
                 interaction = "supply"
-            elif (registry.pending_clarify(quest_id) is not None
-                  or registry.pending_human_review(quest_id) is not None):
+            elif registry.pending_human_review(quest_id) is not None:
                 interaction = "answer"
             else:
                 interaction = "supply"
@@ -2443,7 +2383,6 @@ def make_app(
                     "paper_preview": None,
                     "summary": None,
                     "alive": bool(launcher_status.get("alive")),
-                    "pending_clarify": False,
                     "pending_human_review": None,
                     "review": None,
                     "review_panel": None,
@@ -2561,13 +2500,6 @@ def make_app(
                 # a quest started outside this server (a terminal, another folder's page) runs too
                 or _quest_looks_running(quest_root, time.time())
             ),
-            "pending_clarify": (
-                registry.pending_clarify(quest_id) is not None
-                or (
-                    (quest_root / ".fi" / "clarify_questions.json").is_file()
-                    and not (quest_root / ".fi" / "clarify_answer.json").is_file()
-                )
-            ),
             "pending_human_review": pending_human_review,
             # The pause this quest is waiting on (kind), or null — the same
             # signal the dashboard uses, so the page shows Resume + the right
@@ -2661,84 +2593,6 @@ def make_app(
                     return
 
         return StreamingResponse(gen(), media_type="text/event-stream")
-
-    @app.get("/api/quests/{quest_id}/clarify")
-    async def get_clarify(quest_id: str) -> JSONResponse:
-        """Pending clarify questions. Two sources, like the human-review gate:
-        the in-process registry (web launch=true), else the on-disk
-        ``.fi/clarify_questions.json`` written by EVERY quest that pauses for
-        clarify (subprocess / CLI) — so a subprocess quest can render a form
-        even with no in-process future."""
-        questions = registry.pending_clarify(quest_id)
-        if questions is not None:
-            return JSONResponse({"pending": True, "source": "in_process",
-                                 "questions": questions})
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-            quest_id = quest_root.name  # the full id, also when a shortened one was given
-        except HTTPException:
-            return JSONResponse({"pending": False, "questions": None})
-        on_disk = quest_root / ".fi" / "clarify_questions.json"
-        answered = quest_root / ".fi" / "clarify_answer.json"
-        if not on_disk.is_file() or answered.is_file():
-            return JSONResponse({"pending": False, "questions": None})
-        try:
-            questions = json.loads(on_disk.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"pending": False, "questions": None})
-        return JSONResponse({"pending": True, "source": "disk",
-                             "questions": questions})
-
-    @app.post("/api/quests/{quest_id}/clarify")
-    async def post_clarify(quest_id: str, request: Request) -> JSONResponse:
-        """Submit clarify answers. Resolves the in-process future when present,
-        and always writes ``.fi/clarify_answer.json`` so a subprocess- / CLI-
-        launched engine picks them up on its next ``--resume``."""
-        body = await request.json()
-        answers = body.get("answers")
-        if not isinstance(answers, dict):
-            raise HTTPException(400, "request body must contain {'answers': {...}}")
-        in_process_resolved = registry.resolve_clarify(quest_id, answers)
-        quest_root: Path | None = None
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-            quest_id = quest_root.name  # the full id, also when a shortened one was given
-        except HTTPException:
-            quest_root = None
-        # Only stage an on-disk answer when the quest is actually paused for
-        # clarify on disk (questions present, not yet answered) — a stray POST
-        # to a non-paused quest shouldn't drop an answer file that a later
-        # clarify pass would wrongly consume.
-        has_disk_pause = bool(
-            quest_root is not None
-            and (quest_root / ".fi" / "clarify_questions.json").is_file()
-            and not (quest_root / ".fi" / "clarify_answer.json").is_file()
-        )
-        disk_write_error: str | None = None
-        if has_disk_pause:
-            try:
-                fi = quest_root / ".fi"  # type: ignore[union-attr]
-                fi.mkdir(parents=True, exist_ok=True)
-                # Whole or not at all: a run waiting for it reads the file as soon as it appears.
-                tmp = fi / "clarify_answer.json.tmp"
-                tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
-                try:
-                    os.replace(tmp, fi / "clarify_answer.json")
-                finally:
-                    tmp.unlink(missing_ok=True)
-            except OSError as e:
-                disk_write_error = f"{type(e).__name__}: {e}"
-        if not in_process_resolved and not has_disk_pause:
-            raise HTTPException(409, f"no pending clarify for quest {quest_id}")
-        payload: dict[str, Any] = {"ok": True,
-                                   "in_process_resolved": in_process_resolved}
-        if has_disk_pause and not in_process_resolved:
-            # A quest started from the web page as its own process that is still waiting for these answers reads
-            # them itself, so the page must not start a second run.
-            payload["run_waiting"] = _clarify_run_waiting(quest_root)  # type: ignore[arg-type]
-        if disk_write_error is not None:
-            payload["disk_write_warning"] = disk_write_error
-        return JSONResponse(payload)
 
     @app.get("/api/quests/{quest_id}/human-review")
     async def get_human_review(quest_id: str) -> JSONResponse:
@@ -3074,7 +2928,7 @@ def make_app(
         Gated behind a config flag because this endpoint takes
         user-supplied Python code and runs it on the server. The
         existing ``--resume`` path picks up at ``execute`` if the
-        upstream nodes (clarify / design / implement) have
+        upstream nodes (design / implement) have
         already completed.
 
         On a non-loopback bind, this endpoint is a code-execution
@@ -3206,7 +3060,7 @@ def make_app(
         from core import commission as _commission
 
         try:  # a commission's files and passages, before any quest folder or model call
-            _commission.door(cfg.commission, None, topic=cfg.topic)
+            _commission.door(cfg.commission, None, topic=cfg.topic, asked=cfg.modes_asked())
         except _commission.CommissionRefused as e:
             raise HTTPException(400, str(e)) from e
 
@@ -3221,10 +3075,6 @@ def make_app(
             saved.write_text(_yaml.safe_dump({**cfg_dict, "commission": str(cfg.commission), "output": output},
                                              sort_keys=False), encoding="utf-8")
 
-        async def gui_clarify_callback(questions: dict[str, Any]) -> dict[str, Any]:
-            fut = registry.register_clarify(quest_id, questions)
-            return await fut
-
         async def gui_human_review_callback(
             snapshot: dict[str, Any],
         ) -> dict[str, Any]:
@@ -3238,7 +3088,6 @@ def make_app(
         async def driver():
             try:
                 art = await engine.run(
-                    clarify_callback=gui_clarify_callback,
                     human_feedback_callback=gui_human_review_callback,
                 )
                 # Snapshot review_panel + final review so the

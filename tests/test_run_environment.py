@@ -354,7 +354,7 @@ def _quest_engine(tmp_path: Path):  # noqa: ANN202
 
     cfg = Config(
         topic="a neutral topic about a cooling cup", title="marker", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", oracle_check="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, oracle_check="off"),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )

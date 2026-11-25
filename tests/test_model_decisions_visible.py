@@ -33,7 +33,7 @@ def _engine(tmp_path: Path, *, provider: str = "openai", model: str | None = Non
     cfg = Config(
         topic="decision trace", title="decisions",
         provider=ProviderConfig(name=provider, model=model),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out", save_thinking=save_thinking),
@@ -138,19 +138,6 @@ def test_a_step_s_reasoning_note_does_not_count_another_step_s_calls(tmp_path: P
                   ("node_started", "execute", {})])
     assert "none for this run of the step" in why.explain(root, "execute")
     assert "1 call(s)" in why.explain(root, "execute_reflect")
-
-
-def test_the_setup_answers_the_model_chose_and_why(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    _called(eng, "clarify")
-    eng._audit_claims("clarify", {
-        "clarify_questions": {"simulatability": {"question": "?", "default": "no", "reason": "needs survey data"},
-                              "budget": {"question": "?", "default": "minutes"}},
-        "clarify_answers": {"simulatability": "yes", "budget": "minutes"},
-    })
-    (claim,) = _claims(eng)
-    assert claim["topic"] == "setup/simulatability" and claim["decision"] == "no"
-    assert claim["answer_used"] == "yes", "a person's own answer is shown beside the model's"
 
 
 def test_the_review_s_one_line_why_is_recorded_and_not_carried_on(tmp_path: Path) -> None:

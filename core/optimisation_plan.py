@@ -17,8 +17,7 @@ strict about the numbers. Nothing it returns adds a key the plan did not write (
 written; the frozen protocol's hash depends on it): what FI does when a part is left out (the finer check settings, the
 method, the threshold) is computed by the helpers below at the time it is used, and said in ``plan.md``.
 
-It also decides, from the topic's words alone, whether the topic is clear about the kind of study; when it is not, the
-clarify step asks the person one plain question (:func:`add_study_type_question`).
+It also decides, from the topic's words alone, whether the topic is clear about the kind of study (:func:`classify_topic`).
 
 The search itself is not run here: the engine runs it (:mod:`core.optimise`). A plan of that kind never runs as a plain
 sweep; one the engine cannot search (no block, no budget, one script, a cluster) stops before anything runs
@@ -1800,7 +1799,7 @@ def plan_lines(design: Any) -> list[str]:
     return lines
 
 
-# --- the question at the clarify step -------------------------------------------------------------------------------
+# --- the kind of study, from the topic's words and an earlier FI's recorded answer -------------------------------------------------------------------------------
 
 # Words of looking for the best that are enough to ask the person (narrow: "maximum likelihood", "minimum spanning tree"
 # or "best response" are not a search for a design) ...
@@ -1851,25 +1850,11 @@ def may_seek_best(topic: str) -> bool:
 
 
 LET_THE_PLAN_DECIDE = "let the plan decide"
-QUESTION = (
-    "Is this study meant to (1) measure how the result changes as the design changes, over settings chosen in advance, "
-    "or (2) find the best design: search for the design that makes the result as low or as high as possible, and "
-    "compare it with a starting design? Answer 1 or 2 (or leave it, and the plan decides from the topic)."
-)
-
-
-def add_study_type_question(questions: dict[str, Any], topic: str) -> bool:
-    """Add the one question about the kind of study to the clarify step's questions, when the topic's words leave it
-    open (:func:`classify_topic`). The question goes through the same form as every other clarify question, on every
-    interface. ``True`` when it was added."""
-    if not isinstance(questions, dict) or classify_topic(topic) != "ambiguous":
-        return False
-    questions["study_type"] = {"question": QUESTION, "default": LET_THE_PLAN_DECIDE}
-    return True
 
 
 def resolve_answer(value: Any) -> str | None:
-    """The kind of study a person's answer names (``1``/``2``, or the words), or ``None`` (the plan decides)."""
+    """The kind of study an answer recorded by an earlier FI names (``1``/``2``, or the words), or ``None`` (the plan
+    decides). FI asks no such question now, so a new study's answer is always empty."""
     text = " ".join(str(value or "").strip().lower().split())
     if not text or text == LET_THE_PLAN_DECIDE:
         return None

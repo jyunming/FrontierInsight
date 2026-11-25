@@ -124,7 +124,6 @@ async def test_full_dag_via_server_from_a_commission(
         assert (quest_root / "paper.md").is_file()
         assert body["summary"]["outputs"]["paper_md"] == str(quest_root / "paper.md")
         assert body["errors"] is None
-        assert body.get("pending_clarify") is False
 
         # 4. Rename the finished quest from the quest page: both copies of the paper, the config, the summary and
         # the saved state a later resume reads all carry the new title.

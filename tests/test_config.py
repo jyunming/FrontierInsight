@@ -362,28 +362,25 @@ def test_pauses_namespace_legacy_mapping_and_norway() -> None:
     # Legacy scattered flags fold into pauses with vocab translation.
     legacy = Config.model_validate({
         "topic": "t",
-        "engine": {"clarify_mode": "interactive", "human_feedback_gate": "after_review",
-                   "pause_for_user_input": "after_design"},
+        "engine": {"human_feedback_gate": "after_review", "pause_for_user_input": "after_design"},
         "knowledge": {"pause_for_user_papers": True},
     })
-    assert legacy.pauses.clarify == "ask"
     assert legacy.pauses.review == "ask"
     assert legacy.pauses.supply == "before_build"
     assert legacy.pauses.papers is True
 
     # Unquoted `off` arrives as boolean False from YAML; coerce to "off".
     norway = Config.model_validate({
-        "topic": "t", "pauses": {"clarify": False, "review": False},
+        "topic": "t", "pauses": {"review": False},
     })
-    assert norway.pauses.clarify == "off"
     assert norway.pauses.review == "off"
 
     # An explicit pauses.* value always wins over a legacy flag.
     conflict = Config.model_validate({
-        "topic": "t", "engine": {"clarify_mode": "auto"},
-        "pauses": {"clarify": "ask"},
+        "topic": "t", "engine": {"human_feedback_gate": "after_review"},
+        "pauses": {"review": "off"},
     })
-    assert conflict.pauses.clarify == "ask"
+    assert conflict.pauses.review == "off"
 
 
 # --- unknown-key audit: typo'd YAML keys must fail fast (not silently drop) ---
@@ -482,19 +479,39 @@ def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
 
 
 def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
-    # Real fields + a legacy pause flag (engine.clarify_mode → pauses.clarify)
+    # Real fields + a legacy pause flag (engine.human_feedback_gate → pauses.review)
     # + a free-form dict field (node_http_timeout_s values are node names).
     p = _write(
         tmp_path,
         "topic: t\ntitle: x\n"
         "provider:\n  name: openai\n  node_http_timeout_s:\n    implement: 900\n"
-        "engine:\n  max_iterations: 2\n  clarify_mode: \"off\"\n"
+        "engine:\n  max_iterations: 2\n  human_feedback_gate: after_review\n"
         "knowledge:\n  enabled: false\n  pause_for_user_papers: true\n"
         "output:\n  kinds: [paper_pdf]\n",
     )
     cfg = Config.from_yaml(p)  # must not raise
     assert cfg.provider.node_http_timeout_s["implement"] == 900
     assert cfg.pauses.papers is True  # legacy flag mapped through
+    assert cfg.pauses.review == "ask"
+
+
+def test_the_retired_setup_question_keys_load_and_the_log_says_they_do_nothing(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The setup questions are gone: a config that still sets their keys loads, each key is said once to do nothing,
+    and none of them changes the run."""
+    p = _write(
+        tmp_path,
+        "topic: t\n"
+        "engine:\n  clarify_mode: interactive\n  clarify_overrides:\n    simulatability: \"no\"\n"
+        "pauses:\n  clarify: ask\n",
+    )
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)  # must not raise
+    said = sorted(r.getMessage() for r in caplog.records if "no longer does anything" in r.getMessage())
+    assert said == ["config: engine.clarify_mode no longer does anything; the line can be removed.",
+                    "config: engine.clarify_overrides no longer does anything; the line can be removed.",
+                    "config: pauses.clarify no longer does anything; the line can be removed."], said
+    assert cfg.engine.no_simulation is False and not hasattr(cfg.pauses, "clarify")
 
 
 def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:

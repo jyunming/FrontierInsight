@@ -47,35 +47,6 @@ print('RESULT_JSON: {\"score\": 0.987}')
 
 
 _FAKE_RESPONSES = {
-    "clarify": json.dumps({
-        "comparative_baseline": {
-            "question": "What baseline?",
-            "default": "trivial linear fit",
-        },
-        "empirical_vs_theoretical": {
-            "question": "Empirical or theoretical?",
-            "default": "empirical",
-        },
-        # ``simulatability`` is the routing signal the engine uses to
-        # decide between the normal implement → execute path and the
-        # no-simulation wait_for_data path. The legacy fallback maps
-        # ``empirical_vs_theoretical == "empirical"`` to NO_SIMULATION
-        # when ``simulatability`` is absent, which would pause this
-        # smoke test at wait_for_data and never reach write. The
-        # clarify-completion smoke tests want the full DAG, so we
-        # pin ``simulatability: yes`` here — Python-script-can-answer.
-        "simulatability": {
-            "question": "Can a Python script answer this?",
-            "default": "yes",
-            "reason": "synthetic curve, no real-world data needed",
-        },
-        "success_metric": {
-            "question": "What metric?",
-            "default": "monotonicity of the curve",
-        },
-        "budget": {"question": "Time?", "default": "seconds on CPU"},
-        "output_kinds": {"question": "Deliverables?", "default": ["paper_md"]},
-    }),
     "cross_check": json.dumps({
         "supporting": [{"index": 1, "why": "matches reported direction"}],
         "conflicting": [],
@@ -149,7 +120,6 @@ def _fake_response_for(prompt: str) -> str:
         # What the topic asks for: one comparison and nothing the plan must carry; and nothing left to judge.
         "TopicReading": json.dumps({"comparisons": [{"what": "the comparison the topic itself asks for"}]}),
         "TopicJudging": json.dumps({"items": []}),
-        "Clarify": _FAKE_RESPONSES["clarify"],
         "Experiment Design": _FAKE_RESPONSES["design"],
         # The methodology audit found nothing to change (a reply naming neither is an audit that could not judge).
         "DesignAudit": '{"objections_addressed": []}',
@@ -587,99 +557,6 @@ async def test_reopen_finished_quest_re_runs_to_review(
 
 
 @pytest.mark.asyncio
-async def test_engine_runs_with_clarify_auto(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """End-to-end: full DAG including the clarify node firing
-    in auto mode. The agent generates the questionnaire, self-answers
-    from each slot's default, and the answers flow through into the
-    design/write prompts via `_format_clarify`. Verifies the
-    quest still reaches a terminal artifact bundle."""
-    cfg = Config(
-        topic="smoke-test topic for clarify-auto integration",
-        title="clarify-auto-smoke",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="auto",
-            auto_accept_on_pass=True,
-        ),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return _fake_response_for(messages[-1]["content"])
-    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-
-    artifacts = await engine.run()
-    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    # Clarify state landed on the final raw_state — both the questions
-    # and the auto-derived answers.
-    raw = artifacts.raw_state
-    assert raw.get("clarify_done") is True
-    assert "comparative_baseline" in raw.get("clarify_questions", {})
-    answers = raw.get("clarify_answers", {})
-    assert answers.get("empirical_vs_theoretical") == "empirical"
-    assert answers.get("output_kinds") == ["paper_md"]
-
-
-@pytest.mark.asyncio
-async def test_engine_runs_with_clarify_interactive_via_callback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """End-to-end: full DAG with clarify_mode='interactive'.
-    The engine pauses at the clarify node via `interrupt()`; the
-    test-supplied callback simulates a user answering the questions;
-    the graph resumes and runs to completion."""
-    cfg = Config(
-        topic="smoke-test topic for clarify-interactive integration",
-        title="clarify-interactive-smoke",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="interactive",
-            auto_accept_on_pass=True,
-        ),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-
-    async def fake_chat(self, messages, **kw):  # noqa: ANN001
-        return _fake_response_for(messages[-1]["content"])
-    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-
-    seen_questions: list[dict] = []
-
-    async def cb(questions: dict) -> dict:
-        seen_questions.append(questions)
-        # Override two defaults so we can verify the callback's answers
-        # actually flow into state, not the agent's auto-defaults.
-        # ``simulatability: yes`` is required to keep the engine on
-        # the normal implement → execute path; without it the
-        # legacy fallback on ``empirical_vs_theoretical == "empirical"``
-        # routes to NO_SIMULATION and pauses at wait_for_data.
-        return {
-            "comparative_baseline": "user-chosen baseline",
-            "empirical_vs_theoretical": "empirical",
-            "simulatability": "yes",
-            "success_metric": "user-chosen metric",
-            "budget": "5 minutes",
-            "output_kinds": ["paper_md"],
-        }
-
-    artifacts = await engine.run(clarify_callback=cb)
-
-    assert len(seen_questions) == 1
-    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    answers = artifacts.raw_state.get("clarify_answers", {})
-    assert answers["comparative_baseline"] == "user-chosen baseline"
-    assert answers["success_metric"] == "user-chosen metric"
-
-
-@pytest.mark.asyncio
 async def test_await_with_heartbeat_returns_result_and_logs(smoke_config: Config) -> None:
     """The heartbeat wrapper returns the awaited result unchanged AND emits at
     least one '[execute] … still running' line to the engine logger while the
@@ -970,34 +847,74 @@ async def test_the_demo_and_a_shipped_example_run_from_their_commission(
     assert engine.config.topic == commission.read(cfg.commission)["question"].strip()
 
 
-@pytest.mark.asyncio
-async def test_a_commissioned_data_study_goes_from_its_design_to_the_persons_data_without_any_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A study that analyses data runs ``design -> wait_for_data -> data_load`` on the files the person put in data/: FI
-    looks for no data of its own (no ``auto_collect_data`` step exists), and the simulation steps do not run."""
-    from core import audit_log, commission, demo
+def _commissioned_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str) -> tuple[Engine, Config]:
+    """The demo's commission with ``method: <method>`` added, run by a fake model, no key in the YAML."""
+    from core import commission, demo
 
-    cfg = Config.from_yaml(demo.write_demo_config(tmp_path, "openai"))
-    commission.door(cfg.commission, None)
+    cfg_path = demo.write_demo_config(tmp_path, "openai")
+    commission_file = demo.commission_path(cfg_path)
+    commission_file.write_text(commission_file.read_text(encoding="utf-8") + f"\nmethod: {method}\n", encoding="utf-8")
+    cfg = Config.from_yaml(cfg_path)
+    commission.door(cfg.commission, None, asked=cfg.modes_asked())
     cfg.provider = ProviderConfig(name="openai")
     cfg.knowledge = KnowledgeConfig(enabled=False)
     cfg.execution = ExecutionConfig(sandbox="venv", timeout_s=120)
     cfg.output.output_dir = tmp_path / "outputs"
     cfg.output.kinds = ["paper_md"]
-    cfg.engine.no_simulation = True
     engine = Engine(cfg)
-    (engine.quest_root / "data").mkdir(parents=True)
-    (engine.quest_root / "data" / "table.csv").write_text("x,y\n1,2\n2,4\n3,6\n", encoding="utf-8")
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        assert kw.get("node") != "clarify", "the first node asks no model"
         return _fake_response_for(messages[-1]["content"])
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
-    await engine.run()
+    return engine, cfg
+
+
+@pytest.mark.asyncio
+async def test_a_commissioned_data_study_goes_from_its_design_to_the_persons_data_without_any_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A study whose commission says ``method: analyze_data`` runs ``design -> wait_for_data -> data_load`` on the files the
+    person put in data/: FI looks for no data of its own (no ``auto_collect_data`` step exists), and the simulation steps
+    do not run."""
+    from core import audit_log
+
+    engine, cfg = _commissioned_run(tmp_path, monkeypatch, "analyze_data")
+    assert cfg.engine.no_simulation is True and cfg.engine.survey_mode is False
+    (engine.quest_root / "data").mkdir(parents=True)
+    (engine.quest_root / "data" / "table.csv").write_text("x,y\n1,2\n2,4\n3,6\n", encoding="utf-8")
+    art = await engine.run()
     ran = [e["node"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "node_started"]
     assert "auto_collect_data" not in ran
     assert not {"implement_outline", "implement", "execute"} & set(ran), ran
     assert ran.index("design") < ran.index("wait_for_data") < ran.index("data_load") < ran.index("analyze"), ran
+    assert art.raw_state["no_simulation_resolved"] is True and art.raw_state["survey_mode_resolved"] is False
     assert "auto_collect_data" not in engine._build_graph().compile().get_graph().nodes
+
+
+@pytest.mark.asyncio
+async def test_a_commissioned_literature_review_sets_survey_mode_and_runs_no_experiment_and_no_data_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import audit_log
+
+    engine, cfg = _commissioned_run(tmp_path, monkeypatch, "review_literature")
+    assert cfg.engine.survey_mode is True and cfg.engine.no_simulation is False  # the config's own key is not what sets it
+    art = await engine.run()
+    ran = [e["node"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "node_started"]
+    assert not {"implement_outline", "implement", "execute", "wait_for_data", "data_load"} & set(ran), ran
+    assert ran.index("design") < ran.index("analyze"), ran
+    assert art.raw_state["survey_mode_resolved"] is True and art.raw_state["no_simulation_resolved"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_commission_without_a_method_runs_an_experiment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import audit_log
+
+    engine, cfg = _commissioned_run(tmp_path, monkeypatch, "simulate")
+    art = await engine.run()
+    ran = [e["node"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "node_started"]
+    assert {"implement", "execute"} <= set(ran) and "wait_for_data" not in ran, ran
+    assert art.raw_state["no_simulation_resolved"] is False and art.raw_state["survey_mode_resolved"] is False
 

@@ -636,23 +636,15 @@ class AnalyzeStageMixin:
         return verdicts
 
     def _resolve_write_persona(self, state: QuestState) -> str:
-        """Pick a persona prefix for the ``write`` node based on the
-        format hint in clarify answers + output config.
+        """Pick a persona prefix for the ``write`` node from the
+        output config's paper format.
 
         Scientific venues return empty so ``write.md``'s built-in
         IMRAD framing carries the prompt unchanged. Non-scientific
         formats load their persona prefix from
         ``agents/write_persona_<name>.md`` via ``_load_persona_prefix``
         — same pattern as the ``review_persona_*`` files. Unknown
-        format values fall back to empty (defense-in-depth for the
-        clarify path, which accepts free-form strings from the LLM).
-
-        Resolution order (first match wins):
-        1. ``state["clarify_answers"]["paper_venue"]`` — clarify
-           agent's pick (LLM-generated; normalized via ``.strip().lower()``).
-        2. ``self.config.output.paper_format`` — YAML default
-           (Pydantic-validated against ``PaperFormat`` so case is
-           already canonical).
+        format values fall back to empty.
         """
         venue = self._write_venue(state)
         if venue in SCIENTIFIC_PAPER_FORMATS:
@@ -663,11 +655,7 @@ class AnalyzeStageMixin:
 
     def _write_venue(self, state: QuestState) -> str:
         """The paper format the write persona is chosen by (see :meth:`_resolve_write_persona`)."""
-        venue = ""
-        answers = state.get("clarify_answers") or {}
-        if isinstance(answers, dict):
-            venue = str(answers.get("paper_venue") or "").strip().lower()
-        return venue or self.config.output.paper_format or ""
+        return self.config.output.paper_format or ""
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question

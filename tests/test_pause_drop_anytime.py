@@ -35,7 +35,7 @@ def _mk_engine(tmp_path: Path, mode: str) -> Engine:
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False),
         pauses=PausesConfig(
-            clarify="off", review="off",
+            review="off",
             supply=mode,  # type: ignore[arg-type]
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
@@ -230,21 +230,6 @@ def test_wait_for_data_pause_fires_with_root_data_target(tmp_path: Path) -> None
     assert (tmp_path / "NEXT_STEP.md").is_file()
     desc = json.loads((tmp_path / ".fi" / "pause.json").read_text(encoding="utf-8"))
     assert desc["kind"] == "data" and desc["upload_targets"] == ["root_data"]
-
-
-def test_clear_clarify_snapshot_removes_both_files(tmp_path: Path) -> None:
-    """On consume, the run loop clears BOTH the clarify questions snapshot and
-    the staged answer so the web's "questions present + no answer" pending
-    check stops showing a resolved form. Idempotent when files are absent."""
-    eng = _mk_engine(tmp_path, "never")
-    fi = tmp_path / ".fi"
-    fi.mkdir(parents=True, exist_ok=True)
-    (fi / "clarify_questions.json").write_text("{}", encoding="utf-8")
-    (fi / "clarify_answer.json").write_text("{}", encoding="utf-8")
-    eng._clear_clarify_snapshot()  # type: ignore[attr-defined]
-    assert not (fi / "clarify_questions.json").exists()
-    assert not (fi / "clarify_answer.json").exists()
-    eng._clear_clarify_snapshot()  # type: ignore[attr-defined]  # no raise when absent
 
 
 def test_collect_artifacts_keeps_next_step_on_pause(tmp_path: Path) -> None:

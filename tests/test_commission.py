@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
+from core import commission
 from tests import exact_timing
 
 PASSAGE = "The drain constant of the reference tank is 0.25 per hour under the stated inlet conditions"
@@ -178,17 +179,17 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
         cfg = Config.from_yaml(yaml)
     assert cfg.commission == (tmp_path / "order" / "commission.json").resolve()
     assert cfg.topic == "How fast does a tank drain through outlets of three sizes?"
-    assert cfg.pauses.clarify == "off", "a step the commission gives stays off"
-    said = [r.getMessage() for r in caplog.records if "are not used" in r.getMessage()]
-    assert len(said) == 1 and "pauses.clarify" in said[0] and "engine.clarify_mode" in said[0], said
-    # The study cards are gone: the key loads, and the log says once that it does nothing.
-    assert [r.getMessage() for r in caplog.records if "pauses.scope" in r.getMessage()] == [
-        "config: pauses.scope no longer does anything; the line can be removed."]
+    # The setup questions are gone: the keys load, and the log says once for each that it does nothing.
+    gone = sorted(r.getMessage() for r in caplog.records if "no longer does anything" in r.getMessage())
+    assert gone == ["config: engine.clarify_mode no longer does anything; the line can be removed.",
+                    "config: pauses.clarify no longer does anything; the line can be removed.",
+                    "config: pauses.scope no longer does anything; the line can be removed."], gone
+    assert not [r for r in caplog.records if "are not used" in r.getMessage()], "nothing the commission overrides"
     assert cfg.pauses.papers is False
     assert cfg.engine.enable_analyze_reroute is False
     assert cfg.execution.timeout_s == 2 * 3600, "the commission's hours are the run's time limit when the config is silent"
     plain = Config(topic="a draining tank")
-    assert plain.commission is None and plain.pauses.clarify is None and plain.engine.enable_analyze_reroute is True
+    assert plain.commission is None and plain.engine.enable_analyze_reroute is True
 
 
 def test_the_commission_s_hours_cap_the_run_s_time_limit_the_config_sets(tmp_path: Path) -> None:
@@ -729,7 +730,7 @@ async def test_the_settings_a_commission_overrides_are_named_once_in_the_quest_s
     from core.engine import Engine
 
     path = _commission(tmp_path / "order")
-    eng = Engine(Config(commission=path, provider=ProviderConfig(name="openai"), pauses=PausesConfig(clarify="ask"),
+    eng = Engine(Config(commission=path, provider=ProviderConfig(name="openai"), pauses=PausesConfig(papers=True),
                         engine=EngineConfig(max_iterations=1, review_loop=False),
                         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
@@ -743,7 +744,7 @@ async def test_the_settings_a_commission_overrides_are_named_once_in_the_quest_s
     with pytest.raises(_Stop):
         await eng.run()
     log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert log.count("settings of the config are not used: pauses.clarify.") == 1, log[-2000:]
+    assert log.count("settings of the config are not used: pauses.papers.") == 1, log[-2000:]
 
 
 @pytest.mark.asyncio
@@ -943,7 +944,8 @@ def test_fi_new_writes_a_template_the_check_refuses_until_it_is_filled_in(
     assert not usable and any("no `question`" in line for line in lines) and any("`failure`" in line for line in lines)
     assert launch._new([]) == 0 and (tmp_path / "commission-2.yaml").is_file() and (tmp_path / "study-2.yaml").is_file()
     data = _yaml.safe_load(template.read_text(encoding="utf-8"))
-    assert set(data) == {"question", "scope", "limits", "known_values", "no_known_values", "success", "failure", "doubts"}
+    assert set(data) == {"question", "method", "scope", "limits", "known_values", "no_known_values", "success", "failure",
+                         "doubts"}
     data.update(question="How fast does a tank drain?", scope="three outlets", no_known_values=True,
                 success=[{"condition": "c", "verify": "v"}], failure=[{"condition": "c", "verify": "v"}])
     template.write_text(_yaml.safe_dump(data), encoding="utf-8")
@@ -1079,3 +1081,91 @@ async def test_a_first_start_that_stops_at_the_reviewer_check_is_resumed_as_a_co
     assert json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review_models"
     commission.door(path, engine.quest_root, topic=cfg.topic)  # accepted: no CommissionRefused
 
+
+
+# ---- method and title: how the study gets its evidence, and what it is called ----------------------------------------
+
+
+def test_fi_check_refuses_a_method_that_is_not_one_of_the_three_in_one_sentence(tmp_path: Path) -> None:
+    path = _commission(tmp_path / "order", method="experiment")
+    usable, lines = commission.check(path)
+    assert not usable and len(lines) == 1
+    assert "`method` is 'experiment'" in lines[0] and "`simulate`, `analyze_data`, `review_literature`" in lines[0]
+    for good in ("simulate", "analyze_data", "review_literature"):
+        assert commission.check(_commission(tmp_path / good, method=good))[0]
+    assert commission.check(_commission(tmp_path / "none"))[0], "no method: every existing commission stays valid"
+    assert not commission.check(_commission(tmp_path / "t", title="  "))[0], "an empty title is no title"
+
+
+def test_the_template_fi_new_writes_names_method_and_title() -> None:
+    assert "method: simulate" in commission.TEMPLATE and "# title:" in commission.TEMPLATE
+
+
+@pytest.mark.parametrize("method,modes", [("simulate", (False, False)), ("analyze_data", (True, False)),
+                                          ("review_literature", (True, True))])
+def test_the_method_sets_the_two_modes_of_the_config(tmp_path: Path, method: str, modes: tuple[bool, bool]) -> None:
+    cfg = Config(commission=_commission(tmp_path / "order", method=method))
+    assert (cfg.engine.no_simulation, cfg.engine.survey_mode) == modes
+    assert commission.modes(commission.read(cfg.commission)) == modes
+    assert commission.modes(commission.read(_commission(tmp_path / "none"))) is None
+
+
+def _yaml_with(tmp_path: Path, commission_changes: dict[str, Any], engine: str) -> Path:
+    _commission(tmp_path / "order", **commission_changes)
+    cfg = tmp_path / "order" / "study.yaml"
+    cfg.write_text("commission: commission.json\nengine:\n  " + engine + "\n", encoding="utf-8")
+    return cfg
+
+
+@pytest.mark.parametrize("key,method", [("no_simulation", "analyze_data"), ("survey_mode", "review_literature")])
+def test_the_door_refuses_a_mode_in_the_config_the_commission_does_not_give_and_accepts_it_when_it_does(
+        tmp_path: Path, key: str, method: str) -> None:
+    refused = Config.from_yaml(_yaml_with(tmp_path / "a", {}, f"{key}: true"))
+    with pytest.raises(commission.CommissionRefused) as e:
+        commission.door(refused.commission, None, topic=refused.topic, asked=refused.modes_asked())
+    assert f"`{key}: true`" in str(e.value) and f"`method: {method}`" in str(e.value) and "\n" not in str(e.value)
+    wrong = Config.from_yaml(_yaml_with(tmp_path / "b", {"method": "simulate"}, f"{key}: true"))
+    with pytest.raises(commission.CommissionRefused) as e2:
+        commission.door(wrong.commission, None, topic=wrong.topic, asked=wrong.modes_asked())
+    assert "`method: simulate`" in str(e2.value) and "the commission decides" in str(e2.value)
+    agree = Config.from_yaml(_yaml_with(tmp_path / "c", {"method": method}, f"{key}: true"))
+    commission.door(agree.commission, None, topic=agree.topic, asked=agree.modes_asked())  # goes on
+    none = Config.from_yaml(_yaml_with(tmp_path / "d", {}, "max_iterations: 1"))
+    commission.door(none.commission, None, topic=none.topic, asked=none.modes_asked())  # no mode asked: goes on
+    # A quest that has begun carries its modes in its checkpoint: the check is for a new start only.
+    root = tmp_path / "out" / "q"
+    (root / ".fi").mkdir(parents=True)
+    commission.stage(refused.commission, root)
+    commission.door(refused.commission, root, topic=refused.topic, asked=refused.modes_asked())
+
+
+def test_the_early_check_of_launch_says_the_same_before_anything_starts(tmp_path: Path) -> None:
+    import launch
+
+    bad = _yaml_with(tmp_path / "a", {}, "no_simulation: true")
+    args = launch.parse_args(["--config", str(bad)])
+    said = launch._commission_refusal(args)
+    assert said and "`method: analyze_data`" in said
+    ok = _yaml_with(tmp_path / "b", {"method": "analyze_data"}, "no_simulation: true")
+    assert launch._commission_refusal(launch.parse_args(["--config", str(ok)])) is None
+
+
+@pytest.mark.asyncio
+async def test_the_first_node_makes_no_model_call_for_a_commissioned_study(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, _commission(tmp_path / "order", method="review_literature"))
+    patch = await eng._node_clarify({"topic": eng.config.topic})  # the stub model raises if it is asked
+    assert patch == {"clarify_done": True, "no_simulation_resolved": True, "survey_mode_resolved": True}
+    eng._client.chat.assert_not_awaited()
+
+
+def test_a_title_in_the_commission_is_the_studys_title(tmp_path: Path) -> None:
+    cfg = Config(commission=_commission(tmp_path / "order", title="Draining a tank"))
+    assert cfg.title == "Draining a tank"
+    assert _quest_id_has(cfg, "draining-a-tank")
+
+
+def _quest_id_has(cfg: Config, part: str) -> bool:
+    from core.engine import Engine
+
+    cfg = cfg.model_copy(update={"output": OutputConfig(output_dir=cfg.output.output_dir)})
+    return part in Engine(cfg).quest_id

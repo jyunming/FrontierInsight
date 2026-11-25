@@ -110,8 +110,7 @@ def test_build_analyze_config_defaults_are_no_simulation(tmp_path: Path) -> None
     )
     assert cfg.topic == "How do two regions' survey answers differ?"
     assert cfg.engine.no_simulation is True
-    # No clarify call — the commission is the source of truth.
-    assert cfg.engine.clarify_mode == "off"
+    # No question to the person — the commission is the source of truth.
     # One pass — analyze workflows usually don't want revise cycles.
     assert cfg.engine.review_loop is False
     assert cfg.engine.enable_analyze_reroute is False

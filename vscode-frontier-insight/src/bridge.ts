@@ -62,12 +62,6 @@ interface LmRequest {
     ask_thinking?: boolean;
 }
 
-interface ClarifyRequest {
-    type: "clarify_request";
-    id: number;
-    questions: Record<string, { question: string; default: unknown }>;
-}
-
 interface HumanReviewRequest {
     type: "human_review_request";
     id: number;
@@ -143,7 +137,7 @@ export function beforeAcceptMarkdown(block: BeforeAccept | undefined): string {
     return md + "\n";
 }
 
-type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest;
+type IncomingMessage = LmRequest | HumanReviewRequest;
 
 export interface BridgeOptions {
     progress: vscode.ChatResponseStream;
@@ -297,69 +291,9 @@ export class Bridge {
     private async handleMessage(msg: IncomingMessage): Promise<void> {
         if (msg.type === "lm_request") {
             await this.handleLmRequest(msg);
-        } else if (msg.type === "clarify_request") {
-            await this.handleClarifyRequest(msg);
         } else if (msg.type === "human_review_request") {
             await this.handleHumanReviewRequest(msg);
         }
-    }
-
-    /**
-     * Render the engine's pre-flight clarify questions as a sequence
-     * of `showInputBox` modals. The user can press Esc on any modal
-     * to cancel; we then send `clarify_cancelled` back and the Python
-     * side raises BridgeError (which the engine surfaces as a quest
-     * failure rather than hanging).
-     */
-    private async handleClarifyRequest(req: ClarifyRequest): Promise<void> {
-        this.opts.progress.markdown(
-            "\n🟡 **Pre-flight clarification** — the agent has questions to sharpen the run.\n\n",
-        );
-        const answers: Record<string, unknown> = {};
-        const keys = Object.keys(req.questions);
-        for (const key of keys) {
-            const entry = req.questions[key];
-            const defaultIsList = Array.isArray(entry.default);
-            const defaultStr = defaultIsList
-                ? (entry.default as unknown[]).join(", ")
-                : String(entry.default ?? "");
-            const value = await vscode.window.showInputBox({
-                title: `Clarify (${key})`,
-                prompt: entry.question || key,
-                value: defaultStr,
-                ignoreFocusOut: true,
-            });
-            if (value === undefined) {
-                // User pressed Esc.
-                this.send({
-                    type: "clarify_cancelled",
-                    id: req.id,
-                });
-                this.opts.progress.markdown(
-                    "\n— clarify cancelled by user; quest will fail.\n",
-                );
-                return;
-            }
-            // Re-encode list-typed defaults from the comma-separated
-            // string the modal returns.
-            if (defaultIsList) {
-                answers[key] = value
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter((s) => s.length > 0);
-            } else {
-                answers[key] = value;
-            }
-            this.opts.progress.markdown(
-                `  **${key}:** ${typeof answers[key] === "string" ? answers[key] : JSON.stringify(answers[key])}\n\n`,
-            );
-        }
-        this.send({
-            type: "clarify_response",
-            id: req.id,
-            answers,
-        });
-        this.opts.progress.markdown("\n— clarify answers submitted; resuming…\n\n");
     }
 
     /**

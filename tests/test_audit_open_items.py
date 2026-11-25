@@ -32,7 +32,7 @@ ANCHOR = "Measure every method against the finest step that all of them can reac
 def _engine(tmp_path: Path) -> Engine:
     cfg = Config(
         topic="pendulum period", title="pend", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )
