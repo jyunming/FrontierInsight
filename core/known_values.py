@@ -298,11 +298,13 @@ async def check(data: dict[str, Any], quest_root: Path, *, template: Any, ask: A
             value = await _one(kv, texts.get(str(kv["source"]["file"]), ""), folder, template=template, ask=ask,
                                execute=execute)
         values.append(value)
-        keep = [v for v in values if not any(p.get("unasked") for p in v["programs"])]
-        if keep:
+        if not any(p.get("unasked") for p in value["programs"]):  # kept beside every value already on disk
+            done[str(kv["name"])] = value
+            order = [str(k["name"]) for k in data.get("known_values") or []]
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"commission_sha256": sha, "at": time.time(), "values": keep}, indent=1,
-                                       default=str), encoding="utf-8")
+            path.write_text(json.dumps({"commission_sha256": sha, "at": time.time(),
+                                        "values": [done[n] for n in order if n in done]}, indent=1, default=str),
+                            encoding="utf-8")
     return {"commission_sha256": sha, "at": time.time(), "values": values}
 
 

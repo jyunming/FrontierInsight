@@ -1108,7 +1108,7 @@ class ImproveStageMixin:
                 "These declared oracles cannot be judged by the engine: " + " ".join(incomplete) + " Give each of them a numeric "
                 "`expected` (worked out from the closed form, the limit or the invariant; 0 for an invariant's worst violation or for the difference between two implementations) and "
                 "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0), a `kind` "
-                "(one of special_case, invariant, symmetry, second_implementation, convergence_rate) "
+                "(one of special_case, invariant, symmetry, second_implementation, convergence_rate, published_value) "
                 f"and a `reference` saying where the expected value comes from: {_REFERENCE_FORMS} Also give "
                 f"`expected_formula`, {_forms.EXPECTED_FORMULA_LANGUAGE} (not for an invariant, a symmetry or a second "
                 "implementation). Change nothing else."

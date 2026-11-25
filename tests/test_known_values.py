@@ -450,3 +450,75 @@ def test_a_known_value_the_plan_has_no_check_for_gets_one_from_fi() -> None:
     assert added["name"] == "drain constant" and CASE in added["check"]
     note = commission.oracle_gaps(data, {"oracles": []})
     assert len(note) == 1 and "FI added one from the commission" in note[0]
+
+
+@pytest.mark.asyncio
+async def test_a_value_done_on_a_resume_is_kept_beside_the_values_already_on_disk(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A's program cannot be asked for and B is done; on the resume A is done: every write keeps B.
+    import asyncio
+    import sys
+
+    path = _commission(tmp_path / "order", 0.25, 0.01)
+    quest = tmp_path / "quest"
+    commission.stage(path, quest)
+    data = commission.read(path)
+    data["known_values"] = [{**data["known_values"][0], "name": "outlet constant"}, data["known_values"][0]]
+
+    async def first(prompt: str, second: bool) -> str:
+        if "outlet constant" in prompt:
+            raise RuntimeError("the provider refused the call")
+        return RIGHT
+
+    async def execute(program: Path) -> tuple[int, str, str]:
+        run = await asyncio.create_subprocess_exec(sys.executable, str(program), stdout=asyncio.subprocess.PIPE,
+                                                   stderr=asyncio.subprocess.PIPE)
+        out, err = await run.communicate()
+        return run.returncode or 0, out.decode(), err.decode()
+
+    from core.engine_base import _load_prompts
+
+    template = _load_prompts()["known_value_program"]
+    await known_values.check(data, quest, template=template, ask=first, execute=execute)
+    record = quest / ".fi" / known_values.RECORD
+    assert [v["name"] for v in json.loads(record.read_text(encoding="utf-8"))["values"]] == ["drain constant"]
+    written: list[list[str]] = []
+    real = Path.write_text
+
+    def spy(self: Path, text: str, *a: Any, **kw: Any) -> int:
+        if self == record:
+            written.append([v["name"] for v in json.loads(text)["values"]])
+        return real(self, text, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+
+    async def again(prompt: str, second: bool) -> str:
+        assert "outlet constant" in prompt, "the value already done is not asked again"
+        return RIGHT
+
+    await known_values.check(data, quest, template=template, ask=again, execute=execute)
+    assert written and all("drain constant" in names for names in written), written
+    assert written[-1] == ["outlet constant", "drain constant"]
+
+
+@pytest.mark.asyncio
+async def test_the_repair_of_a_checks_numbers_still_names_a_published_value_and_a_new_check_does_not(
+        tmp_path: Path) -> None:
+    from tests.test_plan_parts_only import ORACLE, Scripted, _design, _planned
+
+    eng, _path, _before = _planned(tmp_path)
+    model = Scripted(eng, [{"protocol": {"oracles": [{"name": "no_gain", "expected": 0, "tolerance": 0.03}]}}])
+    assert await eng._declare_oracles(["The check 'no_gain' has no numeric expected value."]) is True
+    assert "convergence_rate, published_value)" in model.prompts[0], "a check a quest has keeps its kind"
+    design = _design()
+    design["protocol"].pop("oracles")
+    eng, _path, _before = _planned(tmp_path / "new", design)
+    model = Scripted(eng, [{"protocol": {"oracles": [ORACLE]}}])
+    assert await eng._declare_oracles() is True
+    assert "published_value" not in model.prompts[0], "a new check is never a published value the model types"
+
+
+def test_the_note_on_a_plan_with_no_check_still_names_a_published_benchmark() -> None:
+    from core import oracle_check
+
+    assert "a published benchmark value" in oracle_check.problems([], None, 0)[0]
