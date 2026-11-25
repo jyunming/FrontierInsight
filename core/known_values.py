@@ -128,7 +128,8 @@ def _text_of(node: ast.AST, depth: int = 0) -> str | None:
     elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
         text = _text_of(node.left, depth + 1)
         times = node.right.value if isinstance(node.right, ast.Constant) and isinstance(node.right.value, int) else None
-        out = text * times if text is not None and times is not None and 0 <= times <= _FOLD_CHARS             and len(text) * times <= _FOLD_CHARS else None
+        out = (text * times if text is not None and times is not None and 0 <= times <= _FOLD_CHARS
+               and len(text) * times <= _FOLD_CHARS else None)
     elif isinstance(node, ast.JoinedStr):
         parts: list[str | None] = []
         for v in node.values:
