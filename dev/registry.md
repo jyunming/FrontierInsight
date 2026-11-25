@@ -122,12 +122,15 @@ same PR that adds, splits or renames one.
   `went_on_entries` (the gate's automatic go-on for checks that measured nothing too). For quests an earlier FI stopped:
   `launch.py --accept-checks <quest> --approve-as <you>` (`_accept_checks`), `POST /api/quests/{id}/plan/accept-checks`
   and `GET .../plan/unsourced` (the quest page's *Go on as it is*), `@fi /accept-checks` (`skills.ts::runAcceptChecks`).
-  A known-answer check that was measured and failed is never put to a person (a person's choice to go on was deleted):
-  `offer(found, oracles, judged)` (the measured failures, when every problem is one), `script_version` (hash of the
-  script the checks ran + helper modules beside it + the model's package), `gap` (the evidence's sentence, `automatic`),
-  `failing_disclosure` (the writer's note). Engine side: `_oracle_gate` goes on by itself via `_goes_on_by_itself`, the
-  record's status is `went_on_failing` (`_measuring_code_version`); `core/todo.py::waiting` lists it, `core/evidence.py`
-  keeps the gap.
+  Also going on although a known-answer check was measured and failed (the same flag, button and command; `accept`
+  reads which stop it answers from `.fi/pause.json`): `offer(found, oracles, judged)` (offered only when every problem
+  is a measured failure; else why not), `script_version` (hash of the script the checks ran + helper modules beside it + the model's package),
+  `accept_failing` (`needs/FAILED_CHECKS_ACCEPTED.json`, bound to the fingerprint and the code version),
+  `failing_pending` (the stop's `go_on` in `needs/ORACLE_CHECK.json`; the web payload's `failed_checks`), `went_on_by`
+  / `no_longer_applies`, `gap` (the evidence's sentence, person or `automatic`), `failing_disclosure` (the writer's
+  note). Engine side: `_oracle_gate` honours a choice via `_chosen_go_on` before any plan change or repair, an
+  exploration goes on by itself via `_goes_on_by_itself`, the record's status is `went_on_failing`
+  (`_measuring_code_version`); `core/todo.py::waiting` lists it, `core/evidence.py` keeps the gap.
   `vscode-frontier-insight/src/resume-args.ts` (no VS Code import, run by a test with node): `splitRevisePlan` (`/resume
   <id> --revise-plan "..."` goes the `/plan` way) and `unknownResumeFlags` (any other flag is said, and nothing runs).
   `launch._plan_sources_status` prints, after `--revise-plan`, which checks still lack a source.
@@ -503,6 +506,11 @@ same PR that adds, splits or renames one.
   for one of `RETURN_REASONS`: `scope_exceeds_cap` (`_node_stuck_no_findings` on `too_long`, with
   `too_long_problem`; `_no_results_verdict` skips the fit rewrite, `_lower_the_runs` and `_run_up_to_the_limit` make no
   cut) and `known_value_mismatch` (`core/known_values.py`). `quality_report._outcome` puts the reason in the line.
+  The plan overturned before the study (`mismatch_reason` picks `plan_contradicts_sources` or `known_value_mismatch`):
+  `oracle_challenge.three_disagree` (three numbers of a failing check, each by its own error, `mc_error.BAND_SE`; a pair
+  with no error at all by the check's tolerance) read by `Engine._three_numbers_disagree` at the end of `_oracle_gate`,
+  which keeps `_pending_return`; `_gate_pass` / `_typed_results_stable` turn it into the `returned` stop
+  (`_returned_stop`, `_STOPPED_BEFORE_THE_STUDY`), written by `_node_stuck_no_findings` with `known_answer_problem`.
 - `core/known_values.py` — a commissioned study's known values computed from their sources before the plan
   (`Engine._known_values_first`, first in `_node_plan`, only under a commission). Per value (a value too common to hide, 0, 1 or one digit by `decisive`, is not computed): `excerpt` of the staged
   full text (a little before the passage and what follows it; a text whose equations were lost is not judged), `withhold` (the value withheld from the request in every form, its digits as the passage writes them: `written`), one program

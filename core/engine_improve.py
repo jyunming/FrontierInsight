@@ -953,10 +953,7 @@ class ImproveStageMixin:
         # The simulation's code and the script must not be one model's reading of the definitions: the same misreading
         # in both would agree, so with the same model the referee never corrects a check (it can still find the code
         # wrong, which only sends it to a repair).
-        referee_model = self._model_for_node(_oracle_challenge.NUMERIC_NODE) or self.config.provider.model or ""
-        coders = {self._model_for_node(n) or self.config.provider.model or ""
-                  for n in ("implement", "implement_outline", "implement_seed", "implement_oracle", "execute_reflect")}
-        same_coder = "" in coders or not referee_model or any(_review.same_model(referee_model, c) for c in coders)
+        same_coder = not self._referee_independent()
         acted = changed = False
         for j in judged:
             name = str(j.get("name") or "").strip()
@@ -1015,6 +1012,13 @@ class ImproveStageMixin:
         if changed:
             _oracle_triage.write(self.fi_dir, {**_oracle_triage.read(self.fi_dir), key: record})
         return acted
+
+    def _referee_independent(self) -> bool:
+        """Whether the referee's script is written by another model than every one that wrote the simulation."""
+        referee_model = self._model_for_node(_oracle_challenge.NUMERIC_NODE) or self.config.provider.model or ""
+        coders = {self._model_for_node(n) or self.config.provider.model or ""
+                  for n in ("implement", "implement_outline", "implement_seed", "implement_oracle", "execute_reflect")}
+        return not ("" in coders or not referee_model or any(_review.same_model(referee_model, c) for c in coders))
 
     async def _numeric_reference(self, state: QuestState, oracle: dict[str, Any]) -> dict[str, Any]:
         """The check's number computed numerically from the definitions by a short script the model named for
@@ -2316,6 +2320,7 @@ class ImproveStageMixin:
         rewrote the code)``. Run once before the sizing and the freeze, and again by :meth:`_verify_gated_code` when the code
         was changed afterwards."""
         await self._gate_baseline(state)  # the analysis gate's baseline: the code as it is (nothing with the switch off)
+        self._pending_return = None  # a commissioned study a check of this pass hands back (:meth:`_returned_stop`)
         await self._results_from_computation(state)
         # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
         if (static_stop := await self._static_gate(state)) is not None:
@@ -2337,6 +2342,8 @@ class ImproveStageMixin:
         if (gated := await self._gate_first(state)) is not None:  # the analysis on the recorded results (switch off: None)
             return gated, None, False
         await self._code_review_gate(state)
+        if (back := self._returned_stop()) is not None:
+            return back, None, False
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations, None, False
@@ -2360,6 +2367,8 @@ class ImproveStageMixin:
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
+        if (back := self._returned_stop()) is not None:
+            return back, None, False
         # FI's own repair: of either script or of the model's package (a script found changed on disk below may be a
         # person's edit during a stop, so it is not counted here).
         gate_rewrote = (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (

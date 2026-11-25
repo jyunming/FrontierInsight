@@ -2910,6 +2910,17 @@ class CodeStageMixin:
             issue["plan_asked"] = True
             issue["plan_changed"] = after != sha
         _code_review.save(self.quest_root, record)
+        left = _code_review.double_definition_gaps(self._design_from_plan()[0]) if twice_before else []
+        if left and self._commissioned() and _frozen.load(self.quest_root) is None:
+            # FI's own fact, after the plan's model was asked once: a commissioned study is handed back (_returned_stop).
+            from . import commission as _commission
+
+            problem = _commission.defined_twice_problem(left)
+            self._log.warning("[code_review] %s", problem)
+            self._pending_return = {"reason": "plan_contradicts_sources", "problem": problem,
+                                    "evidence": {"detector": "defined_twice", "definitions": left},
+                                    "tried": ["compared each quantity's definition in the plan with its metric's", *left,
+                                              "asked the plan's model once to make them agree: both were left"]}
 
     def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
@@ -4933,7 +4944,9 @@ class CodeStageMixin:
         go_on_checks, _why_not = (_accepted.offer(found, run_oracles, attempts[-1].get("judged") or [])
                                   if found else ([], ""))
         version = self._measuring_code_version(seed_path)
-        if found and self._goes_on_by_itself():
+        # A commissioned study whose failing check has three numbers that disagree is handed back, not gone on with.
+        returned = self._three_numbers_disagree(oracles, attempts) if found else None
+        if found and self._goes_on_by_itself() and returned is None:
             # Whether a check is right is not a question a person is asked: when FI could neither fix the simulation
             # nor correct the check from an independent value, it goes on by itself with each failed check marked
             # unconfirmed (one that measured nothing too), recorded as automatic and bound, as a person's choice was, to
@@ -5013,6 +5026,7 @@ class CodeStageMixin:
             **({"explained": explained} if explained else {}),
             **({"corrected": self._corrections_read()} if self._corrections_read() else {}),
             **({"fitted_to_test_run": fitted} if (fitted := self._fitted_to_test_run(oracles)) else {}),
+            **({"returned": returned["reason"]} if returned else {}),
         })
         if self_check_calls or self_check_runs:
             line = _oracle_triage.cost_line(self_check_calls, self_check_runs)
@@ -5050,7 +5064,7 @@ class CodeStageMixin:
                 "the check counts as failed);" if disputed_failing else "",
             )
             return new_code
-        # Not reached with the checks on: the gate goes on by itself above (``_goes_on_by_itself``).
+        # Reached with the checks on only by a commissioned study handed back (``_three_numbers_disagree``).
         return new_code
 
     def _multiple_hints(self, oracles: list[dict[str, Any]], measured: list[dict[str, Any]],
@@ -5140,6 +5154,50 @@ class CodeStageMixin:
         or the check is wrong is FI's to work out, never a person's; what FI could not confirm is marked unconfirmed,
         so the result counts as exploratory whatever the quest was set up for (a research quest included)."""
         return self.config.engine.oracle_check == "block"
+
+    def _three_numbers_disagree(self, oracles: list[dict[str, Any]], attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """A commissioned study whose failing known-answer check has three numbers that disagree, each by its own error
+        (core/oracle_challenge.py::three_disagree), before the protocol is frozen and with a referee written by another
+        model than the simulation: the hand-back the gate pass returns (:meth:`_returned_stop`), else None. A study run
+        directly goes on with the check marked unconfirmed, as before."""
+        if (not self._commissioned() or not self._goes_on_by_itself() or _frozen.load(self.quest_root) is not None
+                or not self._referee_independent()):
+            return None
+        from . import commission as _commission
+
+        referees = {str(t.get("check")): t for a in attempts for t in a.get("triage") or []
+                    if isinstance(t, dict) and t.get("kind") == "referee"}
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        for j in attempts[-1].get("judged") or []:
+            name = str(j.get("name") or "").strip()
+            found = _oracle_challenge.three_disagree(declared[name], j, referees.get(name)) if name in declared else None
+            if found is None:
+                continue
+            oracle = declared[name]
+            reason = _commission.mismatch_reason(oracle, self._commission_data())
+            proposal = self._oracle_proposals.get(name) or {}
+            evidence = {"detector": "known_answer_three_way",
+                        "check": {k: oracle.get(k) for k in ("name", "kind", "case", "measure", "tolerance") if k in oracle},
+                        **found, **({"a_models_note": [{"from": "repair", "text": str(proposal.get("reason") or "")}]}
+                                    if proposal.get("reason") and proposal.get("source") != "numeric" else {})}
+            back = {"reason": reason, "problem": _commission.known_answer_problem(name, found, reason), "evidence": evidence,
+                    "tried": [f"measured the check on its case: {found['numbers']['simulation']['value']:.6g}",
+                              f"repaired the simulation ({sum(1 for a in attempts if a.get('repair'))} repair(s))",
+                              "had an independent script compute it from the definitions: "
+                              f"{found['numbers']['reference']['value']:.6g}"]}
+            self._log.warning("[oracle] %s", back["problem"])
+            self._pending_return = back
+            return back
+        return None
+
+    def _returned_stop(self) -> dict[str, Any] | None:
+        """The stop before the study of a commissioned study a check of this gate pass handed back, once; else None."""
+        back = self.__dict__.pop("_pending_return", None)
+        if not back:
+            return None
+        stop = self._stop_before_run(back["problem"], "returned", tried=back["tried"])
+        stop["exec_result"]["returned_for"] = {"reason": back["reason"], "evidence": back["evidence"]}
+        return stop
 
     def _fitted_to_test_run(self, oracles: list[dict[str, Any]]) -> list[str]:
         """The checks the plan changed after FI's test run so that they pass on its own numbers, still in the protocol."""

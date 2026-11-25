@@ -356,6 +356,36 @@ def too_long_problem(fit: dict[str, Any] | None, said: str) -> str:
             "FI does not make a commissioned study smaller, so it is handed back")
 
 
+def mismatch_reason(oracle: dict[str, Any], data: dict[str, Any]) -> str:
+    """Why a check whose numbers disagree hands the study back, by where its expected value came from: the commission
+    or a quoted source (a published value) gives ``known_value_mismatch``; the plan's own working ``plan_contradicts_sources``."""
+    from core import oracle_check
+
+    def fold(name: Any) -> str:
+        return re.sub(r"\s+", " ", str(name or "")).strip().lower()
+
+    given = {fold(kv.get("name")) for kv in data.get("known_values") or [] if isinstance(kv, dict)}
+    return ("known_value_mismatch" if oracle_check.kind_of(oracle) == "published_value" or fold(oracle.get("name")) in given
+            else "plan_contradicts_sources")
+
+
+def known_answer_problem(name: str, found: dict[str, Any], reason: str) -> str:
+    """The sentence of a study handed back because a known-answer check's three numbers disagree
+    (core/oracle_challenge.py::three_disagree), in a scientist's words."""
+    n = found["numbers"]
+    expected = "the commission's known value" if reason == "known_value_mismatch" else "the plan's expected value"
+    return (f"the known-answer check {name!r} has three numbers that disagree beyond their own errors: FI's simulation "
+            f"measured {n['simulation']['value']:.6g} (± {n['simulation']['error']:.2g}), FI's independent recomputation "
+            f"gives {n['reference']['value']:.6g} (± {n['reference']['error']:.2g}) and {expected} is {n['plan']:.6g}; "
+            "FI did not run the study, so it is handed back")
+
+
+def defined_twice_problem(left: list[str]) -> str:
+    """The sentence of a study handed back because its plan defines one quantity two ways after its model was asked."""
+    return (f"the plan defines one quantity two ways ({'; '.join(left)}), and the plan's model, asked once to make them "
+            "agree, left both; FI did not run the study, so it is handed back")
+
+
 def write_return(quest_root: Path, reason: str, problem: str, evidence: Any, tried: list[str], **rest: Any) -> dict[str, Any]:
     """Write needs/STUCK.json for a study handed back, ``return_reason`` first, and return the record."""
     if reason not in RETURN_REASONS:

@@ -202,7 +202,8 @@ CHECKS: tuple[Check, ...] = (
           'Refuses a repaired file that changes what the findings name or no longer prints RESULT_JSON.'),
     Check('code_review_plan_conflict', 'core.engine', 'Engine._route_plan_conflicts',
           'execute', 'model_judge', 'repair',
-          "A finding saying the PLAN contradicts itself is sent to the plan's model, never to the code."),
+          "A finding saying the PLAN contradicts itself is sent to the plan's model, never to the code; a commissioned "
+          'study whose plan still defines one quantity two ways after the ask is handed back.'),
     Check('code_review_finding_demonstrated', 'core.code_findings', 'shown_by_assertion',
           'execute', 'measured', 'note',
           'A finding counts as demonstrated only when its generated test fails by its own assertion about '
@@ -561,6 +562,10 @@ CHECKS: tuple[Check, ...] = (
           'implement', 'measured', 'repair',
           'A failing check is refereed by a number FI computes numerically from the definitions (a script that '
           "never saw the plan's working or the measurement); decides which side to fix."),
+    Check('oracle_three_numbers_hand_back', 'core.oracle_challenge', 'three_disagree',
+          'implement', 'measured', 'stop',
+          "A commissioned study is handed back before it runs when a failing check's measured, recomputed and expected "
+          'values are each over 3 of their own standard errors apart (an unknown error decides nothing).'),
     Check('oracle_expected_value_corrected', 'core.engine', 'Engine._correct_expected_values',
           'implement', 'model_judge', 'repair',
           "Plan's expected value of a failing check is rewritten only when two independent workings agree, once "
@@ -1210,7 +1215,7 @@ CHECKS: tuple[Check, ...] = (
     Check('stuck_no_findings_stop', 'core.engine', 'Engine._node_stuck_no_findings',
           'evidence_gate', 'own_record', 'stop',
           'States the honest stop (needs/STUCK.json) for reasons no_numbers, crashed, flat, too_long, not_run, '
-          'cannot_repair, shown_fault_open, headline_missing; earlier paper set aside'),
+          'cannot_repair, shown_fault_open, headline_missing, returned; earlier paper set aside'),
     Check('precision_target_missed', 'core.engine', 'Engine._precision_missed',
           'cross_check', 'own_record', 'repair',
           "re_experiment sends the plan back to design only when FI's own record shows a precision target "
