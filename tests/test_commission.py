@@ -783,3 +783,135 @@ def test_a_staged_quest_with_no_trace_event_and_no_manifest_is_refused_but_one_w
         json.dumps({"kind": "commission_recorded", "sha256": files["inputs/commission.json"], "files": files}) + "\n",
         encoding="utf-8")
     commission.door(path, root)  # an older quest: its trace event checks the files, as before
+
+
+# ---- a study without a commission ------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["--config", "--fleet"])
+async def test_a_topic_only_config_is_refused_before_any_folder_service_or_model_call(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: str) -> None:
+    import launch
+    from core import axon_sidecar
+
+    started: list[int] = []
+    monkeypatch.setattr(axon_sidecar, "ensure_axon_up", lambda *a, **k: started.append(1))
+    chat = AsyncMock(side_effect=AssertionError("no model call is made"))
+    monkeypatch.setattr("core.engine.LLMClient.chat", chat)
+    yaml = tmp_path / "quest.yaml"
+    yaml.write_text(f"topic: How fast does a tank drain?\nprovider:\n  name: ollama\noutput:\n  output_dir: "
+                    f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    assert await launch.main_async(launch.parse_args([flag, str(yaml)])) == 2
+    err = capsys.readouterr().err
+    assert "no study was started: every study starts from a commission file" in err and "`fi new`" in err
+    assert err.count("\n") == 1 and "Traceback" not in err, "one sentence"
+    assert not (tmp_path / "outputs").exists() and started == [] and chat.await_count == 0
+
+
+def test_the_web_start_refuses_a_topic_only_config_before_a_quest_folder_is_made(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    out = tmp_path / "outputs"
+    out.mkdir()
+    r = TestClient(make_app(out)).post("/api/quests/start", json={"yaml": "topic: How fast does a tank drain?\n"})
+    assert r.status_code == 400 and "every study starts from a commission file" in r.json()["detail"]
+    assert list(out.iterdir()) == [], "no quest folder"
+
+
+def test_an_old_quest_without_a_commission_is_not_resumed(tmp_path: Path) -> None:
+    from core import commission
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / "config.yaml").write_text("topic: How fast does a tank drain?\n", encoding="utf-8")
+    with pytest.raises(commission.CommissionRefused, match="q-old was started without a commission file") as e:
+        commission.door(None, root)
+    assert "`fi new`" in str(e.value)
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_an_old_quest_without_a_commission_and_approves_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / "config.yaml").write_text("topic: How fast does a tank drain?\nprovider:\n  name: ollama\n", encoding="utf-8")
+    rc = await launch._run_update(quest_root=root, vscode_bridge_port=0, interactive=False, supervisor=None)
+    assert rc == 2 and "started without a commission file" in capsys.readouterr().err
+    assert not (root / ".fi" / "approved_plan.json").exists()
+
+
+@pytest.mark.parametrize("planted,named", [
+    ({"scope": None}, "The commission has no `scope` (a sentence)."),
+    ({"known_values": _known(passage="The drain constant of the reference tank is 0.25 per minute")},
+     "is not in its source file"),
+    ({"known_values": _known(value=0.3)}, "does not state its value 0.3"),
+], ids=["missing key", "passage not in its source", "passage without its value"])
+def test_fi_check_says_each_problem_in_one_sentence_and_exits_2(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str], planted: dict[str, Any], named: str) -> None:
+    import launch
+
+    assert launch._check([str(_commission(tmp_path, **planted))]) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert any(named in line for line in lines), lines
+    assert all(line.endswith(".") for line in lines)
+
+
+def test_fi_check_passes_a_good_commission_and_one_its_config_names(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    path = _commission(tmp_path)
+    assert launch._check([str(path)]) == 0
+    assert "can be used: every key is there and each passage is in its source." in capsys.readouterr().out
+    config = tmp_path / "study.yaml"
+    config.write_text("commission: commission.json\nprovider:\n  name: ollama\n", encoding="utf-8")
+    assert launch._check([str(config)]) == 0
+    assert launch._check([]) == 2
+
+
+def test_fi_new_writes_a_template_the_check_refuses_until_it_is_filled_in(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import yaml as _yaml
+
+    import launch
+    from core import commission, demo
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(demo, "set_up_providers", lambda: ["ollama"])
+    assert launch._new([]) == 0
+    assert "check commission.yaml" in capsys.readouterr().out
+    template, config = tmp_path / "commission.yaml", tmp_path / "study.yaml"
+    assert not config.read_text(encoding="utf-8").startswith("# Auto-generated by"), "never taken for an old interview's"
+    usable, lines = commission.check(template)
+    assert not usable and any("no `question`" in line for line in lines) and any("`failure`" in line for line in lines)
+    assert launch._new([]) == 0 and (tmp_path / "commission-2.yaml").is_file() and (tmp_path / "study-2.yaml").is_file()
+    data = _yaml.safe_load(template.read_text(encoding="utf-8"))
+    assert set(data) == {"question", "scope", "limits", "known_values", "no_known_values", "success", "failure", "doubts"}
+    data.update(question="How fast does a tank drain?", scope="three outlets", no_known_values=True,
+                success=[{"condition": "c", "verify": "v"}], failure=[{"condition": "c", "verify": "v"}])
+    template.write_text(_yaml.safe_dump(data), encoding="utf-8")
+    assert commission.check(template)[0]
+    cfg = Config.from_yaml(config)
+    assert cfg.commission == template.resolve() and cfg.provider.name == "ollama"
+    commission.door(cfg.commission, None)
+
+
+@pytest.mark.asyncio
+async def test_analyze_takes_a_commission_and_refuses_a_bad_one_before_a_quest_folder_is_made(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", AsyncMock(side_effect=AssertionError("no model call is made")))
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "runs.csv").write_text("outlet,seconds\n1,30\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--analyze", str(data)])  # a commission is required
+    bad = _commission(tmp_path / "order", doubts=None)
+    args = launch.parse_args(["--analyze", str(data), "--commission", str(bad), "--output-root", str(tmp_path / "out"),
+                              "--no-axon-sidecar"])
+    assert await launch.main_async(args) == 2
+    assert "`doubts`" in capsys.readouterr().err and not (tmp_path / "out").exists()

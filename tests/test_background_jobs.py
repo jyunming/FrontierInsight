@@ -20,6 +20,7 @@ from core.config import (
     ProviderConfig,
 )
 from core.engine import Engine
+from tests import commissioned
 from tests.test_engine_smoke import _classify, _fake_response_for
 
 # A phrase only the protocol contains: the topic itself says "background job".
@@ -52,8 +53,10 @@ def cluster(tmp_path: Path, monkeypatch) -> Path:
     return d
 
 
-def _config(tmp_path: Path, *, jobs: bool = True, replicates: int = 1, pilot: bool = False) -> Config:
+def _config(tmp_path: Path, *, jobs: bool = True, replicates: int = 1, pilot: bool = False,
+            commission: Path | None = None) -> Config:
     return Config(
+        commission=commission,
         topic="background job probe", title="background-job",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
@@ -207,11 +210,11 @@ async def test_cli_watch_prints_and_logs_every_check_then_resumes_the_quest(
     import launch
 
     monkeypatch.setattr(jw, "MIN_POLL_S", 0)
-    cfg = _config(tmp_path)
+    cfg = _config(tmp_path, commission=commissioned.write(tmp_path / "order"))  # --watch resumes only a commissioned study
     first = Engine(cfg)
     await first.run()
     yaml_path = tmp_path / "quest.yaml"
-    yaml_path.write_text("topic: x", encoding="utf-8")
+    yaml_path.write_text(commissioned.line(tmp_path / "order"), encoding="utf-8")
 
     resumed: list[str] = []
 

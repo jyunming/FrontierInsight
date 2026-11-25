@@ -8774,7 +8774,7 @@ def mint_quest_id(seed: str) -> str:
 
 def _slugify(s: str) -> str:
     """Quest-id slug. ASCII-only by contract — the quest_id regex used
-    by digest / critique / --resume / interview_update is
+    by digest / critique / --resume is
     ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``, so a non-ASCII slug would
     create a quest directory that those downstream paths can't see.
 
@@ -8786,10 +8786,6 @@ def _slugify(s: str) -> str:
        the original string so every distinct CJK topic still gets a
        distinct quest_id (instead of every CJK quest colliding on the
        constant ``"untitled"``).
-
-    For ``interview.slugify`` (used for human-readable YAML titles +
-    folder names downstream), the Unicode-letter policy is the right
-    one — that helper keeps CJK intact.
     """
     s = s.strip().lower()
     # ASCII-only character class — re.UNICODE is irrelevant here.

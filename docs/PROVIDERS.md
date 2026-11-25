@@ -33,11 +33,11 @@ the integration story is strongest and the cost story is simplest:
 In Copilot Chat:
 
 ```
-@fi /new
+@fi /start <config.yaml>
 ```
 
-The chat participant walks you through 7 quick questions, generates a
-config YAML, and runs the quest. Every LLM call streams through the
+The chat participant runs the quest from a config that names a commission
+file (`fi new` in a terminal writes one to fill in). Every LLM call streams through the
 `vscode.lm` bridge to your selected model.
 
 ## Provider matrix
@@ -171,11 +171,7 @@ was empty on the machine these flags were checked on.
 ## Per-node model routing
 
 Different nodes of the research DAG can use different models. Set it
-by hand-editing the YAML below, or from the interview's "Show advanced"
-screen (`python launch.py --new`, `@fi /new`, or the web `/interview`
-page) — the "Per-node model overrides" field takes the same
-comma-separated `node:model` pairs (`poster:gpt-4o-mini,
-slides:gpt-4o-mini`) and writes this exact block for you. In VSCode the
+by hand-editing the YAML below. In VSCode the
 field is a menu rather than a text box: it lists the models your VSCode
 offers, has one entry for the five light nodes below, and can set a
 single node. Either way gets you the same YAML:
@@ -202,14 +198,13 @@ model selected in your Chat picker and the chat says so in one line, so the
 quest keeps running on a model you chose rather than one FI guessed.
 
 **Which model a `vscode_extension` quest uses.** A quest started or resumed
-from the VS Code chat (`@fi /start`, `/fleet`, `/resume`, `/new`) uses the
+from the VS Code chat (`@fi /start`, `/fleet`, `/resume`) uses the
 model selected in the chat panel: it replaces `provider.model` from the
 config for that run, and `run.log` and the quest's trace say so ("the chat
 panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml"). A
 step's own `node_models` entry is kept. With the picker on *Auto* no model is
 named and the config's stays. A run started from a terminal or the web page
-has no chat panel, so it uses `provider.model` from the config (so does
-`@fi /update`, which approves the config as it is). Whatever was asked for,
+has no chat panel, so it uses `provider.model` from the config. Whatever was asked for,
 `run.log` names the model that answered the first call (as VS Code reports
 it; not with the picker on *Auto*, which names no model), warns when it is not the one the config names, and
 warns when it is not the model that answered the quest's earlier calls (the
@@ -518,9 +513,7 @@ provider keeps its own default: `claude_cli` uses its own setting,
 (e.g. `Gemini 3.1 Pro (High)`; see [Answer-only CLI calls](#answer-only-cli-calls)), `codex_cli` uses codex's built-in default (FI's calls do
 not read `~/.codex/config.toml`, so a `model_reasoning_effort` there does
 not apply; see [Answer-only CLI calls](#answer-only-cli-calls)), and a local
-Ollama model does not think at all. Set it in the YAML, or from the interview's
-"Show advanced" screen ("Reasoning effort") on the CLI, the web
-`/interview` page or `@fi /new`.
+Ollama model does not think at all. Set it in the YAML.
 
 ```yaml
 provider:

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from core.engine import QuestArtifacts
+from tests import commissioned
 from web.server import (
     _QuestRegistry, _scan_quests, _read_log_tail, _current_node_from_log,
     make_app,
@@ -628,10 +629,9 @@ def test_app_index_html_loads(tmp_path: Path) -> None:
     assert "quest-list" in r.text  # quest cards land here
     # The dashboard delegates per-quest detail (paper preview,
     # review panel rendering, log tail) to the /quest/<id> page.
-    # The dashboard itself just shows a list + a "+ New Quest" CTA
-    # so it stays simple. The renderReviewPanel function lives in
-    # the quest detail page; the test there pins it.
-    assert "New Quest" in r.text, "dashboard must surface the New Quest CTA"
+    # The dashboard itself shows the list and says how a study starts:
+    # from a commission written with `fi new` (there is no start form).
+    assert "fi new" in r.text and "New Quest" not in r.text
 
 
 def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
@@ -676,9 +676,8 @@ def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
 # --- in-process quests: the output pass ------------------------------------
 
 
-def _start_yaml(kinds: list[str], *, require_pdf: bool = False) -> str:
-    return textwrap.dedent(f"""\
-        topic: start-route output pass
+def _start_yaml(folder: Path, kinds: list[str], *, require_pdf: bool = False) -> str:
+    return commissioned.line(folder / "order") + textwrap.dedent(f"""\
         title: start-outputs
         provider:
           name: openai
@@ -739,7 +738,7 @@ async def test_a_quest_started_in_process_gets_the_outputs_its_config_asks_for(
 
     monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", fake_compile)
     app = make_app(tmp_path)
-    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md", "paper_pdf"]))
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md", "paper_pdf"]))
 
     assert compiled == ["paper.md"]
     assert (quest_root / "paper.md").read_text(encoding="utf-8").startswith("# A finished quest")
@@ -771,7 +770,7 @@ async def test_an_output_failure_is_logged_and_recorded_for_the_quest(
     monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", broken_compile)
     app = make_app(tmp_path)
     _quest_id, quest_root, detail = await _start_and_finish(
-        app, _start_yaml(["paper_md", "paper_pdf"], require_pdf=require_pdf),
+        app, _start_yaml(tmp_path, ["paper_md", "paper_pdf"], require_pdf=require_pdf),
     )
 
     assert detail["errors"] is not None and len(detail["errors"]) == 1
@@ -792,7 +791,7 @@ async def test_a_failed_quest_is_recorded_and_gets_no_output_pass(
 
     monkeypatch.setattr("core.engine.Engine.run", failing_run)
     app = make_app(tmp_path)
-    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md"]))
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md"]))
 
     assert detail["errors"] == [{"stage": "quest", "error": "RuntimeError('the design node broke')"}]
     assert not (quest_root / "frontier_insight_summary.json").exists()
@@ -818,7 +817,7 @@ async def test_the_server_keeps_answering_while_the_paper_compiles(
     app = make_app(tmp_path)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            r = await client.post("/api/quests/start", json={"yaml": _start_yaml(["paper_md"])})
+            r = await client.post("/api/quests/start", json={"yaml": _start_yaml(tmp_path, ["paper_md"])})
             quest_id = r.json()["quest_id"]
             for _ in range(200):
                 if started.is_set():

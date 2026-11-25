@@ -34,6 +34,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -933,7 +934,7 @@ def make_app(
     here when ``POST /api/quests/start`` is called.
 
     ``max_concurrent`` bounds the number of in-flight quests spawned
-    via the web UI interview. ``vscode_bridge_port`` / ``vscode_bridge_socket``
+    from the web UI. ``vscode_bridge_port`` / ``vscode_bridge_socket``
     are forwarded to each child quest so LLM calls keep routing
     through the same bridge the dashboard inherits from its parent.
     The socket path is the preferred transport (per-user IPC, no port
@@ -977,11 +978,48 @@ def make_app(
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    # Interview routes — /interview (new quest), /update/<id> (mid-quest
-    # re-entry), JSON schema endpoint, and POST handlers. Backed by
-    # core.interview as the single source of truth.
-    from web.interview_routes import register_interview_routes
-    register_interview_routes(app, output_root)
+    @app.get("/api/provider-choices")
+    async def get_provider_choices() -> JSONResponse:
+        """The providers, models and multi-model profiles the Tools page picks from (core/provider_choices.py), with
+        ``vscode_extension`` first when this dashboard was started from a VS Code terminal and the bridge answers."""
+        from core import provider_choices as _provider_choices
+
+        schema = _provider_choices.schema()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports — IPC socket path (default for
+        # --serve outside a chat-spawn) and TCP port (chat-spawned
+        # path). Either one open → vscode_extension surfaces.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
+        schema["vscode_bridge_available"] = bridge_live
+        if bridge_live:
+            providers = list(schema.get("providers", []))
+            if not any(p.get("value") == "vscode_extension" for p in providers):
+                providers.insert(0, {
+                    "value": "vscode_extension",
+                    "label": "vscode_extension — sanctioned Copilot Chat bridge",
+                    "description": (
+                        "Routes every LLM call through vscode.lm on your "
+                        "authenticated Copilot session. Available because "
+                        "this dashboard was launched from a VSCode terminal."
+                    ),
+                })
+            schema["providers"] = providers
+            # No model list for vscode_extension. It used to be three models FI
+            # had picked (gpt-5, claude-opus-4-7, gemini-2.5-pro), which put
+            # them in front of the user as if they were the choices. Empty means
+            # the model picked in the VSCode Chat picker is used, and a model id
+            # can be typed to name another.
+            provider_models = dict(schema.get("provider_models", {}))
+            provider_models.setdefault("vscode_extension", [])
+            schema["provider_models"] = provider_models
+        return JSONResponse(schema)
 
     # Tools routes — /tools/<name> (form pages for critique,
     # digest, summarize, analyze, fleet, ingest), backed
@@ -1171,7 +1209,7 @@ def make_app(
         """Walk outputs/ and feed each quest's paper.md back into
         Axon as ``kind=fi_quest_paper``. Useful when the user ran
         many quests with ``knowledge.enabled: false`` (the default
-        for the interview-generated YAML) and now wants the corpus
+        of older FI-written YAMLs) and now wants the corpus
         retroactively populated. Returns per-quest success/failure
         so the UI can show what landed."""
         try:
@@ -1221,19 +1259,19 @@ def make_app(
 
     @app.get("/api/providers/availability")
     async def provider_availability(provider: str = "", model: str = "") -> JSONResponse:
-        """How far each provider is ready on this host, for the Settings page and the interview's provider picker:
+        """How far each provider is ready on this host, for the Settings page and the Tools page's provider picker:
         a state (not installed, installed, signed in, ... model available), a plain sentence and how to fix it
-        (core/provider_readiness.py, the same words as `fi --doctor` and the CLI interview). The CLIs' own sign-in
+        (core/provider_readiness.py, the same words as `fi --doctor`). The CLIs' own sign-in
         status commands run (each with a short time limit, all at once) and a local Ollama server is asked for its
         models; no request leaves this computer for an API-key provider, whose state is "key present". ``available``
         is kept for older pages: true when nothing found stops a launch. ``?provider=`` (and ``&model=``) checks one."""
-        from core.interview import PROVIDER_CHOICES
+        from core.provider_choices import PROVIDER_CHOICES
         from core.provider_readiness import check_all
 
         choices = [c for c in PROVIDER_CHOICES if not provider or c.value == provider]
         if provider and not choices:
             # A provider the picker offers without being in the CLI list (vscode_extension from a VS Code terminal).
-            from core.interview import Choice
+            from core.provider_choices import Choice
             choices = [Choice(provider, provider, "")]
         states = await check_all([str(c.value) for c in choices], model=model or None, sign_in=True,
                                  call_service=False, timeout_s=5.0)
@@ -1315,9 +1353,9 @@ def make_app(
     @app.post("/api/quests/{quest_id}/resume")
     async def resume_quest(quest_id: str, rerun: bool = False, from_step: str = Query("", alias="from")) -> JSONResponse:
         """Spawn ``python launch.py --config <quest_root>/config.yaml
-        --resume <id>`` as a subprocess via the launcher. Different
-        from ``--update``: no interview; just continue from the last
-        checkpoint with the existing YAML unchanged.
+        --resume <id>`` as a subprocess via the launcher. It
+        continues from the last checkpoint with the existing YAML
+        unchanged.
 
         ``rerun=true`` uses ``--rerun`` instead: for a FINISHED quest it
         re-opens it (re-enters at design, applies saved refine feedback) and
@@ -2383,8 +2421,7 @@ def make_app(
     async def get_quest(quest_id: str) -> JSONResponse:
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         quest_id = quest_root.name  # the full id, also when a shortened one was given
-        # Race window: a quest just submitted via
-        # POST /api/interview/submit?launch=true has had its quest_id
+        # Race window: a quest just spawned by the launcher has had its quest_id
         # minted and its subprocess spawned, but the child engine has
         # not yet created `.fi/` (LangGraph init takes a few seconds —
         # model loading, ADC, env, …). Without this fallback the user
@@ -2435,8 +2472,8 @@ def make_app(
         # Expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
-        # Merge launcher state so quests spawned via the
-        # web UI's POST /api/interview/submit?launch=true also report
+        # Merge launcher state so quests spawned by the
+        # web UI's launcher also report
         # ``alive: true`` while their child process is running.
         # Without this, the in-process registry's `alive(quest_id)`
         # returns False for ANY web-launched quest (those don't
@@ -2822,7 +2859,7 @@ def make_app(
         resolution paths:
 
         1. An in-process future (the in-memory engine path used by
-           interview submit + launch=true) is resolved when present;
+           POST /api/quests/start) is resolved when present;
            the engine resumes within the same Python process.
         2. ``<quest_root>/.fi/human_review_answer.json`` is always
            written so a subprocess- or CLI-launched engine can pick
@@ -3140,11 +3177,8 @@ def make_app(
         # re-runs the execute node. Without this, a terminal-state
         # checkpoint (paper.md present, review.verdict set) would
         # short-circuit the graph and the user's code edit would be
-        # silently ignored. Reuses the same soft-invalidation
-        # primitive interview_update.py uses for paper_format /
-        # study_depth changes.
-        from core.interview_update import soft_invalidate_checkpoint
-        await soft_invalidate_checkpoint(
+        # silently ignored.
+        await _soft_invalidate_checkpoint(
             quest_root,
             ["exec_result", "result_json", "figures",
              "analysis", "cross_check", "paper_md",
@@ -3305,8 +3339,73 @@ def make_app(
     return app
 
 
+async def _soft_invalidate_checkpoint(
+    quest_root: Path, keys_to_drop: list[str],
+) -> bool:
+    """Clear ``keys_to_drop`` from the latest LangGraph checkpoint
+    in ``<quest_root>/.fi/state.sqlite``. Returns True on success,
+    False if no checkpoint exists or the update failed.
+
+    Best-effort: any exception is caught and logged via stderr; the
+    caller treats failure as "no invalidation happened" and the user
+    sees a clear hint."""
+    sqlite_path = quest_root / ".fi" / "state.sqlite"
+    if not sqlite_path.is_file():
+        return False
+    try:
+        # Lazy-import LangGraph so importing this module is cheap.
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except Exception as e:
+        print(
+            f"[FI] re-execute: LangGraph checkpointer unavailable ({e!r}); "
+            f"soft invalidation skipped. The resume still runs.",
+            file=sys.stderr,
+        )
+        return False
+
+    config = {"configurable": {"thread_id": quest_root.name}}
+    try:
+        async with AsyncSqliteSaver.from_conn_string(str(sqlite_path)) as saver:
+            current = await saver.aget_tuple(config)
+            if current is None or current.checkpoint is None:
+                return False
+            channel_values = dict(current.checkpoint.get("channel_values") or {})
+            cleared: list[str] = []
+            for key in keys_to_drop:
+                if key in channel_values:
+                    channel_values.pop(key, None)
+                    cleared.append(key)
+            if not cleared:
+                return False
+            new_checkpoint = dict(current.checkpoint)
+            new_checkpoint["channel_values"] = channel_values
+            # Bump the id so the saver writes a new row (rather than
+            # silently no-op'ing on duplicate primary key).
+            from uuid import uuid4
+            new_checkpoint["id"] = str(uuid4())
+            await saver.aput(
+                config,
+                new_checkpoint,
+                current.metadata or {},
+                {},
+            )
+            print(
+                f"[FI] re-execute: cleared {len(cleared)} state key(s) "
+                f"from latest checkpoint: {','.join(cleared)}"
+            )
+            return True
+    except Exception as e:  # pragma: no cover — defensive only.
+        print(
+            f"[FI] re-execute: soft-invalidation failed ({e!r}); the resume "
+            f"still runs. For a guaranteed re-run, "
+            f"delete {sqlite_path} before re-resuming.",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _warn_if_non_loopback(host: str) -> None:
-    """The web UI now spawns quests via ``POST /api/interview/submit?launch=true``.
+    """The web UI spawns quests (``POST /api/quests/start``, Resume).
     Quest spawn is a privileged action — anyone who can reach the
     endpoint can run arbitrary ``python launch.py --config <yaml>``
     on the server's machine. Binding to anything other than a
@@ -3320,7 +3419,7 @@ def _warn_if_non_loopback(host: str) -> None:
         import logging
         log = logging.getLogger("frontier_insight.serve")
         log.warning(
-            "--serve bound to %s (non-loopback). The /interview "
+            "--serve bound to %s (non-loopback). The quest start "
             "endpoint launches arbitrary quests on this machine; "
             "anyone reachable on the network can submit one. "
             "Bind to 127.0.0.1 unless you trust the network.",

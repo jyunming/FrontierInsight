@@ -228,7 +228,7 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_profile(tmp_path_factory, monkeypatch):
     """No test may read or write the person's real profile (~/.frontier-insight/profile.json): a saved name there would
-    change which questions an interview test is asked. Each test starts with none saved."""
+    change what a test is asked. Each test starts with none saved."""
     monkeypatch.setenv("FI_PROFILE_PATH", str(tmp_path_factory.mktemp("fi_profile") / "profile.json"))
 
 

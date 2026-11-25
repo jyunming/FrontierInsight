@@ -1,0 +1,25 @@
+# The study this example asks FI to run (a commission): a cheap check of the provider, not a study.
+
+question: >-
+  How does the probability of a major outbreak in a stochastic SIR epidemic depend on the basic reproduction number R0,
+  and how does it compare with the deterministic final-size prediction?
+
+scope: >-
+  R0 in {1.5, 3.0}, a population of N = 200, 100 stochastic runs per setting, and the deterministic final-size
+  prediction for the same R0 values. Nothing else.
+
+limits:
+  hours: 0.5
+  model_calls: 40
+
+known_values: []
+no_known_values: true
+
+success:
+  - condition: The outbreak probability is higher at R0 = 3.0 than at R0 = 1.5.
+    verify: The fraction of runs with a major outbreak at each R0, with its standard error.
+failure:
+  - condition: The outbreak probability is not higher at R0 = 3.0.
+    verify: The same fractions and standard errors.
+
+doubts: []

@@ -1,15 +1,7 @@
-topic: |
-  TOPIC: Compare three numerical integrators (forward Euler, 4th-order
-  Runge–Kutta, and Velocity-Verlet) on a 1-D damped harmonic oscillator
-  m * x'' + c * x' + k * x = 0, m = k = 1, c = 0.1, x(0) = 1, x'(0) = 0.
+# How FI runs the study in commission.yaml (the question, what it covers, the time allowed and what counts as
+# supported). Run it:  fi --config examples/integrator_bakeoff/config.yaml
 
-  GOALS:
-  1. Implement all three integrators in Python (numpy).
-  2. Compare trajectory error vs analytical reference for h ∈ {0.5, 0.1, 0.05, 0.01}.
-  3. Quantify long-time energy drift over t ∈ [0, 200] for each (h, integrator) pair.
-  4. Cross-reference results with literature on symplectic vs non-symplectic methods.
-  5. Produce a short markdown paper (≤ 4 pages, IMRAD) with three figures.
-  6. Cite at least three primary references.
+commission: commission.yaml
 
 title: bakeoff-integrators-fi-redesign
 
@@ -33,19 +25,18 @@ execution:
   timeout_s: 1800
   python_version: "3.11"
 
-# The literature search. FI stops at two places for you by default: after the literature, to let you download paywalled
-# papers by hand (pauses.papers), and after the review, to let you accept or reject the paper (pauses.review). This
-# example turns both off so the first run finishes on its own; set them back to "ask" / true to be asked.
 knowledge:
   enabled: true
   top_k: 5
   write_back_quests: true
 
+# FI stops after the review by default, to let you accept or reject the paper (pauses.review). This example turns it
+# off so the first run finishes on its own; set it back to "ask" to be asked.
 pauses:
-  papers: false
   review: "off"
 
 output:
+  page_limit: 4  # the page limit the commission's scope states
   kinds:
     - paper_md
     - paper_pdf

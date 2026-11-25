@@ -1170,9 +1170,8 @@ class EngineConfig(BaseModel):
     # stuck codex_cli call once wedged a run for hours when the
     # provider-level timeout didn't fire).
     web_plots_timeout_s: float = Field(default=360.0, gt=0)
-    # User-pinned answers to the clarify slots, supplied by the
-    # interview frontends (`launch.py --new`, the VSCode `@fi /new`
-    # extension, the `--serve` web UI) or hand-written into YAML. When
+    # User-pinned answers to the clarify slots, hand-written into the
+    # YAML (the setup interview of earlier FI versions wrote them). When
     # present, the clarify node merges these into ``clarify_answers``
     # AFTER it computes its own auto-answers, so user pins always win.
     # When every clarify slot is pinned AND ``clarify_mode == "auto"``,
@@ -1869,7 +1868,7 @@ class Config(BaseModel):
     # config is silent, exploring first and confirming once on data or seeds exploration never saw (``engine.phased``,
     # ``_RESEARCH_DEFAULTS``); that one a config may turn off. ``default``: nothing changes.
     rigor_profile: Literal["default", "research"] = "default"
-    # What the result is for, as the interview asked it (explore / research / decision). Kept because it bounds the
+    # What the result is for (explore / research / decision). Kept because it bounds the
     # evidence: an exploration's result is preliminary, never publication-ready. A config that does not say (one
     # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
     # "publication-ready" on settings nobody chose for that.

@@ -246,5 +246,5 @@ def test_deep_doctor_says_what_it_will_do_before_doing_it(
 
 def test_deep_goes_with_doctor_only() -> None:
     with pytest.raises(SystemExit):
-        launch.parse_args(["--new", "--deep"])
+        launch.parse_args(["--serve", "--deep"])
     assert launch.parse_args(["--doctor", "--deep"]).deep is True

@@ -6,7 +6,7 @@ terminal:
 * ``/tools/critique`` → ``python launch.py --critique <quest_id>``
 * ``/tools/digest``   → ``python launch.py --digest --days N``
 * ``/tools/summarize``→ ``python launch.py --summarize <dir>``
-* ``/tools/analyze``  → ``python launch.py --analyze <dir> --analyze-topic "<topic>"``
+* ``/tools/analyze``  → ``python launch.py --analyze <dir> --commission <file>``
 * ``/tools/fleet``    → ``python launch.py --fleet a.yaml b.yaml ...``
 * ``/tools/ingest``   → ``python launch.py --ingest <path1> <path2> ...``
 
@@ -61,8 +61,7 @@ class ToolSpec:
     artifact_dir: str | None = None  # relative to output_root, e.g. "_digests" — for "View output" link
     accepts_files: bool = False
     # When True, the form gets a provider + model picker (driven
-    # by the same schema as the interview's provider/model
-    # questions). The POST handler maps the picked values to the
+    # by the provider lists of core/provider_choices.py). The POST handler maps the picked values to the
     # tool's `--<tool>-provider` CLI flag. Defaults to True for
     # any tool that fires LLM calls; False for tools that only
     # touch files (ingest) or shell out (fleet has per-config
@@ -155,11 +154,12 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 required=False,
             ),
             ToolField(
-                name="topic",
-                label="Analysis topic",
-                prompt="What the analysis should produce. One sentence.",
-                kind="text",
-                placeholder="Compare ridership trends across regions",
+                name="commission",
+                label="Commission",
+                prompt="Path on the server of the study's commission file (`fi new` writes one to fill in); its "
+                       "question is what the analysis answers.",
+                kind="path",
+                placeholder="commission.yaml",
             ),
         ),
     ),
@@ -285,8 +285,8 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             # the bridge port is inherited and every tool can route
             # LLM calls through `vscode.lm.*`. The client uses this
             # flag to surface `vscode_extension` in the provider
-            # picker (it is intentionally absent from the interview's
-            # PROVIDER_CHOICES list).
+            # picker (it is intentionally absent from
+            # core/provider_choices.py's PROVIDER_CHOICES list).
             "vscode_bridge_available": bridge_live,
             # Source from the canonical ensemble trio so the picker
             # never drifts from what the `full` ensemble profile
@@ -330,7 +330,7 @@ def register_tools_routes(app: FastAPI, output_root: Path) -> None:
             }
             uploaded_paths = await _stage_uploads(form, output_root, spec.name)
 
-        # Mirror the interview's submit-time guard: refuse
+        # Refuse
         # `vscode_extension` when neither bridge transport is wired.
         # The IPC socket is the default path; the TCP port is kept
         # for the chat-spawn case where the extension passes it.
@@ -405,7 +405,7 @@ def _ensemble_argv_tail(
         # Caller will surface this as a UI prompt rather than silently
         # dropping the profile.
         return []
-    from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
+    from core.provider_choices import ENSEMBLE_MIN_MODELS, parse_ensemble_models
 
     named = parse_ensemble_models(payload.get("ensemble_models"))
     if len(named) < ENSEMBLE_MIN_MODELS:
@@ -508,7 +508,7 @@ def _build_argv(
     Per-tool provider and model are appended at the end via the
     ``--<tool>-provider`` and ``--<tool>-model`` flags. The model is
     threaded into the spawned process's ``ProviderConfig.model``,
-    same wiring the interview-generated YAML uses for quests, so the
+    same wiring a quest's YAML uses, so the
     picker selection actually routes the LLM call instead of being a
     UX-only hint."""
     name = spec.name
@@ -537,8 +537,7 @@ def _build_argv(
 
     # Ensemble tail: --<tool>-ensemble takes a CSV of models, not a
     # profile name. Expand the profile picked in the UI into the
-    # provider's curated 3-model trio (mirrors what the interview's
-    # YAML emitter does for engine-side node_ensemble).
+    # provider's curated 3-model trio.
     # Every LLM tool accepts --<tool>-ensemble now: single-shot
     # fan-out for digest / summarize / critique,
     # engine-level node_ensemble for analyze. Map the profile picker
@@ -578,10 +577,10 @@ def _build_argv(
             path = str(uploaded_paths[0].parent)
         if not path:
             raise ValueError("data folder path or uploaded files required")
-        topic = (payload.get("topic") or "").strip()
-        if not topic:
-            raise ValueError("analysis topic is required")
-        return ["--analyze", path, "--analyze-topic", topic, *provider_tail, *ensemble_tail]
+        commission = (payload.get("commission") or "").strip()
+        if not commission:
+            raise ValueError("the study's commission file is required (`fi new` writes one to fill in)")
+        return ["--analyze", path, "--commission", commission, *provider_tail, *ensemble_tail]
 
     if name == "fleet":
         yaml_paths_raw = (payload.get("yaml_paths") or "").strip()

@@ -1,11 +1,11 @@
 """End-to-end smoke: full DAG through the FastAPI server.
 
 This is the validator that proves the GUI works:
-  1. Start a quest via POST /api/quests/start with a fake-LLM config.
-  2. Poll until the clarify panel surfaces (engine paused at clarify node).
-  3. Submit answers via POST /api/quests/{id}/clarify.
-  4. Wait for the quest task to finish.
-  5. Assert paper.md + figures landed on disk AND surface via the
+  1. Start a quest via POST /api/quests/start with a fake-LLM config that
+     names a commission (every study starts from one; it asks no setup
+     questions, so the run goes through without a clarify pause).
+  2. Wait for the quest task to finish.
+  3. Assert paper.md + figures landed on disk AND surface via the
      /api/quests/{id} detail endpoint.
 
 The LLMClient.chat is monkeypatched module-wide so no real API
@@ -28,6 +28,7 @@ from web.server import make_app
 
 
 # Re-use the canned LLM responses from the engine smoke test.
+from tests import commissioned
 from tests.test_engine_smoke import _fake_response_for
 
 # A whole quest with a real venv runs behind each test; give it longer than pytest.ini's per-test default.
@@ -35,11 +36,6 @@ pytestmark = pytest.mark.timeout(1800)
 
 
 _QUEST_YAML = textwrap.dedent("""\
-    topic: |
-      End-to-end GUI smoke test: confirm a fake-LLM quest runs from
-      `/api/quests/start` through `/api/quests/{id}/clarify` to a
-      finished paper.md on disk.
-
     title: gui-smoke
 
     provider:
@@ -49,7 +45,6 @@ _QUEST_YAML = textwrap.dedent("""\
       framework: langgraph
       max_iterations: 1
       review_loop: false
-      clarify_mode: interactive
       # Default gate is "after_review"; auto-accept finalises the
       # clean-verdict path without wiring a callback in tests.
       auto_accept_on_pass: true
@@ -68,10 +63,10 @@ _QUEST_YAML = textwrap.dedent("""\
 
 
 @pytest.mark.asyncio
-async def test_full_dag_via_server_with_clarify_pause_and_resume(
+async def test_full_dag_via_server_from_a_commission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Full GUI flow: start → clarify pause → submit → run completes."""
+    """Full GUI flow: start from a commission → run completes, with no setup questions."""
     # Monkeypatch the LLM so the engine consumes canned responses.
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         return _fake_response_for(messages[-1]["content"])
@@ -83,67 +78,14 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
 
     async with AsyncClient(transport=transport, base_url=base_url) as client:
         # 1. Start a quest.
-        r = await client.post("/api/quests/start", json={"yaml": _QUEST_YAML})
+        yaml_text = commissioned.line(tmp_path / "order") + _QUEST_YAML
+        r = await client.post("/api/quests/start", json={"yaml": yaml_text})
         assert r.status_code == 200, r.text
         quest_id = r.json()["quest_id"]
         quest_root = Path(r.json()["quest_root"])
         assert quest_root.is_relative_to(tmp_path)
 
-        # 2. Poll until clarify panel surfaces (interrupt() fired).
-        # `Engine.run` does an upfront `executor.setup(quest_root)` which
-        # on a cold checkout creates a real venv — on Windows that's
-        # ~30 s — before the clarify node even runs. Budget generously.
-        for _ in range(900):
-            await asyncio.sleep(0.2)
-            r = await client.get(f"/api/quests/{quest_id}/clarify")
-            if r.json().get("pending"):
-                break
-        else:
-            log = (quest_root / ".fi" / "run.log").read_text(
-                encoding="utf-8", errors="replace",
-            )
-            pytest.fail(
-                "clarify never surfaced within 180 s.\n--- run.log tail ---\n"
-                + "\n".join(log.splitlines()[-30:])
-            )
-        questions = r.json()["questions"]
-        assert "comparative_baseline" in questions
-        assert "output_kinds" in questions
-
-        # 3. Submit answers via the clarify endpoint.
-        # IMPORTANT — keep ``empirical_vs_theoretical`` AWAY from
-        # ``"empirical"`` here. The legacy
-        # ``empirical_vs_theoretical=="empirical"`` fallback routes
-        # the quest into no-simulation mode (pauses for user data
-        # and exits rc=0 without writing paper.md). This test is an
-        # end-to-end SIMULATION smoke; we want the regular
-        # implement/execute path to run, which means the
-        # simulatability resolver must NOT trigger. Either:
-        # (a) leave the new ``simulatability`` slot absent AND set
-        #     ``empirical_vs_theoretical: "theoretical"`` (legacy
-        #     fallback inactive), or
-        # (b) explicitly set ``simulatability.default: "yes"``
-        #     (new slot wins over legacy).
-        # Going with (a) — minimal change, no new slot in test
-        # fixtures yet.
-        answers = {
-            "comparative_baseline": "user-supplied baseline X",
-            "empirical_vs_theoretical": "theoretical",
-            "success_metric": "user-supplied metric M",
-            "budget": "1 minute",
-            "output_kinds": ["paper_md"],
-        }
-        r = await client.post(
-            f"/api/quests/{quest_id}/clarify",
-            json={"answers": answers},
-        )
-        assert r.status_code == 200
-        body = r.json()
-        assert body["ok"] is True
-        # In-process server quest → the clarify future resolves in-process.
-        assert body["in_process_resolved"] is True
-
-        # 4. Wait for the engine run to finish. paper/paper.md marks its
+        # 2. Wait for the engine run to finish. paper/paper.md marks its
         #    end; the server-side driver then runs the CLI's output pass
         #    and writes the summary file.
         paper_md = quest_root / "paper" / "paper.md"
@@ -164,7 +106,7 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
                 + "\n".join(log.splitlines()[-30:])
             )
 
-        # 5. Assert the GUI surfaces the finished quest correctly.
+        # 3. Assert the GUI surfaces the finished quest correctly.
         # Wait for the driver task to actually finish: paper.md exists
         # before `engine.run` leaves its `finally:` block and before the
         # output pass runs.
@@ -184,7 +126,7 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
         assert body["errors"] is None
         assert body.get("pending_clarify") is False
 
-        # 6. Rename the finished quest from the quest page: both copies of the paper, the config, the summary and
+        # 4. Rename the finished quest from the quest page: both copies of the paper, the config, the summary and
         # the saved state a later resume reads all carry the new title.
         r = await client.post(f"/api/quests/{quest_id}/title", json={"title": "A Better Title"})
         assert r.status_code == 200, r.text

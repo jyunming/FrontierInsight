@@ -1,5 +1,5 @@
 """Tests for web/quest_launcher.py — the subprocess pool that
-spawns quests from the ``--serve`` web UI's interview-submit
+spawns quests from the ``--serve`` web UI's resume / tools
 endpoint.
 
 These tests do NOT spawn a real Python; they monkeypatch

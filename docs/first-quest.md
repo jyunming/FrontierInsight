@@ -32,13 +32,13 @@ Using another provider (a signed-in `claude` or `codex` command, Gemini, a local
 python launch.py demo
 ```
 
-It writes a small example quest, `fi-demo.yaml`, into the folder you are in (never over a file that is there), checks at no cost that your model can be used — a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call; if not, it says what to fix — and asks before running it. To use another model, change `provider: name:` in `fi-demo.yaml` (the comment above it lists the choices), then run it with `python launch.py --config fi-demo.yaml`.
+It writes a small example study into the folder you are in (never over a file that is there): `fi-demo-commission.yaml`, what to study, and `fi-demo.yaml`, the settings that name it, checks at no cost that your model can be used — a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call; if not, it says what to fix — and asks before running it. To use another model, change `provider: name:` in `fi-demo.yaml` (the comment above it lists the choices), then run it with `python launch.py --config fi-demo.yaml`.
 
 It compares three numerical integrators on a damped oscillator, so it needs no data. It takes a while, and the screen shows one line for each stage as it starts — not the internal detail behind it (that goes only into `.fi/run.log` in the quest folder, for when you want it). Lines beginning with `[<quest id>]` are FI's own; the stages, in order:
 
 | Stage | What it is doing |
 |---|---|
-| `ideate`, `literature` | picks the angle; searches papers and the web |
+| `ideate`, `literature` | picks the angle; reads the sources the commission gives (none, for the example) |
 | `plan`, `design` | writes `plan.md` (what the papers say, the gap, the experiment it will run) |
 | `implement`, `oracle`, `execute` | writes the code, checks it on a case with a known answer, runs it |
 | `analyze`, `cross_check` | reads the results; checks them against the literature |
@@ -68,9 +68,16 @@ Want to see what happened, in order? `python launch.py --trace <quest id>` ([tra
 ## 7. Your own question
 
 ```bash
-python launch.py --new
+python launch.py new
 ```
 
-asks three things (your research question, what the result is for, and the model, with, for research, a different model for one of the four AI reviewers, so they do not all make the same mistakes), then shows four short cards with everything worked out for you (how strictly it is checked and roughly what it costs; the model and whether it is ready; data, sources and pauses; what you get), where any line can be changed, and writes the config. The name printed on the paper (*Paper byline (optional)*) is one folded line on the last card; the first time a paper is written, the terminal asks it once (Enter keeps the Frontier Insight byline). Running `fi` with nothing after it offers three next steps: start a new quest, open the web app, or check your setup. If you have only one model, answer *I only have one model*: the quest still runs, but its result says the review was one model's view and it is not marked publication-ready. The default answer to *what the result is for* is research: every check can stop the quest, and it stops once `plan.md` is written so you can read the plan before anything runs (`python launch.py --resume <quest id>` goes on). Answer *exploring* for a quicker, cheaper draft that does not stop. The same questions are in the web form (`python launch.py --serve`, then http://127.0.0.1:8765) and in VSCode (`@fi /new`). To read and change the plan before anything runs, answer *Stop to read and edit the plan* (advanced): the quest stops after `plan.md` is written, and `python launch.py --resume <quest id>` runs it.
+writes two files into the folder you are in, never over a file that is there: `commission.yaml` and `study.yaml`. The commission says what FI is asked to study: your question (one sentence), what the study covers and leaves out, the hours and model calls you allow, the values you already know from a source (or `no_known_values: true`), what counts as success and as failure, and any doubts. Every key has a one-line comment of what goes there. `study.yaml` names the commission and holds the model and where results go. Then:
+
+```bash
+python launch.py check commission.yaml     # one plain sentence per problem; no model call
+python launch.py --config study.yaml
+```
+
+A config that does not name a commission is refused before anything runs. The commission file is described in [USAGE.md](USAGE.md#the-commission-file). To read and change the plan before anything runs, set `pauses.plan: ask` in `study.yaml`: the quest stops after `plan.md` is written, and `python launch.py --resume <quest id>` runs it. Running `fi` with nothing after it offers the next steps: run the small example, write a commission, open the web app, or check your setup.
 
 Next: the [glossary](glossary.md) for the words, [rigor.md](rigor.md) for how FI checks its own experiments, [USAGE.md](USAGE.md) for every setting.

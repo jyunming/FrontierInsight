@@ -44,7 +44,7 @@ defaults. The tasks below are config, guard-rails, and nice-to-haves.
 
 ## P1 — quality of life
 
-- [ ] **Model discovery for the interview picker**: local-ai-stack serves
+- [ ] **Model discovery for the provider picker**: local-ai-stack serves
   `GET /v1/models` (all registry models) but not Ollama's `/api/tags`
   (`core/provider_models_discover.py:95-122` only probes `/api/tags` for
   local). Add a `/v1/models` probe for any custom `base_url` so `@fi`'s
@@ -52,10 +52,6 @@ defaults. The tasks below are config, guard-rails, and nice-to-haves.
 - [ ] **Pricing rows**: add `gemma4-26b`, `qwen3-coder-30b`, `qwen3.6-35b`,
   `gpt-oss-20b` at $0 to `MODEL_PRICING` (`core/provider.py:1488-1512`) so
   cost logs read $0.00 instead of `None`.
-- [ ] **Interview provider probe**: `core/interview.py:931-939` detects
-  providers via `OPENAI_API_KEY` / binaries; add a cheap
-  `GET http://localhost:8080/health` probe so "local stack" shows as available
-  when the engine is up (or when `las status` would say UP).
 - [ ] **Docs**: add a "Local stack (llama.cpp router)" row to
   `docs/PROVIDERS.md` (next to the ollama/vllm rows, :51-52) and a recipe in
   `docs/recipes.md` (:89-96 pattern) — note the keyless auth and hot-swap

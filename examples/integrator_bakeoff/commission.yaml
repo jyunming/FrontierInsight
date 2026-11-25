@@ -1,0 +1,31 @@
+# The study this example asks FI to run (a commission). `fi check examples/integrator_bakeoff/commission.yaml` checks it.
+
+question: >-
+  How do the midpoint method, 4th-order Runge-Kutta and Velocity-Verlet compare in trajectory error and long-time
+  energy drift on a 1-D damped harmonic oscillator m x'' + c x' + k x = 0 with m = k = 1, c = 0.1, x(0) = 1, x'(0) = 0?
+
+scope: >-
+  The three integrators, each implemented in Python (numpy), on that one oscillator: the trajectory error against the
+  analytical solution for step sizes h in {0.5, 0.1, 0.05, 0.01}, and the long-time energy drift over t in [0, 200] for
+  each (h, integrator) pair. A short paper (at most 4 pages, IMRAD) with three figures. No other methods, forms or
+  parameters.
+
+limits:
+  hours: 1
+  model_calls: 80
+
+# No value is known here: the analytical solution is computed by the study itself, not quoted from a source.
+known_values: []
+no_known_values: true
+
+success:
+  - condition: The trajectory error of each method falls as h shrinks, at about its order of accuracy.
+    verify: The slope of log(error) against log(h) for each method, over the four step sizes.
+  - condition: Velocity-Verlet keeps the energy bounded over t in [0, 200] at every h where it is stable.
+    verify: The energy at t = 200 against its value at t = 0, for each step size.
+failure:
+  - condition: A method's error does not fall as h shrinks, or its energy grows without bound at h = 0.01.
+    verify: The error at each step size, and the energy at t = 200 against its value at t = 0.
+
+doubts:
+  - At h = 0.5 the midpoint method may be unstable, so its error there may say more about stability than accuracy.

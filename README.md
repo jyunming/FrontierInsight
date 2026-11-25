@@ -28,7 +28,7 @@ python launch.py demo
 
 The first run asks once to install its own packages into `.venv/` (usually 30-90s), then continues where you were; every run after that skips straight past it, and a later `git pull` that adds a new dependency is caught and installed the same way, automatically. Prefer to do it yourself first? `python -m venv .venv`, activate it, `pip install -e .` — FI sees that and does nothing further.
 
-`demo` writes a small example quest, **`fi-demo.yaml`**, into the folder you are in (three numerical integrators on a damped oscillator; it needs no data), checks at no cost that your model can be used (a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call), and asks before it runs the quest for real. The quest takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (Once set up, `fi` from an activated `.venv` is the same command as `python launch.py`; installed with pip, the first step is `fi demo`.)
+`demo` writes a small example study into the folder you are in, **`fi-demo-commission.yaml`** (what to study: three numerical integrators on a damped oscillator, no data needed) and **`fi-demo.yaml`** (the settings that name it), checks at no cost that your model can be used (a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call), and asks before it runs the quest for real. The quest takes a while (it writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (Once set up, `fi` from an activated `.venv` is the same command as `python launch.py`; installed with pip, the first step is `fi demo`.)
 
 **Not using OpenAI?** `demo` picks the first model it finds set up on this computer; to choose, change `provider: name:` in `fi-demo.yaml`:
 
@@ -39,9 +39,9 @@ The first run asks once to install its own packages into `.venv/` (usually 30-90
 | A signed-in CLI (`claude auth login`, `codex login`) | `claude_cli` / `codex_cli` |
 | Nothing, offline | `ollama` (local, free) |
 
-If something is missing (a key, a sign-in, a local model), `demo` says what and how to fix it before anything is spent (so do `--new` and the web form before they launch). If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
+If something is missing (a key, a sign-in, a local model), `demo` says what and how to fix it before anything is spent. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks three things (your research question, what the result is for, and the model, with, for research or a decision, a second model for one reviewer), shows the rest worked out for you on four short cards to change before launch, and writes the config. `fi` with nothing after it offers the three next steps: a new quest, the web app, or a setup check. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
+**Your own study.** `fi new` writes two files: `commission.yaml` (what to study: your question, what it covers, the hours and model calls you allow, the values you already know, what counts as success and as failure) and `study.yaml` (the model and where results go). Fill in the commission, check it with `fi check commission.yaml` (no model call; one plain sentence per problem), then run `fi --config study.yaml`. The commission file is described in [docs/USAGE.md](docs/USAGE.md#the-commission-file). `fi` with nothing after it offers the next steps: run the small example, write a commission, open the web app, or check your setup. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 
@@ -69,7 +69,7 @@ Every quest writes **`plan.md`** before the experiment is designed. Ask FI to st
 
 ```yaml
 pauses:
-  plan: ask      # or answer "Stop to read and edit the plan" in the interview
+  plan: ask      # "ask" stops to read and edit the plan
   scope: ask     # before the plan, pick the study to run from 3 or 4 studies FI offers (off skips it)
 ```
 
@@ -83,7 +83,7 @@ On the web the quest page has a **Plan** panel; in VSCode use `@fi /plan <quest_
 
 ## How much can you trust the result?
 
-Each finished quest ends with an **evidence level**, from `executed` (it ran) up to `publication_ready` (every check passed, the review accepted it and so did you: a result no person accepted stays one level below), and a plain sentence for what stands in the way of the next level. Nothing is called validated that was not checked, and a check that was turned off shows up as a gap. Set `rigor_profile: research` (the interview recommends it for a simulation study) to make the checks stop the quest instead of only reporting, and to confirm the result once more on data or seeds the exploration never saw. A config written by hand that says neither `result_use: research` (or `decision`) nor `rigor_profile: research` is taken as an exploration: its result is marked preliminary and never publication-ready. How the checks work is in **[docs/rigor.md](docs/rigor.md)**; what a quest did, in order, is `python launch.py --trace <quest>` (**[docs/trace.md](docs/trace.md)**).
+Each finished quest ends with an **evidence level**, from `executed` (it ran) up to `publication_ready` (every check passed, the review accepted it and so did you: a result no person accepted stays one level below), and a plain sentence for what stands in the way of the next level. Nothing is called validated that was not checked, and a check that was turned off shows up as a gap. Set `rigor_profile: research` (recommended for a simulation study) to make the checks stop the quest instead of only reporting, and to confirm the result once more on data or seeds the exploration never saw. A config written by hand that says neither `result_use: research` (or `decision`) nor `rigor_profile: research` is taken as an exploration: its result is marked preliminary and never publication-ready. How the checks work is in **[docs/rigor.md](docs/rigor.md)**; what a quest did, in order, is `python launch.py --trace <quest>` (**[docs/trace.md](docs/trace.md)**).
 
 ---
 

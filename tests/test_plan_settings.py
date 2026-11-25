@@ -1,5 +1,5 @@
 """The settings a quest was approved with, and a hand edit that changes how strictly it is checked
-(core/plan_settings.py, Engine.run, core/interview_update.approve_settings)."""
+(core/plan_settings.py, Engine.run, plan_settings.approve)."""
 
 from __future__ import annotations
 
@@ -74,13 +74,12 @@ async def test_a_hand_edit_stops_the_quest_before_anything_runs(tmp_path: Path) 
 
 
 def test_update_approves_the_change_and_names_it(tmp_path: Path) -> None:
-    from core.interview_update import approve_settings
 
     root = tmp_path / "q"
     _interview_config(root)
     plan_settings.record(root / ".fi", _cfg(tmp_path))
     said: list[str] = []
-    changed = approve_settings(root, _cfg(tmp_path, oracle_check="warn"), say=said.append)
+    changed = plan_settings.approve(root, _cfg(tmp_path, oracle_check="warn"), say=said.append)
     assert changed and any("engine.oracle_check" in ln for ln in said)
     now = json.loads((root / ".fi" / plan_settings.NAME).read_text(encoding="utf-8"))["settings"]
     assert now["engine.oracle_check"] == "warn"
