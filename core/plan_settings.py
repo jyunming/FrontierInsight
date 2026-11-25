@@ -47,7 +47,6 @@ SETTINGS: tuple[tuple[str, str], ...] = (
     ("engine.run_manifest_check", "what a run-record problem does"),
     ("engine.cross_check_verify", "verifying the findings against the literature"),
     ("engine.cross_check_per_finding_k", "sources checked per finding"),
-    ("engine.ideate_reflect", "self-critique of the ideas"),
     ("engine.enable_analyze_reroute", "redesign after the analysis"),
     ("engine.evidence_gate", "the evidence check before writing"),
     ("engine.phased", "exploring first, then confirming once on data or seeds never seen"),

@@ -2,7 +2,7 @@
 
 The rules a commission must meet are refused at the door, before any model call (core/commission.py ``problems``); a
 commission is frozen into the quest with its full texts and its hash; a resume with another commission stops before
-any step; making ideas and choosing a study are skipped; the plan's model is shown what the commission fixes, and
+any step; the literature step reads only the commission's sources; the plan's model is shown what the commission fixes, and
 plan.md says which known value the plan has no check for; a run FI times as too long is handed back
 (``needs/STUCK.json`` ``return_reason`` first) instead of the plan being rewritten smaller.
 
@@ -171,23 +171,26 @@ def test_the_question_becomes_the_topic_and_the_steps_it_gives_stay_off_whatever
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     _commission(tmp_path / "order")
     yaml = tmp_path / "order" / "quest.yaml"
-    yaml.write_text("commission: commission.json\npauses:\n  scope: ask\nengine:\n  clarify_mode: auto\n"
+    yaml.write_text("commission: commission.json\npauses:\n  clarify: ask\n  scope: ask\nengine:\n  clarify_mode: auto\n"
                     "knowledge:\n  foundational_works: false\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    with caplog.at_level("WARNING", logger="frontier_insight.config"):
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
         cfg = Config.from_yaml(yaml)
     assert cfg.commission == (tmp_path / "order" / "commission.json").resolve()
     assert cfg.topic == "How fast does a tank drain through outlets of three sizes?"
-    assert cfg.pauses.scope == "off" and cfg.pauses.clarify == "off", "a step the commission gives stays off"
+    assert cfg.pauses.clarify == "off", "a step the commission gives stays off"
     said = [r.getMessage() for r in caplog.records if "are not used" in r.getMessage()]
-    assert len(said) == 1 and "pauses.scope" in said[0] and "engine.clarify_mode" in said[0], said
+    assert len(said) == 1 and "pauses.clarify" in said[0] and "engine.clarify_mode" in said[0], said
+    # The study cards are gone: the key loads, and the log says once that it does nothing.
+    assert [r.getMessage() for r in caplog.records if "pauses.scope" in r.getMessage()] == [
+        "config: pauses.scope no longer does anything; the line can be removed."]
     assert "foundational_works" not in said[0], "a setting the commission agrees with is not named"
     assert cfg.pauses.papers is False
     assert cfg.knowledge.foundational_works is False and cfg.knowledge.requery_on_low_relevance is False
-    assert cfg.engine.evidence_gate_max_broaden == 0 and cfg.engine.enable_analyze_reroute is False
+    assert cfg.engine.enable_analyze_reroute is False
     assert cfg.execution.timeout_s == 2 * 3600, "the commission's hours are the run's time limit when the config is silent"
     plain = Config(topic="a draining tank")
-    assert plain.commission is None and plain.pauses.scope == "ask" and plain.engine.evidence_gate_max_broaden == 1
+    assert plain.commission is None and plain.pauses.clarify is None and plain.engine.enable_analyze_reroute is True
 
 
 def test_the_commission_s_hours_cap_the_run_s_time_limit_the_config_sets(tmp_path: Path) -> None:
@@ -334,7 +337,7 @@ def test_the_quest_s_own_config_finds_its_frozen_commission(tmp_path: Path) -> N
 # ---- the steps the commission gives -------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_ideate_and_literature_do_no_work_of_their_own_and_say_nothing_of_it(
+async def test_the_literature_step_reads_only_the_commission_s_sources_and_says_so(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import commission
 
@@ -344,10 +347,8 @@ async def test_ideate_and_literature_do_no_work_of_their_own_and_say_nothing_of_
     commission.stage(path, eng.quest_root)
     said: list[str] = []
     eng._progress = said.append  # type: ignore[method-assign]
-    for node in ("ideate", "scope", "literature"):
-        eng._progress_stage(node)
+    eng._progress_stage("literature")
     assert said == ["[literature] Reading the sources the commission gives."]
-    assert await eng._node_ideate({"topic": eng.config.topic}) == {}
     out = await eng._node_literature({"topic": eng.config.topic})
     [entry] = out["literature"]
     assert entry["metadata"]["source"] == "user_supplied" and PASSAGE in entry["content"]
@@ -366,8 +367,8 @@ async def test_a_rerun_from_a_step_the_commission_gives_says_so_and_changes_noth
     eng.executor.setup = no_env
     eng._record_environment = no_env  # type: ignore[method-assign]
     eng._connect_llm = no_env  # type: ignore[method-assign]
-    await eng.run(from_step="ideas")
-    assert "the ideas step is not one FI did" in capsys.readouterr().out
+    await eng.run(from_step="literature")
+    assert "the literature step is not one FI did" in capsys.readouterr().out
     assert eng._client.chat.call_count == 0
 
 
@@ -689,7 +690,7 @@ async def test_the_settings_a_commission_overrides_are_named_once_in_the_quest_s
     from core.engine import Engine
 
     path = _commission(tmp_path / "order")
-    eng = Engine(Config(commission=path, provider=ProviderConfig(name="openai"), pauses=PausesConfig(scope="ask"),
+    eng = Engine(Config(commission=path, provider=ProviderConfig(name="openai"), pauses=PausesConfig(clarify="ask"),
                         engine=EngineConfig(max_iterations=1, review_loop=False),
                         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
                         output=OutputConfig(output_dir=tmp_path / "out")))
@@ -703,7 +704,7 @@ async def test_the_settings_a_commission_overrides_are_named_once_in_the_quest_s
     with pytest.raises(_Stop):
         await eng.run()
     log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert log.count("settings of the config are not used: pauses.scope.") == 1, log[-2000:]
+    assert log.count("settings of the config are not used: pauses.clarify.") == 1, log[-2000:]
 
 
 @pytest.mark.asyncio

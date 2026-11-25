@@ -161,7 +161,7 @@ this_name_is_defined_nowhere
 
 def _engine(root: Path) -> Engine:
     cfg = Config(topic="a colony's growth", title="colony", provider=ProviderConfig(name="openai"),
-                 engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3, ideate_reflect=False),
+                 engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3),
                  execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True, code_skeleton=True),
                  knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=root / "out"))
     engine = Engine(cfg)

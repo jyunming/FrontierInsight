@@ -100,7 +100,7 @@ def test_evidence_gate_model_decided_records_verdict_and_gaps(tmp_path: Path) ->
     eng._last_chat["evidence_gate"] = {"provider": "openai", "model": "gpt-5"}
     eng._audit_claims("evidence_gate", {
         "evidence_assessment": {
-            "decided_by": "model", "status": "ok", "verdict": "broaden",
+            "decided_by": "model", "status": "ok", "verdict": "insufficient",
             "rationale": "only 2 of 6 sources are on-topic", "gaps": ["on-topic sources", "a supporting finding"],
         },
     })
@@ -108,7 +108,7 @@ def test_evidence_gate_model_decided_records_verdict_and_gaps(tmp_path: Path) ->
     claims = _claims(eng)
     assert len(claims) == 3
     verdict, gap1, gap2 = claims
-    assert verdict["topic"] == "verdict" and verdict["decision"] == "broaden"
+    assert verdict["topic"] == "verdict" and verdict["decision"] == "insufficient"
     assert verdict["claim"] == "only 2 of 6 sources are on-topic"
     assert [gap1["claim"], gap2["claim"]] == ["on-topic sources", "a supporting finding"]
     assert gap1["topic"] == "gap"
@@ -122,7 +122,7 @@ def test_evidence_gate_rule_decided_records_nothing(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     eng._audit_claims("evidence_gate", {
         "evidence_assessment": {
-            "decided_by": "rule", "status": "ok", "verdict": "broaden",
+            "decided_by": "rule", "status": "ok", "verdict": "insufficient",
             "rationale": "no source with readable text was retrieved.", "gaps": ["sources on the research question"],
         },
     })
@@ -208,7 +208,7 @@ async def test_node_evidence_gate_end_to_end_feeds_audit_claims(tmp_path: Path) 
     shape — not just a bug in ``_audit_claims`` — would show up here."""
     eng = _engine(tmp_path, knowledge_enabled=False)  # retrieval_on=False forces the model branch, never the rule
     eng._client = _FakeChatClient(json.dumps({
-        "verdict": "broaden", "rationale": "no on-topic sources were retrieved", "gaps": ["on-topic sources"],
+        "verdict": "insufficient", "rationale": "no on-topic sources were retrieved", "gaps": ["on-topic sources"],
     }))  # type: ignore[assignment]
 
     patch = await eng._node_evidence_gate({"topic": "a test topic"})
@@ -218,7 +218,7 @@ async def test_node_evidence_gate_end_to_end_feeds_audit_claims(tmp_path: Path) 
     eng._audit_claims("evidence_gate", patch)
     claims = _claims(eng)
     assert len(claims) == 2
-    assert claims[0]["topic"] == "verdict" and claims[0]["decision"] == "broaden"
+    assert claims[0]["topic"] == "verdict" and claims[0]["decision"] == "insufficient"
     assert claims[0]["provider"] == "openai"  # stub has no last_provider; falls back to config.provider.name
 
 

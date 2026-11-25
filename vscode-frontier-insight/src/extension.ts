@@ -10,7 +10,7 @@
  *   3. Forward every Python `lm_request` to `vscode.lm.*` and stream
  *      the response back. Render progress in the chat panel.
  *
- * The Python engine drives the actual research loop (clarify, ideate,
+ * The Python engine drives the actual research loop (clarify,
  * literature, design, implement, execute, execute_reflect, analyze,
  * cross_check, write, review). All LLM calls go through `vscode.lm`,
  * which means: sanctioned API, user-consented, normal Copilot quota.

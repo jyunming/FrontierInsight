@@ -22,7 +22,7 @@ The finished paper is in `outputs/<quest id>/paper/paper.md` in your project fol
 ## What this is
 
 The Frontier Insight Python engine drives a 21-node async research
-DAG (`clarify → ideate → literature → design → implement → execute →
+DAG (`clarify → literature → design → implement → execute →
 execute_reflect → analyze → cross_check → write → review`, with three
 self-correction loops and an optional reviewer panel). This extension
 is the **host** that runs the engine inside VSCode and serves its LLM
@@ -268,8 +268,6 @@ In the chat panel you'll see progress messages:
   [FI] start quest_id=...-fi-demo-integrators-xxx provider=openai
   → clarify
   [clarify] mode=auto; agent self-answered 10 slots
-  → ideate
-  [ideate] topic=Compare numerical integrators...
   → literature
   [literature] retrieved 5 docs
   ...
@@ -283,8 +281,6 @@ That example YAML names `provider: openai`, so its model calls go to OpenAI rath
 ### Answer the setup questions
 
 When a quest on the VS Code chat model starts (`@fi /new`, or a YAML with `provider.name: vscode_extension`), it first asks its setup questions: what you most want to see at the end, the title (unless the YAML has one, which the `@fi /new` interview always writes), the baseline, the success metric and a few more. Each opens as an input box filled with the agent's suggested answer; Enter keeps it. Esc on any box carries on with the suggested answers (the chat line may still say the quest will fail; it does not). If nobody answers within `pauses.timeout_s` (1800 s by default) the suggested answers are used, or, with `pauses.clarify: ask`, the quest stops and `@fi /resume <id>` asks again. `pauses.clarify: auto` lets the agent answer, `off` skips the questions. A YAML that names another provider (Kimi through `@fi /start`) is not on the bridge, so VS Code cannot show the boxes: the agent answers, or with `ask` the quest stops until `.fi/clarify_answer.json` holds the answers (see [USAGE.md](../docs/USAGE.md#setup-questions)).
-
-Before the plan, a quest run through the extension shows its study cards as a quick pick: one item per card, *Edit a card…* to change a card's question, and *Write my own…* for a sentence of your own.
 
 ### Review the result before it ships
 
@@ -360,7 +356,7 @@ With no argument, that shows a QuickPick of every quest under
 and the extension auto-finds the matching draft YAML by title slug
 (falling back to a file picker if no match exists), then spawns FI
 with `--resume <quest_id>` so LangGraph continues from the last
-completed node instead of redoing `ideate`/`literature`/`design`
+completed node instead of redoing `literature`/`design`
 from scratch.
 
 You can also pass the quest_id directly:
@@ -619,7 +615,7 @@ or shutting the machine down, is not a crash to report.
 @fi /analyze ./my_data Compare ridership trends across the three regions
 ```
 
-When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `ideate` / `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
+When you already have the dataset and just want FI to write a paper analyzing it. Pass a directory path followed by a one-sentence analysis topic. The extension copies every file under the directory (recursive, symlinks skipped, common noise like `.DS_Store` / `__pycache__` filtered) into the new quest's `data/` directory, then spawns the engine in no-simulation mode. The graph routes `auto_collect_data` → `wait_for_data` → `data_load` → `analyze → cross_check → write → review` — no `literature` / `design` / `implement` / `execute`, since the user already supplied the data. Cost: ~6 premium requests.
 
 Quote the path if it contains spaces: `@fi /analyze "C:/My Data" Find common failure modes`.
 
@@ -671,7 +667,7 @@ provider:
   name: vscode_extension       # set automatically when launched from this extension
   node_models:
     clarify:       gpt-4o-mini       # cheap classification
-    ideate:        claude-3-5-sonnet # broad thinker
+    design:        claude-3-5-sonnet # broad thinker
     cross_check:   gpt-4o-mini
     write:         claude-3-5-sonnet # prose
     review_panel.statistician:   claude-3-5-sonnet

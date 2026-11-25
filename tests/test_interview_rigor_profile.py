@@ -104,7 +104,7 @@ def test_the_web_form_carries_the_answer_and_refuses_an_unknown_one(tmp_path: Pa
         res = client.post("/api/interview/submit", json=body)
         assert res.status_code == 200, res.text
         cfg = Config.from_yaml(Path(res.json()["yaml_path"]))
-        assert cfg.rigor_profile == profile and (cfg.engine.ideate_reflect is False) is draft
+        assert cfg.rigor_profile == profile and (cfg.engine.cross_check_per_finding_k == 0) is draft
         if profile == "research":
             # A single reviewer under research becomes the profile's own panel (written, so it is what was shown).
             assert cfg.engine.review_panel == PANEL
@@ -127,7 +127,7 @@ def test_vscode_emits_the_profile_and_loads(tmp_path: Path) -> None:
     # Exploring: the cheaper draft's three settings, from VS Code exactly as from the CLI.
     yaml_text, cfg = _emit(tmp_path, result_use="explore", review_panel=[])
     assert "rigor_profile" not in yaml_text and cfg.rigor_profile == "default" and cfg.engine.review_panel == []
-    assert cfg.engine.ideate_reflect is False and cfg.engine.cross_check_per_finding_k == 0
+    assert cfg.engine.cross_check_per_finding_k == 0
     # No answer (an older caller): nothing the answer would add.
     yaml_text, _cfg_ = _emit(tmp_path, review_panel=[])
     assert "ideate_reflect" not in yaml_text and "rigor_profile" not in yaml_text

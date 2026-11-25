@@ -92,7 +92,8 @@ def test_non_default_choices_reach_the_right_config_keys(tmp_path: Path):
     assert cfg.pauses.papers is True
     # ensemble_profile=full → provider.node_ensemble is populated.
     assert cfg.provider.node_ensemble, "ensemble profile did not reach node_ensemble"
-    assert "ideate" in cfg.provider.node_ensemble
+    # FI makes no research ideas: the interview's ideate entry is dropped when the config loads.
+    assert set(cfg.provider.node_ensemble) == {"cross_check", "analyze"}
 
 
 def test_defaults_stay_clean(tmp_path: Path):

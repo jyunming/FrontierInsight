@@ -86,7 +86,7 @@ def test_scan_quests_stale_quest_is_incomplete_not_running(tmp_path: Path) -> No
     NOT be reported as running (that's the 'N running' over-count bug)."""
     import os
     import time
-    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [ideate]\n")
+    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [literature]\n")
     old = time.time() - 3600  # an hour ago, no recent activity
     os.utime(q / ".fi" / "run.log", (old, old))
     quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
@@ -112,7 +112,7 @@ def test_read_log_tail_handles_missing_file(tmp_path: Path) -> None:
 
 def test_current_node_extracted_from_log_lines() -> None:
     lines = [
-        "[1234-foo-aa] [ideate] topic=...",
+        "[1234-foo-aa] [clarify] topic=...",
         "[1234-foo-aa] [literature] retrieved 0 docs",
         "[1234-foo-aa] [execute] pip install ['matplotlib']",
     ]
@@ -238,7 +238,7 @@ def test_jobs_endpoint_finished_cli_quest_not_alive(tmp_path: Path) -> None:
 def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
     _mk_quest_dir(
         tmp_path, "q-detail",
-        log_body="[q-detail] [ideate] topic=...\n[q-detail] [literature] retrieved 0 docs\n",
+        log_body="[q-detail] [clarify] topic=...\n[q-detail] [literature] retrieved 0 docs\n",
         paper_md="# Hello\n\nFake paper body.\n",
         figure_names=["result.png", "loss.png"],
         summary={"quest_id": "q-detail", "provider": "openai"},

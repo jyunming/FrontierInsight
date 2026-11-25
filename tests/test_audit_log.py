@@ -201,7 +201,7 @@ async def test_a_quest_leaves_a_trace_of_its_nodes_checks_routes_and_the_reasons
     # Every node that started finished, in order, and the analysis asked for one more run, which FI's record agreed with.
     started = [e["node"] for e in events if e["kind"] == "node_started"]
     done = [e["node"] for e in events if e["kind"] == "node_completed"]
-    assert started == done and started[:3] == ["clarify", "ideate", "literature"] and started.count("design") == 2
+    assert started == done and started[:3] == ["clarify", "literature", "pause_after_literature"] and started.count("design") == 2
     assert all(e["duration_s"] >= 0 for e in events if e["kind"] == "node_completed")
     routes = [(e["node"], e["chosen"]) for e in events if e["kind"] == "route_decision"]
     assert ("cross_check", "redesign") in routes and routes[-2:] == [("review", "done"), ("citation_check", "done")]

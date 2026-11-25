@@ -20,7 +20,7 @@ minimal config built here. When ``--config`` is absent we ship a
 sensible default tuned for the analyze workflow.
 
 Single LLM cost: ~6 premium requests for a bare analyze run
-(no ideate / no literature / no design / no implement / no execute /
+(no literature / no design / no implement / no execute /
 no execute_reflect). Closely matches the no-simulation cost row in
 ``vscode-frontier-insight/README.md``.
 """
@@ -167,10 +167,10 @@ def build_analyze_config(
 ) -> Config:
     """Build a minimal Config for the analyze quest — **local-data-first**.
 
-    The user already supplied the data, so this workflow does NOT ideate,
-    retrieve literature, or design an experiment; it loads and analyses the
+    The user already supplied the data, so this workflow does NOT
+    retrieve literature or design an experiment; it loads and analyses the
     local data directly. Concretely:
-    * ``analyze_local_first: true`` — ideate / literature / design run as
+    * ``analyze_local_first: true`` — literature / design run as
       PASSTHROUGHS (no LLM call, no retrieval). Implies no_simulation.
     * ``knowledge.enabled: false`` + ``web_search: false`` +
       ``external_fallback: []`` — NO external retrieval, web or academic.
@@ -191,7 +191,6 @@ def build_analyze_config(
             no_simulation=True,
             analyze_local_first=True,
             auto_collect_data=False,
-            ideate_reflect=False,
             cross_check_per_finding_k=0,
             enable_analyze_reroute=False,
         ),

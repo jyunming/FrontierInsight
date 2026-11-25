@@ -269,15 +269,12 @@ def test_interview_generated_yaml_parses_with_python_config() -> None:
         assert cfg.output.kinds == ["paper_md", "slides"]
         assert cfg.knowledge.enabled is False
         assert cfg.provider.name == "vscode_extension"
-        # COST DISCIPLINE — default-ON engine features (ideate_reflect,
-        # cross_check, analyze_reroute) are turned OFF for an "Exploring"
+        # COST DISCIPLINE — default-ON engine features (cross_check,
+        # analyze_reroute) are turned OFF for an "Exploring"
         # quest. With them ON, a single quest can burn 25%+ of a
         # 1500-req/month Copilot allotment; saving that is now the person's
         # explicit answer, the same on every interface, instead of a
         # setting only the VS Code interview wrote.
-        assert cfg.engine.ideate_reflect is False, (
-            "ideate_reflect on by default fires one extra LLM call per quest"
-        )
         assert cfg.engine.cross_check_per_finding_k == 0, (
             "cross_check on by default fires ~2 calls × N findings × iterations "
             "— the single biggest Copilot-budget burner observed in real runs"

@@ -291,7 +291,6 @@ def test_the_cheaper_draft_follows_the_answer_not_the_interface(frontend: str) -
 
     base = _sample_answers(provider="vscode_extension", provider_model=None)
     cfg = Config.model_validate(yaml.safe_load(answers_to_yaml(replace(base, result_use="explore"), frontend=frontend)))
-    assert cfg.engine.ideate_reflect is False
     assert cfg.engine.cross_check_per_finding_k == 0
     assert cfg.engine.enable_analyze_reroute is False
     assert cfg.rigor_profile == "default"

@@ -199,8 +199,8 @@ disciplined — per-node named slots, no full-transcript blob.
 1. **Literature is re-rendered in five nodes, uncapped.**
    `_format_lit_from_state` (`engine.py:6175-6204`) iterates *all* of
    `state["literature"]` with no document-count cap, and literature accumulates
-   across `broaden_lit` re-entries by dedup-merge (`engine.py:2105-2124`).
-   Ideate, design, analyze, cross_check and write each re-render it
+   across literature re-entries by dedup-merge (`engine.py:2105-2124`).
+   Design, analyze, cross_check and write each re-render it
    independently. A 20-doc corpus at 4000 chars/doc is ~20K tokens, paid five
    times per pass.
 2. **No prompt caching anywhere.** `grep -ic cache core/provider.py` → **0**.
@@ -335,8 +335,6 @@ A1 and C1 are afternoon-sized and independent of everything else.
 
 ## What was not determined
 
-- How often `broaden_lit` re-entry actually fires, which sets whether the
-  literature-accumulation waste is the common case or an edge case.
 - Real-world split of CLI vs HTTP-direct transport across quests, which sets how
   much of the cost accounting is estimated rather than measured.
 - Whether SEMulator and gds2sem have test suites of ambit's quality. Only

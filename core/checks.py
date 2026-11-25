@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 SOURCES = ("own_record", "measured", "model_text", "model_code", "model_judge")
 POWERS = ("stop", "repair", "strip", "note")
-STAGES = ("clarify", "ideate", "literature", "plan", "design", "implement", "execute", "execute_reflect", "improve",
+STAGES = ("clarify", "literature", "plan", "design", "implement", "execute", "execute_reflect", "improve",
           "analyze", "cross_check", "evidence_gate", "write", "claim_check", "citation_check", "review",
           "human_feedback", "several")
 
@@ -307,26 +307,6 @@ CHECKS: tuple[Check, ...] = (
           'clarify', 'model_judge', 'note',
           'Clarify says the topic is a review/case study/opinion but the engine resolved to run an experiment; '
           'only a run.log warning, design and write keep the experiment minimal.'),
-    Check('ideate_reflect_swap', 'core.engine', 'Engine._node_ideate',
-          'ideate', 'model_judge', 'repair',
-          'A reflection call may swap the chosen idea for another brainstormed one or refine its rationale '
-          '(engine.ideate_reflect; skipped when the tournament ran).'),
-    Check('ideate_tournament_pick', 'core.engine', 'Engine._run_ideate_tournament',
-          'ideate', 'model_judge', 'repair',
-          'Pairwise model comparisons of all ideas pick the winner that replaces the first choice '
-          '(engine.ideate_tournament); inconclusive falls back to the earliest idea.'),
-    Check('scope_cards_literature_refs', 'core.scope_cards', 'normalize',
-          'plan', 'own_record', 'strip',
-          "Study cards from the model are checked against FI's own list of retrieved sources; a card's "
-          'literature line not in that list is removed and said.'),
-    Check('scope_cards_distinct_enough', 'core.scope_cards', 'distinct_enough',
-          'plan', 'model_text', 'repair',
-          'The scope node asks the model once more when fewer than the needed number of cards differ in study '
-          'type or main results (pauses.scope).'),
-    Check('scope_card_not_covered_by_plan', 'core.run_checks', 'RunChecksMixin._scope_gap_note',
-          'write', 'model_text', 'note',
-          'A result or setting of the study card the person chose that the frozen plan has no name for is told '
-          'to the writer for the limitations (name reading via scope_cards.gaps); never stops.'),
     Check('topic_items_name_match', 'core.topic_requirements', 'match',
           'plan', 'model_text', 'note',
           "Looks for each factor, quantity, formula and search the topic text asks for among the plan's grid, "
@@ -1180,11 +1160,11 @@ CHECKS: tuple[Check, ...] = (
     Check('evidence_gate_rule', 'core.engine', '_evidence_gate_rule',
           'evidence_gate', 'own_record', 'repair',
           'Source counts decide the gate for simulation topics with retrieval on: no source with text means '
-          'broaden, many sources with support means sufficient'),
+          'insufficient, many sources with support means sufficient'),
     Check('evidence_gate_model_verdict', 'core.engine', 'Engine._node_evidence_gate',
           'evidence_gate', 'model_judge', 'repair',
-          'Otherwise asks a model sufficient/broaden/insufficient; one bounded broaden re-entry to literature '
-          '(evidence_gate_max_broaden); a failed call is recorded as unknown (research: pauses)'),
+          'Otherwise asks a model sufficient/insufficient (an old reply of broaden is read as insufficient); the '
+          'verdict never routes; a failed call is recorded as unknown (research: pauses)'),
     Check('evidence_gate_flat_objective', 'core.engine', 'Engine._flat_objective_verdict',
           'evidence_gate', 'measured', 'repair',
           'Search whose objective did not move: plan asked once for a design whose objective can move (spends '
@@ -1204,7 +1184,7 @@ CHECKS: tuple[Check, ...] = (
           'quantity, keys that can be removed)'),
     Check('evidence_route', 'core.engine', 'Engine._route_after_evidence_gate',
           'evidence_gate', 'own_record', 'repair',
-          "Routes the gate's decision to write, literature, design, implement, run-step crash repair or stuck; "
+          "Routes the gate's decision to write, design, implement, run-step crash repair or stuck; "
           'phased mode routes a write to the confirm run'),
     Check('stuck_no_findings_stop', 'core.engine', 'Engine._node_stuck_no_findings',
           'evidence_gate', 'own_record', 'stop',
@@ -1216,7 +1196,7 @@ CHECKS: tuple[Check, ...] = (
           'missed and a larger run fits the time allowed'),
     Check('cross_check_route', 'core.engine', 'Engine._cross_check_route',
           'cross_check', 'own_record', 'repair',
-          'write, broaden_lit or redesign from analyze.next_step, the precision record, the phased confirm '
+          'write or redesign from analyze.next_step, the precision record, the phased confirm '
           'stage and engine.max_iterations'),
     Check('plan_controls', 'core.controls', 'judge',
           'cross_check', 'own_record', 'note',

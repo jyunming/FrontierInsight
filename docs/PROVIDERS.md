@@ -475,7 +475,7 @@ choice, and a model name is only valid for its own provider.
 
 The `claude` CLI can switch on its own, though: when the model you named
 declines a request, the CLI hands the request to another model, which can
-cost far more (a Haiku quest's `ideate` call was answered by a Fable model at
+cost far more (a call of a Haiku quest was answered by a Fable model at
 about twelve times Haiku's price), and with a fallback model set up for the
 CLI it also switches when the model is unavailable. FI reads which model wrote each answer from the CLI's own output
 and records it truthfully in `.fi/model_calls.jsonl`. Whenever the CLI

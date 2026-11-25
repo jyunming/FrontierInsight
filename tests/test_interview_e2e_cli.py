@@ -198,7 +198,7 @@ async def test_run_new_writes_the_ensemble_named_in_advanced(
         _review_row("ensemble_models"), "model-a, model-b, model-c",
         "",                                                     # launch
     ])
-    assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
+    assert set(cfg.provider.node_ensemble) == {"cross_check", "analyze"}  # an ideate entry is dropped on load
     assert list(cfg.provider.node_ensemble["cross_check"].models) == ["model-a", "model-b", "model-c"]
 
 
@@ -316,7 +316,6 @@ async def test_run_new_writes_what_the_result_is_for(
     text = path.read_text(encoding="utf-8")
     cfg = Config.model_validate(yaml.safe_load(text))
     assert cfg.rigor_profile == profile
-    assert (cfg.engine.ideate_reflect is False) is draft
     assert (cfg.engine.cross_check_per_finding_k == 0) is draft
     if profile == "research":
         # The review screen shows the panel that runs, reproducibility included, before launch.

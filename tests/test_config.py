@@ -429,6 +429,23 @@ def test_a_config_that_still_sets_the_removed_novelty_check_loads_and_says_it_do
     assert "knowledge.novelty_check no longer does anything" in caplog.text
 
 
+def test_a_config_that_still_sets_the_idea_study_card_or_broaden_keys_loads_and_says_each_does_nothing(
+        tmp_path: Path, caplog) -> None:
+    """FI makes no research ideas, offers no study cards and never goes back to the literature: a config written for an
+    earlier FI loads, and the log names each line once."""
+    p = _write(tmp_path, "topic: t\nengine:\n  ideate_reflect: false\n  ideate_tournament: true\n"
+                         "  evidence_gate_max_broaden: 2\npauses:\n  scope: ask\nprovider:\n  name: openai\n"
+                         "  node_ensemble:\n    ideate:\n      models: [m1, m2]\n      merge: tournament\n")
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)
+    assert cfg.topic == "t" and not cfg.provider.node_ensemble
+    for gone in ("engine.ideate_reflect", "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope"):
+        section, key = gone.split(".")
+        assert not hasattr(getattr(cfg, section), key), gone
+        assert caplog.text.count(f"config: {gone} no longer does anything; the line can be removed.") == 1, gone
+    assert "provider.node_ensemble.ideate no longer does anything" in caplog.text
+
+
 def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
     # Typos of real reliability knobs — the exact silent-revert footgun.
     p = _write(

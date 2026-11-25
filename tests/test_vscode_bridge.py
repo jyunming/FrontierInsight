@@ -121,13 +121,13 @@ async def test_bridge_round_trip_chunked_then_done() -> None:
         await client.connect()
         out = await client.chat(
             [{"role": "user", "content": "hi"}],
-            node="ideate", model_hint="gpt-5",
+            node="plan", model_hint="gpt-5",
         )
         assert out == "Hello, world!"
         # The Python side actually sent what the extension expects.
         sent = server.received[0]
         assert sent["type"] == "lm_request"
-        assert sent["node"] == "ideate"
+        assert sent["node"] == "plan"
         assert sent["model_hint"] == "gpt-5"
         assert sent["messages"][0]["content"] == "hi"
     finally:
@@ -605,7 +605,7 @@ async def test_launch_picks_bridge_clarify_callback_for_vscode_extension(
             ),
             engine=EngineConfig(
                 max_iterations=1, review_loop=False,
-                clarify_mode="interactive", ideate_reflect=False,
+                clarify_mode="interactive",
             ),
             execution=ExecutionConfig(sandbox="venv", timeout_s=60),
             knowledge=KnowledgeConfig(enabled=False),

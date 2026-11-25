@@ -432,7 +432,7 @@ class DataStageMixin:
         they are kept for the text the writer quotes, and a page of general
         background is exactly what a 1 describes. At least
         ``knowledge.relevance_min_keep`` sources survive, best grades first,
-        so a thin retrieval is not emptied (the evidence gate can broaden).
+        so a thin retrieval is not emptied (the evidence gate judges it thin).
         Fail-open: when the screen is off, the call fails or the reply cannot
         be read, every source is kept, and so is any source left ungraded.
         Graded sources carry ``screen_grade``. Every source's grade and the reason it was kept or dropped go to
@@ -733,7 +733,7 @@ class DataStageMixin:
         unavailable (FI_OFFLINE / no model / error), when ``relevance_min_score``
         is 0, or when docs is empty; and always retains at least
         ``relevance_min_keep`` top-scoring docs so a wholly-borderline corpus is
-        not emptied (the evidence_gate can then broaden). Scores against the raw
+        not emptied (the evidence_gate then judges it thin). Scores against the raw
         TOPIC (not the retrieval query, whose folded-in hypothesis keywords are
         exactly what drags off-topic hits in)."""
         min_score = self.config.knowledge.relevance_min_score

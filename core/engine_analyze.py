@@ -683,9 +683,7 @@ class AnalyzeStageMixin:
         profile). Under ``rigor_profile: research`` an unknown status
         additionally pauses the quest for a human to resolve or accept
         the risk, rather than silently writing on unverified evidence.
-        The only action a genuinely-decided gate can take that changes
-        control flow is ONE bounded ``broaden_lit`` re-entry (capped by
-        ``evidence_gate_max_broaden``).
+        The model's verdict never changes the route: only FI's own facts below do.
         """
         # With the gate turned off (``engine.evidence_gate: false``) the model's judgement of the evidence is skipped,
         # but not FI's own facts: a search whose objective never moved, an analysis FI cannot read, a run with no
@@ -813,7 +811,7 @@ class AnalyzeStageMixin:
                 _, parsed = await self._chat_json(
                     prompt, node="evidence_gate", want=("verdict",),
                     usable=lambda p: str(p.get("verdict") or "").strip().lower() in (
-                        "sufficient", "broaden", "insufficient"),
+                        "sufficient", "insufficient", "broaden"),
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
             claim_stop: dict[str, Any] | None = None
@@ -839,27 +837,17 @@ class AnalyzeStageMixin:
         else:
             status, failure = "ok", ""
         verdict = str(parsed.get("verdict") or "").strip().lower()
-        if verdict not in ("sufficient", "broaden", "insufficient"):
+        if verdict == "broaden":
+            # A model that still names the verdict an earlier prompt offered (thin evidence, search again) means
+            # insufficient: FI does not go back to the literature.
+            verdict = "insufficient"
+        if verdict not in ("sufficient", "insufficient"):
             if status == "ok":
                 # The call succeeded but the reply named no recognised verdict —
                 # equally unknown as a raised exception, not a silent "sufficient".
                 status = "unknown"
                 failure = f"the gate's reply named no recognised verdict: {parsed!r}"[:300]
-            verdict = "sufficient"  # keeps existing routing (write, not broaden)
-        broadened = int(state.get("evidence_broaden_count", 0) or 0)
-        # A broaden goes back through the literature step for more sources. With retrieval off (or --analyze, where
-        # that step is skipped) nothing can come back, and the loop only redesigned the experiment after its results
-        # were seen: a live quest threw away a complete first run and changed its hypothesis that way. The verdict
-        # stands (the writer is told the evidence is thin, and the evidence level names it as a gap); the route is write.
-        can_broaden = self.config.knowledge.enabled and not self.config.engine.analyze_local_first
-        will_broaden = (
-            status == "ok"
-            and verdict == "broaden"
-            and can_broaden
-            and broadened < self.config.engine.evidence_gate_max_broaden
-        )
-        if status == "ok" and verdict == "broaden" and not can_broaden:
-            self._log.info("[evidence_gate] broaden asked, but there is no literature step to broaden (retrieval is off); writing with the gap recorded")
+            verdict = "sufficient"  # keeps existing routing (write)
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
@@ -914,7 +902,7 @@ class AnalyzeStageMixin:
             "status": status,
             "failure": failure,
             "route": ("stuck" if no_findings else "repair_crash" if crash_repair else "rewrite_code" if rewrite_code
-                      else "redesign" if redesign else "broaden_lit" if will_broaden else "write"),
+                      else "redesign" if redesign else "write"),
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -924,10 +912,10 @@ class AnalyzeStageMixin:
         }
         self._log.info(
             "[evidence_gate] verdict=%s status=%s route=%s decided=%s type=%s policy=%s "
-            "(sources=%d, findings=%d, supporting=%d, broadened=%d)",
+            "(sources=%d, findings=%d, supporting=%d)",
             verdict, status, assessment["route"], decided_by, protocol.topic_type,
             protocol.source_policy, n_sources, n_findings,
-            n_supporting, broadened,
+            n_supporting,
         )
         self._write_receipt(
             "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
@@ -950,8 +938,6 @@ class AnalyzeStageMixin:
             "evidence_assessment": assessment,
             "research_protocol": protocol.model_dump(),
         }
-        if will_broaden:
-            patch["evidence_broaden_count"] = broadened + 1
         patch.update(self._figures_after_taken_out(state))
         if rewrite_code:
             # The design stays as it is (no design iteration is spent); the new code gets its own repairs.

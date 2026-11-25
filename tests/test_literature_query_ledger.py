@@ -264,26 +264,3 @@ async def test_an_entry_whose_prompt_is_not_the_calls_is_not_reused(tmp_path: Pa
     _write(eng, [_forge(entry, prompt_sha256="0" * 64)])
     patch = await eng._node_literature(_state())
     assert calls.count("literature_query") == 2 and patch["literature_queries"] == FACETS
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [RuntimeError("provider down"), "not json", None])
-async def test_the_ideate_step_records_its_query_entry(tmp_path: Path, answer) -> None:
-    eng = _engine(tmp_path)
-    eng.knowledge.enabled = True
-    _counting(eng, answer=answer)
-    try:
-        await eng._node_ideate({"topic": "t"})
-    except Exception:  # noqa: BLE001 -- the ideas call after the seed search is not under test
-        pass
-    (entry,) = [e for e in _sets(eng) if e["stage"] == "ideate"]
-    assert entry["revised_by"] == "fi" and _query_set_standing(entry) == "verified"
-    from core import attempt_records as ar
-
-    rows = {r["call_id"]: r for r in ar.read(eng.fi_dir, ar.MODEL_CALLS)}
-    assert entry["call_id"] in rows and rows[entry["call_id"]]["node"] == "ideate_query"
-    if answer is None:
-        assert entry["queries"] == FACETS[:3] and rows[entry["call_id"]]["outcome"] == "ok"
-    else:
-        assert entry["queries"] == [] and "gave no query" in entry["reason"]
-        assert ("(the call failed)" in entry["reason"]) == isinstance(answer, BaseException)

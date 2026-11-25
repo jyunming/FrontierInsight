@@ -23,7 +23,7 @@ SKILL = "zzlieflat-charts"
 def test_the_skills_step_is_offered_before_the_code_and_has_its_words() -> None:
     assert rerun_from.resolve("skills") == "skills" and rerun_from.resolve("select_skills") == "skills"
     assert rerun_from.resolve("Skill") == "skills"
-    assert rerun_from.choices() == "ideas, literature, studies, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
+    assert rerun_from.choices() == "literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
     assert "again from the quest's current config" in rerun_from.REDOES["skills"]
     assert rerun_from.picks_skills("skills") and not rerun_from.picks_skills("code")
 
@@ -171,10 +171,10 @@ async def test_a_skill_excluded_since_the_run_is_gone_after_rerunning_from_skill
     assert [d["name"] for d in after["skill_selection"]["dropped"]] == [SKILL]
     assert "skills_exclude" in after["skill_selection"]["dropped"][0]["why"]
     again = searches[searches_before:]
-    assert "_node_literature" not in again and "_node_ideate" not in again, again
+    assert "_node_literature" not in again, again
     assert set(again) <= {"_node_cross_check"}, again
     later = calls[n_calls:]
-    assert not {"Ideation", "IdeateReflect", "Clarify"} & set(later), later
+    assert "Clarify" not in later, later
     assert calls.count("Implementation") > implements, "the code was not written again"
     assert frozen_hash == (_digest(frozen) if frozen.is_file() else "")
     assert plan_hash == (_digest(plan) if plan.is_file() else "")

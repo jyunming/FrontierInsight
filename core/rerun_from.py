@@ -15,7 +15,7 @@ approval (``--approve-as <you>``) before it does them, and says in plain words t
 
 Graph nodes that are not a step, and why:
 
-* ``clarify``: redoing it means starting a new quest; ``ideas`` is the first step.
+* ``clarify``: redoing it means starting a new quest; ``literature`` is the first step.
 * ``pause_after_literature`` and ``wait_for_data``: pauses. They write nothing of their own.
 * ``execute_reflect``: the repair of a crashed script, inside ``run`` (it has its own budget).
 * ``improve``: the changes to the simulation against its checks of correctness, inside ``run`` (``engine.improve_rounds``).
@@ -35,9 +35,7 @@ from typing import Any
 # Plain name -> the graph nodes the step is made of (run in that order). The node names are accepted too.
 # The order is the graph's order, so the list reads top to bottom as the quest runs.
 STEPS: dict[str, tuple[str, ...]] = {
-    "ideas": ("ideate",),
     "literature": ("literature",),
-    "studies": ("scope",),
     "plan": ("plan",),
     "design": ("design",),
     # The skills are picked again just before the code (or, with no simulation, the data) is made: the same place in
@@ -60,8 +58,8 @@ _WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect", "improve")}
 
 # The big blocks a map of the quest shows, and the steps in each.
 GROUPS: dict[str, tuple[str, ...]] = {
-    "Ideas & literature": ("ideas", "literature"),
-    "Skills & plan": ("studies", "plan", "skills"),
+    "Literature": ("literature",),
+    "Skills & plan": ("plan", "skills"),
     "Design": ("design",),
     "Code": ("code",),
     "Run": ("run", "figures"),
@@ -70,17 +68,13 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "Review": ("review",),
 }
 # Steps that change the plan or the frozen protocol: they need a named approval.
-NEEDS_APPROVAL: frozenset[str] = frozenset({"ideas", "literature", "studies", "plan", "design"})
+NEEDS_APPROVAL: frozenset[str] = frozenset({"literature", "plan", "design"})
 
 # What running the quest again from each step does, in one sentence a person reads before choosing.
 _REPLACES = "the experiment plan (frozen) is replaced by the new design's"
 REDOES: dict[str, str] = {
-    "ideas": "comes up with the research ideas again, then redoes the literature, plan, design, code and everything "
-             f"after; {_REPLACES}, and the old one is kept in .fi/previous/",
     "literature": "searches the literature again, then redoes the plan, design, code and everything after; "
-                  f"the ideas are kept, {_REPLACES}, and the old one is kept in .fi/previous/",
-    "studies": "offers the studies the topic could mean again and asks which one to run, then writes plan.md for it and redoes the design, code and everything after; "
-               f"{_REPLACES}, and the old one is kept in .fi/previous/",
+                  f"{_REPLACES}, and the old one is kept in .fi/previous/",
     "plan": "writes plan.md again from the same literature and waits for you to read it, then redoes the design, code "
             f"and everything after; {_REPLACES}, and the old one is kept in .fi/previous/",
     "design": "takes the design written in plan.md again (edit plan.md first to change it; `plan` writes it anew), then "
@@ -102,10 +96,8 @@ REDOES: dict[str, str] = {
     "review": "reviews the same paper again, reads every citation against its source again (and makes the slides and poster from it again)",
 }
 _ALIASES = {
-    "ideate": "ideas", "idea": "ideas", "ideas & literature": "ideas",
     "literature review": "literature", "lit": "literature",
     "select_skills": "skills", "skill": "skills",
-    "scope": "studies", "study": "studies",
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run",
     "auto_collect_data": "run", "web_plots": "figures", "web_figures": "figures", "plots": "figures",
     "analyze": "analysis",
@@ -174,13 +166,10 @@ _OWN: dict[str, list[str]] = {
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.
-    # The study cards and the answer to them: run again, they are offered and answered again.
-    "studies": [".fi/scope.json", ".fi/scope_answer.json"],
     "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK, "needs/receipts/design_audit.json",
              *_FROM_DESIGN],
     "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK,
                    *_FROM_DESIGN],
-    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK, *_FROM_DESIGN],
 }
 # A step redoes everything after it, so it moves aside everything the later steps write too (a rerun that stops halfway
 # must not leave the old receipts for the evidence level to read).
@@ -190,8 +179,12 @@ OUTPUTS: dict[str, list[str]] = {
 }
 # The graph node that leads into a step's first node with a plain edge, for the steps up to the design: the state the
 # engine writes before running them again (the design history, see ``Engine.run``) is written as that node's.
-LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "studies": "pause_after_literature",
-                              "plan": "select_skills", "design": "plan"}
+LEADS_INTO: dict[str, str] = {"literature": "clarify", "plan": "select_skills", "design": "plan"}
+
+# Steps FI no longer has, by every name a person may give them: FI makes no research ideas and offers no studies to pick
+# (every study starts from a commission, which gives its question and its study).
+_GONE = {"ideas": "ideas", "ideate": "ideas", "idea": "ideas", "ideas & literature": "ideas",
+         "studies": "studies", "scope": "studies", "study": "studies"}
 
 
 # ---- one step of a commissioned study run on its own (``step:`` in the config) ----------------------------------------
@@ -202,7 +195,7 @@ LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "studi
 # starts from the state the design step's folder holds; it also holds the gate and the stop that a run which could not
 # start goes to, so the repair of its code stays inside it and a way back to the design leaves it.
 ALONE: dict[str, tuple[str, ...]] = {
-    "design": ("clarify", "ideate", "literature", "pause_after_literature", "scope", "select_skills", "plan", "design"),
+    "design": ("clarify", "literature", "pause_after_literature", "select_skills", "plan", "design"),
     "compute": ("implement_outline", "implement", "execute", "execute_reflect", "improve", "auto_collect_data",
                 "wait_for_data", "data_load", "web_plots", "web_figures", "evidence_gate", "stuck_no_findings"),
 }
@@ -356,6 +349,16 @@ def resolve(name: str) -> str | None:
     return key if key in STEPS else _ALIASES.get(key)
 
 
+def gone(name: str) -> str:
+    """The plain sentence for a ``--from`` naming a step FI no longer has, or ``""`` when ``name`` is not one."""
+    step = _GONE.get((name or "").strip().lower())
+    if not step:
+        return ""
+    return (f"FI no longer has the {step} step: a study starts from a commission, which gives its question and its "
+            "study, so there is nothing to run again from there; nothing was changed. `--from plan` writes the plan "
+            "again.")
+
+
 def choices() -> str:
     return ", ".join(STEPS)
 
@@ -384,7 +387,7 @@ def step_info(step: str, *, reached: bool) -> dict[str, Any]:
 # The blocks of the quest map, in the order the quest runs them: key -> (plain name, one line, on the real-data path
 # instead of the simulation path). The key of a block is what a node names in ``NODES``.
 MAP_BLOCKS: dict[str, tuple[str, str, bool]] = {
-    "setup": ("Understand the question", "Check the setup and pick an angle.", False),
+    "setup": ("Understand the question", "Check the setup.", False),
     "lit": ("Read the literature", "Search papers and pause for any you must download.", False),
     "plan": ("Plan the work", "Choose tools, write the plan, design the experiment.", False),
     "run": ("Build and run the experiment", "Write the code, run it, repair it if it crashes.", False),
@@ -401,24 +404,18 @@ NODES: dict[str, dict[str, str]] = {
     "clarify": {"block": "setup", "title": "Check the setup",
                 "sentence": "Reads your topic and settings, asks about anything unclear.",
                 "reads": "topic, config.yaml", "writes": "clarified topic"},
-    "ideate": {"block": "setup", "title": "Pick an angle",
-               "sentence": "Chooses the research angle, using what earlier quests learned.",
-               "reads": "topic, earlier quests", "writes": "chosen angle"},
     "literature": {"block": "lit", "title": "Search papers",
                    "sentence": "Finds papers. Only free ones are downloaded automatically.",
-                   "reads": "angle", "writes": "literature notes, papers needed by hand"},
+                   "reads": "topic", "writes": "literature notes, papers needed by hand"},
     "pause_after_literature": {"block": "lit", "title": "Wait for papers",
                                "sentence": "Stops so you can add paywalled papers. Skipped when none are needed.",
                                "reads": "needs/WANTED_PAPERS.md", "writes": "inputs/papers/"},
-    "scope": {"block": "plan", "title": "Pick the study",
-              "sentence": "Offers the few studies the topic could mean; you pick the one to run.",
-              "reads": "topic, literature", "writes": ".fi/scope.json"},
     "select_skills": {"block": "plan", "title": "Choose tools",
                       "sentence": "Picks which tools (skills) the code may use.",
                       "reads": "literature, approved tools", "writes": "chosen tools"},
     "plan": {"block": "plan", "title": "Write the plan",
              "sentence": "Writes plan.md. This is what you read and approve before compute is spent.",
-             "reads": "angle, literature", "writes": "plan.md"},
+             "reads": "topic, literature", "writes": "plan.md"},
     "design": {"block": "plan", "title": "Design the experiment",
                "sentence": "Fixes the method, the settings and the pass/fail checks before any run.",
                "reads": "plan", "writes": "frozen protocol"},
@@ -617,7 +614,7 @@ def listing(quest_id: str, steps: list[str] | list[dict[str, Any]]) -> str:
     lines.append(f"Run: --resume {quest_id} --from <step>. What that step and the later ones made is first moved to "
                  ".fi/previous/<time>/.")
     if any(needs_approval(step) for step in names):
-        lines.append("ideas, literature, plan and design replace the experiment plan (frozen), so they also need "
+        lines.append("literature, plan and design replace the experiment plan (frozen), so they also need "
                      "--approve-as <you>.")
     return "\n".join(lines)
 

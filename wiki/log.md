@@ -34,7 +34,7 @@ Sources: core/contract.py, core/contract_parts.py, core/dependent_map.py, core/o
 
 ## 2026-10-24 — picking the study to run
 
-New page: [[study-cards|Picking the study to run]] (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).
+New page: *Picking the study to run* (`study-cards`, removed on 2026-11-25) (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).
 
 Sources: core/scope_cards.py, agents/scope.md, core/config.py, core/rerun_from.py, core/quality_report.py, core/run_checks.py, launch.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
 
@@ -154,3 +154,10 @@ Sources: core/accepted_checks.py, core/engine.py, core/oracle_card.py, core/evid
 Pages updated: [[study-types|Study types]] (the *Best design found* section now opens with one line of what the search found against the baseline; the writer is told not to word it, and words about it that the record contradicts are listed in the quality report, never rewritten or removed).
 
 Sources: core/best_design_report.py, core/record_claims.py, core/quality_report.py, core/paper_facts.py, core/accepted_checks.py.
+
+## 2026-11-25 — No research ideas, no study cards, no second literature search
+
+Pages removed: *Picking the study to run* (`study-cards`): FI no longer offers study cards before the plan (`pauses.scope` loads and does nothing).
+Pages updated: [[doing-a-step-again|Doing a step again]] (the `ideas` step is gone; `--from ideas` and `--from studies` get one plain sentence and change nothing).
+
+Sources: core/engine.py, core/rerun_from.py, core/config.py, core/engine_analyze.py.

@@ -32,7 +32,6 @@ def _mk_cfg(tmp_path: Path, *, max_iter: int = 3) -> Config:
         engine=EngineConfig(
             max_iterations=1, review_loop=False,
             exec_reflect_max_iterations=max_iter,
-            ideate_reflect=False,  # keep tests focused
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),

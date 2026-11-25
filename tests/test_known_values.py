@@ -227,8 +227,7 @@ async def test_a_study_handed_back_at_the_plan_never_reaches_the_design(tmp_path
     async def design(self: Any, state: Any) -> dict[str, Any]:
         raise AssertionError("the design step ran")
 
-    for name in ("_node_clarify_then_phased", "_node_ideate", "_node_pause_after_literature", "_node_scope",
-                 "_node_select_skills"):
+    for name in ("_node_clarify_then_phased", "_node_pause_after_literature", "_node_select_skills"):
         monkeypatch.setattr(Engine, name, nothing)
     monkeypatch.setattr(Engine, "_node_design", design)
     path = _commission(tmp_path / "order", 0.75, 0.01)
@@ -312,8 +311,7 @@ async def test_a_quest_handed_back_at_the_plan_ends_as_a_return_not_a_failure(tm
     async def design(self: Any, state: Any) -> dict[str, Any]:
         raise AssertionError("the design step ran")
 
-    for name in ("_node_clarify_then_phased", "_node_ideate", "_node_pause_after_literature", "_node_scope",
-                 "_node_select_skills"):
+    for name in ("_node_clarify_then_phased", "_node_pause_after_literature", "_node_select_skills"):
         monkeypatch.setattr(Engine, name, nothing)
     monkeypatch.setattr(Engine, "_node_design", design)
     path = _commission(tmp_path / "order", 0.75, 0.01)

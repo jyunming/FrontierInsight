@@ -9,8 +9,8 @@ from __future__ import annotations
 from .engine_base import (  # noqa: F401
     Any, Counter, Path, QuestState, WORK_SCOPE_PAPERS, WORK_SCOPE_PAPERS_AND_BOOKS, _FILLED_AFTER_READ,
     _LITERATURE_QUERIES, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _PERSON_QUERIES, _SURVEY_DESIGN_DIRECTIVE,
-    _attempts, _audit_log, _audit_open, _clean_title, _default_clarify_questions, _design_parts, _fault_from_record,
-    _fault_record, _format_clarify, _format_lit, _format_lit_excerpt, _format_lit_from_state, _frozen,
+    _audit_log, _audit_open, _clean_title, _default_clarify_questions, _design_parts, _fault_from_record,
+    _fault_record, _format_clarify, _format_lit_excerpt, _format_lit_from_state, _frozen,
     _ingest_user_dropped_papers, _is_abstract_only, _is_open_access, _is_scholarly_record, _item_content,
     _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, _literature_query_prompt,
     _literature_text_gaps, _merge_round_robin, _normalize_title, _ok_calls, _one_line, _optim, _pairs,
@@ -475,300 +475,6 @@ class IdeasStageMixin:
             "survey_mode_resolved": survey,
         }
 
-    async def _node_ideate(self, state: QuestState) -> QuestState:
-        if self._commissioned():  # type: ignore[attr-defined]
-            self._log.info("[ideate] the commission gives the question; no ideas are made")
-            return {}
-        if self.config.engine.analyze_local_first:
-            # --analyze: the user supplied the data; there's nothing to
-            # ideate. Passthrough (no LLM call) — downstream reads
-            # chosen_idea via .get() and tolerates its absence.
-            self._log.info("[ideate] analyze_local_first — skipping ideation")
-            return {}
-        self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
-        # Pull a few related items from the knowledge base to ground ideation.
-        # No chosen_idea yet — pass chat_fn so the source-router (if
-        # enabled) can still pick sources from the catalog using the
-        # topic alone. The search engines behind it match keywords, not the
-        # topic's sentences: the same one-call keyword derivation the
-        # literature step uses turns the topic into the field's terms first
-        # (the topic as written when it gives none, as before).
-        self.__dict__.setdefault("_last_call_id", {}).pop("ideate_query", None)
-        self.__dict__.setdefault("_last_call_outcome", {}).pop("ideate_query", None)
-        seed_queries = await self._derive_literature_queries(
-            state["topic"], work_scope=self._work_scope(state), node="ideate_query",
-        ) if self.knowledge.enabled else []
-        if self.knowledge.enabled:
-            if seed_queries:
-                self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
-            ideate_outcome = self.__dict__.get("_last_call_outcome", {}).get("ideate_query")
-            # Kept for a person to see (a failed one too); the literature step derives its own, from the topic AND the
-            # chosen direction.
-            _record_query_set(self.fi_dir, {
-                "stage": "ideate", "queries": seed_queries,
-                "model": (self._chat_provenance("ideate_query") or {}).get("model"),
-                "call_id": self.__dict__.get("_last_call_id", {}).get("ideate_query"),
-                "reason": "the idea step's grounding search (topic only)" + (
-                    "" if seed_queries else "; the derivation gave no query "
-                    + ("(its answer held none)" if ideate_outcome == "ok" else "(the call failed)")
-                    + ", so the topic was searched as written"),
-                "revised_by": "fi"}, log=self._log)
-        seeded = await self.knowledge.asearch(
-            seed_queries[0] if seed_queries else state["topic"], top_k=3,
-            chat_fn=functools.partial(self._chat_messages, node="source_router"),
-            work_scope=self._work_scope(state),
-        )
-        await self._flag_sources(seeded, "ideate")
-        prompt = self._prompts["ideate"].substitute(
-            topic=state["topic"],
-            literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
-            clarify_block=_format_clarify(state),
-        )
-        # Multi-model ensemble path: when the YAML carries
-        # provider.node_ensemble["ideate"], fan out N models in parallel
-        # and tournament-pick the best ideas-JSON. We skip the downstream
-        # ``ideate_tournament`` + ``ideate_reflect`` steps in that case —
-        # the ensemble's moderator already does that job (picking the
-        # best of N candidate idea-sets) and re-running tournament/reflect
-        # on top would double-bill for no quality gain.
-        ensemble_cfg = self._ensemble_for_node("ideate")
-        if ensemble_cfg is not None:
-            from core.ensemble import EnsembleError
-            try:
-                result = await self._ensemble_chat(
-                    prompt, node="ideate", ensemble_cfg=ensemble_cfg,
-                )
-                text = result.merged if isinstance(result.merged, str) else json.dumps(result.merged)
-                # Ensemble already did the "pick the best" work — skip
-                # tournament + reflect downstream.
-                ideate_skip_post_processing = True
-            except EnsembleError as e:
-                self._log.warning(
-                    "[ideate] ensemble all-failed (%s); falling back to single-call path", e,
-                )
-                text = await self._chat(prompt, node="ideate")
-                ideate_skip_post_processing = False
-        else:
-            text = await self._chat(prompt, node="ideate")
-            ideate_skip_post_processing = False
-        parsed = _parse_json_lenient(text) or {}
-        ideas = parsed.get("ideas") or []
-        chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
-
-        # Pairwise tournament. When enabled AND there are
-        # at least 2 ideas to compare, REPLACES the single critique
-        # call below with C(N, 2) parallel pairwise comparisons and
-        # picks the highest-win-count idea. See
-        # ``_run_ideate_tournament`` for the aggregation policy.
-        critique: dict[str, Any] = {}
-        tournament_result: dict[str, Any] | None = None
-        tournament_ran = False
-        if (not ideate_skip_post_processing
-            and self.config.engine.ideate_tournament and len(ideas) >= 2):
-            try:
-                chosen, tournament_result = await self._run_ideate_tournament(
-                    state, ideas, initial_chosen=chosen,
-                )
-                tournament_ran = True
-            except Exception as e:
-                self._log.warning(
-                    "[ideate] tournament failed: %s — falling through "
-                    "to ideate_reflect if enabled", e,
-                )
-        # Self-reflection. Single extra LLM call that may
-        # swap chosen_idea to a different entry from the brainstormed
-        # list. Skipped ONLY when the tournament actually ran (its
-        # pick subsumes the critique's purpose). If the tournament
-        # was enabled but couldn't run (N<2 ideas) or raised, reflect
-        # still gets its chance to refine the single idea.
-        if (not ideate_skip_post_processing
-            and not tournament_ran
-            and self.config.engine.ideate_reflect and ideas):
-            try:
-                critique_prompt = self._prompts["ideate_reflect"].substitute(
-                    topic=state["topic"],
-                    clarify_block=_format_clarify(state),
-                    ideas_block=json.dumps(ideas, indent=2),
-                    chosen_block=json.dumps(chosen, indent=2),
-                )
-                ctext = await self._chat(critique_prompt, node="ideate_reflect")
-                critique = _parse_json_lenient(ctext) or {}
-                swap_to = (critique.get("swap_to") or "").strip()
-                if swap_to:
-                    swapped = next(
-                        (i for i in ideas if i.get("title") == swap_to), None,
-                    )
-                    if swapped is not None:
-                        self._log.info(
-                            "[ideate] reflection swapped chosen: %r -> %r",
-                            chosen.get("title", "?"), swap_to,
-                        )
-                        chosen = {
-                            **swapped,
-                            "rationale": critique.get("refined_rationale")
-                            or swapped.get("rationale", ""),
-                        }
-                    else:
-                        self._log.info(
-                            "[ideate] reflection wanted unknown title %r; keeping original pick",
-                            swap_to,
-                        )
-                elif critique.get("refined_rationale"):
-                    chosen = {**chosen, "rationale": critique["refined_rationale"]}
-            except Exception as e:
-                self._log.warning("[ideate] reflection skipped: %s", e)
-
-        selection = ("ensemble" if ideate_skip_post_processing else "tournament" if tournament_ran
-                     else "reflection" if critique else "model")
-        out: QuestState = {"ideas": ideas, "chosen_idea": chosen, "idea_selection": selection}
-        if critique:
-            out["ideate_critique"] = critique
-        if tournament_result:
-            out["ideate_tournament"] = tournament_result
-        self._record(_attempts.LEDGER, lambda: {
-            "kind": "ideas",
-            "candidates": [{"title": i.get("title"), "hypothesis": i.get("hypothesis")}
-                           for i in (ideas if isinstance(ideas, list) else []) if isinstance(i, dict)],
-            "chosen": chosen.get("title") if isinstance(chosen, dict) else None,
-            "rule": selection,
-            "why": (chosen.get("rationale") if isinstance(chosen, dict) else "") or "",
-            "reflection": {"swap_to": critique.get("swap_to")} if isinstance(critique, dict) and critique else None,
-            "tournament": tournament_result or None,
-        })
-        return out
-
-    async def _run_ideate_tournament(
-        self,
-        state: QuestState,
-        ideas: list[dict[str, Any]],
-        *,
-        initial_chosen: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run C(N, 2) pairwise comparisons across ``ideas`` and return
-        ``(winner_idea, tournament_record)``.
-
-        The record carries the full match table for run.log + Axon
-        write-back so a future quest can see "we already tried these
-        ideas; the tournament picked X over Y because Z."
-
-        Each comparison fires one ``self._chat`` call to the
-        ``ideate_tournament`` prompt, returning ``{winner: A|B,
-        reason: ..., margin: decisive|narrow}``. The N matches run
-        concurrently via ``asyncio.gather`` so total wall-clock is one
-        LLM round-trip (plus parsing) regardless of N. For N=3
-        (FI default), that's 3 calls in parallel vs the prior 1
-        critique call serially.
-
-        Tie-breaking: highest total wins. Ties are then broken by
-        more "decisive" margins, then by EARLIEST original-list
-        position (the ``-i`` term in the sort key). The earliest-
-        position fallback is deterministic across runs but does NOT
-        prefer ``initial_chosen`` — that fallback only fires when NO
-        match resolved a clean winner (the "inconclusive_fallback"
-        outcome below), so the engine always has a chosen_idea for
-        downstream nodes.
-        """
-        from itertools import combinations
-
-        pairs = list(combinations(range(len(ideas)), 2))
-        self._log.info(
-            "[ideate] tournament: %d ideas, %d pairwise matches",
-            len(ideas), len(pairs),
-        )
-
-        async def play(a_idx: int, b_idx: int) -> dict[str, Any]:
-            prompt = self._prompts["ideate_tournament"].substitute(
-                topic=state["topic"],
-                clarify_block=_format_clarify(state),
-                idea_a=json.dumps(ideas[a_idx], indent=2),
-                idea_b=json.dumps(ideas[b_idx], indent=2),
-            )
-            text = await self._chat(prompt, node="ideate_tournament")
-            parsed = _parse_json_lenient(text) or {}
-            winner_label = str(parsed.get("winner", "")).strip().upper()
-            return {
-                "a_idx": a_idx, "b_idx": b_idx,
-                "winner": winner_label,                  # "A" or "B" or ""
-                "reason": parsed.get("reason", ""),
-                "margin": parsed.get("margin", "narrow"),
-            }
-
-        matches = await asyncio.gather(
-            *(play(a, b) for a, b in pairs), return_exceptions=True,
-        )
-
-        # Tally wins. Skip failed matches (Exception or empty winner).
-        wins = [0] * len(ideas)
-        decisive_wins = [0] * len(ideas)
-        valid_matches: list[dict[str, Any]] = []
-        for m in matches:
-            if isinstance(m, BaseException) and not isinstance(m, Exception):
-                raise m  # a cancellation or a model that cannot be used (ProviderUnusable) is not a failed match
-            if isinstance(m, Exception):
-                self._log.warning("[ideate] tournament match raised: %s", m)
-                continue
-            valid_matches.append(m)
-            w = m["winner"]
-            idx = m["a_idx"] if w == "A" else m["b_idx"] if w == "B" else -1
-            if idx >= 0:
-                wins[idx] += 1
-                if m["margin"] == "decisive":
-                    decisive_wins[idx] += 1
-
-        if not any(wins):
-            self._log.info(
-                "[ideate] tournament inconclusive (no valid match outcomes) "
-                "— keeping initial chosen=%r",
-                initial_chosen.get("title", "?"),
-            )
-            return initial_chosen, {
-                "matches": valid_matches, "winner_idx": None,
-                "wins": wins, "decisive_wins": decisive_wins,
-                "outcome": "inconclusive_fallback",
-            }
-
-        # Pick by (wins, decisive_wins, original-order) so ties break
-        # deterministically.
-        winner_idx = max(
-            range(len(ideas)),
-            key=lambda i: (wins[i], decisive_wins[i], -i),
-        )
-        winner = dict(ideas[winner_idx])
-        # Preserve the original rationale; append the tournament reason
-        # for grep-ability in run.log + paper writeback.
-        reasons = [
-            m["reason"]
-            for m in valid_matches
-            if (m["winner"] == "A" and m["a_idx"] == winner_idx)
-            or (m["winner"] == "B" and m["b_idx"] == winner_idx)
-        ]
-        winner["rationale"] = (
-            initial_chosen.get("rationale", "") + " "
-            + " ".join(f"[tournament] {r}" for r in reasons[:2])
-        ).strip()
-        self._log.info(
-            "[ideate] tournament resolved: winner=%r wins=%d (decisive=%d) "
-            "vs initial=%r",
-            winner.get("title", "?"), wins[winner_idx],
-            decisive_wins[winner_idx], initial_chosen.get("title", "?"),
-        )
-        # Compute the original-list index of ``initial_chosen`` so the
-        # "swapped" / "confirmed" outcome is decided by position, not
-        # title. Title comparison would mis-report a swap as
-        # "confirmed" when two ideas share a title (e.g. both fall
-        # back to the synthesized {"title": "fallback", ...}).
-        initial_title = initial_chosen.get("title")
-        initial_idx = next(
-            (i for i, idea in enumerate(ideas)
-             if idea.get("title") == initial_title),
-            -1,
-        )
-        return winner, {
-            "matches": valid_matches, "winner_idx": winner_idx,
-            "wins": wins, "decisive_wins": decisive_wins,
-            "outcome": "swapped" if winner_idx != initial_idx else "confirmed",
-        }
-
     def _lit_kwargs(self, state: QuestState) -> dict[str, Any]:
         """Relevance-selection kwargs for the ``_format_lit*`` helpers, from
         the quest state + knowledge config — so each node's prompt gets the
@@ -806,22 +512,7 @@ class IdeasStageMixin:
         prior = list(state.get("literature") or [])
         prior_iter = int(state.get("literature_iter") or 0)
         this_iter = prior_iter + 1
-        # On a broaden_lit re-entry, the design has already been
-        # written — fold its hypothesis into the query so the second
-        # pass searches for evidence that addresses the SPECIFIC
-        # design, not just the original chosen idea. First pass keeps
-        # the lean ``title + topic`` query because design hasn't run
-        # yet.
-        hypothesis = ""
-        if this_iter > 1 and state.get("design"):
-            hypothesis = str(state["design"].get("hypothesis") or "")[:200]
-            query = (chosen.get("title") or "") + " " + hypothesis + " " + state["topic"][:160]
-            self._log.info(
-                "[literature] iteration=%d (broaden_lit re-entry); query incorporates design.hypothesis",
-                this_iter,
-            )
-        else:
-            query = (chosen.get("title") or "") + " " + state["topic"][:200]
+        query = (chosen.get("title") or "") + " " + state["topic"][:200]
         # A topic statement is written for a person; a search engine matches
         # keywords. A real quest's 365-character topic came back from the
         # academic sources with HTTP 200 and zero hits, where a 79-character
@@ -834,7 +525,7 @@ class IdeasStageMixin:
         # this step again): no second call, and no drift to other queries finding other papers. A new pass, or
         # changed inputs, derives them again, and the record says why.
         title = chosen.get("title") or ""
-        derive_prompt = _literature_query_prompt(state["topic"], title, hypothesis, work_scope=scope)
+        derive_prompt = _literature_query_prompt(state["topic"], title, work_scope=scope)
         # The model that derives them is part of what they answer: a different model derives them again.
         deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
         key = _query_set_key(derive_prompt, this_iter, deriving_model)
@@ -895,7 +586,7 @@ class IdeasStageMixin:
                 reason = ("the saved queries for this pass do not match an answered call in the record of model calls "
                           "(none, another prompt, or a call another entry also names)")
             elif any(e.get("iteration") == this_iter for e in saved):
-                reason = "the topic, the chosen direction, the hypothesis or the model changed"
+                reason = "the topic, the chosen direction or the model changed"
             elif saved:
                 reason = f"a new search pass ({this_iter})"
             else:
@@ -903,7 +594,7 @@ class IdeasStageMixin:
             self.__dict__.setdefault("_last_call_id", {}).pop("literature_query", None)
             self.__dict__.setdefault("_last_call_outcome", {}).pop("literature_query", None)
             queries = await self._derive_literature_queries(
-                state["topic"], title, hypothesis, work_scope=scope,
+                state["topic"], title, work_scope=scope,
             )
             call_id = self.__dict__.get("_last_call_id", {}).get("literature_query")
             call_outcome = self.__dict__.get("_last_call_outcome", {}).get("literature_query")
@@ -1069,7 +760,7 @@ class IdeasStageMixin:
         # Dedup-merge: identity is DOI when present, otherwise the
         # canonical URL, otherwise the first 200 chars of content.
         # On the first iteration ``prior`` is empty so this is a
-        # straight assignment; on broaden_lit re-entries we accumulate
+        # straight assignment; a resumed pass accumulates
         # so the design node sees the full corpus FI has seen for
         # this quest.
         # A specific-enough title is a second identity: the same text reached

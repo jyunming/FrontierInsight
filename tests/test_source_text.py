@@ -68,7 +68,7 @@ def _doc(content: str = POISON, **meta) -> RetrievedDoc:
 def _config(tmp_path: Path, **engine) -> Config:
     return Config(
         topic=TOPIC, title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", ideate_reflect=False,
+        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off",
                             claim_grounding=True, **engine),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, web_search=False, passage_ranking="lexical"),
@@ -569,22 +569,6 @@ async def test_analyze_fences_the_titles_it_shows_after_a_run(tmp_path: Path, mo
     state["literature"] = [_entry(title=f"Epidemics: {NEEDLE}")]
     await eng._node_analyze(state)
     _assert_fenced(_prompt(sent, "analyze"))
-
-
-@pytest.mark.asyncio
-async def test_ideate_fences_and_flags_what_its_search_found(tmp_path: Path, monkeypatch) -> None:
-    sent = _fake_llm(monkeypatch, {"ideate": json.dumps({"ideas": [
-        {"title": "A", "hypothesis": "h", "novelty": "n", "feasibility": "f"}]})})
-    eng = _eng(_config(tmp_path))
-    seeded = [_doc()]
-
-    async def search(query, **kw):  # noqa: ANN001
-        return seeded
-
-    eng.knowledge.asearch = search  # type: ignore[method-assign]
-    await eng._node_ideate({"topic": TOPIC})
-    _assert_fenced(_prompt(sent, "ideate"))
-    assert seeded[0].metadata[st.FLAGS_KEY]
 
 
 def _write_engine(tmp_path: Path) -> Engine:

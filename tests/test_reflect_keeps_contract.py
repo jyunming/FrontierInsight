@@ -25,7 +25,7 @@ GOOD = OLD.replace("float(cell['a'])", "float(sum(cell['a']))")
 def _eng(tmp_path: Path) -> Engine:
     cfg = Config(
         topic="contract tests", title="contract", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3, ideate_reflect=False),
+        engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60, split_analysis=True),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )

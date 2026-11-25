@@ -7,7 +7,7 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
-    Any, BridgeError, FallbackLLMClient, LLMClient, ModelAnswerTruncated, PROXY_PROVIDERS, Path, ProviderUnusable,
+    Any, FallbackLLMClient, LLMClient, ModelAnswerTruncated, PROXY_PROVIDERS, Path, ProviderUnusable,
     QuestArtifacts, QuestState, _CLI_PROVIDERS_SET, _DRAFTED_GRID_ASKED, _DRAFTED_GRID_ASKED_AGAIN,
     _DRAFTED_PARTS_ASKED, _DRAFTED_SEARCH_ASKED, _FIGURES_PER_CALL, _FIGURE_PICK_BATCH, _FIGURE_READING_CHARS,
     _FILLED_AFTER_READ, _FILL_MARKER, _GRID_ASKED, _GRID_ASKED_AGAIN, _LEDGER_ASKED, _LEDGER_PARTS,
@@ -22,7 +22,7 @@ from .engine_base import (  # noqa: F401
     _labelled_sources, _ledger, _lit_query, _mc_error, _one_line, _optim, _optimise, _optimise_search, _oracle,
     _package_block_text, _pairs, _parse_json_lenient, _pick_up_user_dropped_datasets, _plan, _plan_checks_note,
     _plan_scope, _plan_search_mark, _plan_settings, _plan_steps, _protocol, _read_a_search_block,
-    _read_json_or_none_path, _reading, _receipts, _review, _scope_cards, _script_reply, _skeleton, _source_text,
+    _read_json_or_none_path, _reading, _receipts, _review, _script_reply, _skeleton, _source_text,
     _split_run, _study_size, _todo, _top_level_json_objects, _topic_req, _trial_runner, asyncio,
     claude_cli_account_line, copy, hashlib, inspect, interrupt, json, missing_step_api_keys, model_for_node,
     node_provider_for, os, re, resolve_endpoint_async, step_provider_config, step_provider_lines,
@@ -122,9 +122,7 @@ class PlanStageMixin:
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
         await self._read_topic_before_the_prompt(state)
         seek = self._seeks_best_design(state)
-        card = state.get("scope_card")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + self._study_type_part(state, seek=seek)
-                  + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else "")
                   + _known_values.plan_block(known))
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
@@ -274,9 +272,6 @@ class PlanStageMixin:
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,
                             code_layout=self._plan_code_layout({**state, "design": normalized}),
                             confirm=self._plan_confirm_lines(state), held_back=self._audit_changes_held_back())
-        study = _scope_cards.plan_section(_scope_cards.read_record(self.quest_root))
-        if study:
-            body = body.rstrip("\n") + "\n\n" + study
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
@@ -424,11 +419,8 @@ class PlanStageMixin:
         return kept, notes
     @staticmethod
     def _study_type_asked(state: QuestState) -> str | None:
-        """The kind of study the person named (``measure`` / ``find_best_design``), or ``None``: the study card they
-        picked before the plan comes first, then their answer at the clarify step."""
-        card = state.get("scope_card")
-        if isinstance(card, dict) and card.get("study_type") in _scope_cards.STUDY_TYPES:
-            return str(card["study_type"])
+        """The kind of study the person named (``measure`` / ``find_best_design``) in their answer at the clarify step,
+        or ``None``."""
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
     def _asks_for_best_design(self, state: QuestState, *, topic: bool = True) -> str:
@@ -4480,70 +4472,6 @@ class PlanStageMixin:
         if read:
             self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
-
-    async def _node_scope(self, state: QuestState) -> QuestState:
-        """Before the plan, the few different studies the topic could mean, for a person to pick one
-        (:mod:`core.scope_cards`). Runs once per quest: a record in ``.fi/scope.json`` (picked or not) is read, never
-        asked again. With nobody to answer the cards are still recorded, and the plan is written from the topic alone."""
-        if (self.config.pauses.scope == "off" or self.config.engine.analyze_local_first
-                or int(state.get("iteration", 0) or 0) > 0 or _plan.plan_path(self.quest_root).is_file()):
-            return {}
-        record = _scope_cards.read_record(self.quest_root)
-        if record is not None:
-            chosen = record.get("chosen")
-            return {"scope_card": chosen} if isinstance(chosen, dict) else {}
-        sources = _labelled_sources(state.get("literature") or [])
-        ids = {f"[{label}]" for label, _m, _i in sources} | {label for label, _m, _i in sources}
-        listing = "\n".join(
-            f"[{label}] {meta.get('title') or meta.get('source') or 'untitled'} — "
-            + _one_line(_item_content(item), 300) for label, meta, item in sources) or "(none)"
-        again = ""
-        cards: list[dict[str, Any]] = []
-        removed: list[str] = []
-        for _ in range(2):
-            prompt = self._prompts["scope"].substitute(
-                topic=state.get("topic") or self.config.topic, answers=_format_clarify(state),
-                direction=json.dumps(state.get("chosen_idea") or {}, indent=2), sources=listing, again=again)
-            reply = await self._chat(prompt, node="scope")
-            cards, removed = _scope_cards.normalize(_parse_json_lenient(reply) or reply, ids)
-            if _scope_cards.distinct_enough(cards):
-                break
-            again = (f"Your last reply gave {len(cards)} different studies"
-                     + (": " + "; ".join(c["question"] for c in cards) if cards else "")
-                     + ". Two cards with the same study type and the same main results are one study. "
-                       "Write 3 or 4 studies that differ in their study type or in their main results.")
-        chosen = await self._scope_answer(cards) if cards else None
-        try:
-            _scope_cards.write_record(self.quest_root, cards, chosen, removed, widest=_scope_cards.has_widest(cards))
-        except OSError as exc:
-            self._log.warning("[scope] could not write %s (%r); the choice is kept for this run only",
-                              _scope_cards.RECORD, exc)
-        if chosen is not None:
-            self._log.info("[scope] the study to run: %s", chosen.get("question", ""))
-        else:
-            self._log.info("[scope] nobody picked the study to run; the plan is written from the topic alone")
-        return {"scope_card": chosen}
-
-    async def _scope_answer(self, cards: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """The card a person picked: an answer staged in ``.fi/scope_answer.json`` (read now), else the answer channel
-        the clarify questions use, waited for up to ``pauses.timeout_s`` (0: no limit). ``None``: nobody picked."""
-        path = self.quest_root / _scope_cards.ANSWER
-        if path.is_file():
-            try:
-                return _scope_cards.read_answer(json.loads(path.read_text(encoding="utf-8")), cards)
-            except (OSError, ValueError) as exc:
-                self._log.warning("[scope] could not read %s (%r)", _scope_cards.ANSWER, exc)
-        ask = getattr(self, "_scope_answerer", None)
-        if ask is None:
-            return None
-        try:
-            waiting = ask(_scope_cards.question(cards))
-            limit = float(self.config.pauses.timeout_s)
-            answer = await (asyncio.wait_for(waiting, timeout=limit) if limit > 0 else waiting)
-        except (asyncio.TimeoutError, BridgeError) as exc:
-            self._log.warning("[scope] no answer to the study cards (%s)", type(exc).__name__)
-            return None
-        return _scope_cards.read_answer(answer, cards)
 
     async def _read_literature_figures(self, state: QuestState, literature: list[Any]) -> int:
         """Read the values off the papers' figures (``knowledge.read_figures``), in place: the model for the step

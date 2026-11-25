@@ -80,7 +80,7 @@ async def test_engine_run_passes_none_to_ainvoke_when_checkpoint_exists(
     ``Engine.run`` must call ``graph.ainvoke(None, ...)`` so LangGraph
     continues from the last completed node. Passing the full initial
     payload (the prior behavior) caused real quests to restart from
-    `ideate` with whatever topic the YAML had — silently wiping the
+    the first node with whatever topic the YAML had — silently wiping the
     prior run's design/literature work."""
     qid = "1700000000-resume-good-deadbe"
     engine = Engine(_cfg(tmp_path), resume_quest_id=qid)
@@ -110,7 +110,7 @@ async def test_engine_run_passes_none_to_ainvoke_when_checkpoint_exists(
 
     @asynccontextmanager
     async def fake_saver(_path):
-        yield MagicMock()
+        yield MagicMock(aget_tuple=AsyncMock(return_value=None))  # the raw checkpoint: none that names a removed step
 
     monkeypatch.setattr(
         "core.engine.AsyncSqliteSaver.from_conn_string", fake_saver,
@@ -163,7 +163,7 @@ async def test_engine_run_passes_initial_when_no_checkpoint(
 
     @asynccontextmanager
     async def fake_saver(_path):
-        yield MagicMock()
+        yield MagicMock(aget_tuple=AsyncMock(return_value=None))  # the raw checkpoint: none that names a removed step
 
     monkeypatch.setattr(
         "core.engine.AsyncSqliteSaver.from_conn_string", fake_saver,
@@ -184,6 +184,49 @@ async def test_engine_run_passes_initial_when_no_checkpoint(
     assert len(seen_payloads) == 1
     assert isinstance(seen_payloads[0], dict)
     assert seen_payloads[0]["topic"] == "resume unit"
+
+
+@pytest.mark.parametrize("node,said", [("scope", "choosing a study from study cards"),
+                                       ("ideate", "making research ideas")])
+@pytest.mark.asyncio
+async def test_a_checkpoint_stopped_before_a_step_fi_no_longer_has_is_refused_plainly(
+    tmp_path: Path, node: str, said: str,
+) -> None:
+    """An earlier FI's quest that stopped just before its idea step or its study cards: LangGraph reads the checkpoint
+    as having nothing left to run (the node is gone), which would look like a finished quest. The resume is refused in
+    one sentence and nothing runs."""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.graph import END, START, StateGraph
+
+    from core.engine import QuestState
+
+    qid = f"1700000000-old-{node}-deadbe"
+    engine = Engine(_cfg(tmp_path), resume_quest_id=qid)
+    engine.fi_dir.mkdir(parents=True, exist_ok=True)
+
+    async def clarify(_state: QuestState) -> QuestState:
+        return {"clarify_done": True}
+
+    async def stopped(_state: QuestState) -> QuestState:
+        raise RuntimeError("the earlier run stopped here")
+
+    old: StateGraph[QuestState] = StateGraph(QuestState)  # the shape of an earlier FI's graph up to that node
+    old.add_node("clarify", clarify)
+    old.add_node(node, stopped)
+    old.add_edge(START, "clarify")
+    old.add_edge("clarify", node)
+    old.add_edge(node, END)
+    run_cfg = {"configurable": {"thread_id": qid}}
+    async with AsyncSqliteSaver.from_conn_string(str(engine.fi_dir / "state.sqlite")) as saver:
+        with pytest.raises(RuntimeError):
+            await old.compile(checkpointer=saver).ainvoke({"topic": "resume unit", "iteration": 0}, run_cfg)
+    engine.executor.setup = AsyncMock()
+    engine._record_environment = AsyncMock()  # type: ignore[method-assign]
+    engine._connect_llm = AsyncMock()  # type: ignore[method-assign]
+    engine._client = MagicMock(chat=AsyncMock(side_effect=AssertionError("no model call is made")), aclose=AsyncMock())
+    with pytest.raises(ValueError, match=f"stopped just before {said}, a step an earlier FI had and this one does not"):
+        await engine.run()
+    engine._client.chat.assert_not_called()
 
 
 # ---- provider warnings ---------------------------------------------------

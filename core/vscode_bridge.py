@@ -228,7 +228,7 @@ class VSCodeBridgeClient:
         ``lm_done``. The extension does the actual ``vscode.lm`` call
         on the user's behalf; we just shuttle JSON.
 
-        ``node`` is the FI engine node name (``"ideate"``,
+        ``node`` is the FI engine node name (``"plan"``,
         ``"review_panel.statistician"``, …) so the extension can render
         progress in the chat panel with the right tag.
 

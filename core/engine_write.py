@@ -104,8 +104,7 @@ class WriteStageMixin:
 
         With ``scope_block`` (the earlier draft, read-only, and the sections to write) the reply is those sections
         only, not a paper: the caller puts them back into the draft (core/paper_scope.py)."""
-        # When the evidence gate judged the evidence thin (insufficient,
-        # or "broaden" with the broaden budget exhausted), hand the writer
+        # When the evidence gate judged the evidence thin (insufficient), hand the writer
         # an explicit note so the paper frames its limits honestly instead
         # of over-claiming. Suppressed for survey topics (see the helper).
         evidence_note = _format_evidence_note(
@@ -243,7 +242,7 @@ class WriteStageMixin:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             # Write node is the ONE place audience filtering applies:
             # this is the literature block that flows into the paper's
-            # References. ideate/design/cross_check still see the full
+            # References. design/cross_check still see the full
             # pull because those nodes are about choosing what to do,
             # not what to publish.
             literature_block=_format_lit_from_state(

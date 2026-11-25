@@ -40,10 +40,6 @@ print('RESULT_JSON: {"score": 0.5}')
 
 
 _FAKE_RESPONSES = {
-    "Ideation": json.dumps({
-        "ideas": [{"title": "fleet-fake", "summary": "x", "feasibility": "high", "novelty": "low"}],
-        "chosen": {"title": "fleet-fake", "rationale": "only candidate"},
-    }),
     "Experiment Design": json.dumps({
         "hypothesis": "fleet hypothesis",
         "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},

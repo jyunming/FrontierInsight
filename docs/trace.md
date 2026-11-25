@@ -52,7 +52,7 @@ When the connection hands it back (a reasoning model's `reasoning_content` throu
 | `check oracle: ok` | a check's verdict; the record with the detail and its hash are in the event |
 | `review: next is revise because verdict=revise, ...` | the route the quest took and the facts it read to choose |
 | `design: alternative: Wilson pooled -> rejected (assumes independence we can't verify here) [model claim]` | something the model said about its own reasoning, and — when it chose between options — what it decided and why |
-| `evidence_gate: verdict: only 2 of 6 sources are on-topic -> broaden [model claim]` | the evidence gate's own stated reason for its verdict |
+| `evidence_gate: verdict: only 2 of 6 sources are on-topic -> insufficient [model claim]` | the evidence gate's own stated reason for its verdict |
 | `analyze: next_step: the effect is within noise at this sample size -> re_experiment [model claim]` | analyze's stated reason for the next step it picked |
 | `select_skills: skill_chosen: the design mixes nm and um -> use units [model claim]` | the model's reason for a choice it made, from the answer it already gave |
 | `the model changed from gpt-5.6-luna to claude-opus-5 (the model picked in the VS Code chat panel)` | the quest's model changed; results made before and after it came from different models |

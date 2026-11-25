@@ -267,7 +267,7 @@ class ProviderConfig(BaseModel):
     # (``implement``, ``execute_reflect``) routinely outrun the 300 s
     # default on complex topics under Sonnet 4.6 extended thinking;
     # bumping them here avoids tenacity retries that all hit the same
-    # wall. Cheap nodes (``clarify``, ``ideate``) keep the default —
+    # wall. Cheap nodes (``clarify``, ``literature_query``) keep the default —
     # tightening their budget catches real hangs faster.
     #
     # Maps engine-node name → seconds. Lookup misses fall back to
@@ -411,7 +411,7 @@ class ProviderConfig(BaseModel):
         return dict(v)
 
     # Multi-model ensemble per node. Maps an engine node name (one of
-    # ``ideate`` / ``analyze`` / ``cross_check``) to a configuration
+    # ``analyze`` / ``cross_check``) to a configuration
     # that fires N parallel chat calls (one per model in ``models``)
     # and merges the responses via ``merge`` strategy.
     #
@@ -420,10 +420,6 @@ class ProviderConfig(BaseModel):
     #
     # Example:
     #     node_ensemble:
-    #       ideate:
-    #         models: [gpt-5.5, claude-opus-4-7, gemini-2.5-pro]
-    #         merge: tournament
-    #         moderator: claude-opus-4-7
     #       analyze:
     #         models: [gpt-5.5, claude-opus-4-7]
     #         merge: synthesize
@@ -508,6 +504,13 @@ class ProviderConfig(BaseModel):
         """
         if not self.node_ensemble:
             return self
+        if "ideate" in self.node_ensemble:  # the step is gone: said once, like a retired key
+            logging.getLogger("frontier_insight.config").info(
+                "config: provider.node_ensemble.ideate no longer does anything (FI makes no research ideas); the entry "
+                "can be removed.")
+            self.node_ensemble = {k: v for k, v in self.node_ensemble.items() if k != "ideate"} or None
+            if not self.node_ensemble:
+                return self
         for node, cfg in self.node_ensemble.items():
             if node == "analyze" and cfg.merge == "synthesize":
                 raise ValueError(
@@ -616,7 +619,6 @@ PauseForUserInput = Literal[
 ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
-ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
@@ -628,7 +630,8 @@ _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review
 # Legacy flag location (section, old key) → canonical ``pauses`` field. Read by
 # Config's root validator so old YAML keeps working without touching read sites.
 # Keys a config may still set although the setting is gone: accepted, no effect, said once in the log.
-_RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check"})
+_RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check", "engine.ideate_reflect",
+                           "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope"})
 
 _LEGACY_PAUSE_FLAGS = (
     ("engine", "clarify_mode", "clarify"),
@@ -668,9 +671,6 @@ class PausesConfig(BaseModel):
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
     # not wait for you, so unattended and fleet runs are not held up.
     plan: PlanPause = "off"
-    # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
-    # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
-    scope: ScopePause = "ask"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -708,11 +708,6 @@ class PausesConfig(BaseModel):
     @classmethod
     def _norm_plan(cls, v: Any) -> Any:
         # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
-        return "off" if v is False else v
-
-    @field_validator("scope", mode="before")
-    @classmethod
-    def _norm_scope(cls, v: Any) -> Any:
         return "off" if v is False else v
 
 
@@ -778,7 +773,7 @@ class EngineConfig(BaseModel):
     # CLI ``--interactive`` gate, whose blocking ``input()`` implies a human
     # is present.
     human_feedback_timeout_s: float = Field(default=1800.0, ge=0)
-    # Pre-flight clarification (`clarify` node before `ideate`).
+    # Pre-flight clarification (`clarify` node before `literature`).
     #
     #   "off"         — skip the node entirely. Default for tests and fleet.
     #   "auto"        — agent generates the questionnaire AND auto-answers
@@ -828,15 +823,12 @@ class EngineConfig(BaseModel):
     # and write). When True (default), one LLM pass weighs the assembled
     # evidence — source count, cross-check supporting/conflicting balance,
     # whether the run produced real measurements — against the research
-    # question and returns a verdict: ``sufficient`` (write), ``broaden``
-    # (re-enter the literature loop once more, budget permitting), or
+    # question and returns a verdict: ``sufficient`` (write) or
     # ``insufficient`` (write anyway, but the assessment is handed to the
     # writer so the paper frames thin evidence honestly instead of
     # over-claiming). Fails OPEN: any parse error, or the flag off, routes
-    # straight to write. The broaden loop is bounded by
-    # ``evidence_gate_max_broaden`` so it can't spin.
+    # straight to write.
     evidence_gate: bool = True
-    evidence_gate_max_broaden: int = Field(default=1, ge=0)
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting
@@ -992,27 +984,10 @@ class EngineConfig(BaseModel):
     # loop the user through the same drop screen twice.
     pause_for_user_input: PauseForUserInput = "never"
     # Also enables the `next_step` re-route emitted by analyze:
-    # `publish` (default) / `re_experiment` / `broaden_lit`. Both
-    # non-default values route back to `design` (via cross_check first)
-    # and consume from `max_iterations` like the review-loop `revise`.
+    # `publish` (default) / `re_experiment`. `re_experiment` routes back to
+    # `design` (via cross_check first) and consumes from `max_iterations`
+    # like the review-loop `revise`.
     enable_analyze_reroute: bool = True
-    # Extra LLM call after `ideate` to self-critique the
-    # chosen idea. May swap `chosen_idea` to a different entry from
-    # the brainstormed list. Cheap (one extra LLM call per quest).
-    ideate_reflect: bool = True
-    # Pairwise tournament across the brainstormed ideas.
-    # When True, REPLACES the single ``ideate_reflect`` critique call
-    # with ``C(N, 2)`` parallel pairwise comparisons (3 calls for the
-    # default 3 ideas) and picks the idea with the most wins (ties: more
-    # decisive wins, then the original order). The idea comes from
-    # Google Co-Scientist's pairwise ranking, but this is win counting,
-    # not Elo, and the comparisons come from one model family, so they
-    # are not independent judgements. Whether it picks better ideas than
-    # the single critique has not been measured. Costs 2 extra LLM calls
-    # vs. the single critique. Off by default to keep the cost floor at
-    # 7-18 calls.
-    # When True, ``ideate_reflect`` is ignored (tournament wins).
-    ideate_tournament: bool = False
     # Multi-persona reviewer panel on the `review` node.
     # When empty (default), the review node behaves as before: one LLM
     # call producing one verdict. When non-empty, each entry runs in
@@ -1030,7 +1005,7 @@ class EngineConfig(BaseModel):
     # When True, the engine treats the topic as one that needs
     # real-world data the user will collect themselves — not one the
     # LLM should simulate via a Python experiment. The flow becomes:
-    # clarify → ideate → literature → design → wait_for_data, at which
+    # clarify → literature → design → wait_for_data, at which
     # point the engine writes ``<quest_root>/data/README.md``
     # explaining what to drop into the dir and exits cleanly (rc=0).
     # The user collects data, drops it into ``<quest_root>/data/``,
@@ -1058,8 +1033,8 @@ class EngineConfig(BaseModel):
     # See ``Engine._resolve_survey_from_clarify``.
     survey_mode: bool = False
     # Local-data-first mode for the ``--analyze`` workflow: the user has
-    # already supplied the data, so the framing/retrieval nodes (ideate,
-    # literature, design) are made PASSTHROUGHS — no ideation, no external
+    # already supplied the data, so the retrieval nodes (literature,
+    # design) are made PASSTHROUGHS — no external
     # retrieval, no experiment design — and the quest goes straight from
     # clarify to loading + analysing the local data. Implies no_simulation.
     # Off for normal quests. (Set by ``analyze_cli.build_analyze_config``;
@@ -1457,7 +1432,7 @@ class KnowledgeConfig(BaseModel):
     relevance_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
     # Never-starve retention: always keep at least this many top-scoring docs
     # even when all fall below ``relevance_min_score``, so a wholly-borderline
-    # corpus is not emptied (the evidence_gate can then broaden instead).
+    # corpus is not emptied (the evidence_gate then judges it thin instead).
     relevance_min_keep: int = Field(default=3, ge=0)
     # Re-search with different keywords when a retrieval comes back
     # wholly off-topic. When NO doc clears ``relevance_min_score`` on its own
@@ -1814,9 +1789,9 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
 
 # What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
-    "pauses": {"clarify": "off", "scope": "off", "papers": False},
+    "pauses": {"clarify": "off", "papers": False},
     "knowledge": {"foundational_works": False, "requery_on_low_relevance": False},
-    "engine": {"evidence_gate_max_broaden": 0, "enable_analyze_reroute": False},
+    "engine": {"enable_analyze_reroute": False},
 }
 
 

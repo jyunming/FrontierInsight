@@ -40,7 +40,6 @@ def _mk_engine(tmp_path: Path, *, node_models=None, provider_model="gpt-5") -> E
         ),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, clarify_mode="off",
-            ideate_reflect=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),

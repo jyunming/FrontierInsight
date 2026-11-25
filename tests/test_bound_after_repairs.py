@@ -27,7 +27,7 @@ def _cfg(tmp_path: Path, max_iter: int = 2) -> Config:
     return Config(
         topic="bounds after repairs", title="bounds",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=max_iter, ideate_reflect=False),
+        engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=max_iter),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
