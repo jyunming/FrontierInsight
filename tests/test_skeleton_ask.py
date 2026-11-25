@@ -95,10 +95,10 @@ def _sans_frame(prompt: str) -> str:
 
 @pytest.mark.asyncio
 async def test_with_the_frame_off_the_code_request_is_what_it_was(tmp_path: Path) -> None:
-    """The request hash is that of the commit before this change (6ad6c160)."""
+    """The request hash is that of the commit before this change (6ad6c160), except for the one placeholder line of the setup block, now "(none — no setup questions were asked)" (it said "clarify mode is off")."""
     engine, model = await _implement(tmp_path, skeleton_on=False)
     text = model.prompts[0].replace(str(engine.quest_root), "<quest>").replace(str(tmp_path), "<tmp>")
-    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == "cb29b006a3c41edc2c87a9193062533bc94a569f4ddf13bf2b72ad4296636a6d"
+    assert hashlib.sha256(text.encode("utf-8")).hexdigest() == "47b1073424b802685e801ef04f6cb2df9ece9486d01932ac7325bf51d45fc53a"
 
 
 @pytest.mark.asyncio

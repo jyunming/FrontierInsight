@@ -2456,7 +2456,10 @@ def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
     written in the config wins, and an unknown venue is ignored. A new study carries none (nothing asks it)."""
     from core.config import paper_format_with_old_venue
 
-    venue = paper_format_with_old_venue(cfg.output.paper_format, (art.raw_state or {}).get("clarify_answers"))
+    answers = (art.raw_state or {}).get("clarify_answers")
+    if not (isinstance(answers, dict) and answers.get("paper_venue")):
+        return  # a new study carries none: the config is not read at all
+    venue = paper_format_with_old_venue(cfg.output.paper_format, answers)
     if venue == cfg.output.paper_format:
         return
     print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {cfg.output.paper_format} -> {venue}")
