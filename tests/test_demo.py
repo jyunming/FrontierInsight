@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import launch
-from core import demo
+from core import commission, demo
 from core import provider_readiness as pr
 from core.config import Config
 
@@ -43,6 +43,10 @@ def test_demo_writes_an_example_that_loads_and_names_no_missing_file(
     assert path.is_file()
     cfg = Config.from_yaml(path)
     assert cfg.provider.name == "openai"
+    # Every study starts from a commission: the demo writes one beside its config, and it passes the door.
+    assert cfg.commission == (tmp_path / "fi-demo-commission.yaml").resolve()
+    commission.door(cfg.commission, None)
+    assert commission.check(cfg.commission)[0]
     # The pip-installed FI has no examples/ folder: nothing the demo writes or prints may point into one.
     assert "examples/" not in out and "examples/" not in path.read_text(encoding="utf-8")
     # No terminal to ask in: the exact command, and nothing is run.
@@ -57,8 +61,11 @@ def test_demo_never_overwrites(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     assert launch._demo([]) == 0
     assert (tmp_path / "fi-demo.yaml").read_text(encoding="utf-8") == "mine"
     assert (tmp_path / "fi-demo-2.yaml").is_file()
+    assert Config.from_yaml(tmp_path / "fi-demo-2.yaml").commission == (tmp_path / "fi-demo-2-commission.yaml").resolve()
+    (tmp_path / "fi-demo-3-commission.yaml").write_text("mine", encoding="utf-8")  # a commission alone keeps its name too
     assert launch._demo([]) == 0
-    assert (tmp_path / "fi-demo-3.yaml").is_file()
+    assert (tmp_path / "fi-demo-4.yaml").is_file() and not (tmp_path / "fi-demo-3.yaml").exists()
+    assert (tmp_path / "fi-demo-3-commission.yaml").read_text(encoding="utf-8") == "mine"
 
 
 def test_demo_asks_before_running_and_runs_on_yes(

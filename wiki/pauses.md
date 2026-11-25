@@ -21,8 +21,9 @@ Some checks also stop the quest, such as a failing [[how-fi-judges-correctness|o
 Before any work, one model call writes the setup questions, each with a suggested answer: what you want to see, the title (three suggestions, or your own), the baseline to compare with, theory or experiment, whether it can be simulated, how success is measured, budget, outputs, depth, venue and the shape of the topic. When the topic leaves it open, it also asks whether this is a measurement or a search for the best design ([[study-types|Study types]]).
 
 - `off`: skipped. `auto`: FI uses its own suggestions. `ask`: the quest waits for your answers.
-- Unset (what the interview writes): it asks if someone can answer; otherwise FI uses its suggestions.
-- A `title:` in the YAML removes the title question. The interview always writes one.
+- Unset: it asks if someone can answer; otherwise FI uses its suggestions.
+- A `title:` in the YAML removes the title question.
+- A study started from a commission ([[starting-a-study|Starting a study]]) skips these questions and the papers pause: its commission already answers them.
 
 How to answer:
 

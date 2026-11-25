@@ -1,4 +1,4 @@
-"""A quest the web page starts as its own process (the interview's launch) asks its setup questions on the quest page.
+"""A quest the web page starts as its own process (its launcher) asks its setup questions on the quest page.
 
 The run waits for the answers the page stages in ``.fi/clarify_answer.json``; if nobody answers in time it does what
 ``pauses.clarify`` says, exactly as a quest the web server runs in-process does.
@@ -65,7 +65,7 @@ async def _wait_for(path: Path, timeout: float = 60.0) -> None:
     raise AssertionError(f"{path} never appeared")
 
 
-def test_the_interview_launch_tells_the_run_the_web_page_can_answer(tmp_path: Path, monkeypatch) -> None:
+def test_the_web_launch_tells_the_run_the_web_page_can_answer(tmp_path: Path, monkeypatch) -> None:
     from web.quest_launcher import QuestLauncher
 
     captured: dict[str, Any] = {}

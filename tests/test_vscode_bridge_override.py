@@ -267,7 +267,7 @@ def test_extras_respects_every_non_vscode_provider_both(
 
 
 def test_resolve_endpoint_accepts_the_socket_the_extension_passes() -> None:
-    """What ``@fi /update`` and ``@fi /generate`` now put on the command
+    """What ``@fi /generate`` now puts on the command
     line — ``--vscode-bridge-socket <per-user pipe/socket>`` — has to
     resolve to a usable vscode_bridge endpoint. This is the Python half
     of the fix: the extension can only hand over an address, and this is
@@ -288,7 +288,7 @@ def test_resolve_endpoint_accepts_the_socket_the_extension_passes() -> None:
 def test_resolve_endpoint_still_rejects_the_old_bare_terminal_spawn() -> None:
     """Before the fix, ``/update`` and ``/generate`` opened a plain
     terminal, so the YAML's ``provider.name: vscode_extension`` (which
-    every ``@fi /new`` config pins) reached resolution with an EMPTY
+    every config of the old setup interview pinned) reached resolution with an EMPTY
     ``extra``. That must keep raising — it is exactly the error users
     were hitting, and it is the thing the new flag prevents."""
     from core.provider import resolve_endpoint

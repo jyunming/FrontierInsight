@@ -1,5 +1,5 @@
 """Tests for ``core/analyze_cli.py`` — the helper that powers
-``fi --analyze <data_path>``."""
+``fi --analyze <data_path> --commission <file>``."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +12,17 @@ from core.analyze_cli import (
     prepare_analyze_quest,
     stage_data,
 )
+
+
+def _commission(folder: Path, question: str) -> Path:
+    """A commission with no known value whose question is ``question`` (made-up tests only)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "commission.yaml"
+    path.write_text(
+        f"question: {question}\nscope: the files given\nlimits: {{hours: 1, model_calls: 20}}\nknown_values: []\n"
+        "no_known_values: true\nsuccess: [{condition: c, verify: v}]\nfailure: [{condition: c, verify: v}]\n"
+        "doubts: []\n", encoding="utf-8")
+    return path
 
 
 def test_mint_quest_id_shape() -> None:
@@ -94,14 +105,15 @@ def test_build_analyze_config_defaults_are_no_simulation(tmp_path: Path) -> None
     """The config must skip implement/execute and route through
     auto_collect_data → wait_for_data → data_load → analyze."""
     cfg = build_analyze_config(
-        topic="Belgium vs Taiwan cultural attitudes",
+        commission=_commission(tmp_path, "How do two regions' survey answers differ?"),
         output_dir=tmp_path / "outputs",
     )
+    assert cfg.topic == "How do two regions' survey answers differ?"
     assert cfg.engine.no_simulation is True
     # auto_collect_data: False because the user already supplied data;
     # asking Axon to add more would dilute the prompt.
     assert cfg.engine.auto_collect_data is False
-    # No clarify call — topic is the source of truth.
+    # No clarify call — the commission is the source of truth.
     assert cfg.engine.clarify_mode == "off"
     # One pass — analyze workflows usually don't want revise cycles.
     assert cfg.engine.review_loop is False
@@ -114,7 +126,7 @@ def test_build_analyze_config_is_local_data_first(tmp_path: Path) -> None:
     skipped (analyze_local_first) AND no external retrieval happens — web
     search OFF (it's independent of `enabled`, so `enabled=False` alone
     didn't stop it) and no academic fallbacks."""
-    cfg = build_analyze_config(topic="SpaceX revenue trend", output_dir=tmp_path)
+    cfg = build_analyze_config(commission=_commission(tmp_path, "How did a revenue series trend?"), output_dir=tmp_path)
     assert cfg.engine.analyze_local_first is True
     assert cfg.knowledge.enabled is False
     assert cfg.knowledge.web_search is False          # the bug: was defaulting True
@@ -131,7 +143,7 @@ def test_prepare_analyze_quest_end_to_end(tmp_path: Path) -> None:
     output_root = tmp_path / "outputs"
 
     cfg, quest_id, files_staged = prepare_analyze_quest(
-        data_path=src, topic="Identify the trend",
+        data_path=src, commission=_commission(tmp_path, "Identify the trend"),
         output_root=output_root,
     )
     assert files_staged == 2
@@ -149,7 +161,7 @@ def test_prepare_analyze_quest_empty_dir_returns_zero(tmp_path: Path) -> None:
     src = tmp_path / "empty"
     src.mkdir()
     cfg, quest_id, n = prepare_analyze_quest(
-        data_path=src, topic="t", output_root=tmp_path / "outputs",
+        data_path=src, commission=_commission(tmp_path, "t"), output_root=tmp_path / "outputs",
     )
     assert n == 0
     assert cfg.topic == "t"

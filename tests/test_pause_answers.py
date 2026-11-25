@@ -1,11 +1,6 @@
 """What a pause does with the answer it gets back.
 
-Two problems noticed while the clarify pause for web-launched quests was built:
-
-* the topic interview wrote ``pauses.clarify: "auto"`` for a person who never chose it, so a quest set up through the
-  interview (terminal ``--new``, the web page, VS Code) never talked the topic over, although an unset value means
-  "ask when someone can answer";
-* a review answer with no decision in it (``{}``, ``None``, a dismissed prompt) either re-fired the review pause
+A problem noticed while the clarify pause for web-launched quests was built: a review answer with no decision in it (``{}``, ``None``, a dismissed prompt) either re-fired the review pause
   forever (LangGraph reads ``Command(resume={})`` as "resume nothing"), crashed the run, or was silently taken as
   "accept". It now stops the quest cleanly, leaving NEXT_STEP.md to say what is needed.
 """
@@ -18,91 +13,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 from langgraph.graph import END, START, StateGraph
 
 from core.config import Config, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine, QuestState
-from core.interview import InterviewAnswers, answers_to_yaml, build_smart_defaults
 
 # --------------------------------------------------------------------------------------------------------------------
-# 1. The interview leaves the clarify pause to the run unless the person chose one
-# --------------------------------------------------------------------------------------------------------------------
-
-
-def _answers(**over: Any) -> InterviewAnswers:
-    base: dict[str, Any] = dict(
-        topic="A test quest about something interesting",
-        title="test-quest",
-        output_kinds=["paper_md"],
-        paper_format="generic",
-        no_simulation=False,
-        study_depth="journal-length",
-        comparative_baseline="",
-        success_metric="",
-        budget="",
-        clarify_mode=build_smart_defaults({"topic": "A test quest"})["clarify_mode"],
-        review_panel=[],
-        knowledge_enabled=False,
-        provider="openai",
-        provider_model="gpt-4o",
-    )
-    base.update(over)
-    return InterviewAnswers(**base)
-
-
-def _config_from(text: str, tmp_path: Path) -> Config:
-    path = tmp_path / "quest.yaml"
-    path.write_text(text, encoding="utf-8")
-    return Config.from_yaml(path)
-
-
-def test_interview_default_leaves_clarify_unset(tmp_path: Path) -> None:
-    """Accepting the interview's defaults must not pin ``pauses.clarify`` to ``auto``."""
-    cfg = _config_from(answers_to_yaml(_answers()), tmp_path)
-    assert cfg.pauses.clarify is None, (
-        "the interview's default wrote pauses.clarify="
-        f"{cfg.pauses.clarify!r}; unset means 'ask when someone can answer, else answer for itself'")
-
-
-@pytest.mark.parametrize(("choice", "expected"), [("auto", "auto"), ("interactive", "ask"), ("off", "off")])
-def test_an_explicit_interview_choice_is_still_written(tmp_path: Path, choice: str, expected: str) -> None:
-    cfg = _config_from(answers_to_yaml(_answers(clarify_mode=choice)), tmp_path)
-    assert cfg.pauses.clarify == expected
-
-
-def test_update_of_a_yaml_without_a_clarify_choice_keeps_it_unset(tmp_path: Path) -> None:
-    """``--update`` re-reads the quest's YAML and writes it again; an absent choice must stay absent."""
-    from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
-
-    text = answers_to_yaml(_answers())
-    assert "clarify" not in (yaml.safe_load(text).get("pauses") or {})
-    for variant in (text, text.replace("pauses:\n", "pauses:\n  clarify: null\n", 1)):
-        quest = tmp_path / f"q{len(variant)}"
-        quest.mkdir()
-        (quest / "config.yaml").write_text(variant, encoding="utf-8")
-        answers, _path, raw = load_current_answers(quest)
-        again = rewrite_yaml_with_new_answers(raw, answers)
-        assert _config_from(again, tmp_path).pauses.clarify is None
-
-    # An unquoted ``off`` (YAML reads it as False) is the person's "off", not "no choice".
-    quest = tmp_path / "unquoted_off"
-    quest.mkdir()
-    (quest / "config.yaml").write_text(text.replace("pauses:\n", "pauses:\n  clarify: off\n", 1), encoding="utf-8")
-    answers, _path, raw = load_current_answers(quest)
-    assert answers.clarify_mode == "off"
-    assert _config_from(rewrite_yaml_with_new_answers(raw, answers), tmp_path).pauses.clarify == "off"
-
-    # And an explicit choice survives the same round trip.
-    quest = tmp_path / "explicit"
-    quest.mkdir()
-    (quest / "config.yaml").write_text(answers_to_yaml(_answers(clarify_mode="interactive")), encoding="utf-8")
-    answers, _path, raw = load_current_answers(quest)
-    assert _config_from(rewrite_yaml_with_new_answers(raw, answers), tmp_path).pauses.clarify == "ask"
-
-
-# --------------------------------------------------------------------------------------------------------------------
-# 2. A review answer with no decision stops the quest; it never loops, crashes or accepts
+# A review answer with no decision stops the quest; it never loops, crashes or accepts
 # --------------------------------------------------------------------------------------------------------------------
 
 

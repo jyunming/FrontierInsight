@@ -154,3 +154,13 @@ Sources: core/accepted_checks.py, core/engine.py, core/oracle_card.py, core/evid
 Pages updated: [[study-types|Study types]] (the *Best design found* section now opens with one line of what the search found against the baseline; the writer is told not to word it, and words about it that the record contradicts are listed in the quality report, never rewritten or removed).
 
 Sources: core/best_design_report.py, core/record_claims.py, core/quality_report.py, core/paper_facts.py, core/accepted_checks.py.
+
+## 2026-11-25 — Every study starts from a commission
+
+Pages added: [[starting-a-study|Starting a study]] (the commission's keys, `fi new` and `fi check`, `fi demo`'s pair,
+`--analyze --commission`, the refusal at every start, `--update` without questions). Pages updated:
+[[pauses|Pauses]], [[explore-then-confirm|Explore then confirm]], [[how-fi-judges-correctness|How FI judges
+correctness]] (the setup interview is gone).
+
+Sources: core/commission.py, core/config.py, core/demo.py, core/analyze_cli.py, core/plan_settings.py, launch.py,
+web/server.py, vscode-frontier-insight/src/extension.ts.

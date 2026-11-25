@@ -1,6 +1,6 @@
 ---
 title: Explore then confirm
-sources: [core/phased.py, core/phased_data.py, core/phased_isolation.py, core/confirmations.py, core/engine.py, core/evidence.py, core/config.py, core/interview.py, core/plan.py, core/disclosure.py, core/optimise.py, core/todo.py]
+sources: [core/phased.py, core/phased_data.py, core/phased_isolation.py, core/confirmations.py, core/engine.py, core/evidence.py, core/config.py, core/plan.py, core/disclosure.py, core/optimise.py, core/todo.py]
 updated: 2026-10-01
 ---
 # Explore then confirm
@@ -64,6 +64,6 @@ With the setting off too, a design revised after the experiment had first been r
 
 ## Interfaces
 
-The interview asks it on every interface as an advanced field, *Confirm the result on data it never saw*: on by default for research and a decision, off when exploring (`core/interview.py:smart_default_phased`, mirrored in the web page and the VS Code interview). Off under research writes `phased: false`; an unanswered question writes nothing and the profile decides. It is fixed for the quest and recorded with the approved settings. The result looks the same in all three.
+A config turns it on or off with `engine.phased`; left unset, the profile decides (on under research). It is fixed for the quest and recorded with the approved settings. The result looks the same in the CLI, the web app and VS Code.
 
 Related: [[study-types|Study types]], [[scoring-criteria|Scoring criteria]].

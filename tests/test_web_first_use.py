@@ -160,49 +160,6 @@ def _answers() -> dict:
     }
 
 
-def test_launch_stops_before_spending_when_the_model_is_not_ready(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    launched: list[str] = []
-    asked: list[tuple[str, str | None]] = []
-
-    async def not_ready(provider, *, model=None, base_url="", api_key_env="", timeout_s=5.0):  # noqa: ANN001, ANN202
-        asked.append((provider, model))
-        return pr.Readiness(provider, "key_rejected", "The service refused the key in OPENAI_API_KEY.",
-                            "Check OPENAI_API_KEY.")
-
-    monkeypatch.setattr(pr, "preflight", not_ready)
-    client = _client(tmp_path)
-    monkeypatch.setattr(client.app.state.launcher, "launch", lambda **kw: launched.append("launched"))
-    res = client.post("/api/interview/submit?launch=true", json=_answers())
-    assert res.status_code == 409
-    body = res.json()
-    assert "refused the key" in body["detail"] and "To fix: Check OPENAI_API_KEY." in body["detail"]
-    assert launched == []
-    assert asked == [("openai", "gpt-5")]
-    # The answers are kept: the draft YAML is on disk to run once fixed.
-    assert Path(body["yaml_path"]).is_file()
-
-
-def test_interview_page_shows_the_reason_and_keeps_the_answers() -> None:
-    html = (STATIC / "interview.html").read_text(encoding="utf-8")
-    assert "e.status === 409" in html  # fetchJson's error carries the HTTP status
-    assert "Your answers are kept" in html
-    assert "/api/providers/availability?provider=" in html  # the picked provider's state under the picker
-
-
 # ---------------------------------------------------------------- text drift
 
 
-def test_dashboard_does_not_hard_code_a_question_count() -> None:
-    for page in ("index.html", "interview.html"):
-        text = (STATIC / page).read_text(encoding="utf-8")
-        assert "14-question" not in text and "14 question" not in text
-
-
-def test_dashboard_counts_the_questions_from_the_schema(tmp_path: Path) -> None:
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
-    assert 'id="question-count"' in html and "/api/interview/schema" in html
-    schema = _client(tmp_path).get("/api/interview/schema").json()
-    n = sum(1 for q in schema["questions"] if q["tier"] == 1 and "serve" in (q.get("frontends") or ["serve"]))
-    assert n > 0

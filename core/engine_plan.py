@@ -4169,8 +4169,8 @@ class PlanStageMixin:
             headline="settings that decide how strictly this quest is checked changed after you approved it",
             steps=[
                 "Nothing was run. Changed since the quest was approved:\n" + "\n".join(f"  - {c}" for c in changed),
-                "To keep the change, approve it: `python launch.py --update " + self.quest_id + "` (web: the quest page's "
-                "Update, VS Code: `@fi /update " + self.quest_id + "`); it shows the settings and records them.",
+                "To keep the change, approve it: `python launch.py --update " + self.quest_id + "`; it shows the "
+                "settings, records them and resumes the quest.",
                 f"To undo it, put the setting back in `{self.quest_root / 'config.yaml'}` (or resume with the config "
                 f"you started with), then `python launch.py --resume {self.quest_id}`.",
             ],

@@ -14,7 +14,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Study type**: what kind of study the plan is: a *measurement* (`measure`: how a result changes over settings chosen in advance) or a *search for the best design* (`find_best_design`: the design that makes one result as low or as high as possible within limits, compared with a starting design). This version plans a search but does not run it. [rigor.md](rigor.md)
 
-**Interview**: the questions FI asks before a quest exists (`fi --new`, the web form, `@fi /new`); your answers become the quest's config file. [USAGE.md](USAGE.md)
+**Commission**: the file that says what FI is asked to study: one question, what the study covers, the hours and model calls allowed, the values already known from a source (or none), and what counts as success and as failure. `fi new` writes one to fill in and `fi check` checks it; every study starts from one. [USAGE.md](USAGE.md#the-commission-file)
 
 **Setup questions**: the questions a quest asks you when it starts (what you want to see, the title, the baseline, ...), each with the agent's own suggested answer; the config key is `pauses.clarify`. Left unset, the quest asks when someone can answer (the terminal with `--interactive`, the web quest page, VS Code for a quest on the VS Code chat model) and answers itself when nobody can. [USAGE.md](USAGE.md#setup-questions)
 
@@ -52,7 +52,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Evidence level**: how far a result was checked, from `executed` (it ran) through `internally_reconciled`, `protocol_runtime_matched`, `independently_validated` and `statistically_adequate` to `publication_ready`. Each level says what it guarantees and what it does not. [rigor.md](rigor.md)
 
-**Rigor profile**: `rigor_profile: research` turns on together what a study needs before its result can be trusted, and makes those checks stop the quest instead of only reporting. The interview recommends it for a simulation study. [rigor.md](rigor.md)
+**Rigor profile**: `rigor_profile: research` turns on together what a study needs before its result can be trusted, and makes those checks stop the quest instead of only reporting. Recommended for a simulation study. [rigor.md](rigor.md)
 
 **Trace**: the quest's ordered, tamper-evident diary (`.fi/audit.jsonl`): each step, each check, each route, and what the model said about why. Read it with `fi --trace <quest id>` (`--follow` to watch it live); `fi --why <quest id>` answers why it stopped, why it was sent back, why the evidence is at its level; `fi --why <quest id> reasons` lists the reasons the model gave at every step (its own account, not its hidden reasoning). [trace.md](trace.md)
 

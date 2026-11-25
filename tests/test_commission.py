@@ -295,7 +295,7 @@ def test_a_commission_given_to_a_quest_that_already_has_a_plan_is_refused(tmp_pa
     root = tmp_path / "out" / "q2"
     root.mkdir(parents=True)
     (root / "plan.md").write_text("# a plan\n", encoding="utf-8")
-    with pytest.raises(commission.CommissionRefused, match="already has a plan.md"):
+    with pytest.raises(commission.CommissionRefused, match="q2 was started without a commission file"):
         commission.door(_commission(tmp_path / "order"), root)
 
 
@@ -783,3 +783,259 @@ def test_a_staged_quest_with_no_trace_event_and_no_manifest_is_refused_but_one_w
         json.dumps({"kind": "commission_recorded", "sha256": files["inputs/commission.json"], "files": files}) + "\n",
         encoding="utf-8")
     commission.door(path, root)  # an older quest: its trace event checks the files, as before
+
+
+# ---- a study without a commission ------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["--config", "--fleet"])
+async def test_a_topic_only_config_is_refused_before_any_folder_service_or_model_call(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: str) -> None:
+    import launch
+    from core import axon_sidecar
+
+    started: list[int] = []
+    monkeypatch.setattr(axon_sidecar, "ensure_axon_up", lambda *a, **k: started.append(1))
+    chat = AsyncMock(side_effect=AssertionError("no model call is made"))
+    monkeypatch.setattr("core.engine.LLMClient.chat", chat)
+    yaml = tmp_path / "quest.yaml"
+    yaml.write_text(f"topic: How fast does a tank drain?\nprovider:\n  name: ollama\noutput:\n  output_dir: "
+                    f"{(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    assert await launch.main_async(launch.parse_args([flag, str(yaml)])) == 2
+    err = capsys.readouterr().err
+    assert "no study was started: every study starts from a commission file" in err and "`fi new`" in err
+    assert err.count("\n") == 1 and "Traceback" not in err, "one sentence"
+    assert not (tmp_path / "outputs").exists() and started == [] and chat.await_count == 0
+
+
+def test_the_web_start_refuses_a_topic_only_config_before_a_quest_folder_is_made(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    out = tmp_path / "outputs"
+    out.mkdir()
+    r = TestClient(make_app(out)).post("/api/quests/start", json={"yaml": "topic: How fast does a tank drain?\n"})
+    assert r.status_code == 400 and "every study starts from a commission file" in r.json()["detail"]
+    assert list(out.iterdir()) == [], "no quest folder"
+
+
+def test_an_old_quest_without_a_commission_is_not_resumed(tmp_path: Path) -> None:
+    from core import commission
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / "config.yaml").write_text("topic: How fast does a tank drain?\n", encoding="utf-8")
+    with pytest.raises(commission.CommissionRefused, match="q-old was started without a commission file") as e:
+        commission.door(None, root)
+    assert "`fi new`" in str(e.value)
+
+
+@pytest.mark.parametrize("flag", ["--resume", "--rerun", "--watch"])
+def test_the_early_check_leaves_a_resumed_quest_to_the_check_that_knows_its_folder(tmp_path: Path, flag: str) -> None:
+    """A quest that goes on is judged with its folder (it may have been started from a commission, or not); the check
+    before any service starts judges only a new study's config, so it never says "no study was started" for one."""
+    import launch
+
+    cfg = tmp_path / "q-old" / "config.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text("topic: How fast does a tank drain?\n", encoding="utf-8")
+    args = launch.parse_args(["--config", str(cfg), flag, "q-old"])
+    assert launch._commission_refusal(args) is None
+    assert "no study was started" in launch._commission_refusal(launch.parse_args(["--config", str(cfg)]))
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_an_old_quest_without_a_commission_and_approves_nothing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / "config.yaml").write_text("topic: How fast does a tank drain?\nprovider:\n  name: ollama\n", encoding="utf-8")
+    rc = await launch._run_update(quest_root=root, vscode_bridge_port=0, interactive=False, supervisor=None)
+    assert rc == 2 and "started without a commission file" in capsys.readouterr().err
+    assert not (root / ".fi" / "approved_plan.json").exists()
+
+
+@pytest.mark.parametrize("planted,named", [
+    ({"scope": None}, "The commission has no `scope` (a sentence)."),
+    ({"known_values": _known(passage="The drain constant of the reference tank is 0.25 per minute")},
+     "is not in its source file"),
+    ({"known_values": _known(value=0.3)}, "does not state its value 0.3"),
+], ids=["missing key", "passage not in its source", "passage without its value"])
+def test_fi_check_says_each_problem_in_one_sentence_and_exits_2(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str], planted: dict[str, Any], named: str) -> None:
+    import launch
+
+    assert launch._check([str(_commission(tmp_path, **planted))]) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert any(named in line for line in lines), lines
+    assert all(line.endswith(".") for line in lines)
+
+
+def test_fi_check_passes_a_good_commission_and_one_its_config_names(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    path = _commission(tmp_path)
+    assert launch._check([str(path)]) == 0
+    assert "can be used: every key is there and each passage is in its source." in capsys.readouterr().out
+    config = tmp_path / "study.yaml"
+    config.write_text("commission: commission.json\nprovider:\n  name: ollama\n", encoding="utf-8")
+    assert launch._check([str(config)]) == 0
+    assert launch._check([]) == 2
+
+
+def test_fi_new_writes_a_template_the_check_refuses_until_it_is_filled_in(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import yaml as _yaml
+
+    import launch
+    from core import commission, demo
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(demo, "set_up_providers", lambda: ["ollama"])
+    assert launch._new([]) == 0
+    assert "check commission.yaml" in capsys.readouterr().out
+    template, config = tmp_path / "commission.yaml", tmp_path / "study.yaml"
+    assert not config.read_text(encoding="utf-8").startswith("# Auto-generated by"), "never taken for an old interview's"
+    usable, lines = commission.check(template)
+    assert not usable and any("no `question`" in line for line in lines) and any("`failure`" in line for line in lines)
+    assert launch._new([]) == 0 and (tmp_path / "commission-2.yaml").is_file() and (tmp_path / "study-2.yaml").is_file()
+    data = _yaml.safe_load(template.read_text(encoding="utf-8"))
+    assert set(data) == {"question", "scope", "limits", "known_values", "no_known_values", "success", "failure", "doubts"}
+    data.update(question="How fast does a tank drain?", scope="three outlets", no_known_values=True,
+                success=[{"condition": "c", "verify": "v"}], failure=[{"condition": "c", "verify": "v"}])
+    template.write_text(_yaml.safe_dump(data), encoding="utf-8")
+    assert commission.check(template)[0]
+    cfg = Config.from_yaml(config)
+    assert cfg.commission == template.resolve() and cfg.provider.name == "ollama"
+    commission.door(cfg.commission, None)
+
+
+@pytest.mark.asyncio
+async def test_analyze_takes_a_commission_and_refuses_a_bad_one_before_a_quest_folder_is_made(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", AsyncMock(side_effect=AssertionError("no model call is made")))
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "runs.csv").write_text("outlet,seconds\n1,30\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        launch.parse_args(["--analyze", str(data)])  # a commission is required
+    bad = _commission(tmp_path / "order", doubts=None)
+    args = launch.parse_args(["--analyze", str(data), "--commission", str(bad), "--output-root", str(tmp_path / "out"),
+                              "--no-axon-sidecar"])
+    assert await launch.main_async(args) == 2
+    assert "`doubts`" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+# --- the review's five points: a started quest, the settings baseline, the topic, finite limits ----------------------
+
+
+def test_a_quest_started_without_a_commission_cannot_take_one_before_its_plan(tmp_path: Path) -> None:
+    """A quest stopped before plan.md (in its setup questions, say) began without a commission: its own checkpoint says
+    it started, so a commission given on resume is refused, not taken as a new study's."""
+    from core import commission
+
+    root = tmp_path / "out" / "q-old"
+    (root / ".fi").mkdir(parents=True)
+    (root / ".fi" / "state.sqlite").write_bytes(b"")
+    with pytest.raises(commission.CommissionRefused, match="q-old was started without a commission file"):
+        commission.door(_commission(tmp_path / "order"), root)
+    commission.door(_commission(tmp_path / "order"), tmp_path / "out" / "q-new")  # a folder with no record: a new quest
+
+
+def test_a_commissioned_quest_records_its_settings_at_the_first_start_and_a_looser_one_asks_for_update(
+        tmp_path: Path) -> None:
+    from core import plan_settings
+    from core.config import Config
+
+    root = tmp_path / "q"
+    (root / ".fi").mkdir(parents=True)
+    first = Config(commission=_commission(tmp_path / "order"), rigor_profile="research")
+    assert plan_settings.check(root, root / ".fi", first) == []
+    assert (root / ".fi" / plan_settings.NAME).is_file(), "the commissioned quest's settings are its baseline"
+    looser = Config(commission=first.commission)
+    changed = plan_settings.check(root, root / ".fi", looser)
+    assert changed and any("how strictly the quest is checked" in line for line in changed)
+
+
+@pytest.mark.asyncio
+async def test_a_config_topic_that_is_not_the_commissions_question_is_refused(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+    from core import commission
+
+    path = _commission(tmp_path / "order")
+    question = commission.read(path)["question"]
+    yaml = tmp_path / "quest.yaml"
+    yaml.write_text(f"topic: Something else entirely\ncommission: {path.as_posix()}\nprovider:\n  name: ollama\n"
+                    f"output:\n  output_dir: {(tmp_path / 'outputs').as_posix()}\n", encoding="utf-8")
+    assert await launch.main_async(launch.parse_args(["--config", str(yaml)])) == 2
+    err = capsys.readouterr().err
+    assert "`topic:` is not the commission's question" in err and err.count("\n") == 1
+    assert not (tmp_path / "outputs").exists()
+    assert launch._check([str(yaml)]) == 2
+    commission.door(path, None, topic=f"  {question}  ")  # the same words are fine
+    commission.door(path, None, topic=None)
+
+
+@pytest.mark.parametrize("hours", [".inf", ".nan", "1.0e+308"])
+def test_hours_that_are_not_a_finite_number_fail_the_check_and_the_start_alike(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str], hours: str) -> None:
+    import launch
+    from core import commission
+
+    path = tmp_path / "order" / "commission.yaml"
+    path.parent.mkdir()
+    path.write_text(f"question: How fast does a tank drain?\nscope: one tank\nlimits: {{hours: {hours}, model_calls: 9}}\n"
+                    "known_values: []\nno_known_values: true\nsuccess: [{condition: c, verify: v}]\n"
+                    "failure: [{condition: c, verify: v}]\ndoubts: []\n", encoding="utf-8")
+    assert launch._check([str(path)]) == 2
+    assert "`limits.hours` is missing, is not a number above 0, or is too large to count" in capsys.readouterr().out
+    with pytest.raises(commission.CommissionRefused, match="limits.hours"):
+        commission.door(path, None)
+
+
+@pytest.mark.parametrize("hours", ["1.0e+308"])
+def test_hours_too_large_to_count_in_seconds_are_refused_when_the_config_is_read(tmp_path: Path, hours: str) -> None:
+    """The start counts the time limit in seconds: an hour count whose seconds overflow is refused in one sentence when
+    the config is read, never an OverflowError."""
+    from core import commission
+    from core.config import Config
+
+    order = tmp_path / "order"
+    order.mkdir()
+    (order / "commission.yaml").write_text(
+        f"question: How fast does a tank drain?\nscope: one tank\nlimits: {{hours: {hours}, model_calls: 9}}\n"
+        "known_values: []\nno_known_values: true\nsuccess: [{condition: c, verify: v}]\n"
+        "failure: [{condition: c, verify: v}]\ndoubts: []\n", encoding="utf-8")
+    config = tmp_path / "study.yaml"
+    config.write_text("commission: order/commission.yaml\n", encoding="utf-8")
+    with pytest.raises(commission.CommissionRefused, match="too large to count"):
+        Config.from_yaml(config)
+    built = Config(commission=order / "commission.yaml")  # the web start builds it from the text: no crash either
+    assert built.execution.timeout_s < 10 ** 12
+
+
+@pytest.mark.asyncio
+async def test_a_first_start_that_stops_at_the_reviewer_check_is_resumed_as_a_commissioned_quest(
+        tmp_path: Path) -> None:
+    """Research with every reviewer on one model stops before anything runs; the quest it leaves is still the
+    commission's (staged before the run's first record), so the resume is not refused as an old one."""
+    from core import commission
+    from core.config import Config
+    from core.engine import Engine
+
+    path = _commission(tmp_path / "order")
+    cfg = Config.model_validate({
+        "commission": str(path), "rigor_profile": "research", "provider": {"name": "openai", "model": "m-main"},
+        "knowledge": {"enabled": False}, "output": {"output_dir": str(tmp_path / "out")},
+    })
+    engine = Engine(cfg)
+    await engine.run()
+    assert json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review_models"
+    commission.door(path, engine.quest_root, topic=cfg.topic)  # accepted: no CommissionRefused
+
