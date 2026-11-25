@@ -64,11 +64,12 @@ import asyncio
 import itertools
 import json
 import math
+import os
 import statistics
 import time
 from dataclasses import dataclass, field, replace as _replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from . import execution as _execution
 from . import in_run as _in_run
@@ -101,6 +102,18 @@ MIN_RUNS_FOR_LIMIT = 10
 #: little of the plan says little of what the plan asked.
 FEW_FIT_SHARE = 0.10
 RECORD = Path(".fi") / "run_estimate.json"
+#: The range FI's time estimate could be in (kept in the record only, as the reference the running study is checked against), from the share of the study's settings it timed: the estimate divided by
+#: ``RANGE_LOW / sqrt(share timed)`` up to the estimate times ``RANGE_HIGH``. Chosen on 246 stored studies (actual wall time inside
+#: the range at the start: 90%; the other candidates are scored in C:/fi_runs/replays/2026-11-25_s6_time_range/scores.md).
+RANGE_LOW = 5.0
+RANGE_HIGH = 2.0
+#: The range is said, and watched, only for an estimate over this many seconds (a shorter study's range is not worth a line).
+RANGE_FROM_S = 3600.0
+#: Under this share of the settings timed, the start line adds that the estimate may be far off.
+FEW_TIMED_SHARE = 0.5
+#: A running study is told that it left the range once at least this share of its trials is done (on the stored studies:
+#: the same true alarms as at 10%, fewer false ones).
+ALARM_FROM = 0.2
 
 
 def few_fit(fit: dict[str, Any] | None) -> bool:
@@ -1155,13 +1168,30 @@ def write_record(quest_root: Path, record: dict[str, Any]) -> bool:
     try:
         path = Path(quest_root) / RECORD
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        spread = None
+        if isinstance(record.get("estimate_s"), (int, float)) and not record.get("at_least"):
+            spread = time_range(float(record["estimate_s"]), int(record.get("timed") or 0), int(record.get("cells") or 0))
+        record = {k: v for k, v in record.items() if k != "range_s"}
+        if spread is not None:
+            record["range_s"] = [round(spread[0], 1), round(spread[1], 1)]  # what the start line said
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, path)  # an interrupted write never leaves broken JSON
         return True
     except OSError:
         return False
 
 
 # ---- words ---------------------------------------------------------------------------------------------------------------
+
+
+def time_range(seconds: float, timed: int, cells: int) -> tuple[float, float] | None:
+    """``(least, most)`` seconds the study could take when FI says ``seconds`` and timed ``timed`` of its ``cells`` settings: the
+    fewer settings timed, the lower the least. ``None`` for an estimate FI does not give a range for (not over an hour)."""
+    if seconds <= RANGE_FROM_S or cells <= 0:
+        return None
+    share = min(1.0, max(int(timed), 1) / cells)
+    return seconds / (RANGE_LOW / share ** 0.5), seconds * RANGE_HIGH
 
 
 def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
@@ -1180,6 +1210,9 @@ def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
     if est.parts and est.parts_timed < est.parts:
         line += (f" (the time FI allows for timing ran out after {est.parts_timed} of the study's {est.parts} parts, so the "
                  "rest are counted at the cost of the base: this is a lower bound)")
+    if not est.at_least and est.seconds * SAFETY > RANGE_FROM_S and 0 < est.cells and est.timed / est.cells < FEW_TIMED_SHARE:
+        line += (f" (only {min(est.timed, est.cells)} of the study's {est.cells} setting{'s' if est.cells != 1 else ''} "
+                 f"{'was' if est.timed == 1 else 'were'} timed, so this may be far off)")
     return line
 
 
@@ -1192,6 +1225,27 @@ def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, el
     if done_trials <= 0 or trials <= done_trials or elapsed_s <= 0:
         return head
     return f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
+
+
+def left_the_range(done_trials: int, trials: int, elapsed_s: float, range_s: Sequence[float] | None,
+                   said_s: float | None) -> str:
+    """The one sentence that tells a running study's projected total is outside the range kept at the start (``range_s``), once at
+    least :data:`ALARM_FROM` of the trials are done; ``""`` otherwise. ``said_s`` is the estimate first said."""
+    try:
+        low, high = (float(x) for x in range_s) if isinstance(range_s, (list, tuple)) and len(range_s) == 2 else (None, None)
+    except (TypeError, ValueError):
+        return ""  # a record that does not hold numbers has no range to leave
+    try:
+        said_s = float(said_s) if said_s else None
+    except (TypeError, ValueError):
+        said_s = None  # the estimate first said is not a number: the sentence leaves it out
+    if low is None or trials <= 0 or done_trials <= 0 or elapsed_s <= 0 or done_trials / trials < ALARM_FROM:
+        return ""
+    total = elapsed_s / done_trials * trials
+    if low <= total <= high:
+        return ""
+    first = f", not about {plain_duration(said_s)} as first said" if said_s else ""
+    return f"FI now expects the study to take about {plain_duration(total)} in all{first}."
 
 
 def _stated_min(protocol: dict[str, Any] | None) -> int | None:

@@ -1809,7 +1809,7 @@ class RunChecksMixin:
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
                     "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
                     "once_s": est.once_s, "once_axes": list(est.once_axes),
-                    "at_once": est.at_once}
+                    "at_once": est.at_once, "at_least": est.at_least}
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
             # More settings than FI lists: the whole grid is never built. The settings the time allowed can reach are planned,
