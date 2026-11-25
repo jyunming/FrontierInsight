@@ -2809,6 +2809,8 @@ class PlanStageMixin:
             block = taken
         self._clear_search_refused()
 
+        left_out_parts: list[str] = []
+
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
             # them inside its block), and what they compared is the block's now; they are removed with the grid.
@@ -2818,7 +2820,16 @@ class PlanStageMixin:
             if gone:
                 self._log.warning("[plan] a search keeps %s inside its own block, so FI removed what the plan wrote beside "
                                   "it", ", ".join(f"`{k}`" for k in gone))
-            out = {**design, "protocol": {**kept, "optimisation": block}}
+            now = {**kept, "optimisation": block}
+            # What the plan wrote beside the scan was judged against the plan's own grid, which is gone: an entry that names
+            # a setting the search's scan does not have (a control, a metric's reference) is read as the design reader reads
+            # it, left out alone and said in the plan, never the whole block refused for it.
+            repaired, notes = _plan.repair_protocol(now)
+            if repaired is not None and notes:
+                left_out_parts.extend(notes)
+                self._log.warning("[plan] with the search's scan in place of the plan's grid: %s", "; ".join(notes)[:600])
+                now = repaired
+            out = {**design, "protocol": now}
             out["study_type"] = "find_best_design"
             return out
 
@@ -2828,8 +2839,9 @@ class PlanStageMixin:
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
             raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
-        if left_out:
-            merged_text = _plan.add_to_section(merged_text, _PART_HEADING, ["", *[f"- {n}" for n in left_out]])
+        if left_out or left_out_parts:
+            merged_text = _plan.add_to_section(merged_text, _PART_HEADING,
+                                               ["", *[f"- {n}" for n in [*left_out, *left_out_parts]]])
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
