@@ -1328,7 +1328,7 @@ class ReviewStageMixin:
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None, alarm: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -1351,6 +1351,11 @@ class ReviewStageMixin:
                         where = str(progress() or "") if callable(progress) else ""
                     except Exception:  # noqa: BLE001
                         where = ""
+                    try:  # a study that left the time FI first said: told once, where the person sees it
+                        if callable(alarm) and (said := str(alarm() or "")):
+                            self._progress(f"[execute] {said}")
+                    except Exception:  # noqa: BLE001
+                        pass
                     if where:
                         from .run_estimate import plain_duration
 

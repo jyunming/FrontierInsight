@@ -101,13 +101,15 @@ MIN_RUNS_FOR_LIMIT = 10
 #: little of the plan says little of what the plan asked.
 FEW_FIT_SHARE = 0.10
 RECORD = Path(".fi") / "run_estimate.json"
-#: The range FI says its time estimate could be in, from the share of the study's settings it timed: the estimate divided by
+#: The range FI's time estimate could be in (kept in the record only, as the reference the running study is checked against), from the share of the study's settings it timed: the estimate divided by
 #: ``RANGE_LOW / sqrt(share timed)`` up to the estimate times ``RANGE_HIGH``. Chosen on 246 stored studies (actual wall time inside
 #: the range at the start: 90%; the other candidates are scored in C:/fi_runs/replays/2026-11-25_s6_time_range/scores.md).
 RANGE_LOW = 5.0
 RANGE_HIGH = 2.0
 #: The range is said, and watched, only for an estimate over this many seconds (a shorter study's range is not worth a line).
 RANGE_FROM_S = 3600.0
+#: Under this share of the settings timed, the start line adds that the estimate may be far off.
+FEW_TIMED_SHARE = 0.5
 #: A running study is told that it left the range once at least this share of its trials is done (on the stored studies:
 #: the same true alarms as at 10%, fewer false ones).
 ALARM_FROM = 0.2
@@ -1189,10 +1191,6 @@ def time_range(seconds: float, timed: int, cells: int) -> tuple[float, float] | 
     return seconds / (RANGE_LOW / share ** 0.5), seconds * RANGE_HIGH
 
 
-def _range_words(low: float, high: float) -> str:
-    return f"from {plain_duration(low)} to {plain_duration(high)}"
-
-
 def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
     """The one plain line for run.log and the console. ``topic``: the limit is the one the topic states."""
     whose = "the topic's" if topic else "the"
@@ -1209,34 +1207,34 @@ def says(est: Estimate, limit_s: float, *, topic: bool = False) -> str:
     if est.parts and est.parts_timed < est.parts:
         line += (f" (the time FI allows for timing ran out after {est.parts_timed} of the study's {est.parts} parts, so the "
                  "rest are counted at the cost of the base: this is a lower bound)")
-    spread = None if est.at_least else time_range(est.seconds * SAFETY, est.timed, est.cells)
-    if spread is not None:
-        line += (f" (FI timed {min(est.timed, est.cells)} of the study's {est.cells} setting{'s' if est.cells != 1 else ''}, "
-                 f"so it could take {_range_words(*spread)})")
+    if not est.at_least and est.seconds * SAFETY > RANGE_FROM_S and 0 < est.cells and est.timed / est.cells < FEW_TIMED_SHARE:
+        line += (f" (only {min(est.timed, est.cells)} of the study's {est.cells} setting{'s' if est.cells != 1 else ''} "
+                 f"{'was' if est.timed == 1 else 'were'} timed, so this may be far off)")
     return line
 
 
-def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, elapsed_s: float, *,
-                  range_s: Sequence[float] | None = None, said: set[str] | None = None) -> str:
+def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, elapsed_s: float) -> str:
     """``"3 of 96 settings done, about 6 h left"``: where the study is, for the "still running" line. The time left is what the
-    trials done so far took, for the trials still to do; with none done yet it is not guessed.
-
-    ``range_s``: the ``(least, most)`` seconds said at the start. When at least :data:`ALARM_FROM` of the trials are done and the
-    study's projected total is outside it, the line also says so, once (``said`` is the caller's memory of that)."""
+    trials done so far took, for the trials still to do; with none done yet it is not guessed."""
     if cells <= 0:
         return ""
     head = f"{done_cells} of {cells} setting{'s' if cells != 1 else ''} done"
     if done_trials <= 0 or trials <= done_trials or elapsed_s <= 0:
         return head
-    line = f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
-    if range_s and len(range_s) == 2 and done_trials / trials >= ALARM_FROM and (said is None or "range" not in said):
-        total = elapsed_s / done_trials * trials
-        if not range_s[0] <= total <= range_s[1]:
-            if said is not None:
-                said.add("range")
-            line += (f"; FI now expects about {plain_duration(total)} in all, which is outside the "
-                     f"{plain_duration(range_s[0])} to {plain_duration(range_s[1])} it said at the start (the run goes on)")
-    return line
+    return f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
+
+
+def left_the_range(done_trials: int, trials: int, elapsed_s: float, range_s: Sequence[float] | None,
+                   said_s: float | None) -> str:
+    """The one sentence that tells a running study's projected total is outside the range kept at the start (``range_s``), once at
+    least :data:`ALARM_FROM` of the trials are done; ``""`` otherwise. ``said_s`` is the estimate first said."""
+    if not range_s or len(range_s) != 2 or trials <= 0 or done_trials <= 0 or elapsed_s <= 0 or done_trials / trials < ALARM_FROM:
+        return ""
+    total = elapsed_s / done_trials * trials
+    if range_s[0] <= total <= range_s[1]:
+        return ""
+    first = f", not about {plain_duration(said_s)} as first said" if said_s else ""
+    return f"FI now expects the study to take about {plain_duration(total)} in all{first}."
 
 
 def _stated_min(protocol: dict[str, Any] | None) -> int | None:

@@ -554,23 +554,24 @@ def test_the_slowdown_beside_others_is_timed_with_each_process_on_its_share_of_t
 
 
 
-# ---- the time range: said at the start, kept in the record, and told once when a running study leaves it ------------------
+# ---- the time range: one number and a clause at the start, the range kept in the record, a running study told once -----------
 
 
 def _long_estimate(timed: int, cells: int) -> est.Estimate:
     return est.Estimate(seconds=4 * 3600.0 / est.SAFETY, at_least=False, complete=True, cells=cells, trials=cells, timed=timed)
 
 
-def test_a_long_estimate_is_said_with_the_range_it_could_take() -> None:
-    line = est.says(_long_estimate(1, 100), 10 * 3600.0)
-    assert "FI timed 1 of the study's 100 settings, so it could take from 5 minutes to 8 h" in line
-    wide, narrow = est.time_range(4 * 3600.0, 1, 100), est.time_range(4 * 3600.0, 100, 100)
-    assert wide is not None and narrow is not None and wide[0] < narrow[0] and wide[1] == narrow[1] == 8 * 3600.0
+def test_a_long_estimate_with_few_settings_timed_says_so_and_gives_no_range() -> None:
+    line = est.says(_long_estimate(1, 16), 10 * 3600.0)
+    assert line.startswith("FI estimates the experiment takes about 4 h;")
+    assert "only 1 of the study's 16 settings was timed, so this may be far off" in line
+    assert " to " not in line.split("limit is")[1]  # no range on screen
+    assert "may be far off" not in est.says(_long_estimate(12, 16), 10 * 3600.0)  # most settings timed
 
 
-def test_a_short_estimate_says_no_range() -> None:
+def test_a_short_estimate_says_no_clause() -> None:
     short = est.Estimate(seconds=600.0, at_least=False, complete=True, cells=10, trials=10, timed=2)
-    assert "could take" not in est.says(short, 3600.0) and est.time_range(600.0, 2, 10) is None
+    assert "far off" not in est.says(short, 3600.0) and est.time_range(600.0, 2, 10) is None
 
 
 def test_the_record_carries_the_range(tmp_path: Path) -> None:
@@ -581,13 +582,30 @@ def test_the_record_carries_the_range(tmp_path: Path) -> None:
     assert "range_s" not in est.read_record(tmp_path)
 
 
-def test_a_running_study_that_leaves_the_range_is_told_once() -> None:
-    said: set[str] = set()
-    inside = est.progress_line(30, 100, 30, 100, 3600.0, range_s=[1800.0, 20000.0], said=said)   # projects 3 h 20 min
-    assert "outside" not in inside and not said
-    early = est.progress_line(5, 100, 5, 100, 10.0, range_s=[1800.0, 20000.0], said=said)         # under 20% done
-    assert "outside" not in early
-    slow = est.progress_line(30, 100, 30, 100, 36000.0, range_s=[1800.0, 20000.0], said=said)     # projects 33 h 20 min
-    assert "FI now expects about 33 h in all, which is outside the 30 minutes to 5 h 33 min it said at the start" in slow
-    assert "outside" not in est.progress_line(40, 100, 40, 100, 48000.0, range_s=[1800.0, 20000.0], said=said)
-    assert "outside" not in est.progress_line(30, 100, 30, 100, 36000.0)  # no range said: nothing to leave
+def test_the_sentence_for_a_study_that_left_the_range() -> None:
+    rng = [1800.0, 20000.0]
+    assert est.left_the_range(30, 100, 3600.0, rng, 14400.0) == ""          # projects 3 h 20 min: inside
+    assert est.left_the_range(5, 100, 10.0, rng, 14400.0) == ""             # under 20% done
+    assert est.left_the_range(30, 100, 36000.0, None, 14400.0) == ""        # no range kept
+    assert est.left_the_range(30, 100, 36000.0, rng, 14400.0) == "FI now expects the study to take about 33 h in all, not about 4 h as first said."
+
+
+def test_a_study_that_left_the_range_is_told_once_on_the_console(tmp_path: Path) -> None:
+    from core.engine_review import ReviewStageMixin
+
+    shown: list[str] = []
+
+    class Eng(ReviewStageMixin):
+        _log = type("L", (), {"info": staticmethod(lambda *a, **k: None)})()
+
+        def _progress(self, text: str) -> None:
+            shown.append(text)
+
+    sentences = iter(["FI now expects the study to take about 9 h in all.", "", ""])
+
+    async def work() -> int:
+        await asyncio.sleep(0.3)
+        return 1
+
+    assert asyncio.run(Eng()._await_with_heartbeat(work(), label="x", interval_s=0.05, alarm=lambda: next(sentences, ""))) == 1
+    assert shown == ["[execute] FI now expects the study to take about 9 h in all."]

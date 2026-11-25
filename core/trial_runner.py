@@ -2221,8 +2221,28 @@ class TrialsRunner:
             done_trials += seen
             done_cells += seen >= len(task["trials"])
         return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
-                                       time.monotonic() - self._plan_started,
-                                       range_s=_estimate.read_record(self.quest_root).get("range_s"), said=self._range_said)
+                                       time.monotonic() - self._plan_started)
+
+    def progress_alarm(self) -> str:
+        """The sentence saying the study left the time range FI kept at the start, once; empty before that and after."""
+        plan = self._plan_seen
+        if not plan or self._range_said:
+            return ""
+        from . import run_estimate as _estimate
+
+        done = 0
+        for task in plan:
+            try:
+                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            done += sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
+        record = _estimate.read_record(self.quest_root)
+        text = _estimate.left_the_range(done, sum(len(t["trials"]) for t in plan), time.monotonic() - self._plan_started,
+                                        record.get("range_s"), record.get("estimate_s"))
+        if text:
+            self._range_said.add("range")
+        return text
 
     def _without_left_out(self, summary: Path) -> Path:
         """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
