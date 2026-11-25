@@ -351,3 +351,102 @@ async def test_a_program_that_crashes_is_followed_by_a_second_one_that_decides(
     assert "Another program computed this value" in model.asked[1] and "7741" not in model.asked[1]
     value = _record(eng)["values"][0]
     assert value["verdict"] == "match" and "a first program gave no value" in value["why"]
+
+
+@pytest.mark.asyncio
+async def test_a_value_too_common_to_hide_is_not_computed_and_no_model_is_asked(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.5, 0.01, [])
+    assert model.asked == [], "no program is asked for: its writer could not be kept from the value"
+    value = _record(eng)["values"][0]
+    assert value["verdict"] == "cannot_judge" and "too common a number to hide" in value["why"] and "stuck" not in out
+
+
+def test_a_value_typed_in_as_text_counts_as_typed_in() -> None:
+    for expression in ('float("0.25")', 'float("2.5e-1")'):
+        script, why = known_values.program(_program(("formula", expression, "0")), 0.25, 0.01, given="")
+        assert script == "" and "types in a number close to the value withheld" in why
+    assert known_values.program(_program(("formula", 'float("1") / 4', "0")), 0.25, 0.01, given="")[0]
+
+
+def test_a_negative_value_keeps_its_sign_when_its_passage_writes_more_digits() -> None:
+    from decimal import Decimal
+
+    value = known_values.written({"value": -0.4, "passage": "a drain of -0.400 per hour"})
+    assert value == Decimal("-0.400") and str(value) == "-0.400"
+    assert known_values.judge([{"route": "formula", "value": -0.4, "error": 0.0}], value, 0.0005)[0] == "match"
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_stops_with_an_error_after_a_value_line_is_a_crash(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stops = _program(("formula", "1 / 4", "0")).replace("\n```", "\nraise SystemExit(3)\n```")
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [stops, RIGHT])
+    assert len(model.asked) == 2, "a second program is asked for"
+    value = _record(eng)["values"][0]
+    first = value["programs"][0]
+    assert first["routes"] == [] and first["printed_before_it_stopped"][0]["value"] == 0.25
+    assert "stopped with an error" in first["why"] and value["verdict"] == "match" and "stuck" not in out
+
+
+def test_a_route_counts_once_and_only_under_its_own_name() -> None:
+    line = 'KNOWN_JSON: {"route": "%s", "value": 1, "error": 0}'
+    routes, _ = known_values.printed("\n".join([line % "formula", line % "formula", line % "check", line % "Definition"]))
+    assert [r["route"] for r in routes] == ["formula", "definition"]
+    one, _ = known_values.printed("\n".join([line % "formula", line % "formula"]))
+    assert len(one) == 1 and known_values.judge(one, 1.0, 0.1)[0] == "cannot_judge"
+
+
+@pytest.mark.asyncio
+async def test_each_known_value_is_kept_as_it_is_done_so_a_stop_asks_again_only_for_the_rest(tmp_path: Path) -> None:
+    import asyncio
+    import sys
+
+    path = _commission(tmp_path / "order", 0.25, 0.01)
+    quest = tmp_path / "quest"
+    commission.stage(path, quest)
+    data = commission.read(path)
+    data["known_values"].append({**data["known_values"][0], "name": "outlet constant"})
+    asked: list[str] = []
+
+    async def ask(prompt: str, second: bool) -> str:
+        asked.append(prompt)
+        if len(asked) > 1:
+            raise asyncio.CancelledError  # the quest stops while the second value's program is asked for
+        return RIGHT
+
+    async def execute(program: Path) -> tuple[int, str, str]:
+        run = await asyncio.create_subprocess_exec(sys.executable, str(program), stdout=asyncio.subprocess.PIPE,
+                                                   stderr=asyncio.subprocess.PIPE)
+        out, err = await run.communicate()
+        return run.returncode or 0, out.decode(), err.decode()
+
+    from core.engine_base import _load_prompts
+
+    with pytest.raises(asyncio.CancelledError):
+        await known_values.check(data, quest, template=_load_prompts()["known_value_program"], ask=ask, execute=execute)
+    kept = json.loads((quest / ".fi" / known_values.RECORD).read_text(encoding="utf-8"))
+    assert [v["name"] for v in kept["values"]] == ["drain constant"] and kept["values"][0]["verdict"] == "match"
+    asked.clear()
+
+    async def again(prompt: str, second: bool) -> str:
+        asked.append(prompt)
+        return RIGHT
+
+    record = await known_values.check(data, quest, template=_load_prompts()["known_value_program"], ask=again,
+                                      execute=execute)
+    assert len(asked) == 1 and [v["verdict"] for v in record["values"]] == ["match", "match"]
+
+
+def test_a_known_value_the_plan_has_no_check_for_gets_one_from_fi() -> None:
+    data = {"known_values": [{"name": "drain constant", "value": 0.25, "tolerance": 0.01, "case": CASE,
+                              "passage": "The drain constant is 0.25 per hour", "source": {"file": "tank_note.md"}}]}
+    for oracles in ([], ["Drain constant"]):
+        design = known_values.fill_checks({"protocol": {"oracles": oracles}}, data, {"tank_note.md": "2"})
+        (check,) = design["protocol"]["oracles"]
+        assert check["kind"] == "published_value" and check["expected"] == 0.25 and check["tolerance"] == 0.01
+        assert check["reference"].startswith("[2]") and check["name"].lower() == "drain constant"
+    added = known_values.fill_checks({"protocol": {}}, data, {})["protocol"]["oracles"][0]
+    assert added["name"] == "drain constant" and CASE in added["check"]
+    note = commission.oracle_gaps(data, {"oracles": []})
+    assert len(note) == 1 and "FI added one from the commission" in note[0]

@@ -331,7 +331,8 @@ def prompt_block(data: dict[str, Any], labels: dict[str, str]) -> str:
 
 
 def oracle_gaps(data: dict[str, Any], protocol: Any) -> list[str]:
-    """plan.md audit notes: each known value no entry of ``protocol.oracles`` is named for (case and spaces aside)."""
+    """plan.md audit notes: each known value no entry of ``protocol.oracles`` is named for (case and spaces aside), for
+    which FI adds a check (``known_values.fill_checks``) when the plan has a protocol."""
     from core import oracle_check
 
     def fold(name: Any) -> str:
@@ -339,7 +340,9 @@ def oracle_gaps(data: dict[str, Any], protocol: Any) -> list[str]:
 
     have = {fold(o.get("name")) for o in oracle_check.declared(protocol if isinstance(protocol, dict) else None)}
     return [f"The commission's known value {kv['name']!r} ({kv['value']} with tolerance {kv['tolerance']}) has no check "
-            f"in this plan: no entry of `protocol.oracles` is named {kv['name']!r}."
+            f"in this plan's draft: no entry of `protocol.oracles` is named {kv['name']!r}"
+            + (", so FI added one from the commission (its number, tolerance and source; the plan gives it no case or "
+               "measure)." if isinstance(protocol, dict) else ".")
             for kv in data.get("known_values") or [] if fold(kv.get("name")) not in have]
 
 

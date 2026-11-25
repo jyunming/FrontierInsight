@@ -21,6 +21,7 @@ from . import commission as _commission
 from .oracle_triage import num as _number
 
 LINE = "KNOWN_JSON:"
+ROUTES = ("formula", "definition")  # the two ways a program computes a value (agents/known_value_program.md)
 RECORD = "known_values.json"  # in .fi/
 WITHHELD = "[value withheld]"
 EXCERPT_CHARS = 12000  # how much of the source text the program's writer is shown
@@ -49,6 +50,7 @@ def written(kv: dict[str, Any]) -> Decimal:
         if found is None or not math.isclose(abs(found), abs(value), rel_tol=1e-9, abs_tol=0.0):
             continue
         form = Decimal(m.group(2).replace(",", "")).scaleb(int((m.group(3) or "0").replace("−", "-")))
+        form = form.copy_sign(best)  # the commission's sign (-0.400 is -0.4), whatever the passage's own sign
         if len(form.as_tuple().digits) > len(best.as_tuple().digits):
             best = form
     return best
@@ -108,6 +110,18 @@ def prompt(template: Any, kv: dict[str, Any], shown: str, *, again: str = "") ->
         again=again or "")
 
 
+def _constants(tree: ast.AST) -> list[float]:
+    """Every number a program types: its number constants and each number written in a text constant
+    (``float("2.3846")``)."""
+    out: list[float] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
+            out.append(float(n.value))
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out += [x for m in _commission._NUMBER.finditer(n.value) if (x := _commission.number_value(m)) is not None]
+    return out
+
+
 def program(reply: Any, value: float | Decimal, tolerance: float, given: str) -> tuple[str, str]:
     """``(the program, "")`` from the reply, or ``("", why)``: no fenced block, a forbidden call (reading or running
     anything, core/oracle_challenge.py), under 5 or over 400 lines, or a number within the tolerance of a
@@ -125,16 +139,16 @@ def program(reply: Any, value: float | Decimal, tolerance: float, given: str) ->
             tree = ast.parse(script)
         except SyntaxError as e:
             return "", f"the program is not valid Python ({e.msg}, line {e.lineno})"
-        typed = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, (int, float))
-                 and not isinstance(n.value, bool) and abs(abs(float(n.value)) - abs(float(value))) <= tolerance
-                 and not _commission.number_in_text(n.value, given)]
+        typed = [x for x in _constants(tree) if abs(abs(x) - abs(float(value))) <= tolerance
+                 and not _commission.number_in_text(x, given)]
         if typed:
             return "", "the program types in a number close to the value withheld; it must compute the value"
     return script, ""
 
 
 def printed(stdout: str) -> tuple[list[dict[str, Any]], str]:
-    """``(the routes, what it says it cannot do)`` from the program's ``KNOWN_JSON`` lines."""
+    """``(the routes, what it says it cannot do)`` from the program's ``KNOWN_JSON`` lines: one route per name of
+    :data:`ROUTES` (its first line), so a line printed twice or under another name is never a second route."""
     routes: list[dict[str, Any]] = []
     cannot = ""
     for line in str(stdout or "").splitlines():
@@ -148,9 +162,10 @@ def printed(stdout: str) -> tuple[list[dict[str, Any]], str]:
             continue
         if str(data.get("cannot") or "").strip():
             cannot = " ".join(str(data["cannot"]).split())[:400]
-        elif (v := _number(data.get("value"))) is not None:
-            routes.append({"route": str(data.get("route") or f"route {len(routes) + 1}").strip().lower()[:40], "value": v,
-                           "error": abs(_number(data.get("error")) or 0.0), "how": " ".join(str(data.get("how") or "").split())[:300]})
+        elif ((v := _number(data.get("value"))) is not None and (name := str(data.get("route") or "").strip().lower()) in ROUTES
+              and name not in {r["route"] for r in routes}):
+            routes.append({"route": name, "value": v, "error": abs(_number(data.get("error")) or 0.0),
+                           "how": " ".join(str(data.get("how") or "").split())[:300]})
     return routes, cannot
 
 
@@ -223,11 +238,13 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
     routes, cannot = printed(out)
     ran = {"program": path.name, "sha256": _commission.sha256(path), "returncode": code, "stdout_tail": out[-1500:],
            "routes": routes}
-    if not routes:
+    if code != 0 or not routes:  # a program that stopped with an error: what it printed before is not judged
         failed = (err or "").strip().splitlines()[-1][:200] if (err or "").strip() else f"exit code {code}"
-        why = (f"the program says the text does not give what it needs: {cannot}" if cannot else
+        why = (f"the program stopped with an error ({failed}); what it printed before is not judged" if code != 0 else
+               f"the program says the text does not give what it needs: {cannot}" if cannot else
                f"the program printed no `{LINE}` value ({failed})")
-        return {**ran, "verdict": "cannot_judge", "why": why, "crashed": not cannot}
+        return {**ran, "routes": [], "printed_before_it_stopped": routes if code != 0 else [], "verdict": "cannot_judge",
+                "why": why, "crashed": code != 0 or not cannot}
     verdict, why = judge(routes, value, tolerance)
     return {**ran, "verdict": verdict, "why": why}
 
@@ -235,6 +252,9 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
 async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[str, Any]:
     out = {"name": kv["name"], "value": float(kv["value"]), "tolerance": float(kv["tolerance"]), "case": kv["case"],
            "passage": kv["passage"], "source": kv["source"], "programs": []}
+    if not decisive(written(kv)):  # 0, 1, 0.5: no text can be shown without it, so no program would be blind to it
+        return {**out, "verdict": "cannot_judge",
+                "why": "too common a number to hide from the program's writer (one digit, or 0 or 1), so it is not computed"}
     shown = excerpt(text, str(kv["passage"]))
     if len(_LOST_EQUATION.findall(shown)) >= 2:
         return {**out, "verdict": "cannot_judge", "why": "the full text lost its equations (numbered rows with no formula)"}
@@ -257,26 +277,33 @@ async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[
 
 
 async def check(data: dict[str, Any], quest_root: Path, *, template: Any, ask: Ask, execute: Execute) -> dict[str, Any]:
-    """Every known value of the commission ``data`` computed and judged, recorded in ``.fi/known_values.json``; a record
-    already there for the same commission is read back instead (a resume asks nothing again)."""
+    """Every known value of the commission ``data`` computed and judged, recorded in ``.fi/known_values.json`` as each
+    one is done; a value already recorded for the same commission is read back instead (a resume asks nothing again for
+    it). A value whose program could not be asked for is not kept, so the next pass asks again."""
     path = Path(quest_root) / ".fi" / RECORD
     sha = _commission.recorded_sha(Path(quest_root))
     try:
         kept = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
     except (OSError, ValueError):
         kept = None
-    if isinstance(kept, dict) and sha and kept.get("commission_sha256") == sha:
-        return kept
+    done = ({str(v.get("name")): v for v in kept.get("values") or [] if isinstance(v, dict)}
+            if isinstance(kept, dict) and sha and kept.get("commission_sha256") == sha else {})
     names = _commission.staged_names(data)
     texts = {raw: _source_text(Path(quest_root), name) for raw, name in names.items()}
     folder = Path(quest_root) / ".fi" / "known_values"
-    values = [await _one(kv, texts.get(str(kv["source"]["file"]), ""), folder, template=template, ask=ask,
-                         execute=execute) for kv in data.get("known_values") or []]
-    record = {"commission_sha256": sha, "at": time.time(), "values": values}
-    if not any(p.get("unasked") for v in values for p in v["programs"]):  # else asked again on the next pass
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
-    return record
+    values: list[dict[str, Any]] = []
+    for kv in data.get("known_values") or []:
+        value = done.get(str(kv["name"]))
+        if value is None:
+            value = await _one(kv, texts.get(str(kv["source"]["file"]), ""), folder, template=template, ask=ask,
+                               execute=execute)
+        values.append(value)
+        keep = [v for v in values if not any(p.get("unasked") for p in v["programs"])]
+        if keep:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"commission_sha256": sha, "at": time.time(), "values": keep}, indent=1,
+                                       default=str), encoding="utf-8")
+    return {"commission_sha256": sha, "at": time.time(), "values": values}
 
 
 def mismatches(record: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -324,21 +351,31 @@ def labels(literature: list[Any], data: dict[str, Any]) -> dict[str, str]:
 
 def fill_checks(design: dict[str, Any], data: dict[str, Any], source_labels: dict[str, str]) -> dict[str, Any]:
     """The plan's checks named for a known value, with FI writing their kind, expected value, tolerance and source
-    from the commission: the plan's model gives only the case and the measure."""
+    from the commission: the plan's model gives only the case and the measure. A known value the plan has no check
+    for gets one from FI (its name, the commission's case in words, and the same four parts), so every known value
+    is checked; plan.md says which (``commission.oracle_gaps``, read before this)."""
     from .oracle_check import _KIND_KEYS, _REFERENCE_KEYS
 
     protocol = design.get("protocol") if isinstance(design, dict) else None
-    if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+    if not isinstance(protocol, dict):
         return design
     by = {_fold(kv.get("name")): kv for kv in data.get("known_values") or []}
-    oracles = []
-    for o in protocol["oracles"]:
+
+    def fi_part(kv: dict[str, Any]) -> dict[str, Any]:
+        label = source_labels.get(str(kv["source"]["file"]))
+        where = f"[{label}]" if label else f"the supplied full text {Path(str(kv['source']['file'])).name}"
+        return {"kind": "published_value", "expected": float(kv["value"]), "tolerance": float(kv["tolerance"]),
+                "tolerance_mode": "absolute", "reference": f"{where}, where it states: \"{kv['passage']}\""}
+
+    oracles, named = [], set()
+    for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(o, str) and _fold(o) in by:  # a check written as its name alone (oracle_check.declared)
+            o = {"name": o.strip(), "check": o.strip()}
         kv = by.get(_fold(o.get("name"))) if isinstance(o, dict) else None
         if kv is not None:
-            label = source_labels.get(str(kv["source"]["file"]))
-            where = f"[{label}]" if label else f"the supplied full text {Path(str(kv['source']['file'])).name}"
-            o = {**{k: v for k, v in o.items() if k not in (*_KIND_KEYS, *_REFERENCE_KEYS, "expected_formula")},
-                 "kind": "published_value", "expected": float(kv["value"]), "tolerance": float(kv["tolerance"]),
-                 "tolerance_mode": "absolute", "reference": f"{where}, where it states: \"{kv['passage']}\""}
+            named.add(_fold(kv.get("name")))
+            o = {**{k: v for k, v in o.items() if k not in (*_KIND_KEYS, *_REFERENCE_KEYS, "expected_formula")}, **fi_part(kv)}
         oracles.append(o)
+    oracles += [{"name": kv["name"], "check": f"the commission's known value for {kv['case']}", **fi_part(kv)}
+                for key, kv in by.items() if key not in named]
     return {**design, "protocol": {**protocol, "oracles": oracles}}

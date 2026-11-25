@@ -124,9 +124,7 @@ def test_a_plan_without_a_model_says_so_where_a_person_reads_it() -> None:
     ("closed_form", "special_case"), ("limiting_case", "special_case"), ("exact_small_case", "special_case"),
     ("invariant", "invariant"), ("independent_implementation", "second_implementation"),
     ("special case", "special_case"), ("Conservation", "invariant"), ("scaling", "symmetry"),
-    ("convergence-rate", "convergence_rate"), ("published_value", "published_value"),
-    # A published value is FI's to write, from a commission (core/known_values.py): no other word of a model's names it.
-    ("published benchmark", None), ("benchmark", None), ("literature_value", None),
+    ("convergence-rate", "convergence_rate"), ("published benchmark", "published_value"),
     ("second_implementation", "second_implementation"), ("vibes", None), ("", None),
 ])
 def test_the_older_names_of_a_kind_are_read_as_the_six(written: str, kind: str | None) -> None:

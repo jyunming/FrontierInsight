@@ -235,8 +235,10 @@ class PlanStageMixin:
         if self._runs_code(state) and self._client is not None and isinstance(normalized.get("protocol"), dict):
             normalized, contract_notes = await self._ask_contract_parts(normalized)
             repaired_notes += contract_notes
+        unchecked: list[str] = []  # the known values the draft has no check for: FI adds one (said in plan.md)
         if known is not None:  # the checks of the known values: their numbers and sources are FI's, from the commission
             data = self._commission_data()  # type: ignore[attr-defined]
+            unchecked = _commission.oracle_gaps(data, normalized.get("protocol"))
             normalized = _known_values.fill_checks(normalized, data, _known_values.labels(state.get("literature") or [], data))
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
@@ -266,8 +268,7 @@ class PlanStageMixin:
             source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
             audit += model_notes
             audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
-        if self._commissioned():  # type: ignore[attr-defined]
-            audit += _commission.oracle_gaps(self._commission_data(), normalized.get("protocol"))  # type: ignore[attr-defined]
+        audit += unchecked
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit,
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,

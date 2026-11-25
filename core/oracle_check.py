@@ -202,7 +202,7 @@ KINDS: dict[str, str] = {
     "convergence_rate": "a convergence rate",
     "published_value": "a published benchmark value",
 }
-# Older names of the six and other words a model writes for one (none for `published_value`: only FI writes it).
+# The names used before these six (the plan asked for them), and other words a model writes for one of the six.
 _KIND_WORDS = {
     "closed_form": "special_case", "limiting_case": "special_case", "exact_small_case": "special_case",
     "exact_solution": "special_case", "analytic": "special_case", "analytical": "special_case", "limit": "special_case",
@@ -211,6 +211,8 @@ _KIND_WORDS = {
     "scaling": "symmetry", "symmetry_scaling": "symmetry", "scaling_law": "symmetry",
     "independent_implementation": "second_implementation", "second_method": "second_implementation",
     "convergence": "convergence_rate", "convergence_order": "convergence_rate", "order_of_accuracy": "convergence_rate",
+    "benchmark": "published_value", "published_benchmark": "published_value", "benchmark_value": "published_value",
+    "literature_value": "published_value",
     # Words a real plan wrote for a check whose kind is one of the six (a normalised source integrates to 1 whatever
     # the parameters: an invariant; a source symmetric about x = 0 has a zero x-centroid: a symmetry).
     "normalization": "invariant", "normalisation": "invariant", "normalized": "invariant", "normalised": "invariant",
@@ -222,6 +224,8 @@ _KIND_WORDS = {
     "analytical_solution": "special_case", "limiting": "special_case", "asymptotic": "special_case",
     "cross_check": "second_implementation", "independent": "second_implementation",
     "order": "convergence_rate", "grid_convergence": "convergence_rate", "mesh_convergence": "convergence_rate",
+    "published": "published_value", "literature": "published_value", "reference_value": "published_value",
+    "experimental_value": "published_value", "measured_value": "published_value",
 }
 # Words that name a kind only as a whole ("independent_implementation"), never as one word of a longer name: a
 # grid-independence check is not a second implementation, and a "zeroth order limit" is not a convergence rate.
