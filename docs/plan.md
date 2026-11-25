@@ -56,17 +56,10 @@ for the layered design see [`architecture.md`](architecture.md).
   per-finding literature search and a supporting / conflicting /
   neutral classification surfaced into the write prompt.
 
-### Clarify
-- Pre-flight questionnaire (`want_to_see`, `title`,
-  `comparative_baseline`, `empirical_vs_theoretical`, `simulatability`,
-  `success_metric`, `budget`, `output_kinds`, `study_depth`,
-  `paper_venue`, `topic_shape`; `study_type` when the topic leaves it open).
-- `pauses.clarify: off | auto | ask` (old name `engine.clarify_mode`,
-  `interactive` = `ask`). `auto` lets the agent self-fill defaults; `ask`
-  pauses the graph for the user's answers (terminal, web quest page or
-  the VSCode bridge). Unset, it asks when someone can answer and is
-  `auto` otherwise.
-- Answers flow into every downstream prompt as `$clarify_block`.
+### First node
+- No question and no model call: the commission's `method` (`simulate`, `analyze_data`,
+  `review_literature`) sets the no-simulation and survey modes, and its `title` names the study.
+  The setup questionnaire and `pauses.clarify` are gone (old configs still load; the log says they do nothing).
 
 ### Provider transports
 - **HTTP direct** — `openai` / `codex` / `gemini` / `ollama` / `vllm`.
@@ -160,8 +153,7 @@ for the layered design see [`architecture.md`](architecture.md).
 
 ### Status GUI
 - FastAPI + vanilla-JS frontend launched via `launch.py --serve`.
-- Per-quest live log stream over SSE; clarify panel for interactive
-  mode; paper preview; reviewer-panel cards.
+- Per-quest live log stream over SSE; paper preview; reviewer-panel cards.
 
 ## Cross-cutting concerns
 

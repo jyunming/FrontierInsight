@@ -1,6 +1,6 @@
 # Format validation - generic x journal-length
 # All format_validation/*.yaml run the same study (commission.yaml), so
-# differences in the produced paper come from paper_format / study_depth
+# differences in the produced paper come from paper_format
 # only. Run via:
 #   python launch.py --fleet examples/format_validation/*.yaml --max-concurrent 3
 commission: commission.yaml
@@ -15,15 +15,6 @@ engine:
   framework: langgraph
   max_iterations: 1
   review_loop: false
-  clarify_mode: "off"
-  clarify_overrides:
-    study_depth: journal-length
-    paper_venue: generic
-    output_kinds: ["paper_md", "paper_pdf"]
-    simulatability: "yes"
-    comparative_baseline: ""
-    success_metric: "ROC-AUC > 0.9"
-    budget: ""
 
 execution:
   sandbox: venv

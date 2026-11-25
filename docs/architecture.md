@@ -110,7 +110,7 @@ Conditional edges visible in the graph:
 | `write → replot_layout` | only after a person's refine: a point only asks for the figures to be arranged or drawn differently (`NEEDS_LAYOUT:`); they are redrawn from the saved numbers | none (a person asked for it) |
 | `replot_layout → write` | the redraw could not carry out a layout note, so the paper says so | once per refine; otherwise `replot_layout → claim_check` |
 | `design → web_figures` | a literature survey (no experiment and no data to collect): the quest skips the code and the data collection, draws illustrative figures and goes on to the analysis | none |
-| `design → wait_for_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
+| `design → wait_for_data` | `state.no_simulation_resolved is True` (set by the commission's `method`, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
 ## Key contracts
 
@@ -131,11 +131,11 @@ Core path (every quest produces these):
 `analysis`, `paper_md`, `review`.
 
 Feature-specific extras:
-- Clarify: `clarify_questions`, `clarify_answers`, `clarify_done`.
+- First node: `clarify_done`; `clarify_questions` and `clarify_answers` are kept only so a study stored by an older FI loads (nothing writes them).
 - Execute-repair loop: `exec_reflect_iter`, `exec_reflect_history`, `exec_give_up_reason`.
 - Analyze re-route + cross-paper check: `cross_check` (per-finding classification list).
 - Reviewer panel: `review_panel` (per-persona reviews + moderator synthesis).
-- No-simulation routing: `no_simulation_resolved` (bool, decided at clarify or YAML). When True, the engine skips `implement → execute → execute_reflect` and routes through `wait_for_data → data_load → analyze`.
+- No-simulation routing: `no_simulation_resolved` (bool, set by the commission's `method`). When True, the engine skips `implement → execute → execute_reflect` and routes through `wait_for_data → data_load → analyze`.
 - Auto-collect bookkeeping: `auto_collected_count` (int — kept so studies stored by an older FI still load; nothing writes it now).
 
 JSON-serializable so `AsyncSqliteSaver` can checkpoint after every

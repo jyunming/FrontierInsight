@@ -1,5 +1,5 @@
-# The one study every format_validation/*.yaml runs (a commission), so the papers differ only in their paper_format
-# and study_depth. `fi check examples/format_validation/commission.yaml` checks it.
+# The one study every format_validation/*.yaml runs (a commission), so the papers differ only in their paper_format.
+# `fi check examples/format_validation/commission.yaml` checks it.
 
 question: >-
   Can a Random Forest classifier trained on simple intensity and contrast features find the defective spots in

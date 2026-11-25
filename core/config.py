@@ -71,8 +71,7 @@ NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
 # The paper template a quest gets when nobody chose one: FI's plain one-column
-# article. A config left at this value also means "no template chosen yet", so
-# the clarify step's ``paper_venue`` pick may replace it.
+# article.
 DEFAULT_PAPER_FORMAT: PaperFormat = "article"
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 # How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template

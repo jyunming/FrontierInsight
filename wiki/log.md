@@ -177,3 +177,9 @@ correctness]] (the setup interview is gone).
 
 Sources: core/commission.py, core/config.py, core/demo.py, core/analyze_cli.py, core/plan_settings.py, launch.py,
 web/server.py, vscode-frontier-insight/src/extension.ts.
+
+## 2026-11-25 - the setup questions are gone
+
+The first node asks nothing and makes no model call: the commission's `method` and `title` set the study mode and name. Updated [[pauses|Pauses]] and [[study-types|Study types]]; the setup interview is no longer described.
+
+Sources: core/commission.py, core/config.py, core/engine_ideas.py, launch.py.

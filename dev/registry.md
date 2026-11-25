@@ -276,9 +276,9 @@ same PR that adds, splits or renames one.
   and `repair_protocol`), what FI does with what the plan left out, computed at use and never written into the block
   (`check_levels`: the plan's finer check values or the fixed rule; `effective_method`; `improvement_rule`), the
   evaluation count worked out at plan time (`budget`), the *What is being optimised* section of plan.md
-  (`plan_lines`), the topic's numbers in the block (`numbers`, read by `protocol_check.plan_notes`), and the one
-  clarify question for an ambiguous topic (`classify_topic`, `add_study_type_question`, `resolve_answer`; added in
-  `Engine._node_clarify_questions`, the plan prompt's `_STUDY_TYPE_DIRECTIVE` and `Engine._settle_study_type`).
+  (`plan_lines`), the topic's numbers in the block (`numbers`, read by `protocol_check.plan_notes`), and the
+  kind of study a topic's words suggest (`classify_topic`, `resolve_answer`; read by the plan prompt's `_STUDY_TYPE_DIRECTIVE`
+  and `Engine._settle_study_type`; nobody is asked: the setup questions are gone).
   `Engine._search_cannot_start_stop` (called at the start of `_node_implement` and of `_node_execute`) ends a search whose block or budget is missing or unreadable, after the bounded asks, in the honest stop (`exec_result.no_search`, `stuck_reason: no_search`, `needs/STUCK.json`, no paper; nobody is asked to pick another model). `Engine._stop_if_the_search_cannot_start` (in `_node_design`) pauses only for the quest's setup (`split_analysis: false`, `background_jobs`), before anything is implemented or run. Before it stops for a missing or
   unreadable block, `Engine._ask_plan_for_the_search` (called at the plan step, before the person reads the plan, and again
   in `_node_design`) asks the plan's model to write the block (`optimisation_plan.ask_request`; at most twice and six chat calls per plan and
@@ -559,11 +559,12 @@ same PR that adds, splits or renames one.
   (`/start`, `/resume`, `/generate`, `/ingest`, `/install-tectonic`) runs it as a child with its output in
   the chat and a per-command bridge; `reportQuestEnd` shows how a quest run ended. No chat command opens a terminal;
   the one terminal is the Axon server's "Start in terminal" button.
-- `core/engine_ideas.py` `_node_clarify` — the first discussion of a quest (what you want to see, the title, scope). `pauses.clarify`
-  unset means ask when a callback or staged answer exists, else auto (`Engine._clarify_answerable`); the title chosen there
-  is `state["title"]` (`title_confirmed`), which the writer is told to use (`_spell_out_title_options` puts the
-  suggested titles in the question's words, `_clean_title` tidies the answer). `Engine.run` resumes the clarify pause from the
-  callback, then a staged `.fi/clarify_answer.json` (`_json_file_is_answer` keeps one written as the wait ran out).
+- `core/engine_ideas.py` `_node_clarify` — the first node (graph name kept for checkpoints): no question and no model call. It
+  sets `no_simulation_resolved` and `survey_mode_resolved` from the commission's `method` (`core/commission.py` `METHODS`,
+  `method_of`, `modes`; `Config._apply_commission` copies them into `engine.no_simulation` / `engine.survey_mode`, and
+  `commission.door(..., asked=cfg.modes_asked())` refuses a config that asks for a mode the commission does not give). The
+  study's title is the commission's `title` (`Config.title`). An old checkpoint that stopped at the setup questions just runs
+  this node on resume. `pauses.clarify`, `engine.clarify_mode`, `engine.clarify_overrides` are in `config._RETIRED_KEYS`.
 - `core/engine_base.py` `_review_decision` — whether a human-review answer (callback or staged `human_review_answer.json`)
   carries accept / reject / refine; `Engine.run` resumes only with one, and otherwise (or on a closed VS Code prompt)
   pause-exits with the snapshot and `NEXT_STEP.md` kept.
@@ -1023,11 +1024,7 @@ same PR that adds, splits or renames one.
   real browser with no network through `tests/web_browser_harness.py` (Playwright routes to the app in-process,
   with fault injection).
 - `web/quest_launcher.py` — the subprocess pool for quests started from the web UI, each a detached
-  `core/proc_tree.py` `ProcessTree` (it outlives the server; Cancel stops the whole tree). Its children (and the quest page's
-  Resume) run with `FI_WEB_ANSWERS=1`, so `launch.py` `_web_page_clarify_callback` asks the setup questions on the
-  quest page (`.fi/clarify_questions.json` → `.fi/clarify_answer.json`, with `.fi/clarify_waiting.json` holding the
-  waiting child's pid); `web/server.py` `_clarify_run_waiting` reads that file, so `POST /api/quests/{id}/clarify`
-  says `run_waiting` and `POST .../resume` refuses (409) while the child waits, even after a server restart.
+  `core/proc_tree.py` `ProcessTree` (it outlives the server; Cancel stops the whole tree). A review pause is answered on the quest page (`.fi/human_review_answer.json`).
 - `vscode-frontier-insight/src/extension.ts` — the `@fi` chat participant and every slash command.
 - `vscode-frontier-insight/src/bridge.ts`, `persistent-bridge.ts` — the `vscode.lm.*` bridge a spawned `launch.py`
   talks to over a local socket; `lm_done` carries `served_model` (`lm-messages.ts` `servedModel`), which
