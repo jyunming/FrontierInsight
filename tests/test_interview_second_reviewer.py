@@ -270,8 +270,8 @@ def test_the_web_form_carries_the_answer(tmp_path: Path) -> None:
     assert "!String(out.provider_model || '').trim()" in page
     # The update form hides a question by the schema's own editability, not by having a condition.
     assert "!(q.ask_if && !schema.editable_fields.includes(q.id))" in page
-    # A draft's model that only the live list has is kept until it arrives.
-    assert "pendingModelValues[qid] = target" in page and "applyPendingModel('provider_model')" in page
+    # A saved answer's model that only the live list has is kept until it arrives.
+    assert "pendingModelValues[qid] = String(value)" in page and "applyPendingModel('provider_model')" in page
 
 
 # ---- a later --update keeps it ----
