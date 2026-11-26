@@ -1166,7 +1166,7 @@ class RunChecksMixin:
         self._log.warning("[execute] %s: sending derive.py back for it before the run", said)  # type: ignore[attr-defined]
         failed = self._code_review_failed_run(  # type: ignore[attr-defined]
             f"FI read derive.py before the run: {said}. Write `{wanted[0][1]}`, so the run can give the value the plan "
-            "asks for.", script=_analysis.DERIVE_FILE)
+            "asks for.", script=_analysis.DERIVE_FILE, check="fis_stub")
         failed["exec_result"]["failed_body"] = wanted[0][1]
         return failed
 
@@ -1599,7 +1599,7 @@ class RunChecksMixin:
             f"{said}.{wrong} The plan's grid gives each run its own value "
             f"({values}), and the study compares the results across those values, so the simulation must use the value it is "
             "given (`cell[\"<name>\"]`, the name exactly as the grid spells it) where the plan's model uses it. Do not fix "
-            "the value inside the code.", script=simulate.name)
+            "the value inside the code.", script=simulate.name, check="unread_compared_setting")
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 
@@ -2485,7 +2485,7 @@ class RunChecksMixin:
             print("[FI] a small trial run before the study shows the simulation does not measure what the protocol names; "
                   "sending it back to be repaired")
             return self._code_review_failed_run(  # type: ignore[attr-defined]
-                _estimate.directive(result), script=_split_run.SIMULATE_NAME)
+                _estimate.directive(result), script=_split_run.SIMULATE_NAME, check="pilot_run")
         _estimate.write_pilot_record(  # type: ignore[attr-defined]
             self.quest_root, {**base, "outcome": "stopped", "repairs": repairs, "problems": says})
         return self._stop_before_run(  # type: ignore[attr-defined]
@@ -2885,7 +2885,8 @@ class RunChecksMixin:
         message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive(self._level_rule(state, self.quest_root / "code" / _split_run.SIMULATE_NAME))  # type: ignore[attr-defined]
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
-        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME,  # type: ignore[attr-defined]
+                                            check="small_run_crash")
 
     async def _small_run_checks(self, state: Any, record: dict[str, Any]) -> dict[str, Any] | None:
         """The small run against the frozen plan (core/small_run.py): the shape of each number the plan declares one per
@@ -2937,7 +2938,7 @@ class RunChecksMixin:
                        "plan:\n" + "\n".join(f"- {f.why}" for f in to_send)
                        + "\n\nRepair the code so that it gives what the plan declares, in the form the plan declares. Do "
                        "not change the plan's quantities or the values it gives each run. Keep everything else as it is.")
-            failed = self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
+            failed = self._code_review_failed_run(message, script=script, check="small_run_plan")  # type: ignore[attr-defined]
             if script == "derive.py":
                 failed["exec_result"]["failed_body"] = to_send[0].body
             # its own counter (in .fi/small_run.json): ``execute_reflect`` spends no crash repair on it and needs none left
@@ -3263,10 +3264,12 @@ class RunChecksMixin:
             self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
             if self._analysis_on():
                 # FI's analysis: the function of derive.py its record names goes to the repair, never FI's experiment.py
-                failed = self._code_review_failed_run(after.says(), script="derive.py")  # type: ignore[attr-defined]
+                failed = self._code_review_failed_run(after.says(), script="derive.py",  # type: ignore[attr-defined]
+                                                      check="analysis_gate")
                 failed["exec_result"]["failed_body"] = getattr(after, "body", "")
             else:
-                failed = self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
+                failed = self._code_review_failed_run(after.says(), script="experiment.py",  # type: ignore[attr-defined]
+                                                      check="analysis_gate")
             # a repair of the analysis has its own counter and spends no crash repair (``execute_reflect`` reads the mark)
             failed["exec_result"]["gate_repair"] = True
             failed["gate_repairs"] = made + 1

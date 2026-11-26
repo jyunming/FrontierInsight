@@ -806,9 +806,10 @@ class AgentCoder:
         record = {"task": task, "task_sha": task_sha, "session_id": "", "fixes": 0, "write_done": False, "rounds": []}
         return await self._round(record, "write", task, session_id=None)
 
-    async def continue_(self, feedback: str) -> AgentResult:
+    async def continue_(self, feedback: str, *, marks: dict[str, Any] | None = None) -> AgentResult:
         """A further round: ``feedback`` (what FI's checks found, in plain words) goes to the same agent session. Refused
-        (``exhausted``) once ``max_fixes`` rounds have been used."""
+        (``exhausted``) once ``max_fixes`` rounds have been used. ``marks`` go into the round's record when it is first
+        saved, before the agent starts (``{"after_freeze": True}``), so a crash in the round cannot lose them."""
         record = self.load()
         if not record.get("task"):
             return AgentResult(ok=False, error="the coding agent has not written anything yet", exhausted=True)
@@ -827,12 +828,14 @@ class AgentCoder:
         whole = str(record["task"]) + "\n\n# What FI's checks found in the code now in code/\n\n" + feedback.strip() + "\n"
         if session is None:
             prompt = whole
-        return await self._round(record, "fix", prompt, session_id=session, feedback=feedback, fallback_prompt=whole)
+        return await self._round(record, "fix", prompt, session_id=session, feedback=feedback, fallback_prompt=whole,
+                                 marks=marks)
 
     async def _round(self, record: dict[str, Any], kind: str, prompt: str, *, session_id: str | None,
-                     feedback: str = "", fallback_prompt: str = "") -> AgentResult:
+                     feedback: str = "", fallback_prompt: str = "", marks: dict[str, Any] | None = None) -> AgentResult:
         n = 1 + int(record.get("fixes") or 0)
-        entry: dict[str, Any] = {"n": n, "kind": kind, "status": "started", "feedback_head": feedback.strip()[:400]}
+        entry: dict[str, Any] = {"n": n, "kind": kind, "status": "started", "feedback_head": feedback.strip()[:400],
+                                 **(marks or {})}
         record.setdefault("rounds", []).append(entry)
         self._save(record)   # before it starts: a crash in the round still counts as a round
         self._log.info("[implement] the coding agent is %s in code/ (round %d of %d)",

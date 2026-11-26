@@ -199,8 +199,10 @@ def _stand(tmp_path: Path, cap: int = 3) -> Any:
         def _protocol_block(self, state: Any) -> Any:
             return PROTOCOL
 
-        def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> Any:
-            return {"exec_result": {"returncode": 1, "stderr_tail": message, "failed_script": script}}
+        def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None,
+                                    check: str = "") -> Any:
+            return {"exec_result": {"returncode": 1, "stderr_tail": message, "failed_script": script,
+                                    **({"check": check} if check else {})}}
 
     (tmp_path / ".fi").mkdir(exist_ok=True)
     (tmp_path / "plan.md").write_text("# Plan\n", encoding="utf-8")

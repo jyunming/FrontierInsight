@@ -1125,6 +1125,9 @@ class AnalyzeStageMixin:
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
                                   "why_repairs_ended": ended}
+        findings = (state.get("exec_result") or {}).get(f"{reason}_findings")
+        if isinstance(findings, list) and findings:
+            record["findings"] = [str(f) for f in findings]  # what each check found, whole (the problem is its short form)
         aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
         for name in [n for n in _rerun_from._PAPER
                      if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
