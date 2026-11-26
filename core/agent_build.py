@@ -100,7 +100,7 @@ def check_words(check: str) -> str:
     """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``, a
     check before the run ``before_run:<check>``), in plain words."""
     if check.startswith(BEFORE_RUN + ":"):
-        return _CHECK_WORDS.get(check.split(":", 1)[1]) or _CHECK_WORDS[BEFORE_RUN]
+        return _CHECK_WORDS.get(check.split(":")[1]) or _CHECK_WORDS[BEFORE_RUN]
     return _CHECK_WORDS.get(check) or _SITE.get(check) or check
 
 
@@ -118,9 +118,36 @@ BEFORE_RUN = "before_run"
 FINDING_CHARS = 8000
 
 
-def before_run_check(check: Any) -> str:
-    """The name a check before the run is judged under: ``before_run:<check>``, or ``before_run``."""
-    return f"{BEFORE_RUN}:{check}" if check else BEFORE_RUN
+def before_run_check(check: Any, finding: str = "") -> str:
+    """The name a check before the run is judged under: ``before_run:<check>:<what it found>``, the last part a short
+    fingerprint of the finding with its numbers and spacing set aside. One check can find one fault after another (the
+    first of several functions still FI's stub): a round that fixes the one it was sent and meets the next has made
+    progress, and the same finding again has not. ``before_run`` alone for a check that does not name itself."""
+    import hashlib
+
+    if not check:
+        return BEFORE_RUN
+    said = " ".join(without_numbers(str(finding or "")).split())
+    return f"{BEFORE_RUN}:{check}:{hashlib.sha256(said.encode('utf-8')).hexdigest()[:10]}" if said else f"{BEFORE_RUN}:{check}"
+
+
+#: What a stop's record (needs/STUCK.json ``findings``) keeps of all the findings together; the earliest are kept whole.
+RECORD_CHARS = 40000
+
+
+def findings_for_record(found: list[str]) -> list[str]:
+    """The findings a stop's record keeps: each at most :data:`FINDING_CHARS` (its middle cut, :func:`shorten_middle`),
+    the earliest whole while they fit :data:`RECORD_CHARS` together, then one line saying how many were left out."""
+    out: list[str] = []
+    total = 0
+    items = [shorten_middle(f, FINDING_CHARS) for f in found if f.strip()]
+    for i, f in enumerate(items):
+        if total + len(f) > RECORD_CHARS:
+            out.append(f"[{len(items) - i} more finding(s) left out: the record keeps {RECORD_CHARS} characters]")
+            break
+        out.append(f)
+        total += len(f)
+    return out
 
 
 def shorten_middle(text: str, limit: int) -> str:
@@ -534,7 +561,7 @@ class AgentBuildMixin:
                 # A check before the run sent the code back with what it found (FI's small run, the layout of the code
                 # folder, a stub of FI's): the code did not run, and the finding is the check's own text, whole. Each
                 # check is its own (``before_run:<check>``), so a round that fixes one and meets the next is progress.
-                checks[before_run_check(result.get("check"))] = False
+                checks[before_run_check(result.get("check"), text)] = False
                 found.append(shorten_middle(text, FINDING_CHARS)
                              or "A check of the code before the run sent it back without saying why.")
             else:
@@ -630,7 +657,7 @@ class AgentBuildMixin:
                     "the coding agent wrote the code and fixed what FI's checks found, round by round",
                     *[one_line(f) for f in found[:3] if f.strip()]])
                 # every finding whole, for needs/STUCK.json (the stop's line above is the short form)
-                stop["exec_result"]["cannot_repair_findings"] = [f for f in found if f.strip()]
+                stop["exec_result"]["cannot_repair_findings"] = findings_for_record(found)
                 return stop, None, False
             if broke:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "

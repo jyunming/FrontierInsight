@@ -952,7 +952,7 @@ def test_a_round_that_fixes_one_check_before_the_run_and_meets_another_is_progre
     assert out == (None, None, False), "round 2 fixed the stub and met FI's small run; round 3 fixed that"
     assert len(agent.prompts) == 3 and "came back as one number per value of `h`" in agent.prompts[2]
     rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
-    assert rounds[1]["newly_passed"] == ["before_run:fis_stub"]
+    assert len(rounds[1]["newly_passed"]) == 1 and rounds[1]["newly_passed"][0].startswith("before_run:fis_stub:")
     assert ab.check_words("before_run:small_run_plan") == "FI's small run of the simulation compared with the plan"
 
 
@@ -1010,3 +1010,46 @@ def test_the_round_after_the_freeze_is_marked_before_the_agent_starts(tmp_path: 
     asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
     assert seen == [True], "the record says the round is the one after the freeze while it runs"
     assert ab.fixes_before_the_run(eng.quest_root) == 0
+
+
+def test_a_round_that_fixes_one_of_several_faults_one_check_finds_is_progress(tmp_path: Path,
+                                                                             monkeypatch) -> None:  # noqa: ANN001
+    """FI's stub check asks for the first of several functions still its stub: a round that writes it and meets the
+    next is progress, not "no check newly passes"."""
+    agent = _Agent([_write(1), _write(2), _write(3)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _sent_back_by(eng, {
+        1: ("fis_stub", "FI read derive.py before the run: `y` is computed by no function yet (`f_y` is FI's stub). "
+                        "Write `f_y`."),
+        2: ("fis_stub", "FI read derive.py before the run: `z` is computed by no function yet (`f_z` is FI's stub). "
+                        "Write `f_z`.")}))
+    _first_write(eng, agent)
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "round 2 wrote `f_y` and met `f_z`; round 3 wrote that"
+    assert len(agent.prompts) == 3 and "Write `f_z`" in agent.prompts[2]
+    # numbers and spacing are not a new finding
+    assert ab.before_run_check("small_run_plan", "`y` has 3  values") == ab.before_run_check("small_run_plan",
+                                                                                            "`y` has 9 values")
+
+
+def test_a_stop_record_keeps_its_findings_within_a_bound(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1), _write(1)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    huge = ["A fault another model found, which FI's test shows: " + f"fixture {i} " * 4000 + "how it failed: the end."
+            for i in range(8)]
+
+    def shown(_state: Any, found: list[str], checks: dict[str, Any]) -> None:
+        found.extend(huge)
+        checks["finding F-1"] = False
+
+    monkeypatch.setattr(eng, "_shown_findings", shown)
+    monkeypatch.setattr(eng, "_gate_pass", _sent_back_by(eng, {1: ("small_run_plan", "FI ran the simulation: `y` is off.")}))
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    kept = stop["exec_result"]["cannot_repair_findings"]
+    assert kept[0] == "FI ran the simulation: `y` is off.", "the earliest finding is kept whole"
+    assert all(len(f) <= ab.FINDING_CHARS for f in kept)
+    assert kept[1].startswith("A fault another model found") and kept[1].endswith("how it failed: the end.")
+    assert sum(len(f) for f in kept) <= ab.RECORD_CHARS + 200 and "more finding(s) left out" in kept[-1]
