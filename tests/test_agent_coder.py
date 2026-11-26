@@ -561,6 +561,56 @@ async def test_a_file_fi_cannot_read_is_left_in_the_copy_and_the_round_is_kept(
     assert not any("reached outside" in m for m in said)
 
 
+async def test_a_change_to_a_file_fi_cannot_read_already_in_code_keeps_nothing_and_says_why(
+        quest: Path, tmp_path: Path, standin, caplog) -> None:
+    """A file FI cannot read that is already in code/ (a compiled module, an archive) and that the round changes: leaving
+    the change out would run the round's code with the old file, not what the agent ran, so nothing of the round is
+    kept. It is not a reach outside, and the log and the result do not say it is. Removing such a file is carried back."""
+    code = quest / "code"
+    (code / "pkg").mkdir()
+    (code / "pkg" / "native.pyd").write_bytes(b"old payload")
+    (code / "pkg" / "bundle.zip").write_bytes(b"old archive")
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM + "import pkg.native\n"},
+                  {"write": "pkg/native.pyd", "text": "new payload"}])
+    coder = ac.AgentCoder(quest, _host(tmp_path, standin), max_fixes=2, timeout_s=60, startup=[])
+    with caplog.at_level(logging.INFO):
+        res = await coder.write("task")
+    assert not res.ok and res.copied == [] and not res.cheats
+    assert any("code/pkg/native.pyd" in r and "already in code/" in r for r in res.not_kept), res.not_kept
+    assert res.error.startswith("nothing of the coding agent's round is kept") and "reached outside" not in res.error
+    said = [r.getMessage() for r in caplog.records]
+    assert not any("reached outside" in m for m in said)
+    assert any("nothing of this round of the coding agent is kept" in m and "native.pyd" in m for m in said)
+    assert (code / "pkg" / "native.pyd").read_bytes() == b"old payload"
+    assert "import pkg.native" not in (code / "simulate.py").read_text(encoding="utf-8")
+    assert coder.last_not_kept() == res.not_kept and coder.load()["rounds"][-1]["status"] == "not_kept"
+    # removing such a file is carried back: code/ then holds what the agent ran
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}, {"delete": "pkg/bundle.zip"}])
+    again = await coder.continue_("try again")
+    assert again.ok and not again.not_kept and "pkg/bundle.zip" in again.copied
+    assert not (code / "pkg" / "bundle.zip").exists() and (code / "pkg" / "native.pyd").read_bytes() == b"old payload"
+
+
+async def test_the_next_round_is_told_which_files_were_left_out(quest: Path, tmp_path: Path, standin) -> None:
+    """Old code: a file left out was named only in run.log; code that read it failed on a missing file and the agent was
+    never told why. The round records what it left out, and the next round's prompt names it in one sentence."""
+    reads = GOOD_SIM + "WEIGHTS = open('pkg/weights.bin', 'rb').read()\n"
+    standin.plan([{"write": "simulate.py", "text": reads}, {"write": "pkg/weights.bin", "text": "\x00\x01"}])
+    coder = ac.AgentCoder(quest, _host(tmp_path, standin), max_fixes=2, timeout_s=60, startup=[])
+    res = await coder.write("task")
+    assert res.ok and res.left_out == ["pkg/weights.bin"] and "simulate.py" in res.copied
+    assert coder.load()["rounds"][-1]["left_out"] == ["pkg/weights.bin"]
+    assert not (quest / "code" / "pkg" / "weights.bin").exists()
+    standin.plan([])
+    await coder.continue_("Running the code failed: FileNotFoundError: pkg/weights.bin")
+    prompt = standin.calls()[-1]["prompt"]
+    assert "did not carry these files of your last round back" in prompt and "code/pkg/weights.bin" in prompt
+    assert "must not need them" in prompt
+    # a round that left nothing out adds no such sentence to the round after it
+    await coder.continue_("one more")
+    assert "did not carry these files" not in standin.calls()[-1]["prompt"]
+
+
 async def test_a_real_reach_outside_still_drops_the_round_beside_a_file_fi_cannot_read(
         quest: Path, tmp_path: Path, standin, caplog) -> None:
     """The known positive: the same round with code that climbs out of its folder is still not kept, and the log says
