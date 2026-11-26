@@ -765,3 +765,160 @@ def test_a_for_loop_over_literals_in_the_agents_code_is_a_note_not_a_difference_
     assert out == (None, None, False) and len(agent.prompts) == 1, "the loop's values sent the code back"
     record = json.loads((eng.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
     assert record["status"] == "ok" and record["differences"] == [] and record["notes"]
+
+
+# --- a round that changes the layout, the stop's words and the round counts (backlog -610) -------------------------------
+
+
+def _two_scripts_with_trials(code: Path) -> None:
+    _write(2)(code)
+    (code / "simulate.py").write_text("def run_trial(cell, trial_id, seed):\n    return {'y': 1.0}\n", encoding="utf-8")
+
+
+def test_a_round_that_changes_how_the_code_is_laid_out_is_not_judged_on_the_old_setup(tmp_path: Path,
+                                                                                    monkeypatch) -> None:  # noqa: ANN001
+    """A live first round was not kept, so the run step set up for one script; the next rounds wrote simulate.py with
+    ``run_trial`` and were judged, and run, as one script: the analysis ran alone and failed on FI's own setup."""
+    agent = _Agent([lambda code: code.mkdir(parents=True, exist_ok=True), _two_scripts_with_trials])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr(eng, "_split_on", lambda _state: True)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    layout = eng._script_layout({})
+    assert layout == (False, frozenset())
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py", layout=layout))
+    assert out[0] is ab.LAYOUT_CHANGED, "the new layout goes back to the run step's setup, not to the old checks"
+    assert len(agent.prompts) == 2
+    assert eng._script_layout({}) == (True, frozenset({"run_trial"}))
+    assert "run_trial" in ab.layout_words(eng._script_layout({})) and ab.layout_words(layout) == "one script"
+
+
+def test_the_run_step_sets_up_again_when_a_round_changed_the_layout(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    from unittest.mock import AsyncMock
+
+    from core.execution import ExecutionResult
+
+    eng = _engine(tmp_path)
+    (eng.quest_root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    (eng.quest_root / "figures").mkdir(exist_ok=True)
+    monkeypatch.setattr(eng, "_split_on", lambda _state: True)
+    ok = ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.05)
+    eng.executor.install = AsyncMock(return_value=ok)  # type: ignore[method-assign]
+    eng.executor.execute = AsyncMock(return_value=ok)  # type: ignore[method-assign]
+    calls: list[tuple[Any, Path]] = []
+    stop = eng._stop_before_run("stopped here for the test", "cannot_repair")
+
+    async def build(_state: Any, _py: Any, _env: Any, seed_path: Path, *, layout: Any = None) -> tuple[Any, Any, bool]:
+        calls.append((layout, seed_path))
+        if len(calls) == 1:  # the agent's round wrote simulate.py with the function FI calls
+            _two_scripts_with_trials(eng.quest_root / "code")
+            return ab.LAYOUT_CHANGED, None, False
+        return stop, None, False
+
+    monkeypatch.setattr(eng, "_agent_build", build)
+    out = asyncio.run(eng._node_execute({"deps": []}))
+    assert out is stop
+    assert [c[0] for c in calls] == [(False, frozenset()), (True, frozenset({"run_trial"}))]
+    assert calls[1][1].name == "simulate.py", "the checks of the new code read the simulation"
+    assert eng._trial_mode is True
+    log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "changed how the code is laid out" in log
+
+
+def test_a_check_that_sent_the_code_back_before_the_run_is_named_with_its_own_words(tmp_path: Path,
+                                                                                   monkeypatch) -> None:  # noqa: ANN001
+    """A live stop read "Running the code failed:" and nothing after it: the code had not run; FI's small run had sent it
+    back, and only the first line of that finding, a heading, was kept."""
+    agent = _Agent([_write(1), _write(1)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    sent = ("FI ran the simulation on a small case before the study and compared what it gave with the frozen plan:\n"
+            "- FI's small run: `y` came back as one number per value of `h`, but the plan declares it one number per run.")
+
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        return eng._code_review_failed_run(sent, script="simulate.py"), None, False
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    said = stop["exec_result"]["cannot_repair"]
+    assert "came back as one number per value of `h`" in said
+    assert "Running the code failed" not in said, "the code did not run; a check sent it back"
+    assert any("came back as one number" in t for t in stop["exec_result"]["cannot_repair_tried"])
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert rounds[0]["checks"] == {"before_run": False} and "came back as one number" in agent.prompts[1]
+
+
+def test_a_failed_run_with_no_error_text_still_says_what_failed(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1), _write(1)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    failed = eng._stop_before_run("unused", "cannot_repair")
+    failed["exec_result"] = {"returncode": 3, "stderr_tail": "", "stdout_tail": ""}
+    failed.pop("exec_give_up_reason", None)
+
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        return failed, None, False
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    said = stop["exec_result"]["cannot_repair"]
+    assert "Running the code failed (exit code 3): it printed no error message." in said
+
+
+def test_a_round_given_to_the_runs_failure_does_not_use_up_a_round_of_fixes_before_the_run(tmp_path: Path,
+                                                                                          monkeypatch) -> None:  # noqa: ANN001
+    """A live quest stopped saying its 3 rounds of fixes before the run were used, at round 4 of 5: two had been fixes
+    before the run and one was the round after the freeze."""
+    agent = _Agent([_write(v) for v in (1, 2, 3, 4, 5)])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr("core.code_checks.check_code", _verdicts_by_value(
+        {1: {"x": False, "y": False}, 2: {"x": True, "y": False}, 4: {"x": True, "y": True}}))
+
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        text = (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+        if int(text.split("value = ")[1].split()[0]) in (3, 5):
+            return None, None, False
+        await eng._chat("repair the script so the check passes", node="implement_oracle")
+        raise AssertionError("the chat model was asked to repair the agent's code")
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    _first_write(eng, agent)
+    seed = eng.quest_root / "code" / "experiment.py"
+    assert asyncio.run(eng._agent_build({}, "python", {}, seed)) == (None, None, False), "round 3 passed"
+    monkeypatch.setattr(ab._frozen, "load", lambda _root: {"frozen": True})
+    failed = {"returncode": 1, "stderr_tail": "ZeroDivisionError", "stdout_tail": ""}
+    patch = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    assert patch["exec_patch_pending"] is True
+    out = asyncio.run(eng._agent_build({}, "python", {}, seed))
+    assert out == (None, None, False), "round 5 of 5 was the agent's to use, and its code passed"
+    assert len(agent.prompts) == 5
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert [r.get("after_freeze", False) for r in rounds] == [False, False, False, True, False]
+    assert ab.fixes_before_the_run(eng.quest_root) == 3 and ab.after_freeze_rounds(eng.quest_root) == 1
+
+
+def test_the_stop_for_the_rounds_before_the_run_names_the_round_as_the_run_log_does(tmp_path: Path,
+                                                                                  monkeypatch) -> None:  # noqa: ANN001
+    nodes = {1: "implement_oracle", 2: "implement_protocol", 3: "implement_seed", 4: "implement_figures"}
+    agent = _Agent([_write(1), _write(2), _write(3), _write(4)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, lambda v: nodes.get(v)))
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    coder = asyncio.run(eng._code_agent())
+    said = stop["exec_result"]["cannot_repair"]
+    assert f"its {ab.FIX_ROUNDS} round(s) of fixes before the run are used (round {coder.rounds_made()} of " \
+           f"{coder.total_rounds};" in said
+    log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert f"(round {coder.rounds_made()} of {coder.total_rounds})" in log, "the run log counts the same rounds"
+
+
+def test_a_finding_on_one_line_keeps_the_words_after_its_heading() -> None:
+    assert ab.one_line("FI compared it with the plan:\n- `y` is one number per value") == (
+        "FI compared it with the plan: - `y` is one number per value")
+    assert ab.one_line("x" * 400).endswith("…") and len(ab.one_line("x" * 400)) == 300
