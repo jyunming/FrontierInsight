@@ -475,6 +475,31 @@ def test_a_change_to_fi_s_drawing_calls_runs_the_trials_again(tmp_path: Path) ->
     assert again.key != inputs.key
 
 
+def test_every_fi_file_the_frame_runtime_imports_when_it_loads_is_in_the_key(tmp_path: Path) -> None:
+    # the rule, not one name: a trial process loads fi_frame.py, which opens each fi_* module it imports at the top; the key
+    # must list each of them, or the record of the trials is refused after every analysis-only repair
+    import ast
+
+    from core import code_layout, skeleton
+
+    tree = ast.parse(skeleton.RUNTIME)  # the text FI writes as code/fi_frame.py
+    loaded: set[str] = set()
+    for top in tree.body:  # the module level, and a try block at the module level
+        for node in ast.walk(top) if isinstance(top, ast.Try) else [top]:
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("fi_"):
+                loaded.add(node.module + ".py")
+            elif isinstance(node, ast.Import):
+                loaded.update(a.name + ".py" for a in node.names if a.name.startswith("fi_"))
+    assert skeleton.FIGURE_CALLS_FILE in loaded, loaded
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    for name in loaded:
+        (root / "code" / name).write_text("X = 1", encoding="utf-8")
+    listed = {p.name for p in code_layout.simulation_inputs(root)}
+    assert loaded <= listed, sorted(loaded - listed)
+
+
 # ---- slice 4: the checks and the numeric-warnings resume read the same files ------------------------------------------
 
 
