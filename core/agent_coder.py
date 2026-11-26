@@ -1132,9 +1132,13 @@ class TreeSnapshot:
         return lost
 
 
+_LEFT_OUT_NAMED = 20  # the files named in the sentence; the rest are counted, so a round that wrote thousands keeps the prompt short
+
+
 def left_out_sentence(left_out: Iterable[str]) -> str:
     """The plain sentence the next round of the agent gets about files of its last round FI did not carry back."""
-    names = ", ".join(f"code/{r}" for r in left_out)
+    files = [f"code/{r}" for r in left_out]
+    names = ", ".join(files[:_LEFT_OUT_NAMED]) + (f" and {len(files) - _LEFT_OUT_NAMED} more" if len(files) > _LEFT_OUT_NAMED else "")
     return (f"FI did not carry these files of your last round back into code/, because it cannot read their type "
             f"(only Python and {', '.join(TEXT_SUFFIXES)} come back): {names}. They are not in code/ now, and the "
             "code must not need them: write what it needs as Python or one of those types, or have the study make it "

@@ -678,3 +678,12 @@ async def test_fis_own_records_written_during_a_round_are_not_a_cheat(quest: Pat
     (quest / ".fi" / "trials" / "t1.json").write_text("{}", encoding="utf-8")
     after = ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60)._outside()[0]
     assert after == snapshot
+
+
+def test_the_sentence_about_left_out_files_names_twenty_and_counts_the_rest() -> None:
+    from core.agent_coder import left_out_sentence
+
+    text = left_out_sentence([f"out/f{i}.bin" for i in range(500)])
+    assert "code/out/f0.bin" in text and "code/out/f19.bin" in text and "code/out/f20.bin" not in text
+    assert "and 480 more" in text and len(text) < 2000
+
