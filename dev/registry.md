@@ -793,7 +793,7 @@ same PR that adds, splits or renames one.
   mismatch), `tests/equation_judge_helpers.py`.
 - `core/agent_coder.py` — the coding agent's runner and guard (used by `core/agent_build.py`): `ClaudeCliRunner` (`claude -p` on a
   scratch copy of `code/`, in Docker when the daemon answers, else on the host with a tripwire), `make_runner`, `AgentCoder`
-  (`write` / `continue_` rounds, every runner on a copy outside the quest (`default_workdir`; never `code/` and its `.git`), FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json`),
+  (`write` / `continue_` rounds, every runner on a copy outside the quest (`default_workdir`; never `code/` and its `.git`), FI-owned files kept, writes outside the copy put back and recorded in `.fi/agent_coder.json` (that round not kept), the agent's run products and any new file FI cannot read (not `.py`, not `TEXT_SUFFIXES`) left in the copy with one log line while the rest of the round comes back, the left-out files recorded (`left_out`) and named in the next round's prompt (`left_out_sentence`); a change to such a file already in `code/` keeps nothing of the round (`not_kept`, `last_not_kept`, not a reach outside)),
   `guarded_round`, `hide_path` (the prompt never names the quest folder). Image: `docker/agent_coder/Dockerfile` (CLI version
   pinned to `CLAUDE_VERSION`). Tests: `tests/test_agent_coder.py`.
 - `core/agent_build.py` — agent mode (`engine.code_writer: agent`), `AgentBuildMixin` of `Engine`: `_implement_by_agent`

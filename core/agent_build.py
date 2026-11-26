@@ -670,6 +670,12 @@ class AgentBuildMixin:
                              + "; ".join(outside[:6]) + ". FI keeps no round whose code reads or writes outside the "
                              "folder you are given (no path into the home folder, no absolute path, no `..`): write it "
                              "again without that.")
+            else:
+                held = coder.last_not_kept()
+                if held:
+                    found.insert(0, "FI did not keep your last round: " + "; ".join(held[:6]) + ". Leave a file FI "
+                                 "cannot read as it is in code/ (or remove it if the code does not need it), and make "
+                                 "the change in Python or a plain text or data file instead.")
             self._log.info("[implement] FI's checks found %d problem(s) in the coding agent's code; sending them back to "  # type: ignore[attr-defined]
                            "it", len(found))
             # A round that has only the run's failure to fix is limited to the code the traceback names; a round with

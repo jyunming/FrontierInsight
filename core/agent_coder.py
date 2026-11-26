@@ -195,6 +195,8 @@ class AgentResult:
     replayed: bool = False         # the write was already done (a resume): nothing was spawned
     cheats: list[str] = field(default_factory=list)     # writes outside its folder, reaches for FI's values (no Docker)
     copied: list[str] = field(default_factory=list)     # no Docker: the files copied back into code/
+    left_out: list[str] = field(default_factory=list)   # new files FI cannot read, left in the copy (the round kept)
+    not_kept: list[str] = field(default_factory=list)   # why a round was not kept that is not a reach outside
 
 
 # ---- Docker on this machine -------------------------------------------------------------------------------------------
@@ -691,6 +693,12 @@ class AgentCoder:
         rounds = self.load().get("rounds") or []
         return [str(c) for c in (rounds[-1].get("cheats") or [])] if rounds and isinstance(rounds[-1], dict) else []
 
+    def last_not_kept(self) -> list[str]:
+        """Why the last round was not kept when its code did not reach outside its folder (it changed a file in ``code/``
+        FI cannot read); ``[]`` when there is no such reason."""
+        rounds = self.load().get("rounds") or []
+        return [str(c) for c in (rounds[-1].get("not_kept") or [])] if rounds and isinstance(rounds[-1], dict) else []
+
     def rounds_made(self) -> int:
         """The number of the last round the record holds (0 before the first write)."""
         rounds = [r for r in self.load().get("rounds") or [] if isinstance(r, dict)]
@@ -818,6 +826,12 @@ class AgentCoder:
                                error=f"the {self.max_fixes} fix round(s) allowed are used")
         record["fixes"] = int(record.get("fixes") or 0) + 1
         session = str(record.get("session_id") or "") or None
+        # Files of the last round FI left out (a type it cannot read) are gone from the new copy: the agent is told, so
+        # code that needed one is changed instead of failing on a missing file with no reason given.
+        last = (record.get("rounds") or [{}])[-1]
+        left_out = [str(r) for r in (last.get("left_out") or [])] if isinstance(last, dict) else []
+        if left_out:
+            feedback = (feedback.rstrip() + "\n\n" + left_out_sentence(left_out)).strip()
         prompt = ("FI ran its own checks on the code you left in code/ and they found this. FI's checks are the judge; "
                   "your own runs do not replace them.\n\n" + feedback.strip() + "\n\n"
                   "Fix the cause in code/ (change as little as you can, keep what works), run what you changed yourself, "
@@ -909,11 +923,14 @@ class AgentCoder:
                     path.unlink()
         return found
 
-    def _take_back(self, work: Path, changed: list[str]) -> tuple[list[str], list[str], list[str]]:
-        """``(copied, tampered, cheats)``: FI's own files are kept as they are in ``code/`` (a change recorded as
-        tampered), the agent's run outputs (``figures/`` ...) are left in the copy, and code that reaches for FI's check
-        values or outside its folder is a cheat; with none, the rest is copied into ``code/`` (a file removed in the copy
-        is removed)."""
+    def _take_back(self, work: Path, changed: list[str]) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+        """``(copied, tampered, cheats, not_kept, left_out)``: FI's own files are kept as they are in ``code/`` (a change
+        recorded as tampered), the agent's run outputs (``figures/`` ...) are left in the copy, and so is a new file FI
+        cannot read (not Python and not a plain text or data file, :data:`TEXT_SUFFIXES`: FI cannot check what is in it,
+        so it never reaches ``code/``; ``left_out``, and the rest of the round is kept). A change to such a file that is
+        already in ``code/`` keeps nothing of the round (``not_kept``): the new code would run with the old file, which is
+        not what the agent ran. Code that reaches for FI's check values or outside its folder is a cheat. With neither,
+        the rest is copied into ``code/`` (a file removed in the copy is removed, one FI cannot read included)."""
         tampered = [f"code/{rel} ({'removed' if not (work / rel).is_file() else 'added' if not (self.code_dir / rel).is_file() else 'changed'})"
                     for rel in changed if self._owned_rel(rel)]
         take = [rel for rel in changed if not self._owned_rel(rel) and not is_scratch(rel)]
@@ -923,6 +940,8 @@ class AgentCoder:
             self._log.info("[implement] not carried back from the coding agent's copy (products of its own runs, the "
                            "study writes them again when it runs): %s", shown)
         cheats: list[str] = []
+        unread: list[str] = []
+        not_kept: list[str] = []
         for rel in take:
             path = work / rel
             if not path.is_file():
@@ -933,15 +952,27 @@ class AgentCoder:
             elif rel.endswith(".py"):
                 cheats += reaches_outside(path.read_text(encoding="utf-8", errors="replace"), f"code/{rel}")
             elif not name.endswith(TEXT_SUFFIXES):
-                cheats.append(f"code/{rel} is not Python or a plain text or data file FI can read "
-                              f"({', '.join(TEXT_SUFFIXES)})")
+                if (self.code_dir / rel).is_file():
+                    not_kept.append(f"code/{rel} is a file FI cannot read that was already in code/, and the round "
+                                    "changed it: FI cannot check the new one, and the new code must not run with the "
+                                    "old one")
+                else:
+                    unread.append(rel)
             else:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 named = next((n for n in _FI_CHECK_NAMES if n in text), "")
                 if named:
                     cheats.append(f"code/{rel} names `{named}`, one of FI's own check files")
         if cheats:
-            return [], tampered, cheats
+            return [], tampered, cheats, [], []
+        if not_kept:
+            return [], tampered, [], not_kept, []
+        if unread:
+            shown = ", ".join(f"code/{r}" for r in unread[:5]) + (f" and {len(unread) - 5} more" if len(unread) > 5 else "")
+            self._log.info("[implement] not carried back from the coding agent's copy (not Python and not a plain text or "
+                           "data file FI can read, so FI cannot check it; the rest of the round is kept): %s", shown)
+            left = set(unread)
+            take = [rel for rel in take if rel not in left]
         for rel in take:
             src, dst = work / rel, self.code_dir / rel
             if src.is_file():
@@ -950,7 +981,7 @@ class AgentCoder:
             else:
                 with contextlib.suppress(OSError):
                     dst.unlink()
-        return take, tampered, []
+        return take, tampered, [], [], unread
 
     async def _copy_round(self, record: dict[str, Any], entry: dict[str, Any], kind: str, prompt: str, *,
                           session_id: str | None, fallback_prompt: str) -> AgentResult:
@@ -978,26 +1009,31 @@ class AgentCoder:
                   *(await asyncio.to_thread(self._restore_startup, startup_before) if startup_before is not None else []),
                   *await asyncio.to_thread(self._beside, work)]
         changed = await asyncio.to_thread(self._copy_diff, work)
+        not_kept: list[str] = []
+        left_out: list[str] = []
         if cheats:
             copied, tampered = [], [f"code/{rel}" for rel in changed if self._owned_rel(rel)]
         else:
-            copied, tampered, cheats = await asyncio.to_thread(self._take_back, work, changed)
+            copied, tampered, cheats, not_kept, left_out = await asyncio.to_thread(self._take_back, work, changed)
         ran = out.exit_code == 0 and not out.timed_out
-        ok = ran and not cheats
+        ok = ran and not cheats and not not_kept
         if tampered:
             self._log.warning("[implement] the coding agent changed files FI owns in its copy; FI kept its own: %s",
                               "; ".join(tampered))
         if cheats:
             self._log.warning("[implement] the coding agent reached outside its copy of code/, so nothing of this round "
                               "is kept: %s", "; ".join(cheats[:6]))
+        if not_kept:
+            self._log.warning("[implement] nothing of this round of the coding agent is kept: %s", "; ".join(not_kept[:6]))
         if out.session_id:
             record["session_id"] = out.session_id
         if kind == "write" and ok:
             record["write_done"] = True
-        entry.update({"status": "done" if ok else ("cheat" if ran else "timed_out" if out.timed_out else "failed"),
+        entry.update({"status": "done" if ok else (("cheat" if cheats else "not_kept") if ran
+                                                   else "timed_out" if out.timed_out else "failed"),
                       "mode": "copy", "exit_code": out.exit_code, "timed_out": out.timed_out,
                       "duration_s": round(out.duration_s, 1), "tampered": tampered, "cheats": cheats, "copied": copied,
-                      "message": out.message[-_TAIL:], "stderr_tail": out.stderr_tail[-500:]})
+                      "not_kept": not_kept, "left_out": left_out, "message": out.message[-_TAIL:], "stderr_tail": out.stderr_tail[-500:]})
         self._save(record)
         if out.timed_out:
             self._log.warning("[implement] the coding agent was stopped after %g s (the wall-clock cap)", self.timeout_s)
@@ -1005,9 +1041,11 @@ class AgentCoder:
             self._log.warning("[implement] the coding agent ended with exit code %s: %s", out.exit_code,
                               out.stderr_tail.strip()[-300:] or "(no message)")
         error = ("the coding agent reached outside its copy of code/: " + "; ".join(cheats[:6])) if cheats else (
+            ("nothing of the coding agent's round is kept: " + "; ".join(not_kept[:6])) if not_kept else
             "" if ran else out.stderr_tail[-500:])
         return AgentResult(ok=ok, round=n, exit_code=out.exit_code, timed_out=out.timed_out, message=out.message,
-                           duration_s=out.duration_s, tampered=tampered, error=error, cheats=cheats, copied=copied)
+                           duration_s=out.duration_s, tampered=tampered, error=error, cheats=cheats, copied=copied,
+                           left_out=left_out, not_kept=not_kept)
 
 
 # ---- one round of repair, undone whole when it fails a condition ----------------------------------------------------------
@@ -1017,6 +1055,7 @@ class AgentCoder:
 SCRATCH_DIRS = ("figures", "data", "raw", "results")
 _TREE_SKIP = {"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"}
 #: The only files besides ``.py`` that come back from the agent's copy into ``code/``: plain text and data FI can read.
+#: Any other file the agent wrote in its copy is left there (named in the log), never a reason to drop the round.
 TEXT_SUFFIXES = (".json", ".csv", ".tsv", ".txt", ".md", ".yaml", ".yml", ".toml")
 #: Files Python runs by itself when it starts (with ``*.pth``): never written by the study's code.
 _STARTUP_NAMES = {"sitecustomize.py", "usercustomize.py"}
@@ -1091,6 +1130,19 @@ class TreeSnapshot:
                 with contextlib.suppress(OSError):
                     (code_dir / rel).rmdir()
         return lost
+
+
+_LEFT_OUT_NAMED = 20  # the files named in the sentence; the rest are counted, so a round that wrote thousands keeps the prompt short
+
+
+def left_out_sentence(left_out: Iterable[str]) -> str:
+    """The plain sentence the next round of the agent gets about files of its last round FI did not carry back."""
+    files = [f"code/{r}" for r in left_out]
+    names = ", ".join(files[:_LEFT_OUT_NAMED]) + (f" and {len(files) - _LEFT_OUT_NAMED} more" if len(files) > _LEFT_OUT_NAMED else "")
+    return (f"FI did not carry these files of your last round back into code/, because it cannot read their type "
+            f"(only Python and {', '.join(TEXT_SUFFIXES)} come back): {names}. They are not in code/ now, and the "
+            "code must not need them: write what it needs as Python or one of those types, or have the study make it "
+            "when it runs.")
 
 
 def is_scratch(rel: str) -> bool:
