@@ -526,8 +526,6 @@ async def test_a_startup_file_in_the_users_site_is_a_cheat_and_is_removed(quest:
 @pytest.mark.parametrize("rel,text,why", [
     ("pkg/boot.pth", "import os\n", "runs when it starts"),
     ("sitecustomize.py", "x = 1\n", "runs when it starts"),
-    ("pkg/settings.ini", "[x]\n", "not Python or a plain text"),
-    ("pkg/blob.bin", "\x00\x01", "not Python or a plain text"),
     ("pkg/table.json", '{"source": "oracle_values"}', "oracle_values"),
 ])
 async def test_a_file_that_is_not_python_is_read_or_refused_before_it_comes_back(
@@ -536,6 +534,48 @@ async def test_a_file_that_is_not_python_is_read_or_refused_before_it_comes_back
     res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
     assert not res.ok and res.copied == [] and any(why in c for c in res.cheats), res.cheats
     assert not (quest / "code" / rel).exists()
+
+
+@pytest.mark.parametrize("rel,text", [
+    ("pkg/settings.ini", "[x]\n"),
+    ("pkg/blob.bin", "\x00\x01"),
+    ("_trial/log.jsonl", '{"event": "evaluation", "n": 0}\n'),
+])
+async def test_a_file_fi_cannot_read_is_left_in_the_copy_and_the_round_is_kept(
+        quest: Path, tmp_path: Path, standin, caplog, rel: str, text: str) -> None:
+    """Old code: a file inside code/ that FI cannot read (an unknown extension, a binary) was a cheat, logged as the agent
+    reaching outside its copy of code/, and the whole round was dropped, its code with it (a live quest lost every file
+    of a round to a trial log the agent's own smoke run left in a folder of code/). Now that file alone stays behind,
+    named in one log line, and the round's code comes back."""
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM}, {"write": "pkg/model.py", "text": "K = 3\n"},
+                  {"write": rel, "text": text}])
+    with caplog.at_level(logging.INFO):
+        res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    assert res.ok and not res.cheats and not res.error, res.cheats
+    assert sorted(res.copied) == ["pkg/model.py", "simulate.py"]
+    assert not (quest / "code" / rel).exists()
+    assert (quest / "code" / "simulate.py").read_text(encoding="utf-8") == GOOD_SIM
+    said = [r.getMessage() for r in caplog.records]
+    left = [m for m in said if "not carried back" in m and f"code/{rel}" in m]
+    assert len(left) == 1 and "FI can read" in left[0]
+    assert not any("reached outside" in m for m in said)
+
+
+async def test_a_real_reach_outside_still_drops_the_round_beside_a_file_fi_cannot_read(
+        quest: Path, tmp_path: Path, standin, caplog) -> None:
+    """The known positive: the same round with code that climbs out of its folder is still not kept, and the log says
+    the agent reached outside its copy; the file FI cannot read is no part of why."""
+    standin.plan([{"write": "simulate.py", "text": GOOD_SIM + "_X = open('../escape.txt').read()\n"},
+                  {"write": "_trial/log.jsonl", "text": "{}\n"}])
+    with caplog.at_level(logging.INFO):
+        res = await ac.AgentCoder(quest, _host(tmp_path, standin), timeout_s=60, startup=[]).write("task")
+    assert not res.ok and res.copied == []
+    assert any("climbs out of its folder" in c for c in res.cheats) and not any("log.jsonl" in c for c in res.cheats)
+    assert "reached outside its copy of code/" in res.error
+    assert any("reached outside its copy of code/, so nothing of this round is kept" in r.getMessage()
+               for r in caplog.records)
+    assert (quest / "code" / "simulate.py").read_text(encoding="utf-8") != GOOD_SIM + "_X = open('../escape.txt').read()\n"
+    assert not (quest / "code" / "_trial").exists()
 
 
 async def test_a_plain_data_file_comes_back(quest: Path, tmp_path: Path, standin) -> None:

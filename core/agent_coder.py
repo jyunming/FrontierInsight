@@ -911,9 +911,10 @@ class AgentCoder:
 
     def _take_back(self, work: Path, changed: list[str]) -> tuple[list[str], list[str], list[str]]:
         """``(copied, tampered, cheats)``: FI's own files are kept as they are in ``code/`` (a change recorded as
-        tampered), the agent's run outputs (``figures/`` ...) are left in the copy, and code that reaches for FI's check
-        values or outside its folder is a cheat; with none, the rest is copied into ``code/`` (a file removed in the copy
-        is removed)."""
+        tampered), the agent's run outputs (``figures/`` ...) are left in the copy, and so is a file FI cannot read (not
+        Python and not a plain text or data file, :data:`TEXT_SUFFIXES`: FI cannot check what is in it, so it never
+        reaches ``code/``; the rest of the round is kept). Code that reaches for FI's check values or outside its folder
+        is a cheat; with none, the rest is copied into ``code/`` (a file removed in the copy is removed)."""
         tampered = [f"code/{rel} ({'removed' if not (work / rel).is_file() else 'added' if not (self.code_dir / rel).is_file() else 'changed'})"
                     for rel in changed if self._owned_rel(rel)]
         take = [rel for rel in changed if not self._owned_rel(rel) and not is_scratch(rel)]
@@ -923,6 +924,7 @@ class AgentCoder:
             self._log.info("[implement] not carried back from the coding agent's copy (products of its own runs, the "
                            "study writes them again when it runs): %s", shown)
         cheats: list[str] = []
+        unread: list[str] = []
         for rel in take:
             path = work / rel
             if not path.is_file():
@@ -933,8 +935,7 @@ class AgentCoder:
             elif rel.endswith(".py"):
                 cheats += reaches_outside(path.read_text(encoding="utf-8", errors="replace"), f"code/{rel}")
             elif not name.endswith(TEXT_SUFFIXES):
-                cheats.append(f"code/{rel} is not Python or a plain text or data file FI can read "
-                              f"({', '.join(TEXT_SUFFIXES)})")
+                unread.append(rel)
             else:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 named = next((n for n in _FI_CHECK_NAMES if n in text), "")
@@ -942,6 +943,12 @@ class AgentCoder:
                     cheats.append(f"code/{rel} names `{named}`, one of FI's own check files")
         if cheats:
             return [], tampered, cheats
+        if unread:
+            shown = ", ".join(f"code/{r}" for r in unread[:5]) + (f" and {len(unread) - 5} more" if len(unread) > 5 else "")
+            self._log.info("[implement] not carried back from the coding agent's copy (not Python and not a plain text or "
+                           "data file FI can read, so FI cannot check it; the rest of the round is kept): %s", shown)
+            left = set(unread)
+            take = [rel for rel in take if rel not in left]
         for rel in take:
             src, dst = work / rel, self.code_dir / rel
             if src.is_file():
@@ -1017,6 +1024,7 @@ class AgentCoder:
 SCRATCH_DIRS = ("figures", "data", "raw", "results")
 _TREE_SKIP = {"__pycache__", ".pytest_cache", ".git", ".venv", "node_modules"}
 #: The only files besides ``.py`` that come back from the agent's copy into ``code/``: plain text and data FI can read.
+#: Any other file the agent wrote in its copy is left there (named in the log), never a reason to drop the round.
 TEXT_SUFFIXES = (".json", ".csv", ".tsv", ".txt", ".md", ".yaml", ".yml", ".toml")
 #: Files Python runs by itself when it starts (with ``*.pth``): never written by the study's code.
 _STARTUP_NAMES = {"sitecustomize.py", "usercustomize.py"}
