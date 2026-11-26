@@ -1406,10 +1406,8 @@ def _repair_protocol(protocol: Any) -> tuple[_reading.Reading, list[str]]:
                 if reason is None:
                     kept_k.append(item)
                     continue
-                label = (str(item.get("name") or "").strip() if isinstance(item, dict) else "") or f"number {index}"
                 faults.append(_fault(_reading.join("protocol.controls", index), reason, as_written=item))
-                notes.append(f"the control {label!r} was left out of `protocol.controls` because it could not be judged "
-                             f"({reason}); FI does not judge it")
+                notes.append(_controls.left_out_note(index, item, reason))
             if len(kept_k) < len(out["controls"]):
                 if kept_k:
                     out["controls"] = kept_k

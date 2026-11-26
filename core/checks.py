@@ -385,6 +385,11 @@ CHECKS: tuple[Check, ...] = (
           'The honest stop (no paper) when the plan is a search for the best design and its search block still '
           'cannot be made after asking; a search is never run as a plain sweep. A reading-based stop, so see '
           'stop_power.'),
+    Check('search_ready_at_design_end', 'core.engine', 'Engine._judge_the_search_the_design_hands_on',
+          'design', 'own_record', 'stop',
+          'A design step run on its own ends stopped, with the plain reason, when its plan is a search for the best design '
+          'and lacks the search FI can run (receipt check search_ready); a compute step given such a design hands it back '
+          'to the design step.'),
     Check('search_setup_cannot_start', 'core.engine', 'Engine._stop_if_the_search_cannot_start',
           'design', 'own_record', 'stop',
           'Pauses the quest when its setup stops a search (execution.background_jobs on, or '
