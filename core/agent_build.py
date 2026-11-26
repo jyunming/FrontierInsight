@@ -790,11 +790,23 @@ class AgentBuildMixin:
                                                     marks={"after_freeze": True} if frozen else None)
         # A round stopped at its limit did not end: while a round is left it gets the next one, told to continue from
         # what it left (as before the run, AgentBuildMixin._agent_build).
-        while result.timed_out and not result.cheats and not result.not_kept and coder.fixes_left() > 0:
+        def time_left() -> bool:
+            return seconds_used(self.quest_root) < TOTAL_S  # type: ignore[attr-defined]
+
+        while result.timed_out and not result.cheats and not result.not_kept and coder.fixes_left() > 0 and time_left():
             self._log.info("[execute_reflect] the coding agent's round was stopped at its limit; it continues in the "  # type: ignore[attr-defined]
                            "next round")
             result = await _agent_scope.scoped_continue(coder, stopped_note(coder.timeout_s) + "\n\n" + feedback,  # type: ignore[attr-defined]
                                                         scope, self._log, marks={"after_freeze": True} if frozen else None)
+        if result.timed_out and not result.cheats and not result.not_kept and not time_left():
+            # the same bound as before the run (AgentBuildMixin._agent_build): no round starts once the time is used
+            kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
+            if kept is not None:  # a run the results check sent back keeps its results
+                return {**spent, **kept}
+            why = (f"its {TOTAL_S // 60} minutes for the code are used (its last round was stopped at its limit of "
+                   f"{round_limit_words(coder.timeout_s)}); the run's failure stands")
+            self._log.warning("[execute_reflect] %s", why)  # type: ignore[attr-defined]
+            return {**spent, "exec_give_up_reason": why}
         if result.exhausted:
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
             if kept is not None:  # a run the results check sent back keeps its results

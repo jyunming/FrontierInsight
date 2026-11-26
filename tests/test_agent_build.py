@@ -1309,3 +1309,20 @@ def test_a_quest_saved_before_the_round_limit_was_stated_keeps_its_agent_record_
     assert agent.prompts == [], "the saved write is this task: nothing is written again"
     kept = json.loads((eng.quest_root / ac.RECORD).read_text(encoding="utf-8"))
     assert kept["session_id"] == "s1" and kept["fixes"] == 1 and len(kept["rounds"]) == 2
+
+
+def test_a_repair_after_the_freeze_stopped_at_its_limit_starts_no_round_once_the_time_for_the_code_is_used(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # 44 minutes used before the run; the repair after the freeze is stopped at 20 minutes: no further round starts.
+    agent = _CappedAgent([_write(1), lambda _code: None, _write(2)], capped={1})
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    record = json.loads((eng.quest_root / ac.RECORD).read_text(encoding="utf-8"))
+    record["rounds"][0]["duration_s"] = 44 * 60.0
+    (eng.quest_root / ac.RECORD).write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(ab._frozen, "load", lambda _root: {"frozen": True})
+    failed = {"returncode": 1, "stderr_tail": "ZeroDivisionError", "stdout_tail": ""}
+    patch = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    assert len(agent.prompts) == 2, "the stopped repair round, and no round after it"
+    said = patch["exec_give_up_reason"]
+    assert f"its {ab.TOTAL_S // 60} minutes for the code are used" in said and "stopped at its limit" in said
