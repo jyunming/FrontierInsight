@@ -54,6 +54,46 @@ def _held_back_in(protocol: dict[str, Any], held: dict[str, Any]) -> dict[str, A
     return out
 
 
+def _leave_out_what_the_scan_lacks(protocol: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """``(protocol, notes)``: ``protocol`` without the controls and the metric references that name a setting the search's scan
+    does not have (the plan's own grid is gone when a search block is taken in), and one sentence for each. Only those two
+    kinds of entry, and only for that reason: anything else the strict reader refuses stays refused."""
+    from . import controls as _controls
+    from . import reference_values as _refs
+
+    out, notes = dict(protocol), []
+    controls = out.get("controls")
+    if isinstance(controls, (list, dict)):
+        base = {k: v for k, v in out.items() if k != "controls"}
+        rows = controls if isinstance(controls, list) else [controls]
+        kept = []
+        for index, item in enumerate(rows, start=1):
+            why = _controls.setting_fault(index, item, base)
+            if why is None:
+                kept.append(item)
+            else:
+                notes.append(_controls.left_out_note(index, item, why))
+        if len(kept) < len(rows):
+            if kept:
+                out["controls"] = kept
+            else:
+                del out["controls"]
+    metrics = out.get("metrics")
+    if isinstance(metrics, list):
+        fixed = []
+        for m in metrics:
+            why = _refs.unscanned_filter(m["reference"], out) if isinstance(m, dict) and m.get("reference") is not None else None
+            if why is None:
+                fixed.append(m)
+                continue
+            ident = str(m.get("id") or "").strip()
+            notes.append(f"the reference value of `{ident}` was left out of the plan ({why}); that quantity reads "
+                         '"no reference"')
+            fixed.append({k: v for k, v in m.items() if k != "reference"})
+        out["metrics"] = fixed
+    return out, notes
+
+
 def _left_out_between(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     """The controls and metric references of ``before`` that ``after`` (the same protocol read by the design reader) lacks."""
     kept = {str(c.get("name") or "").strip() for c in after.get("controls") or [] if isinstance(c, dict)}
@@ -1385,6 +1425,7 @@ class PlanStageMixin:
         self._answer_refused = []  # what of the answer the keep did not take, with the reader's reasons
         prompt = self._prompts["plan_parts"].substitute(topic=self.config.topic, plan_md=current, request=request)
         parts = await self._ask_for_plan_parts(prompt)
+        self.__dict__.pop("_pending_held", None)
         kept = keep(current, parts)
         if kept is None:
             raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
@@ -1393,6 +1434,7 @@ class PlanStageMixin:
         if path.read_text(encoding="utf-8") != expect:
             raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(kept, encoding="utf-8")
+        self._commit_held(kept)
         entry = _plan.record_version(self.quest_root, kept, by=by, note=(note() if callable(note) else note)[:300])
         self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
@@ -2890,7 +2932,9 @@ class PlanStageMixin:
         self._clear_search_refused()
 
         left_out_parts: list[str] = []
-        held_aside = self._held_aside()
+        # What an earlier merge left out is put back only while the plan is still the one that merge wrote (its design block
+        # unchanged): a person's edit, or any other change, ends the hold, so a control they removed never returns.
+        held_aside = self._held_aside(self._design_block_mark(before_text))
         aside_now: dict[str, Any] = {"controls": [], "references": {}}
         came_back: list[str] = []
 
@@ -2910,7 +2954,7 @@ class PlanStageMixin:
             # What an earlier merge had to leave out (a control on a setting the scan lacked then) comes back to be judged
             # again, so a scan setting asked back of the plan's model brings back what names it.
             now = _held_back_in(now, held_aside)
-            repaired, notes = _plan.repair_protocol(now)
+            repaired, notes = _leave_out_what_the_scan_lacks(now)
             if repaired is not None:
                 aside_now.update(_left_out_between(now, repaired))
                 for name in _restored_between(held_aside, repaired):
@@ -2934,7 +2978,7 @@ class PlanStageMixin:
             merged_text = NL.join(line for line in merged_text.split(NL) if not any(
                 line.lstrip().startswith(("- the control " + repr(n) + " was left out", f"- the reference value of `{n}` was left out"))
                 for n in came_back))
-        self._keep_aside(aside_now)
+        self.__dict__["_pending_held"] = aside_now  # written beside the plan, once the plan is written (_complete_plan_parts)
         if left_out or left_out_parts:
             merged_text = _plan.add_to_section(merged_text, _PART_HEADING,
                                                ["", *[f"- {n}" for n in [*left_out, *left_out_parts]]])
@@ -2942,22 +2986,28 @@ class PlanStageMixin:
 
     _HELD_ASIDE = "held_beside_the_scan.json"
 
-    def _held_aside(self) -> dict[str, Any]:
+    def _held_aside(self, plan_mark: str) -> dict[str, Any]:
         """The controls and metric references an earlier merge of a search block left out because the scan lacked a setting
-        they name (``.fi/held_beside_the_scan.json``): ``{"controls": [entries as written], "references": {id: reference}}``."""
+        they name (``.fi/held_beside_the_scan.json``): ``{"controls": [entries as written], "references": {id: reference}}``.
+        Empty unless the record was written for the plan whose design block has ``plan_mark``."""
         try:
             record = json.loads((self.fi_dir / self._HELD_ASIDE).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             record = {}
-        record = record if isinstance(record, dict) else {}
+        record = record if isinstance(record, dict) and record.get("plan_mark") == plan_mark else {}
         return {"controls": [c for c in record.get("controls") or [] if isinstance(c, dict)],
                 "references": {str(k): v for k, v in (record.get("references") or {}).items()}}
 
-    def _keep_aside(self, now: dict[str, Any]) -> None:
-        """Write what the merge just left out (the record is replaced: what came back is no longer held)."""
+    def _commit_held(self, plan_text: str) -> None:
+        """After the plan is written: what its merge left out is kept, tied to the plan written (the record is replaced:
+        what came back is no longer held). Nothing is written when the merge did not leave this for the plan."""
+        pending = self.__dict__.pop("_pending_held", None)
+        if pending is None:
+            return
+        record = {**pending, "plan_mark": self._design_block_mark(plan_text)}
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / self._HELD_ASIDE).write_text(json.dumps(now, ensure_ascii=False, default=str), encoding="utf-8")
+            (self.fi_dir / self._HELD_ASIDE).write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
         except OSError as e:
             self._log.warning("[plan] couldn't keep the entries left out of the plan: %r", e)
 

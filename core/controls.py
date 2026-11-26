@@ -106,6 +106,29 @@ def left_out_note(index: int, item: Any, why: str) -> str:
             f"({why}); FI does not judge it")
 
 
+def setting_fault(index: int, item: Any, protocol: Any) -> str | None:
+    """Why the control's ``setting`` names something the study does not run (a setting its grid, or its search's scan, lacks,
+    or a value of one it does not have), in words a person can act on; ``None`` when it names only what the study runs, and
+    for an entry that is not a mapping with a name (the other checks say so). Nothing else about the entry is judged."""
+    protocol = protocol if isinstance(protocol, dict) else {}
+    if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+        return None
+    head = f"`protocol.controls` entry {index} (`{item['name'].strip()}`)"
+    grid = _grid(protocol)
+    where = _scan_name(protocol)
+    setting = item.get("setting")
+    if not isinstance(setting, dict) or not setting:
+        return (f"{head}: `setting` must map each setting of {where} that picks the control's cells to one of its "
+                f"values ({', '.join(grid) or 'the grid is empty'})")
+    for axis, value in setting.items():
+        if str(axis) not in grid:
+            return f"{head}: `{axis}` is not a setting of {where} ({', '.join(grid) or 'the grid is empty'})"
+        if isinstance(value, (list, dict)) or not any(_same_value(value, v) for v in grid[str(axis)]):
+            return (f"{head}: `{axis}` is {value!r}, which is not one of its values in {where} "
+                    f"({', '.join(str(v) for v in grid[str(axis)])})")
+    return None
+
+
 def entry_fault(index: int, item: Any, protocol: Any) -> str | None:
     """Why the ``index``-th entry of ``protocol.controls`` cannot be judged, in words a person can act on; ``None`` when
     it can. Held to the grid and the declared results the protocol has; nothing is read from the control's name."""
@@ -121,18 +144,9 @@ def entry_fault(index: int, item: Any, protocol: Any) -> str | None:
     quantity = item.get("quantity")
     if not isinstance(quantity, str) or quantity.strip() not in declared:
         return (f"{head}: `quantity` must be the id of a declared result ({', '.join(declared) or 'the plan declares none'})")
-    grid = _grid(protocol)
-    where = _scan_name(protocol)
-    setting = item.get("setting")
-    if not isinstance(setting, dict) or not setting:
-        return (f"{head}: `setting` must map each setting of {where} that picks the control's cells to one of its "
-                f"values ({', '.join(grid) or 'the grid is empty'})")
-    for axis, value in setting.items():
-        if str(axis) not in grid:
-            return f"{head}: `{axis}` is not a setting of {where} ({', '.join(grid) or 'the grid is empty'})"
-        if isinstance(value, (list, dict)) or not any(_same_value(value, v) for v in grid[str(axis)]):
-            return (f"{head}: `{axis}` is {value!r}, which is not one of its values in {where} "
-                    f"({', '.join(str(v) for v in grid[str(axis)])})")
+    why = setting_fault(index, item, protocol)
+    if why:
+        return why
     if not _number(item.get("expected")):
         return f"{head}: `expected` must be a number (the value a working study gives at the control)"
     if not _number(item.get("tolerance")) or float(item["tolerance"]) <= 0:

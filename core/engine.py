@@ -1843,15 +1843,33 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             (self.fi_dir / "search_ready.json").write_text(json.dumps(judged, indent=1), encoding="utf-8")
         except OSError as exc:
             self._log.warning("[step] could not write the record of the search check (%r)", exc)
-        if judged.get("status") != "not_ready" or stuck_path.is_file():
+        if judged.get("status") != "not_ready":
+            self._remove_own_search_stop(stuck_path)  # an earlier stop of this check, for a plan that is complete now
+            return
+        if stuck_path.is_file():
             return
         problem = str(judged["detail"])
-        record = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": judged.get("tried") or [problem],
+        record = {"at": time.time(), "kind": "no_findings", "source": "search_ready", "problem": problem,
+                  "tried": judged.get("tried") or [problem],
                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
                   "why_repairs_ended": "the plan's model could not write a search FI can run"}
         stuck_path.parent.mkdir(parents=True, exist_ok=True)
         stuck_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
         self._log.warning("[step] the design step ends stopped: %s", problem)
+
+    def _remove_own_search_stop(self, stuck_path: Path) -> None:
+        """Remove ``needs/STUCK.json`` only when the design step's search check wrote it (``source: search_ready``); a stop
+        any other step wrote is never touched."""
+        try:
+            record = json.loads(stuck_path.read_text(encoding="utf-8")) if stuck_path.is_file() else None
+        except (OSError, ValueError):
+            return
+        if isinstance(record, dict) and record.get("source") == "search_ready":
+            try:
+                stuck_path.unlink()
+                self._log.info("[step] the earlier stop of the search check is removed: the plan's search is ready now")
+            except OSError as exc:
+                self._log.warning("[step] could not remove the earlier stop of the search check (%r)", exc)
 
     def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
         """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""

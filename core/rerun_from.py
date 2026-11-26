@@ -139,7 +139,7 @@ _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RU
                 ".fi/oracle_dry_run.json",
                 "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
-_PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
+_PLAN_LOOK = [".fi/held_beside_the_scan.json", ".fi/search_ready.json", ".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
               ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json",
               # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
               ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/grid_asked_again.json", ".fi/search_block_asked.json",
