@@ -26,6 +26,7 @@ $topic_block
 - Use the plan's equations exactly as written. Put each equation's id in a comment (`# E1`) on or above the code that computes it.
 - No network access. Packages the study needs are already installed in the interpreter above. If you need one that is not, do not try to install it: say so in your last message on a line `DEPS: name1, name2` and write the code so far.
 - Keep the whole study within the wall-time limit (seconds): $timeout_s.
+- That limit is for FI's run of the study; each round of your own work here (this one, and each time FI sends you what its checks found) is stopped after $round_limit, whatever is still running, so write `experiment.py` (and `simulate.py` where the plan needs it) early and keep each of your own runs to a few minutes.
 - Your last message is a short plain account: which files you wrote, what you ran and what it printed.
 
 # Output rules for the script

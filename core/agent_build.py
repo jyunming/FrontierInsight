@@ -14,7 +14,10 @@ model again. In agent mode the code is the agent's (:mod:`core.agent_coder`, the
   now and failed there is newly passing, one that passed there and fails now is broken. A round is progress only when
   something newly passes and nothing is broken; a round that broke a check is said so, naming it, to the agent and in
   the run log, and gets one round to put it back. The loop ends early when a round makes nothing newly pass, or when a
-  round that broke a check is followed by another round that is not progress. FI does not undo a round: its checks
+  round that broke a check is followed by another round that is not progress, except that a round stopped at its time
+  limit (the agent's task states it) is not judged so: it gets the next round, told that it was stopped, within the rounds
+  and :data:`TOTAL_S` (checked before a round starts). A round that left no script fails only :data:`CODE_WRITTEN`, so
+  the round that writes the script has made progress even when its first run fails. FI does not undo a round: its checks
   judge the code the last round left. The agent's own account counts for nothing: the code is accepted only when FI's
   checks pass it, and a stop says which check did not. A round that changes how the code is laid out (one script or
   two, the function simulate.py gives) goes back to the run step, which sets up again for it (:data:`LAYOUT_CHANGED`);
@@ -44,7 +47,11 @@ from . import frozen_protocol as _frozen
 
 #: Fix rounds of the coding agent before the run (after its first write).
 FIX_ROUNDS = 3
-#: The wall-clock cap of one round of the agent.
+#: The wall-clock cap of one round of the agent, stated in its task (:func:`round_limit_words`). Stored agent rounds that
+#: ended by themselves took at most 1,117 s (the 22 that first delivered the code: median 316 s; the fix rounds after
+#: that: at most 217 s). A share of the commission's time would have cut some of them on short commissions, and a longer
+#: cap was not shown to help, so it is one constant.
+#: A round it stops is not judged as the agent's finished attempt (:func:`round_was_capped`).
 ROUND_S = 20 * 60
 #: The time the coding agent may take before the run, its first write included.
 TOTAL_S = 45 * 60
@@ -69,8 +76,14 @@ _SITE = {
 }
 
 
+#: The check that the round left the analysis script in the folder. Its own check, not ``run``: a round that writes the
+#: code for the first time has made progress even when its first run fails (a real study was stopped at round 2 of 5 as
+#: "no progress": round 1 left no script, round 2 wrote all of it and its first run failed, and both were ``run``).
+CODE_WRITTEN = "code_written"
+
 #: The checks of :func:`core.code_checks.check_code` and the run of the code, in a scientist's words.
 _CHECK_WORDS = {
+    CODE_WRITTEN: "the check that the code is written (experiment.py is in the folder)",
     "run": "running the code",
     "before_run": "a check of the code before the run (the code was not run)",
     "code_layout": "the check that the code folder is laid out as the quest needs (equation labels, package, tests)",
@@ -304,6 +317,18 @@ def _record_round(quest_root: Path, n: int) -> dict[str, Any]:
     return next((r for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict) and r.get("n") == n), {})
 
 
+def round_was_capped(quest_root: Path, n: int) -> bool:
+    """Round ``n`` was stopped at :data:`ROUND_S` (``timed_out`` in its record): the agent was stopped, not done, so the
+    round is not judged as making no progress; the rounds and :data:`TOTAL_S` still bound the loop."""
+    return bool(_record_round(quest_root, n).get("timed_out"))
+
+
+def round_limit_words(seconds: float) -> str:
+    """A round's time limit as the agent is told it (``20 minutes``)."""
+    minutes = float(seconds) / 60
+    return f"{minutes:g} minutes" if minutes >= 1 else f"{float(seconds):g} seconds"
+
+
 def after_freeze_rounds(quest_root: Path) -> int:
     return sum(1 for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict) and r.get("after_freeze"))
 
@@ -368,6 +393,9 @@ class AgentBuildMixin:
             design_block=self._code_design_block(state),  # type: ignore[attr-defined]
             clarify_block=_e._format_clarify(state),
             timeout_s=self._planning_limit(state),  # type: ignore[attr-defined]
+            # The limit the runner enforces on each of the agent's rounds: told nothing of it, a live agent spent two whole
+            # rounds on its own long trial runs and never wrote the script.
+            round_limit=round_limit_words(getattr(getattr(self, "_agent_coder_obj", None), "timeout_s", ROUND_S)),
             skills_block=(self._skills_block(state, in_code=True) + self._dropped_skills_note(state))  # type: ignore[attr-defined]
             or "(no skills selected for this quest)",
             inputs_block=self._inputs_block(),  # type: ignore[attr-defined]
@@ -510,12 +538,14 @@ class AgentBuildMixin:
         self._fi_own_findings = []  # type: ignore[attr-defined]
         # A round that left no script (it ran out of time before writing one) is a finding for the next round: the
         # checks below read the script, and one real round that wrote nothing in its 20 minutes stopped the quest there.
+        # It is its own check (CODE_WRITTEN), not a failed run: the round that then writes the script has made progress.
         if not (self.quest_root / "code" / _split_run.ANALYSIS_NAME).is_file():  # type: ignore[attr-defined]
-            checks["run"] = False
+            checks[CODE_WRITTEN] = False
             found.append(f"There is no `{_split_run.ANALYSIS_NAME}` in the folder: the code was not written. Write "
                          f"`{_split_run.ANALYSIS_NAME}` (and `{_split_run.SIMULATE_NAME}` where the plan needs it) "
                          "first, then run it on a small case; keep each of your own runs short.")
             return None, found, checks
+        checks[CODE_WRITTEN] = True
         # A quest whose simulation FI runs itself (execution.split_analysis): the code is not the study's until
         # simulate.py defines the function FI calls for each setting. One script passes none of the checks that need it
         # (FI running a check's case itself, FI's record of every trial), so it is sent back, not run as it is.
@@ -632,10 +662,14 @@ class AgentBuildMixin:
             # The round before this one broke a check and had its one round to put it back.
             after_break = bool(earlier) and bool(_record_round(self.quest_root, earlier[-1][0]).get("newly_failed"))  # type: ignore[attr-defined]
             progress = bool(compared["newly_passed"]) and not broke
+            # A round stopped at its time limit did not end: what it left is judged and sent back, but it is not the
+            # agent's finished attempt, so it gets the next round (two real rounds stopped at the limit before the script
+            # was written ended a study as "no progress" with three of its five rounds unused).
+            capped = round_was_capped(self.quest_root, n)  # type: ignore[attr-defined]
             why = ""
-            if earlier and not compared["newly_passed"]:
+            if earlier and not compared["newly_passed"] and not capped:
                 why = "its last round made no check of FI's pass that failed before"
-            elif earlier and after_break and not progress:
+            elif earlier and after_break and not progress and not capped:
                 why = "its round to put back what it broke was not progress either"
             elif coder.fixes_left() <= 0:
                 why = f"all {coder.total_rounds} of its rounds are used (round {n} of {coder.total_rounds})"
@@ -644,6 +678,8 @@ class AgentBuildMixin:
                        f"the last {AFTER_FREEZE_ROUNDS} is kept for a failure of the study's own run)")
             elif seconds_used(self.quest_root) >= TOTAL_S:  # type: ignore[attr-defined]
                 why = f"its {TOTAL_S // 60} minutes for the code are used"
+            if why and capped:
+                why += f" (its last round was stopped at its limit of {round_limit_words(coder.timeout_s)})"
             if why:
                 still = [check_words(c) for c in compared["still_broken"]]
                 if still:
@@ -662,6 +698,12 @@ class AgentBuildMixin:
             if broke:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
                              "while you keep what you fixed: a round that breaks a check that passed is not progress.")
+            if capped:
+                # Told only what the checks found ("the code was not written"), a live agent started its work over.
+                found.insert(0, f"FI stopped your last round at its limit of {round_limit_words(coder.timeout_s)}, before it "
+                             "ended, and judged what it left in the folder. Continue from what is there instead of "
+                             "starting again: write the files the checks below need first, and keep each of your own runs "
+                             "to a few minutes, so that they are in the folder when this round ends.")
             # A round FI did not keep (its code reached outside its folder) says why, first: the checks only see that no
             # code is there, and a live agent told only that wrote the same code again.
             outside = coder.last_cheats()

@@ -279,7 +279,8 @@ CHECKS: tuple[Check, ...] = (
           'names one action; transient failures are retried before stopping.'),
     Check('agent_code_missing', 'core.agent_build', 'AgentBuildMixin._agent_judge',
           'implement', 'own_record', 'repair',
-          'No analysis script in code/ after an agent round is a finding for the next round.'),
+          'No analysis script in code/ after an agent round is a finding for the next round (its own check, '
+          'code_written: the round that writes it is progress).'),
     Check('agent_two_scripts_contract', 'core.agent_build', 'AgentBuildMixin._agent_judge',
           'implement', 'model_code', 'repair',
           'Split study without run_cell/run_trial in simulate.py is sent back to the agent, not run.'),
@@ -290,7 +291,7 @@ CHECKS: tuple[Check, ...] = (
     Check('agent_round_progress', 'core.agent_build', 'AgentBuildMixin._agent_build',
           'implement', 'own_record', 'stop',
           'Honest stop when agent rounds make no progress (compare_rounds), fix rounds or minutes are used up '
-          'and checks still fail.'),
+          'and checks still fail; a round stopped at its time limit is not judged as no progress.'),
     Check('code_checks_verdicts', 'core.code_checks', 'check_code',
           'implement', 'measured', 'note',
           'Judges code/ with the gate-pass checks (typed results, grid keys, small run, equation tests, known '

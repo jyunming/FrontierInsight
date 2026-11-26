@@ -804,7 +804,10 @@ same PR that adds, splits or renames one.
   `_gate_pass` in `_node_execute`: the checks run in report mode, what they found goes back to the agent, at most `FIX_ROUNDS`
   fixes before the run (`fixes_before_the_run`: the round after the freeze is not taken from them) / `TOTAL_S`; each round judged check by check against the best earlier round (`compare_rounds`: a round that broke a
   check that passed is not progress, named to the agent and in the log, and gets one round to put it back); ends when a round
-  makes nothing newly pass; claimed vs found and passed / newly_passed / newly_failed per round in `.fi/agent_coder.json`;
+  makes nothing newly pass, except a round stopped at `ROUND_S` (`round_was_capped`, the record's `timed_out`), which gets
+  the next round with a line saying it was stopped (still bounded by the rounds and by `TOTAL_S`, checked before a round
+  starts); the agent's task states `ROUND_S` (`round_limit_words`, the `$round_limit` of `agents/implement_agent.md`); a
+  round that left no script fails only `CODE_WRITTEN` (not `run`), so the round that writes it is progress; claimed vs found and passed / newly_passed / newly_failed per round in `.fi/agent_coder.json`;
   a round that changes how the code is laid out (`Engine._script_layout` in `core/engine_run.py`: one script or two, the
   function simulate.py gives) returns `LAYOUT_CHANGED` and `_node_execute_steps` sets the run up again; a check's send-back
   before the run (`directive`, named by `Engine._code_review_failed_run(check=...)`) is the check
