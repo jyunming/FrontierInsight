@@ -16,8 +16,9 @@ def test_agent_prompt_fills_every_placeholder_the_implement_prompt_uses() -> Non
     used_by_implement = _identifiers("implement.md")
     used_by_agent = _identifiers("implement_agent.md")
     assert used_by_agent, "the agent prompt should use at least one placeholder"
-    # Every placeholder the agent prompt uses must be one that the implement prompt's substitution supplies.
-    assert used_by_agent <= (used_by_implement | _identifiers("implement_body.md"))
+    # Every placeholder the agent prompt uses must be one that the implement prompt's substitution supplies, or the one
+    # only the agent has: the time limit of its own round (core/agent_build.py, AgentBuildMixin._agent_task).
+    assert used_by_agent <= (used_by_implement | _identifiers("implement_body.md") | {"round_limit"})
 
     dummies = {name: f"DUMMY_{name.upper()}" for name in used_by_agent | used_by_implement}
     text = (AGENTS / "implement_agent.md").read_text(encoding="utf-8")

@@ -872,7 +872,7 @@ def test_a_check_that_sent_the_code_back_before_the_run_is_named_with_its_own_wo
     assert "Running the code failed" not in said, "the code did not run; a check sent it back"
     assert any("came back as one number" in t for t in stop["exec_result"]["cannot_repair_tried"])
     rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
-    assert rounds[0]["checks"] == {"before_run": False} and "came back as one number" in agent.prompts[1]
+    assert rounds[0]["checks"] == {ab.CODE_WRITTEN: True, "before_run": False} and "came back as one number" in agent.prompts[1]
 
 
 def test_a_failed_run_with_no_error_text_still_says_what_failed(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -1077,3 +1077,252 @@ def test_a_stop_record_keeps_its_findings_within_a_bound(tmp_path: Path, monkeyp
     assert all(len(f) <= ab.FINDING_CHARS for f in kept)
     assert kept[1].startswith("A fault another model found") and kept[1].endswith("how it failed: the end.")
     assert sum(len(f) for f in kept) <= ab.RECORD_CHARS + 200 and "more finding(s) left out" in kept[-1]
+
+
+# --- a round stopped at its time limit (backlog -615) ---------------------------------------------------------------------
+
+
+class _CappedAgent(_Agent):
+    """A stand-in agent whose rounds in ``capped`` (0 = the first write) are stopped at the time limit, as the runner says
+    of a real one (``timed_out``, the limit's seconds); what the round's step wrote is kept, as FI keeps it."""
+
+    def __init__(self, steps: list[Callable[[Path], None]], capped: set[int]) -> None:
+        super().__init__(steps)
+        self.capped = capped
+        self.limits: list[float] = []
+
+    async def run(self, prompt: str, *, cwd: Path, session_id: str | None, timeout_s: float) -> ac.RunnerOutput:
+        k = len(self.prompts)
+        self.limits.append(timeout_s)
+        out = await super().run(prompt, cwd=cwd, session_id=session_id, timeout_s=timeout_s)
+        if k in self.capped:
+            return ac.RunnerOutput(exit_code=-1, timed_out=True, duration_s=timeout_s,
+                                   stderr_tail=f"(stopped after {timeout_s:g} s)")
+        return out
+
+
+def _no_script(code: Path) -> None:
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "_trial.py").write_text("print('a trial run of my own')\n", encoding="utf-8")
+
+
+def test_two_rounds_stopped_at_the_time_limit_before_the_code_was_written_get_the_next_round(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A real study: the first two rounds were stopped at 20 minutes before experiment.py was written, and FI stopped the
+    study at round 2 of 5 as "its last round made no check of FI's pass that failed before"."""
+    agent = _CappedAgent([_no_script, _no_script, _write(2)], capped={0, 1})
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "round 3 wrote the script and FI's checks passed it"
+    assert len(agent.prompts) == 3
+    assert agent.limits == [ab.ROUND_S] * 3
+    assert "FI stopped your last round at its limit of 20 minutes" in agent.prompts[2]
+    assert "There is no `experiment.py`" in agent.prompts[2]
+
+
+def test_a_round_that_ended_by_itself_and_again_wrote_no_code_still_stops(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_no_script, _no_script, _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    said = stop["exec_result"]["cannot_repair"]
+    assert "made no check of FI's pass that failed before" in said and "stopped at its limit" not in said
+    assert len(agent.prompts) == 2
+
+
+def test_a_round_stopped_at_the_limit_after_rounds_that_did_the_same_ends_on_the_time_for_the_code(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # Three rounds of 20 minutes pass the 45 minutes for the code: the stop says so, and that the last round was stopped.
+    agent = _CappedAgent([_no_script, _no_script, _no_script, _write(2)], capped={0, 1, 2})
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _gate_wanting(eng, 2))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    said = stop["exec_result"]["cannot_repair"]
+    assert f"its {ab.TOTAL_S // 60} minutes for the code are used" in said
+    assert "its last round was stopped at its limit of 20 minutes" in said
+    assert len(agent.prompts) == 3
+
+
+def test_the_round_that_first_writes_the_code_is_progress_even_when_its_run_fails(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A real study: round 1 left no script, round 2 wrote the whole code and its first run failed; both were judged as
+    the failing check ``run``, so FI stopped at round 2 as no progress."""
+    agent = _Agent([_no_script, _write(1), _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+
+    async def gate(state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[Any, Any, bool]:
+        text = (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+        if "value = 2" in text:
+            return None, None, False
+        # the run itself failed (no check sent the code back before it): the check ``run``
+        return {"exec_result": {"returncode": 1, "stderr_tail": "Traceback (most recent call last):\n"
+                                "ValueError: bad shape"}}, None, False
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "round 3 fixed the run"
+    assert len(agent.prompts) == 3
+    rounds = json.loads((eng.quest_root / ac.RECORD).read_text(encoding="utf-8"))["rounds"]
+    assert rounds[1]["newly_passed"] == [ab.CODE_WRITTEN]
+
+
+def test_writing_the_script_is_its_own_check_and_a_failed_run_after_it_is_not_the_same_check() -> None:
+    no_code = {ab.CODE_WRITTEN: False}
+    code = {ab.CODE_WRITTEN: True, "run": False}
+    assert ab.compare_rounds([(1, no_code)], dict(code))["newly_passed"] == [ab.CODE_WRITTEN]
+    assert ab.compare_rounds([(1, no_code)], dict(no_code))["newly_passed"] == []
+    assert ab.check_words(ab.CODE_WRITTEN) != ab.check_words("run")
+
+
+def test_the_agents_task_states_the_time_limit_of_its_rounds(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1)])
+    eng = _engine(tmp_path, agent=agent)
+
+    async def no_project(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(eng, "_refresh_code_project", no_project)
+    asyncio.run(eng._implement_by_agent({"design": {"hypothesis": "h"}}, {}, []))
+    task = agent.prompts[0]
+    assert "is stopped after 20 minutes" in task and "$round_limit" not in task
+    assert ab.round_limit_words(ab.ROUND_S) == "20 minutes"
+
+
+def test_writing_the_code_is_progress_once_and_a_round_that_then_changes_nothing_stops(tmp_path: Path,
+                                                                                      monkeypatch) -> None:  # noqa: ANN001
+    # Round 1 left no script; round 2 wrote it and failed two checks; round 3 changed nothing. Against round 1 (one
+    # failing check) round 3 would "newly pass" the script again: the best earlier round is one that left code.
+    agent = _Agent([_no_script, _write(2), _write(2), _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr("core.code_checks.check_code", _verdicts_by_value({2: {"equation_tests": True,
+                                                                              "known_answers": False}}))
+    monkeypatch.setattr(eng, "_gate_pass", _gate_always_asks(eng))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert "made no check of FI's pass that failed before" in stop["exec_result"]["cannot_repair"]
+    assert len(agent.prompts) == 3
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert rounds[1]["newly_passed"] == [ab.CODE_WRITTEN] and rounds[2]["compared_with"] == 2
+    got = ab.compare_rounds([(1, {ab.CODE_WRITTEN: False}), (2, {ab.CODE_WRITTEN: True, "run": False, "k": False})],
+                            {ab.CODE_WRITTEN: True, "run": False, "k": False})
+    assert got["best"] == 2 and got["newly_passed"] == []
+
+
+def test_a_no_script_round_saved_by_an_older_fi_is_read_as_one_and_an_unreadable_one_is_not_compared(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A quest resumed across the change: its round 1 was saved as ``{"run": False}`` (the missing script); round 2 wrote
+    the code and its run failed. Read as it was saved, round 2 made "no progress", the failure this change fixes."""
+    agent = _Agent([_no_script, _write(1), _write(2)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+
+    async def gate(state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[Any, Any, bool]:
+        if "value = 2" in (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8"):
+            return None, None, False
+        return {"exec_result": {"returncode": 1, "stderr_tail": "ValueError: bad shape"}}, None, False
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    record = coder.load()
+    record["rounds"][0].update({"checks": {"run": False}, "found": [
+        "There is no `experiment.py` in the folder: the code was not written. Write `experiment.py` first."]})
+    coder._save(record)
+    asyncio.run(coder.continue_("There is no `experiment.py` in the folder"))
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False) and len(agent.prompts) == 3, "round 2 was progress; round 3 fixed the run"
+
+    record = coder.load()
+    record["rounds"][0].pop("found")
+    coder._save(record)
+    assert [n for n, _c in ab.judged_rounds(eng.quest_root)] == [2], "a saved {run: False} with no finding: unknown"
+    record["rounds"][0]["found"] = ["Running the code failed (exit code 1): ValueError"]
+    coder._save(record)
+    assert ab.judged_rounds(eng.quest_root)[0] == (1, {"run": False, ab.CODE_WRITTEN: True})
+
+
+def test_a_round_stopped_at_its_limit_does_not_take_the_place_of_the_round_that_must_put_back_a_break(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # Round 2 broke the equations; round 3 was stopped at its limit; round 4 passes the known answers and breaks the trials
+    # instead of putting the equations back: it is the round after the break, and it is not progress.
+    other = {"equation_tests": False, "trial_checks": False, "known_answers": True}
+    agent = _CappedAgent([_write(v) for v in (1, 2, 3, 4, 5)], capped={2})
+    eng = _engine(tmp_path, agent=agent)
+    monkeypatch.setattr("core.code_checks.check_code", _verdicts_by_value(
+        {1: FIRST, 2: BROKE_AN_EQUATION, 3: BROKE_AN_EQUATION, 4: other, 5: other}))
+    monkeypatch.setattr(eng, "_gate_pass", _gate_always_asks(eng))
+    coder = asyncio.run(eng._code_agent())
+    asyncio.run(coder.write("write the study"))
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert "its round to put back what it broke was not progress either" in stop["exec_result"]["cannot_repair"]
+    assert len(agent.prompts) == 4
+
+
+def test_a_repair_after_the_freeze_stopped_at_its_limit_gets_the_next_round(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    agent = _CappedAgent([_write(1), lambda _code: None, _write(2)], capped={1})
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    monkeypatch.setattr(ab._frozen, "load", lambda _root: {"frozen": True})
+    failed = {"returncode": 1, "stderr_tail": "ZeroDivisionError", "stdout_tail": ""}
+    patch = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    assert "exec_give_up_reason" not in patch and patch["exec_patch_pending"] is True
+    assert patch["code"].startswith("value = 2") and len(agent.prompts) == 3
+    assert "FI stopped your last round at its limit of 20 minutes" in agent.prompts[2]
+    assert "ZeroDivisionError" in agent.prompts[2]
+
+
+def test_a_quest_saved_before_the_round_limit_was_stated_keeps_its_agent_record_on_resume(tmp_path: Path,
+                                                                                           monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(9)])
+    eng = _engine(tmp_path, agent=agent)
+
+    async def no_project(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(eng, "_refresh_code_project", no_project)
+    state: dict[str, Any] = {"design": {"hypothesis": "h"}}
+    asyncio.run(eng._code_agent())
+    full = eng._agent_task(state, {})
+    older = eng._agent_task(state, {}, round_limit=False)
+    line = next(x for x in full.splitlines(keepends=True) if "is stopped after 20 minutes" in x)
+    assert full.replace(line, "", 1) == older, "the older task is the task without that one line"
+    _write(1)(eng.quest_root / "code")
+    saved = {"task": older, "task_sha": ac._sha(older.encode("utf-8")), "session_id": "s1", "fixes": 1,
+             "write_done": True, "rounds": [{"n": 1, "kind": "write", "status": "done", "duration_s": 300.0},
+                                            {"n": 2, "kind": "fix", "status": "done", "duration_s": 60.0}]}
+    (eng.quest_root / ac.RECORD).parent.mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / ac.RECORD).write_text(json.dumps(saved), encoding="utf-8")
+    asyncio.run(eng._implement_by_agent(state, {}, []))
+    assert agent.prompts == [], "the saved write is this task: nothing is written again"
+    kept = json.loads((eng.quest_root / ac.RECORD).read_text(encoding="utf-8"))
+    assert kept["session_id"] == "s1" and kept["fixes"] == 1 and len(kept["rounds"]) == 2
+
+
+def test_a_repair_after_the_freeze_stopped_at_its_limit_starts_no_round_once_the_time_for_the_code_is_used(
+        tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # 44 minutes used before the run; the repair after the freeze is stopped at 20 minutes: no further round starts.
+    agent = _CappedAgent([_write(1), lambda _code: None, _write(2)], capped={1})
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    record = json.loads((eng.quest_root / ac.RECORD).read_text(encoding="utf-8"))
+    record["rounds"][0]["duration_s"] = 44 * 60.0
+    (eng.quest_root / ac.RECORD).write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(ab._frozen, "load", lambda _root: {"frozen": True})
+    failed = {"returncode": 1, "stderr_tail": "ZeroDivisionError", "stdout_tail": ""}
+    patch = asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    assert len(agent.prompts) == 2, "the stopped repair round, and no round after it"
+    said = patch["exec_give_up_reason"]
+    assert f"its {ab.TOTAL_S // 60} minutes for the code are used" in said and "stopped at its limit" in said
