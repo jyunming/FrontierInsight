@@ -174,7 +174,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev,docker]
 
-      # The web pages' browser tests (tests/test_web_interview_browser.py, tests/test_web_offline_assets.py) drive a
+      # The web pages' browser tests (tests/test_web_offline_assets.py and the others on tests/web_browser_harness.py) drive a
       # real Chromium; they skip where none is installed, so without this they would run nowhere but a laptop.
       - name: Install Playwright + Chromium for the web pages' browser tests
         run: |

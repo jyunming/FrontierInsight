@@ -184,14 +184,6 @@ def test_a_typesetter_hyphen_before_a_capital_is_joined_too() -> None:
     assert pdf_text.clean("Kermack-￾\nMcKendrick") == "Kermack-McKendrick"
 
 
-def test_a_fetch_that_came_back_as_the_abstract_still_asks_for_the_paper() -> None:
-    from core.engine import _is_abstract_only
-    from core.knowledge import RetrievedDoc
-
-    doc = RetrievedDoc(content="x" * 3000, metadata={"fetched_full_text": True, "content_quality": "abstract_only"})
-    assert _is_abstract_only(doc)
-
-
 def test_a_long_reference_list_is_not_a_preview() -> None:
     from core.engine import _content_quality
 

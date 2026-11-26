@@ -68,7 +68,7 @@ def _doc(content: str = POISON, **meta) -> RetrievedDoc:
 def _config(tmp_path: Path, **engine) -> Config:
     return Config(
         topic=TOPIC, title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", ideate_reflect=False,
+        engine=EngineConfig(max_iterations=1, review_loop=False,
                             claim_grounding=True, **engine),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, web_search=False, passage_ranking="lexical"),
@@ -514,30 +514,21 @@ async def test_the_literature_step_flags_a_poisoned_source_and_keeps_it(tmp_path
     sent = _fake_llm(monkeypatch, {"design": json.dumps({"hypothesis": "h", "method": "m", "dependencies": [],
                                                          "figures_planned": ["f.png"]})})
     eng = _eng(_config(tmp_path))
-    eng.config.knowledge.enabled = True
-    eng.config.knowledge.source_routing = "manual"
-    eng.config.knowledge.literature_screen = False
-    eng.config.knowledge.foundational_works = False
-
-    async def search(query, **kw):  # noqa: ANN001
-        return [_doc()]
-
-    async def fetch(docs):  # noqa: ANN001
-        return docs
-
-    eng.knowledge.asearch = search  # type: ignore[method-assign]
-    eng.knowledge.fetch_full_text = fetch  # type: ignore[method-assign]
-    monkeypatch.setattr(eng, "_filter_docs_by_relevance", lambda topic, docs, *, stats=None: docs)
-    patch = await eng._node_literature({"topic": TOPIC, "chosen_idea": {"title": "T"}})
+    papers = eng.quest_root / "inputs" / "papers"
+    papers.mkdir(parents=True)
+    (papers / "poisoned.md").write_text("# Final size of SIR epidemics\n\n" + POISON, encoding="utf-8")
+    patch = await eng._node_literature({"topic": TOPIC})
     (entry,) = patch["literature"]
-    assert entry["content"] == POISON
+    assert POISON in entry["content"]
     assert entry["metadata"][st.FLAGS_KEY]
     events = [e for e in audit_log.read(eng.audit.path) if e.get("check") == "source_text"]
     assert events and events[-1]["status"] == "flagged"
-    assert "Final size of SIR epidemics" in json.dumps(events[-1]["problems"])
+    assert "poisoned.md" in json.dumps(events[-1]["problems"])
     run_log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "look" in run_log and "like instructions to an AI model" in run_log
     # The prompts that read the corpus name it as flagged.
+    # a dropped paper is named by its file; the prompts list a source with a title and a year
+    entry["metadata"].update({"title": "Final size of SIR epidemics", "year": 2001})
     await eng._node_design({"topic": TOPIC, "iteration": 0, "literature": patch["literature"]})
     design = _prompt(sent, "design")
     _assert_fenced(design)
@@ -569,22 +560,6 @@ async def test_analyze_fences_the_titles_it_shows_after_a_run(tmp_path: Path, mo
     state["literature"] = [_entry(title=f"Epidemics: {NEEDLE}")]
     await eng._node_analyze(state)
     _assert_fenced(_prompt(sent, "analyze"))
-
-
-@pytest.mark.asyncio
-async def test_ideate_fences_and_flags_what_its_search_found(tmp_path: Path, monkeypatch) -> None:
-    sent = _fake_llm(monkeypatch, {"ideate": json.dumps({"ideas": [
-        {"title": "A", "hypothesis": "h", "novelty": "n", "feasibility": "f"}]})})
-    eng = _eng(_config(tmp_path))
-    seeded = [_doc()]
-
-    async def search(query, **kw):  # noqa: ANN001
-        return seeded
-
-    eng.knowledge.asearch = search  # type: ignore[method-assign]
-    await eng._node_ideate({"topic": TOPIC})
-    _assert_fenced(_prompt(sent, "ideate"))
-    assert seeded[0].metadata[st.FLAGS_KEY]
 
 
 def _write_engine(tmp_path: Path) -> Engine:
@@ -629,19 +604,6 @@ async def test_cross_check_fences_and_flags_its_candidates(tmp_path: Path, monke
                                                               "next_step": "publish"}})
     _assert_fenced(_prompt(sent, "cross_check"))
     assert hits[0].metadata[st.FLAGS_KEY]
-
-
-@pytest.mark.asyncio
-async def test_the_literature_screen_and_relevance_guard_fence_their_candidates(tmp_path: Path, monkeypatch) -> None:
-    sent = _fake_llm(monkeypatch, {"literature_screen": json.dumps({"grades": [{"i": 0, "grade": 3}]}),
-                                   "relevance_guard": json.dumps({"relevant_indices": [0]})})
-    eng = _eng(_config(tmp_path))
-    eng.config.knowledge.enabled = True
-    docs = [_doc(content=f"{NEEDLE}. An abstract.")]
-    await eng._screen_literature(TOPIC, docs)
-    _assert_fenced(_prompt(sent, "literature_screen"))
-    await eng._filter_relevant_docs(TOPIC, docs)
-    _assert_fenced(_prompt(sent, "relevance_guard"))
 
 
 @pytest.mark.asyncio

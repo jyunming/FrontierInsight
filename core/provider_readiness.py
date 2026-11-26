@@ -1,8 +1,8 @@
 """How far a model provider is ready on this computer, in one plain sentence.
 
 The old check was one yes/no ("READY") that only meant "a key is set" or "the command is on PATH": it said nothing
-about being signed in, the server running or the model being there, so a person found out after answering the whole
-interview, or after the quest had started. This module answers the same question as a ladder, and stops at the
+about being signed in, the server running or the model being there, so a person found out only after the quest had
+started. This module answers the same question as a ladder, and stops at the
 first step that is not met::
 
     not installed -> installed -> signed in (or: cannot tell) -> reachable -> model available
@@ -15,7 +15,7 @@ and never a generation; a CLI without one says "cannot tell".
 Three levels of checking, so each caller pays only for what it needs:
 
 * :func:`check_local` -- no subprocess, no network: the command on PATH, the key in the environment. For the quick
-  ``fi --doctor`` and the interview's provider list.
+  ``fi --doctor``.
 * :func:`check` with ``sign_in=True`` (the default) -- also the CLIs' status commands and a local Ollama server.
   For the Settings page. No call leaves this computer except what a CLI's own status command does.
 * :func:`preflight` -- also the provider's model list over the network. Before a quest is launched, by ``fi demo``
@@ -218,7 +218,7 @@ def _own_gateway(provider: str, base_url: str, api_key_env: str) -> bool:
 
 
 #: When FI checks what a local check leaves open; said in those sentences.
-_WHEN = "when you launch from `fi demo`, `fi --new` or the web form, and by `fi --doctor --deep`"
+_WHEN = "when you launch from `fi demo`, and by `fi --doctor --deep`"
 
 
 def check_local(provider: str, *, model: str | None = None, base_url: str = "", api_key_env: str = "") -> Readiness:

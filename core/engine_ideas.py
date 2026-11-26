@@ -1,4 +1,4 @@
-"""Methods of :class:`core.engine.Engine` for the questions to the person, the ideas and the literature.
+"""Methods of :class:`core.engine.Engine` for the first node (the study's run modes), the design prompt and the literature.
 
 ``Engine`` inherits :class:`IdeasStageMixin`; every method here uses the engine's own attributes and its other methods
 through ``self``. The shared names come from ``core/engine_base.py``.
@@ -8,16 +8,16 @@ from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
     Any, Counter, Path, QuestState, WORK_SCOPE_PAPERS, WORK_SCOPE_PAPERS_AND_BOOKS, _FILLED_AFTER_READ,
-    _LITERATURE_QUERIES, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _PERSON_QUERIES, _SURVEY_DESIGN_DIRECTIVE,
-    _attempts, _audit_log, _audit_open, _clean_title, _default_clarify_questions, _design_parts, _fault_from_record,
-    _fault_record, _format_clarify, _format_lit, _format_lit_excerpt, _format_lit_from_state, _frozen,
-    _ingest_user_dropped_papers, _is_abstract_only, _is_open_access, _is_scholarly_record, _item_content,
-    _labelled_sources, _leading_simulatability_word, _lit_query, _literature_entry, _literature_query_prompt,
-    _literature_text_gaps, _merge_round_robin, _normalize_title, _novelty, _ok_calls, _one_line, _optim, _pairs,
-    _papers_dir_has_files, _papers_to_ask, _parse_json_lenient, _person_queries, _phased, _plan, _query_set_key,
-    _query_set_standing, _read_query_sets, _reading, _receipts, _record_query_set, _retractions,
-    _search_record_has_abstract, _sf_snapshot, _simulatability_answer, _source_text, _spell_out_title_options,
-    _take_papers_declined, _topic_req, _usable_queries, _write_paper_need_stubs, asyncio, functools, hashlib, json,
+    _LITERATURE_QUERIES, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE,
+    _audit_log, _audit_open, _design_parts, _fault_from_record,
+    _fault_record, _format_clarify, _format_lit_excerpt, _format_lit_from_state, _frozen,
+    _ingest_user_dropped_papers, _item_content,
+    _entry_identities, _labelled_sources, _lit_query, _literature_entry, 
+    _normalize_title, _ok_calls, _one_line, _optim, _pairs,
+    _parse_json_lenient, _phased, _plan, 
+    _reading, _receipts, _retractions, _write_query_sets,
+    _source_text,
+    _topic_req, asyncio, functools, hashlib, json,
 )
 from . import commission as _commission
 
@@ -43,784 +43,22 @@ class IdeasStageMixin:
         return out
 
     async def _node_clarify(self, state: QuestState) -> QuestState:
-        """Pre-flight clarification, then the quest's title.
+        """The study's two run modes, from the commission's ``method`` (``Config`` sets ``engine.no_simulation`` and
+        ``engine.survey_mode`` from it, ``core/config.py``). No question to the person and no model call.
 
-        The title the user approved in the discussion (or the agent's own pick in ``auto``) replaces the raw
-        topic as the quest's display title; a ``title`` set in the YAML always wins.
-        """
-        patch = await self._node_clarify_questions(state)
-        answers = patch.get("clarify_answers") if isinstance(patch, dict) else None
-        if self.config.title or not isinstance(answers, dict):
-            return patch
-        title = _clean_title(answers.get("title"))
-        picks = (patch.get("clarify_questions") or {}).get("title", {}).get("suggestions") or []
-        if title.isdigit() and 1 <= int(title) <= len(picks):
-            title = picks[int(title) - 1]
-        if title:
-            patch = {**patch, "title": title}
-            if self.config.pauses.clarify == "ask" or (
-                    self.config.pauses.clarify is None and self._clarify_answerable):
-                patch["title_confirmed"] = True
-            self._log.info("[clarify] quest title: %s", title)
-        return patch
-
-    async def _node_clarify_questions(self, state: QuestState) -> QuestState:
-        """Pre-flight clarification.
-
-        Three modes, controlled by `engine.clarify_mode`:
-
-        * ``"off"`` (default) — skip entirely. Returns an empty patch so
-          downstream nodes see ``clarify_done=False`` and ignore the slot.
-        * ``"auto"`` — agent generates the 5-question survey AND uses
-          its own `default` values as answers. No human loop. Cheap way
-          to sharpen framing.
-        * ``"interactive"`` — generates the questions, then calls
-          LangGraph's ``interrupt()`` so a CLI prompt (`launch.py
-          --interactive`) or the web UI's clarify panel can collect
-          answers from the user. ``interrupt()`` returns the payload
-          the caller resumed with, which becomes ``clarify_answers``.
-
-        Idempotent across restart: when ``clarify_done`` is already True
-        (e.g. resuming after a kill), the node passes through.
-        """
-        mode = self.config.pauses.clarify
-        if mode is None:
-            # Not set in the YAML: talk it over when someone is there to answer, else answer for yourself.
-            mode = "ask" if self._clarify_answerable else "auto"
+        ``survey_mode_resolved`` implies ``no_simulation_resolved`` (a survey has no experiment). Passes through when a
+        resume finds it done (``clarify_done``)."""
         if state.get("clarify_done"):
             return {}
-        if mode == "off":
-            self._log.info("[clarify] mode=off; skipping")
-            # When clarify is skipped, only the YAML can switch on
-            # no_simulation — ``engine.no_simulation`` or a pinned
-            # ``clarify_overrides.simulatability``; there's no clarify answer.
-            return {
-                "clarify_done": True,
-                **self._resolve_modes({}),
-            }
-
-        # Proposal short-circuit: when this quest was started from a
-        # ``/proposal``-generated YAML (detected by a ``*-proposal.md``
-        # pinned in ``knowledge.local_papers``), parse the proposal's
-        # structured H2 sections directly into ``clarify_answers``
-        # and skip the clarify LLM call entirely. The user already
-        # approved the hypothesis + success criteria when they ran
-        # ``/proposal``; re-asking is wasted compute.
-        #
-        # Gated on ``mode == "auto"`` only — ``interactive`` mode's
-        # contract is "let the human confirm / override every slot",
-        # so silently bypassing the prompt because a proposal MD
-        # happens to be pinned would surprise users. In interactive
-        # mode the regular ``interrupt()`` path still runs; the
-        # human can copy values from the proposal MD into the modal
-        # if they want.
-        if mode == "auto":
-            seeded = self._maybe_seed_clarify_from_proposal()
-            if seeded is not None:
-                proposal_path, answers = seeded
-                # Even when seeded from a proposal, YAML-pinned
-                # clarify_overrides still win — the interview /
-                # --update path is meant to override proposal defaults.
-                answers = {**answers, **dict(self.config.engine.clarify_overrides)}
-                self._log.info(
-                    "[clarify] mode=auto; seeded from proposal %s "
-                    "(skipped LLM call)",
-                    proposal_path.name,
-                )
-                return {
-                    "clarify_questions": {},
-                    "clarify_answers": answers,
-                    "clarify_done": True,
-                    **self._resolve_modes(answers),
-                }
-
-        # When the interview / --update has pinned EVERY known clarify
-        # slot in YAML AND mode is auto, the LLM call is pure waste —
-        # the answers are already known. Skip it. The 8-slot list
-        # matches _CLARIFY_LABELS + the proposal-seed contract.
-        overrides = dict(self.config.engine.clarify_overrides)
-        # ``known_slots`` defines when ``clarify_mode=auto`` can
-        # short-circuit (all answers known from clarify_overrides, no
-        # LLM call needed). Kept at the ORIGINAL 7 slots so configs
-        # produced by the existing interview machinery — which doesn't
-        # pin ``topic_shape`` yet — continue to short-circuit instead
-        # of regressing to a wasted LLM call on every quest.
-        # ``topic_shape`` is handled by the safety-default a few lines
-        # below: when not pinned, the engine populates a sensible
-        # ``experimental`` default so downstream consumers always see
-        # a value.
-        known_slots = {
-            "comparative_baseline", "empirical_vs_theoretical",
-            "simulatability", "success_metric", "budget",
-            "output_kinds", "study_depth", "paper_venue",
-        }
-        if mode == "auto" and known_slots.issubset(overrides.keys()):
-            # Auto-populate ``topic_shape`` when the user pinned the
-            # other 7 but not this one. ``experimental`` is the right
-            # safe default — most quests are experiment-shaped — and
-            # the mismatch helper / design prompt simply act as no-ops
-            # for ``experimental``. The override path leaves the
-            # caller's value intact when they DID pin it.
-            overrides.setdefault("topic_shape", "experimental")
-            self._log.info(
-                "[clarify] mode=auto; all %d slots pinned via "
-                "clarify_overrides (skipped LLM call)", len(known_slots),
-            )
-            modes = self._resolve_modes(overrides)
-            self._log_topic_shape_mismatch(
-                overrides, no_simulation_resolved=modes["no_simulation_resolved"])
-            return {
-                "clarify_questions": {},
-                "clarify_answers": overrides,
-                "clarify_done": True,
-                **modes,
-            }
-
-        # The answers resume this node from its first line (LangGraph re-runs a node after its interrupt), so the
-        # questions put to the person are kept on disk before the pause and read back here: the model is not asked
-        # again, and the answers are matched to the questions the person actually saw (a title picked by number).
-        questions = self._asked_clarify_questions(state["topic"])
-        if questions is not None:
-            self._log.info("[clarify] using the %d question(s) already asked (no second model call)", len(questions))
-        else:
-            prompt = self._prompts["clarify"].substitute(topic=state["topic"])
-            text = await self._chat(prompt, node="clarify")
-            questions = _parse_json_lenient(text) or {}
-            if not isinstance(questions, dict) or not questions:
-                # Degrade gracefully: if the LLM produced unparseable JSON,
-                # synthesize a minimal default questionnaire from the topic
-                # alone so the downstream nodes get *something*.
-                self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
-                questions = _default_clarify_questions(state["topic"])
-            _spell_out_title_options(questions)
-            # Measure, or find the best design: asked only when the topic's words leave it open
-            # (core/optimisation_plan.py).
-            if _optim.add_study_type_question(questions, state["topic"]):
-                self._log.info("[clarify] the topic does not say whether it measures or looks for the best design: "
-                               "that question is added")
-        if self.config.title:
-            questions.pop("title", None)
-
-        if mode == "auto":
-            agent_answers = {
-                k: v.get("default") for k, v in questions.items()
-                if isinstance(v, dict)
-            }
-            agent_count = len(agent_answers)  # pre-merge count for honest logging
-            answers = dict(agent_answers)
-            # User-pinned overrides (from the interview / --update flow)
-            # win over the agent's self-answers. Logged so run.log
-            # tells the user exactly which slots they pre-pinned.
-            if overrides:
-                pinned = sorted(overrides.keys() & answers.keys())
-                answers = {**agent_answers, **overrides}
-                # EXCEPT ``simulatability`` / ``topic_shape``: these are
-                # TOPIC JUDGMENTS the clarify agent is better placed to make
-                # than the interview's format heuristic. When the agent
-                # actually answered one and it conflicts with the pinned
-                # value, the agent's judgment wins back — otherwise a
-                # review-shaped topic the agent flagged as no-simulation
-                # gets force-run as an experiment by a stale
-                # ``simulatability: "yes"`` override (audit #1). The hard
-                # ``engine.no_simulation: true`` YAML pin still wins
-                # absolutely (see _resolve_no_simulation_from_clarify);
-                # there is intentionally no hard "force simulate" — the
-                # engine trusts the agent's "can a simulation answer this?"
-                # call over a format guess.
-                reclaimed: list[str] = []
-                for slot in ("simulatability", "topic_shape"):
-                    agent_val = agent_answers.get(slot)
-                    if (agent_val not in (None, "")
-                            and slot in overrides
-                            and overrides[slot] != agent_val):
-                        answers[slot] = agent_val
-                        reclaimed.append(slot)
-                self._log.info(
-                    "[clarify] mode=auto; agent self-answered %d slots, "
-                    "user-pinned overrides applied to %d (%s)%s",
-                    agent_count, len(pinned), ",".join(pinned),
-                    (f"; agent judgment kept over heuristic for "
-                     f"{','.join(reclaimed)}") if reclaimed else "",
-                )
-            else:
-                self._log.info("[clarify] mode=auto; agent self-answered %d slots", agent_count)
-            modes = self._resolve_modes(answers)
-            self._log_topic_shape_mismatch(
-                answers, no_simulation_resolved=modes["no_simulation_resolved"])
-            return {
-                "clarify_questions": questions,
-                "clarify_answers": answers,
-                "clarify_done": True,
-                **modes,
-            }
-
-        # Kept as the model wrote them, before the pinned answers below are filled in: a resume after
-        # ``--update`` changed a pin shows the new one. Removed when the quest finishes (not here: the node's
-        # result is saved only after it returns, and a crash in between would ask the model again).
-        self._keep_asked_clarify_questions(state["topic"], questions)
-        # Interactive: pre-fill any user-pinned answers as the
-        # default for each question's interrupt payload, so the human
-        # sees the interview / --update value already in the slot and
-        # only has to confirm. Cheap merge; an empty overrides dict
-        # is a no-op and preserves prior behavior.
-        if overrides:
-            for slot, value in overrides.items():
-                if isinstance(questions.get(slot), dict):
-                    questions[slot]["default"] = value
-        # NB: the on-disk ``.fi/clarify_questions.json`` snapshot (so a
-        # subprocess quest can render a web form) is written by ``Engine.run``'s
-        # clarify pause-exit branch, NOT here — the node re-executes on resume
-        # (interrupt() returns the answer), so writing it here would re-create
-        # the file the run loop just consumed and falsely re-show the form.
-        # Interactive: pause the graph until the caller resumes with answers.
-        payload = self._pause_for_human(
-            kind="clarify",
-            interaction="answer",
-            headline="confirm the research setup",
-            steps=[
-                f"Answer the {len(questions)} clarifying question(s) in the "
-                "panel (Web / VSCode) or at the CLI prompt.",
-                "Headless run? Write your answers into "
-                "`.fi/clarify_answer.json`, then resume.",
-            ],
-            payload={"clarify_questions": questions},
-        )
-        # payload is whatever the resume call sent. Accept either a
-        # dict (the answers) or a dict that includes a "clarify_answers"
-        # key (the GUI wraps it that way for forward-compat).
-        if isinstance(payload, dict) and "clarify_answers" in payload:
-            answers = payload["clarify_answers"]
-        elif isinstance(payload, dict):
-            answers = payload
-        else:
-            answers = None
-        if not isinstance(answers, dict) or not answers:
-            # Resumed with nothing (or a non-dict): the questions' own defaults are the answers.
-            answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
-        modes = self._resolve_modes(answers)
-        self._log_topic_shape_mismatch(
-            answers, no_simulation_resolved=modes["no_simulation_resolved"])
-        return {
-            "clarify_questions": questions,
-            "clarify_answers": answers,
-            "clarify_done": True,
-            **modes,
-        }
-
-    def _maybe_seed_clarify_from_proposal(
-        self,
-    ) -> tuple[Path, dict[str, Any]] | None:
-        """Check ``knowledge.local_papers`` for a ``*-proposal.md`` and
-        parse it into a clarify_answers shape. Returns
-        ``(proposal_path, answers)`` when a proposal is found and
-        parses cleanly; ``None`` otherwise.
-
-        Imported lazily so a quest with no local_papers (the common
-        case) doesn't pay the import cost. The proposal_seed module
-        is pure-Python with no heavy deps so the import is cheap
-        once paid."""
-        local_papers = list(self.config.knowledge.local_papers or [])
-        if not local_papers:
-            return None
-        from core.proposal_seed import seed_clarify_from_local_papers
-        return seed_clarify_from_local_papers(local_papers)
-
-    def _log_topic_shape_mismatch(
-        self, answers: dict[str, Any], *, no_simulation_resolved: bool,
-    ) -> None:
-        """Log a WARNING when the clarify-detected topic shape disagrees
-        with the engine's already-computed simulatability decision.
-
-        Specifically: if the topic shape is ``review`` / ``case_study``
-        / ``opinion`` BUT the engine resolved to SIMULATE, the quest
-        is about to run a Python experiment on a topic that doesn't
-        really want one. The downstream design and write prompts
-        already read ``topic_shape`` from ``clarify_answers`` and will
-        keep the experiment minimal + shift weight to the literature
-        synthesis — but the mismatch is worth surfacing in run.log so
-        the user can hand-pivot ``simulatability=no`` next time if
-        they prefer the no-experiment flow.
-
-        Takes the already-computed ``no_simulation_resolved`` so we
-        don't double-call ``_resolve_no_simulation_from_clarify``
-        (which logs at INFO each call). No-op when the slot is
-        missing (legacy quests pre-dating ``topic_shape``) or the
-        shape is ``experimental``.
-        """
-        answers = answers or {}
-        shape_raw = answers.get("topic_shape")
-        shape = ""
-        if isinstance(shape_raw, dict):
-            shape = str(shape_raw.get("default", "")).strip().lower()
-        elif isinstance(shape_raw, str):
-            shape = shape_raw.strip().lower()
-        if not shape or shape == "experimental":
-            return
-        if no_simulation_resolved:
-            # NO_SIMULATION path is consistent with non-experimental
-            # shapes — no warning needed.
-            return
-        self._log.warning(
-            "[clarify] topic_shape=%r but engine resolved to SIMULATE — "
-            "the quest will run an experiment on a topic that doesn't "
-            "want one. design + write stages will keep the experiment "
-            "minimal and shift weight to literature synthesis; set "
-            "``simulatability: \"no\"`` in clarify_overrides (the quotes "
-            "matter — PyYAML reads bare ``no`` as boolean False) if you "
-            "prefer the no-experiment flow.", shape,
-        )
-
-    def _resolve_no_simulation_from_clarify(
-        self, answers: dict[str, Any],
-    ) -> bool:
-        """Decide whether the ``no_simulation`` flag should be on for
-        this quest, based on the YAML config + the clarify answers.
-
-        Decision precedence (first match wins):
-
-        1. ``engine.no_simulation: true`` in YAML → always True. The
-           user's explicit override beats any LLM judgement.
-        2. ``simulatability`` answer in clarify (new slot, see
-           ``agents/clarify.md``):
-            - ``"no"`` → True. The LLM judged that Python can't
-              produce data that answers this question.
-            - ``"yes"`` or ``"uncertain"`` → False. The simulation
-              path runs; ``uncertain`` adds a review-time caveat (not
-              implemented in this method — happens in the review prompt).
-            An answer in the person's own words counts by its first word
-            ("yes, but more than 100 lines" is "yes").
-        3. **Legacy fallback** — ``empirical_vs_theoretical == "empirical"``
-           → True. Kept for back-compat with quests started before the
-           ``simulatability`` slot existed (resumes from old
-           checkpoints, hand-written YAML answers, etc.). New quests
-           should always have the simulatability slot populated.
-        4. The YAML's ``engine.clarify_overrides.simulatability`` (what the
-           interview wrote), when the clarify answer is missing, empty or
-           does not start with yes / no / uncertain. Also with clarify off.
-
-        Every resolution is logged at INFO level with the reason
-        (when available) so the user can see exactly why the engine
-        took whichever path it took — log line format:
-        ``[clarify] simulatability resolved: NO_SIMULATION|SIMULATE
-        (source=yaml|clarify_simulatability|clarify_empirical_legacy|yaml_clarify_overrides|default,
-        reason='<quote>')``.
-        """
-        answers = answers or {}
-        if self.config.engine.no_simulation:
-            self._log.info(
-                "[clarify] simulatability resolved: NO_SIMULATION "
-                "(source=yaml, reason='engine.no_simulation: true')",
-            )
-            return True
-
-        # ``simulatability`` may arrive in either shape:
-        # * dict ``{default, reason}`` — when callers pass through the
-        #   full clarify slot (the unit-test path in
-        #   test_engine_helpers, and any caller that explicitly
-        #   preserves the slot's reason).
-        # * bare string ``"yes" | "no" | "uncertain"`` — what
-        #   ``clarify_mode="auto"`` produces, because the reducer at
-        #   line ~530 collapses ``{k: v["default"]}`` for every slot
-        #   to keep ``clarify_answers`` flat for downstream prompt
-        #   substitution. The reason is dropped in that path; we log
-        #   "(no reason provided)" so the source is still greppable.
-        # Both shapes route the same — the contract is the decision.
-        sim = answers.get("simulatability")
-        decision, reason = _simulatability_answer(sim)
-        # A person answers in their own words ("yes, but more than 100 lines"): the leading yes / no / uncertain is
-        # the answer, the rest is their note.
-        decision = _leading_simulatability_word(decision) or decision
-        if decision or isinstance(sim, dict):
-            if decision == "no":
-                self._log.info(
-                    "[clarify] simulatability resolved: NO_SIMULATION "
-                    "(source=clarify_simulatability, reason=%r)",
-                    reason or "(no reason provided)",
-                )
-                return True
-            if decision in ("yes", "uncertain"):
-                self._log.info(
-                    "[clarify] simulatability resolved: SIMULATE "
-                    "(source=clarify_simulatability, decision=%s, reason=%r)",
-                    decision, reason or "(no reason provided)",
-                )
-                return False
-            # Unknown / empty decision — fall through to the YAML's answer,
-            # then the legacy fallback. Surface it though: an answer
-            # outside the documented {yes, no, uncertain} set ("maybe", a
-            # typo) silently changing the route is a routing bug waiting
-            # to bite, so a WARNING names the value in run.log.
-            if decision:
-                self._log.warning(
-                    "[clarify] the answer to \"can a simulation answer this?\" was %r, which does not start with "
-                    "one of {yes, no, uncertain}; using the empirical_vs_theoretical legacy check, else the "
-                    "setting in the YAML.", decision,
-                )
-
-        # Legacy fallback for quests scoped before the simulatability
-        # slot was added.
-        evt = answers.get("empirical_vs_theoretical")
-        if isinstance(evt, str) and evt.strip().lower() == "empirical":
-            self._log.info(
-                "[clarify] simulatability resolved: NO_SIMULATION "
-                "(source=clarify_empirical_legacy, "
-                "reason='empirical_vs_theoretical=empirical, "
-                "simulatability slot missing')",
-            )
-            return True
-
-        # The YAML's own answer (engine.clarify_overrides.simulatability, which the interview writes): used when the
-        # clarify answer left the question open (the person cleared the slot, wrote something with no yes / no in
-        # front, or their answer did not include it) and the legacy check above did not decide. After that check, so
-        # the interview's own "yes" (written for every quest not set to no-simulation) never outranks a topic judgment.
-        pinned = (getattr(self.config.engine, "clarify_overrides", None) or {}).get("simulatability")
-        pinned_decision = _leading_simulatability_word(_simulatability_answer(pinned)[0])
-        if pinned_decision:
-            self._log.info(
-                "[clarify] simulatability resolved: %s (source=yaml_clarify_overrides, decision=%s)",
-                "NO_SIMULATION" if pinned_decision == "no" else "SIMULATE", pinned_decision,
-            )
-            return pinned_decision == "no"
-
-        self._log.info(
-            "[clarify] simulatability resolved: SIMULATE "
-            "(source=default, neither the clarify answer nor the YAML says yes, no or uncertain)",
-        )
-        return False
-
-    def _resolve_survey_from_clarify(self, answers: dict[str, Any]) -> bool:
-        """Decide whether ``survey`` mode is on: a descriptive literature /
-        history synthesis with NO experiment AND NO dataset. True when
-        ``engine.survey_mode: true`` is pinned in YAML OR the clarify agent
-        classified ``topic_shape == 'survey'`` (a history / overview /
-        "evolution of X" humanities topic). Survey is a stronger form of
-        no_simulation — the caller (:meth:`_resolve_modes`) forces
-        ``no_simulation_resolved`` True whenever this is True, so the graph
-        skips both the experiment and the data-collection path."""
-        if self.config.engine.survey_mode:
-            self._log.info(
-                "[clarify] survey resolved: SURVEY "
-                "(source=yaml, reason='engine.survey_mode: true')",
-            )
-            return True
-        answers = answers or {}
-        shape = str(answers.get("topic_shape") or "").strip().lower()
-        if shape == "survey":
-            self._log.info(
-                "[clarify] survey resolved: SURVEY "
-                "(source=clarify_topic_shape, reason='topic_shape=survey')",
-            )
-            return True
-        return False
-
-    def _resolve_modes(self, answers: dict[str, Any]) -> dict[str, bool]:
-        """Resolve the two run-mode flags together and return them as a
-        state patch. ``survey_mode_resolved`` implies ``no_simulation_resolved``
-        (a survey has no experiment), so callers can spread this into their
-        clarify return dict and get a consistent pair. Passing ``{}`` (no
-        clarify answers, e.g. ``clarify=off``) still honours the YAML
-        ``engine.no_simulation`` / ``engine.survey_mode`` flags via the
-        underlying resolvers."""
-        survey = self._resolve_survey_from_clarify(answers)
-        no_sim = self._resolve_no_simulation_from_clarify(answers) or survey
-        return {
-            "no_simulation_resolved": no_sim,
-            "survey_mode_resolved": survey,
-        }
-
-    async def _node_ideate(self, state: QuestState) -> QuestState:
-        if self._commissioned():  # type: ignore[attr-defined]
-            self._log.info("[ideate] the commission gives the question; no ideas are made")
-            return {}
-        if self.config.engine.analyze_local_first:
-            # --analyze: the user supplied the data; there's nothing to
-            # ideate. Passthrough (no LLM call) — downstream reads
-            # chosen_idea via .get() and tolerates its absence.
-            self._log.info("[ideate] analyze_local_first — skipping ideation")
-            return {}
-        self._log.info("[ideate] topic=%s", state["topic"][:80].replace("\n", " "))
-        # Pull a few related items from the knowledge base to ground ideation.
-        # No chosen_idea yet — pass chat_fn so the source-router (if
-        # enabled) can still pick sources from the catalog using the
-        # topic alone. The search engines behind it match keywords, not the
-        # topic's sentences: the same one-call keyword derivation the
-        # literature step uses turns the topic into the field's terms first
-        # (the topic as written when it gives none, as before).
-        self.__dict__.setdefault("_last_call_id", {}).pop("ideate_query", None)
-        self.__dict__.setdefault("_last_call_outcome", {}).pop("ideate_query", None)
-        seed_queries = await self._derive_literature_queries(
-            state["topic"], work_scope=self._work_scope(state), node="ideate_query",
-        ) if self.knowledge.enabled else []
-        if self.knowledge.enabled:
-            if seed_queries:
-                self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
-            ideate_outcome = self.__dict__.get("_last_call_outcome", {}).get("ideate_query")
-            # Kept for a person to see (a failed one too); the literature step derives its own, from the topic AND the
-            # chosen direction.
-            _record_query_set(self.fi_dir, {
-                "stage": "ideate", "queries": seed_queries,
-                "model": (self._chat_provenance("ideate_query") or {}).get("model"),
-                "call_id": self.__dict__.get("_last_call_id", {}).get("ideate_query"),
-                "reason": "the idea step's grounding search (topic only)" + (
-                    "" if seed_queries else "; the derivation gave no query "
-                    + ("(its answer held none)" if ideate_outcome == "ok" else "(the call failed)")
-                    + ", so the topic was searched as written"),
-                "revised_by": "fi"}, log=self._log)
-        seeded = await self.knowledge.asearch(
-            seed_queries[0] if seed_queries else state["topic"], top_k=3,
-            chat_fn=functools.partial(self._chat_messages, node="source_router"),
-            work_scope=self._work_scope(state),
-        )
-        await self._flag_sources(seeded, "ideate")
-        prompt = self._prompts["ideate"].substitute(
-            topic=state["topic"],
-            literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
-            clarify_block=_format_clarify(state),
-        )
-        # Multi-model ensemble path: when the YAML carries
-        # provider.node_ensemble["ideate"], fan out N models in parallel
-        # and tournament-pick the best ideas-JSON. We skip the downstream
-        # ``ideate_tournament`` + ``ideate_reflect`` steps in that case —
-        # the ensemble's moderator already does that job (picking the
-        # best of N candidate idea-sets) and re-running tournament/reflect
-        # on top would double-bill for no quality gain.
-        ensemble_cfg = self._ensemble_for_node("ideate")
-        if ensemble_cfg is not None:
-            from core.ensemble import EnsembleError
-            try:
-                result = await self._ensemble_chat(
-                    prompt, node="ideate", ensemble_cfg=ensemble_cfg,
-                )
-                text = result.merged if isinstance(result.merged, str) else json.dumps(result.merged)
-                # Ensemble already did the "pick the best" work — skip
-                # tournament + reflect downstream.
-                ideate_skip_post_processing = True
-            except EnsembleError as e:
-                self._log.warning(
-                    "[ideate] ensemble all-failed (%s); falling back to single-call path", e,
-                )
-                text = await self._chat(prompt, node="ideate")
-                ideate_skip_post_processing = False
-        else:
-            text = await self._chat(prompt, node="ideate")
-            ideate_skip_post_processing = False
-        parsed = _parse_json_lenient(text) or {}
-        ideas = parsed.get("ideas") or []
-        chosen = parsed.get("chosen") or (ideas[0] if ideas else {"title": "fallback", "rationale": ""})
-
-        # Pairwise tournament. When enabled AND there are
-        # at least 2 ideas to compare, REPLACES the single critique
-        # call below with C(N, 2) parallel pairwise comparisons and
-        # picks the highest-win-count idea. See
-        # ``_run_ideate_tournament`` for the aggregation policy.
-        critique: dict[str, Any] = {}
-        tournament_result: dict[str, Any] | None = None
-        tournament_ran = False
-        if (not ideate_skip_post_processing
-            and self.config.engine.ideate_tournament and len(ideas) >= 2):
-            try:
-                chosen, tournament_result = await self._run_ideate_tournament(
-                    state, ideas, initial_chosen=chosen,
-                )
-                tournament_ran = True
-            except Exception as e:
-                self._log.warning(
-                    "[ideate] tournament failed: %s — falling through "
-                    "to ideate_reflect if enabled", e,
-                )
-        # Self-reflection. Single extra LLM call that may
-        # swap chosen_idea to a different entry from the brainstormed
-        # list. Skipped ONLY when the tournament actually ran (its
-        # pick subsumes the critique's purpose). If the tournament
-        # was enabled but couldn't run (N<2 ideas) or raised, reflect
-        # still gets its chance to refine the single idea.
-        if (not ideate_skip_post_processing
-            and not tournament_ran
-            and self.config.engine.ideate_reflect and ideas):
-            try:
-                critique_prompt = self._prompts["ideate_reflect"].substitute(
-                    topic=state["topic"],
-                    clarify_block=_format_clarify(state),
-                    ideas_block=json.dumps(ideas, indent=2),
-                    chosen_block=json.dumps(chosen, indent=2),
-                )
-                ctext = await self._chat(critique_prompt, node="ideate_reflect")
-                critique = _parse_json_lenient(ctext) or {}
-                swap_to = (critique.get("swap_to") or "").strip()
-                if swap_to:
-                    swapped = next(
-                        (i for i in ideas if i.get("title") == swap_to), None,
-                    )
-                    if swapped is not None:
-                        self._log.info(
-                            "[ideate] reflection swapped chosen: %r -> %r",
-                            chosen.get("title", "?"), swap_to,
-                        )
-                        chosen = {
-                            **swapped,
-                            "rationale": critique.get("refined_rationale")
-                            or swapped.get("rationale", ""),
-                        }
-                    else:
-                        self._log.info(
-                            "[ideate] reflection wanted unknown title %r; keeping original pick",
-                            swap_to,
-                        )
-                elif critique.get("refined_rationale"):
-                    chosen = {**chosen, "rationale": critique["refined_rationale"]}
-            except Exception as e:
-                self._log.warning("[ideate] reflection skipped: %s", e)
-
-        selection = ("ensemble" if ideate_skip_post_processing else "tournament" if tournament_ran
-                     else "reflection" if critique else "model")
-        out: QuestState = {"ideas": ideas, "chosen_idea": chosen, "idea_selection": selection}
-        if critique:
-            out["ideate_critique"] = critique
-        if tournament_result:
-            out["ideate_tournament"] = tournament_result
-        self._record(_attempts.LEDGER, lambda: {
-            "kind": "ideas",
-            "candidates": [{"title": i.get("title"), "hypothesis": i.get("hypothesis")}
-                           for i in (ideas if isinstance(ideas, list) else []) if isinstance(i, dict)],
-            "chosen": chosen.get("title") if isinstance(chosen, dict) else None,
-            "rule": selection,
-            "why": (chosen.get("rationale") if isinstance(chosen, dict) else "") or "",
-            "reflection": {"swap_to": critique.get("swap_to")} if isinstance(critique, dict) and critique else None,
-            "tournament": tournament_result or None,
-        })
-        return out
-
-    async def _run_ideate_tournament(
-        self,
-        state: QuestState,
-        ideas: list[dict[str, Any]],
-        *,
-        initial_chosen: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run C(N, 2) pairwise comparisons across ``ideas`` and return
-        ``(winner_idea, tournament_record)``.
-
-        The record carries the full match table for run.log + Axon
-        write-back so a future quest can see "we already tried these
-        ideas; the tournament picked X over Y because Z."
-
-        Each comparison fires one ``self._chat`` call to the
-        ``ideate_tournament`` prompt, returning ``{winner: A|B,
-        reason: ..., margin: decisive|narrow}``. The N matches run
-        concurrently via ``asyncio.gather`` so total wall-clock is one
-        LLM round-trip (plus parsing) regardless of N. For N=3
-        (FI default), that's 3 calls in parallel vs the prior 1
-        critique call serially.
-
-        Tie-breaking: highest total wins. Ties are then broken by
-        more "decisive" margins, then by EARLIEST original-list
-        position (the ``-i`` term in the sort key). The earliest-
-        position fallback is deterministic across runs but does NOT
-        prefer ``initial_chosen`` — that fallback only fires when NO
-        match resolved a clean winner (the "inconclusive_fallback"
-        outcome below), so the engine always has a chosen_idea for
-        downstream nodes.
-        """
-        from itertools import combinations
-
-        pairs = list(combinations(range(len(ideas)), 2))
-        self._log.info(
-            "[ideate] tournament: %d ideas, %d pairwise matches",
-            len(ideas), len(pairs),
-        )
-
-        async def play(a_idx: int, b_idx: int) -> dict[str, Any]:
-            prompt = self._prompts["ideate_tournament"].substitute(
-                topic=state["topic"],
-                clarify_block=_format_clarify(state),
-                idea_a=json.dumps(ideas[a_idx], indent=2),
-                idea_b=json.dumps(ideas[b_idx], indent=2),
-            )
-            text = await self._chat(prompt, node="ideate_tournament")
-            parsed = _parse_json_lenient(text) or {}
-            winner_label = str(parsed.get("winner", "")).strip().upper()
-            return {
-                "a_idx": a_idx, "b_idx": b_idx,
-                "winner": winner_label,                  # "A" or "B" or ""
-                "reason": parsed.get("reason", ""),
-                "margin": parsed.get("margin", "narrow"),
-            }
-
-        matches = await asyncio.gather(
-            *(play(a, b) for a, b in pairs), return_exceptions=True,
-        )
-
-        # Tally wins. Skip failed matches (Exception or empty winner).
-        wins = [0] * len(ideas)
-        decisive_wins = [0] * len(ideas)
-        valid_matches: list[dict[str, Any]] = []
-        for m in matches:
-            if isinstance(m, BaseException) and not isinstance(m, Exception):
-                raise m  # a cancellation or a model that cannot be used (ProviderUnusable) is not a failed match
-            if isinstance(m, Exception):
-                self._log.warning("[ideate] tournament match raised: %s", m)
-                continue
-            valid_matches.append(m)
-            w = m["winner"]
-            idx = m["a_idx"] if w == "A" else m["b_idx"] if w == "B" else -1
-            if idx >= 0:
-                wins[idx] += 1
-                if m["margin"] == "decisive":
-                    decisive_wins[idx] += 1
-
-        if not any(wins):
-            self._log.info(
-                "[ideate] tournament inconclusive (no valid match outcomes) "
-                "— keeping initial chosen=%r",
-                initial_chosen.get("title", "?"),
-            )
-            return initial_chosen, {
-                "matches": valid_matches, "winner_idx": None,
-                "wins": wins, "decisive_wins": decisive_wins,
-                "outcome": "inconclusive_fallback",
-            }
-
-        # Pick by (wins, decisive_wins, original-order) so ties break
-        # deterministically.
-        winner_idx = max(
-            range(len(ideas)),
-            key=lambda i: (wins[i], decisive_wins[i], -i),
-        )
-        winner = dict(ideas[winner_idx])
-        # Preserve the original rationale; append the tournament reason
-        # for grep-ability in run.log + paper writeback.
-        reasons = [
-            m["reason"]
-            for m in valid_matches
-            if (m["winner"] == "A" and m["a_idx"] == winner_idx)
-            or (m["winner"] == "B" and m["b_idx"] == winner_idx)
-        ]
-        winner["rationale"] = (
-            initial_chosen.get("rationale", "") + " "
-            + " ".join(f"[tournament] {r}" for r in reasons[:2])
-        ).strip()
-        self._log.info(
-            "[ideate] tournament resolved: winner=%r wins=%d (decisive=%d) "
-            "vs initial=%r",
-            winner.get("title", "?"), wins[winner_idx],
-            decisive_wins[winner_idx], initial_chosen.get("title", "?"),
-        )
-        # Compute the original-list index of ``initial_chosen`` so the
-        # "swapped" / "confirmed" outcome is decided by position, not
-        # title. Title comparison would mis-report a swap as
-        # "confirmed" when two ideas share a title (e.g. both fall
-        # back to the synthesized {"title": "fallback", ...}).
-        initial_title = initial_chosen.get("title")
-        initial_idx = next(
-            (i for i, idea in enumerate(ideas)
-             if idea.get("title") == initial_title),
-            -1,
-        )
-        return winner, {
-            "matches": valid_matches, "winner_idx": winner_idx,
-            "wins": wins, "decisive_wins": decisive_wins,
-            "outcome": "swapped" if winner_idx != initial_idx else "confirmed",
-        }
+        engine = self.config.engine
+        survey = bool(engine.survey_mode)
+        no_sim = bool(engine.no_simulation) or survey
+        self._log.info("[clarify] study mode: %s", "review of the literature (no experiment, no data)" if survey
+                       else "analysis of the data you give (no experiment)" if no_sim else "experiment")
+        out: dict[str, Any] = {"clarify_done": True, "no_simulation_resolved": no_sim, "survey_mode_resolved": survey}
+        if (self.config.title or "").strip():  # the person's own title (the commission's, or the config's): the paper uses it
+            out.update(title=self.config.title.strip(), title_confirmed=True)
+        return out  # type: ignore[return-value]
 
     def _lit_kwargs(self, state: QuestState) -> dict[str, Any]:
         """Relevance-selection kwargs for the ``_format_lit*`` helpers, from
@@ -847,491 +85,80 @@ class IdeasStageMixin:
         return WORK_SCOPE_PAPERS
 
     async def _node_literature(self, state: QuestState) -> QuestState:
-        if self._commissioned():  # type: ignore[attr-defined]
-            return await self._commission_literature(state)
-        if self.config.engine.analyze_local_first:
-            # --analyze: local-data-first, so NO external literature is
-            # retrieved. Passthrough — the analysis rests on the user's
-            # data, not on fetched sources.
-            self._log.info("[literature] analyze_local_first — no retrieval")
-            return {}
-        chosen = state.get("chosen_idea") or {}
-        prior = list(state.get("literature") or [])
-        prior_iter = int(state.get("literature_iter") or 0)
-        this_iter = prior_iter + 1
-        # On a broaden_lit re-entry, the design has already been
-        # written — fold its hypothesis into the query so the second
-        # pass searches for evidence that addresses the SPECIFIC
-        # design, not just the original chosen idea. First pass keeps
-        # the lean ``title + topic`` query because design hasn't run
-        # yet.
-        hypothesis = ""
-        if this_iter > 1 and state.get("design"):
-            hypothesis = str(state["design"].get("hypothesis") or "")[:200]
-            query = (chosen.get("title") or "") + " " + hypothesis + " " + state["topic"][:160]
-            self._log.info(
-                "[literature] iteration=%d (broaden_lit re-entry); query incorporates design.hypothesis",
-                this_iter,
-            )
-        else:
-            query = (chosen.get("title") or "") + " " + state["topic"][:200]
-        # A topic statement is written for a person; a search engine matches
-        # keywords. A real quest's 365-character topic came back from the
-        # academic sources with HTTP 200 and zero hits, where a 79-character
-        # keyword query found three on-target papers. One small call turns the
-        # topic into the terms the field publishes under. On any failure the
-        # concatenation above is kept, so a flaky model degrades to the old
-        # query rather than to no search at all.
-        scope = self._work_scope(state)
-        # The same search pass with the same inputs uses the queries it derived before (a resume after a pause runs
-        # this step again): no second call, and no drift to other queries finding other papers. A new pass, or
-        # changed inputs, derives them again, and the record says why.
-        title = chosen.get("title") or ""
-        derive_prompt = _literature_query_prompt(state["topic"], title, hypothesis, work_scope=scope)
-        # The model that derives them is part of what they answer: a different model derives them again.
-        deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
-        key = _query_set_key(derive_prompt, this_iter, deriving_model)
-        saved = [e for e in _read_query_sets(self.fi_dir, log=self._log) if e.get("stage") == "literature"]
-        # Only an entry whose digest checks out is used again. One changed after FI wrote it is said so, never used.
-        edited = [e for e in saved if e.get("key") == key and _query_set_standing(e) == "edited"]
-        if edited:
-            self._log.warning(
-                "[literature] the saved search queries for this pass in .fi/%s were changed after FI wrote them; they "
-                "are not used, and FI derives them again (to search with your own queries, put them in %s, one per "
-                "line)", _LITERATURE_QUERIES, _PERSON_QUERIES.as_posix())
-            self._audit("check_result", check="literature_queries", status="edited",
-                        summary=f"{len(edited)} saved query set(s) for this pass no longer match their digest")
-        ok_calls = _ok_calls(self.fi_dir, "literature_query")
-        prompt_sha = hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest()
-
-        def _backed(e: dict[str, Any]) -> bool:
-            # The entry names an answered call of this same prompt, and no other entry names that call.
-            cid = e.get("call_id")
-            return (cid in ok_calls and ok_calls[cid] == prompt_sha == e.get("prompt_sha256")
-                    and sum(1 for o in saved if o.get("call_id") == cid) == 1)
-
-        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))
-                     and e.get("revised_by") != "person" and _query_set_standing(e) == "verified"
-                     and _backed(e)), None)
-        person = _person_queries(self.quest_root) if self.config.knowledge.enabled else None
-        if person is not None:
-            # A person's own queries: used as given, recorded as their revision (once per version of the file).
-            queries, source_sha = person
-            known = next((e for e in reversed(saved) if e.get("revised_by") == "person"
-                          and e.get("source_sha256") == source_sha and e.get("iteration") == this_iter
-                          and _query_set_standing(e) == "verified"), None)
-            query_set = known or {
-                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
-                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(), "model": None,
-                "call_id": None, "reason": f"your queries in {_PERSON_QUERIES.as_posix()}", "revised_by": "person",
-                "source_sha256": source_sha,
-            }
-            query_set = {**query_set, "reused": known is not None}
-            if known is None:
-                _record_query_set(self.fi_dir, query_set, log=self._log)
-            self._audit("check_result", check="literature_queries", status="person",
-                        summary=f"searched with the person's own queries ({_PERSON_QUERIES.as_posix()})",
-                        source=_PERSON_QUERIES.as_posix(), source_sha256=source_sha, queries=queries)
-            self._log.info("[literature] searching with your queries from %s: %r", _PERSON_QUERIES.as_posix(), queries)
-        elif same is not None and self.config.knowledge.enabled:
-            queries = [q.strip() for q in same["queries"]][:3]
-            query_set = {**same, "reused": True}
-            self._log.info("[literature] reusing the search queries derived for this pass (by %s): %r",
-                           same.get("model") or "the model then", queries)
-        else:
-            if edited:
-                reason = "the saved queries for this pass were changed after FI wrote them"
-            elif any(e.get("key") == key and _query_set_standing(e) == "unverified" for e in saved):
-                reason = "the saved queries for this pass carry no digest (written before FI recorded one)"
-            elif any(e.get("key") == key and e.get("revised_by") != "person" and _usable_queries(e.get("queries"))
-                     and not _backed(e) for e in saved):
-                reason = ("the saved queries for this pass do not match an answered call in the record of model calls "
-                          "(none, another prompt, or a call another entry also names)")
-            elif any(e.get("iteration") == this_iter for e in saved):
-                reason = "the topic, the chosen direction, the hypothesis or the model changed"
-            elif saved:
-                reason = f"a new search pass ({this_iter})"
-            else:
-                reason = "the first search"
-            self.__dict__.setdefault("_last_call_id", {}).pop("literature_query", None)
-            self.__dict__.setdefault("_last_call_outcome", {}).pop("literature_query", None)
-            queries = await self._derive_literature_queries(
-                state["topic"], title, hypothesis, work_scope=scope,
-            )
-            call_id = self.__dict__.get("_last_call_id", {}).get("literature_query")
-            call_outcome = self.__dict__.get("_last_call_outcome", {}).get("literature_query")
-            query_set = {
-                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
-                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
-                "model": ((self._chat_provenance("literature_query") or {}).get("model") or deriving_model or None)
-                if queries else None,
-                "call_id": call_id, "reason": reason, "revised_by": "fi", "reused": False,
-            }
-            if not queries:
-                query_set["reason"] = (f"{reason}; the derivation gave no query "
-                                       + ("(its answer held none)" if call_outcome == "ok" else "(the call failed)")
-                                       + ", so the search used the topic and the chosen direction as written")
-            # Every derivation is kept, a failed one too (its empty list is never reused, so the next run tries again).
-            if self.config.knowledge.enabled:
-                _record_query_set(self.fi_dir, query_set, log=self._log)
-        derived = bool(queries)
-        if queries:
-            if not query_set.get("reused") and query_set.get("revised_by") != "person":
-                self._log.info("[literature] search queries derived from the topic: %r", queries)
-            query = queries[0]
-        else:
-            queries = [query.strip()]
-        chat_fn = functools.partial(self._chat_messages, node="source_router")
-        # One routing decision for all facets: they are phrasings of one
-        # topic, and routing each would spend a call re-deriving the same list.
-        sources = await self.knowledge.choose_sources(
-            query, chosen_idea=chosen, chat_fn=chat_fn,
-        )
-        self._log.info(
-            "[literature] searching sources=%s (knowledge.enabled=%s, "
-            "source_routing=%s)",
-            sources or "none", self.config.knowledge.enabled,
-            self.config.knowledge.source_routing,
-        )
-
-        async def _retrieve(q: str, *, web: bool = True) -> list:
-            return await self.knowledge.asearch(
-                q.strip(),
-                top_k=self.config.knowledge.top_k,
-                # The literature node is the one path that explicitly wants
-                # broad external retrieval when Axon misses — pass the
-                # config's external cap so a web miss returns ~20 abstracts
-                # instead of being silently capped at the Axon top_k.
-                external_top_k=self.config.knowledge.external_top_k,
-                chosen_idea=chosen,
-                chat_fn=chat_fn,
-                work_scope=scope,
-                sources=sources,
-                # Web search runs for the first facet only: the keyless
-                # DuckDuckGo backend throttles a burst of queries, and the
-                # other facets are there to reach scholarly work.
-                web=web,
-                # Full text is fetched once, below, for the sources that
-                # survive the relevance screen -- not for every facet's hits.
-                fetch_full_text=False,
-            )
-
-        per_facet = await asyncio.gather(*(
-            _retrieve(q, web=(i == 0)) for i, q in enumerate(queries)
-        ))
-        docs = _merge_round_robin(list(per_facet))
-        if docs:
-            why_none = ""
-        elif not self.config.knowledge.enabled:
-            why_none = " — knowledge.enabled is false, so nothing was searched"
-        else:
-            why_none = (
-                " — no source returned anything; look for [source-failures] at "
-                "the end of this log, and check network access"
-            )
-        self._log.info(
-            "[literature] hits per query=%s, %d after merging%s",
-            [len(x) for x in per_facet], len(docs), why_none,
-        )
-        # Relevance floor: drop off-topic sources the retriever returned before
-        # they reach the corpus. This is the ONLY relevance filter on the
-        # literature path — the LLM guard runs only under auto_collect, which
-        # survey / simulation quests skip — so without this a humanities topic
-        # carries e.g. change-point-math papers into analyze/write. Scored vs
-        # the raw topic; fail-open + never-starve (see _filter_docs_by_relevance).
-        rel_topic = (state.get("topic") or "").strip() or query
-        stats: dict = {}
-        filtered = self._filter_docs_by_relevance(rel_topic, docs, stats=stats)
-
-        # Re-search with different keywords when the whole retrieval missed.
-        # ``above_floor == 0`` means not one source cleared the threshold on
-        # its own merits and only never-starve retention kept anything — a
-        # symptom of a badly-worded query, not of a topic with no literature.
-        # Proceeding here is what produces "it gave me three irrelevant
-        # papers": min_keep pads the set and the writer treats the padding as
-        # evidence. Retrying with the model's alternative phrasings is the
-        # principled fix. Bounded, and skipped when unscored (see config).
-        kn = self.config.knowledge
-        tried_queries = list(queries)
-        if kn.requery_on_low_relevance and stats.get("scored") and docs:
-            attempt = 0
-            while stats.get("above_floor", 0) == 0 and attempt < kn.requery_max:
-                attempt += 1
-                alt = await self._propose_literature_queries(
-                    rel_topic, tried_queries, docs, work_scope=scope,
-                )
-                if not alt:
-                    self._log.info(
-                        "[literature] requery %d: no alternative query proposed; "
-                        "keeping the original results", attempt,
-                    )
-                    break
-                self._log.info(
-                    "[literature] requery %d/%d: nothing cleared the relevance "
-                    "floor (best cosine=%.2f) — retrying with %r",
-                    attempt, kn.requery_max, stats.get("best", 0.0), alt,
-                )
-                tried_queries.append(alt)
-                more = await _retrieve(alt)
-                if not more:
-                    continue
-                # Merge rather than replace: the first pass may still hold the
-                # single on-topic hit, and dedup happens downstream anyway.
-                docs = docs + more
-                stats = {}
-                filtered = self._filter_docs_by_relevance(
-                    rel_topic, docs, stats=stats,
-                )
-            if stats.get("above_floor", 0) > 0 and attempt:
-                self._log.info(
-                    "[literature] requery succeeded after %d retry(ies): "
-                    "%d doc(s) now clear the floor",
-                    attempt, stats.get("above_floor", 0),
-                )
-                # The query that found sources is the one later searches reuse, not the one that found none.
-                query, derived = tried_queries[-1], True
-        self._record_floor_verdicts(docs, filtered, stats, this_iter)
-        docs = filtered
-        # The original papers and textbooks a keyword search does not reach
-        # join the candidates, and the screen judges them like the rest.
-        docs = docs + await self._foundational_works(rel_topic, docs, work_scope=scope)
-        # The floor scores word overlap; the screen asks whether the paper
-        # could cite each source for a claim (see _screen_literature).
-        n_before_screen = len(docs)
-        docs = await self._screen_literature(rel_topic, docs, work_scope=scope, iteration=this_iter)
-        self._log.info(
-            "[literature] kept %d of %d after the relevance floor and the screen",
-            len(docs), n_before_screen,
-        )
-        # Legal full text for the scholarly sources that were kept (web pages
-        # already carry their page text). Once here rather than per facet.
-        docs = await self.knowledge.fetch_full_text(docs)
-        # Keep the FULL fetched text (no truncation): it lands uncapped on
-        # disk under data/literature/ for audit, and the prompt builders
-        # relevance-select the passages each node needs (see
-        # _format_lit_excerpt / knowledge.literature_excerpt_chars) rather
-        # than the old first-2000-chars slice that usually held only the
-        # abstract. content_quality records whether real full text was
-        # recovered or only the search snippet survived.
-        # The whole text goes to disk (data/literature/.full_text/, up to knowledge.full_text_max_kb); the state keeps
-        # its first _STATE_TEXT_CHARS, as it always held, so the checkpoint does not grow with a 10 MB source. Readers
-        # that need the whole text (the passage selection, the claim check's quote check) read it back through
-        # _item_content. content_quality says what the text is: full_text, abstract_only (not much more than the
-        # abstract), preview_only (a table of contents), or snippet_only (nothing fetched).
-        new_entries = [_literature_entry(self.quest_root, d.content, d.metadata) for d in docs]
-        # Dedup-merge: identity is DOI when present, otherwise the
-        # canonical URL, otherwise the first 200 chars of content.
-        # On the first iteration ``prior`` is empty so this is a
-        # straight assignment; on broaden_lit re-entries we accumulate
-        # so the design node sees the full corpus FI has seen for
-        # this quest.
-        # A specific-enough title is a second identity: the same text reached
-        # under several DOIs (or once with a DOI, once without) is one source.
-        seen: set[str] = set()
-        merged: list[dict[str, Any]] = []
-        for entry in (*prior, *new_entries):
-            md = entry.get("metadata") or {}
-            ident = (
-                str(md.get("doi") or "").strip()
-                or str(md.get("url") or "").strip()
-                or (entry.get("content") or "")[:200]
-            )
-            norm_title = _normalize_title(md.get("title") or "")
-            idents = [i for i in (ident, f"title:{norm_title}" if norm_title else "") if i]
-            if any(i in seen for i in idents):
-                continue
-            seen.update(idents)
-            merged.append(entry)
-        added = len(merged) - len(prior)
-        # Pull in any PDFs the user dropped under ``inputs/papers/`` on
-        # a previous pause cycle. Indexes them as new ``user_supplied``
-        # literature entries so the design / write nodes see real
-        # full text instead of only the upstream abstracts.
-        # A thread: a scanned paper is read by OCR here, about ten seconds a page, and the event loop runs the rest of
-        # a --fleet meanwhile.
-        merged, user_added = await asyncio.to_thread(
-            _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
-        )
-        if user_added:
-            self._log.info(
-                "[literature] picked up %d user-supplied paper(s) from inputs/papers/",
-                user_added,
-            )
-        # Each DOI looked up in Crossref for a retraction (core/retractions.py); a retracted source is marked, never
-        # used as support. No answer is "could not be checked", and nothing here stops the quest.
-        if self.config.knowledge.enabled:
-            merged, retraction_rows = await _retractions.check_literature(merged)
-            if retraction_rows:
-                self._record_source_verdicts("retractions", this_iter, "checked", retraction_rows)
-                self._log.info("[literature] %s", _retractions.summary_line(retraction_rows))
-        self._log.info(
-            "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
-            "+%d user-supplied, total=%d)",
-            len(docs), this_iter, added, user_added, len(merged),
-        )
-        # Text in a source that is hidden from a reader or addressed to an AI model is flagged, never removed
-        # (core/source_text.py): marked in the prompts, recorded in the audit trace, and the quest goes on.
-        await self._flag_sources(merged, "literature", record_clean=True)
-        qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
-        full_n = qualities.get("full_text", 0)
-        # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
-        # the paper's abstract. The line used to call all of those "snippet only", which read as if not even the
-        # abstract had come back.
-        not_fetched = [e for e in merged
-                       if ((e.get("metadata") or {}).get("content_quality") or "snippet_only") == "snippet_only"]
-        scholarly = [e for e in not_fetched if _is_scholarly_record(e.get("metadata") or {})]
-        with_abstract = sum(1 for e in scholarly if _search_record_has_abstract(e.get("content") or ""))
-        self._log.info(
-            "[literature] full-text coverage: %d/%d sources have real full text (%d by OCR of a scanned PDF); "
-            "%d papers have the abstract only (from the search, nothing downloaded), %d only a title or a one-line "
-            "snippet, %d a download that held little more than the abstract, %d a preview or table of contents, "
-            "%d web pages or notes from earlier quests",
-            full_n, len(merged), sum(1 for e in merged if (e.get("metadata") or {}).get("full_text_ocr")),
-            with_abstract, len(scholarly) - with_abstract,
-            qualities.get("abstract_only", 0), qualities.get("preview_only", 0),
-            len(not_fetched) - len(scholarly),
-        )
-        why = _literature_text_gaps(
-            merged, _sf_snapshot(self.quest_id),
-            downloads_on=bool(self.config.knowledge.enabled and self.config.knowledge.try_fetch_full_text))
-        if why:
-            self._log.info("[literature] why the full text is missing: %s", why)
-
-        # Pause-for-user-papers gate. Fires only when the user opted in
-        # AND we have abstract-only hits (heuristic: content shorter
-        # than ~1500 chars or carrying an explicit ``abstract_only``
-        # flag from the retriever). On a re-entry after the user
-        # dropped PDFs, ``inputs/papers/`` is non-empty and we don't
-        # pause again — the resume path picks up the new files and
-        # proceeds.
-        if not _papers_dir_has_files(self.quest_root):
-            # A retracted paper is never asked for: it is not to be cited (core/retractions.py).
-            withdrawn = _retractions.retracted_dois(merged)
-            abstract_only = [d for d in docs if _is_abstract_only(d)
-                             and _retractions.normalize_doi((d.metadata or {}).get("doi")) not in withdrawn]
-            # Split the genuinely paywalled from open-access sources we simply
-            # failed to fetch. Only the former justify stopping the quest to
-            # ask a person for help: an arXiv/PMC paper we could not download
-            # is OUR network problem, and a pause that asks the user to fetch
-            # a free paper is both confusing and usually futile (the same host
-            # is behind the same proxy). The OA ones are still listed in
-            # WANTED_PAPERS.md as a manual fallback -- a browser often works
-            # where httpx does not -- but they never trigger the pause.
-            oa_unfetched = [d for d in abstract_only if _is_open_access(d)]
-            needed = [d for d in abstract_only if not _is_open_access(d)]
-            if oa_unfetched:
-                self._log.warning(
-                    "[literature] %d open-access source(s) (arXiv/PMC/preprint) "
-                    "came back abstract-only -- full-text fetch failed for "
-                    "sources that are free to download. This usually means "
-                    "the host is unreachable (proxy/firewall), not a paywall. "
-                    "Listed in WANTED_PAPERS.md as a manual fallback; not "
-                    "pausing the quest for them.",
-                    len(oa_unfetched),
-                )
-            # Resuming from the papers pause without adding files is the answer "go on without them": those papers
-            # are not asked for again. Only the papers not yet declined are asked for.
-            already = 0
-            if self.config.pauses.papers:
-                declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
-                                                     getattr(self, "_resumed_from_pause", None))
-                if declined_now:
-                    self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
-                    self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
-                                   "inputs/papers/): they are read from their abstracts only", len(declined_now))
-                needed, already = _papers_to_ask(needed, self.fi_dir)
-            if needed or oa_unfetched:
-                _write_paper_need_stubs(
-                    self.quest_root, needed, self._log,
-                    query=_lit_query(state), oa_unfetched=oa_unfetched,
-                    paused=bool(needed and self.config.pauses.papers),
-                )
-            if needed and not self.config.pauses.papers:
-                # Unattended: FI downloads only free papers and never fetches a paywalled one itself.
-                self._log.info(
-                    "[literature] %d paper(s) are not confirmed free to read, so FI did not download them. They "
-                    "are read from their abstracts; the list with a link each is in needs/WANTED_PAPERS.md if you "
-                    "want to download some by hand.",
-                    len(needed),
-                )
-            if needed and self.config.pauses.papers:
-                self._pause_for_human(
-                    kind="papers",
-                    interaction="supply",
-                    headline=f"download {len(needed)} paper(s) not confirmed free to read",
-                    steps=[
-                        f"{len(needed)} relevant paper(s) came back abstract-only "
-                        "(not confirmed free to read). They're listed, most-relevant-first, in "
-                        "`needs/WANTED_PAPERS.md` with a download link each."
-                        + (f" ({already} other(s) you went on without earlier are not asked for again.)"
-                           if already else ""),
-                        "Download the few that matter and drop the PDFs into "
-                        "`inputs/papers/` — they're ingested as full text.",
-                        "Or go on without them: resume without adding files, and those papers are used from "
-                        "their abstracts only (FI will not ask for them again).",
-                    ],
-                    payload={
-                        "papers_required": True,
-                        "quest_id": self.quest_id,
-                        "papers_dir": str(self.quest_root / "inputs" / "papers"),
-                        "needed_count": len(needed),
-                    },
-                    upload_targets=["papers"],
-                )
-                # Unreachable in practice (see ``wait_for_data`` for the
-                # same pattern): interrupt() raises GraphInterrupt; on
-                # resume this node is re-invoked from the checkpoint,
-                # ``_ingest_user_dropped_papers`` picks up the new
-                # files, and the gate's else-branch falls through.
-                return {}
-        else:
-            left = sum(1 for d in docs if _is_abstract_only(d) and not _is_open_access(d))
-            if left:
-                self._log.info(
-                    "[literature] %d paper(s) are not confirmed free to read and FI did not download them; "
-                    "inputs/papers/ already has files, so no new list was written.", left,
-                )
-
-        # Download the retrieved sources to disk for EVERY quest (sim and
-        # no-sim alike) so the collected web/academic literature is always
-        # auditable on disk under ``data/literature/``. The no-simulation
-        # path additionally reuses the same corpus as analysis data via
-        # auto_collect_data (``data/auto_collected/``); this write
-        # guarantees a downloaded corpus even on the SIMULATION path,
-        # where auto_collect_data never runs (design → implement →
-        # execute …). Empty corpus → no files, no empty directory.
-        downloaded = self._write_literature_files(
-            merged, self.quest_root / "data" / "literature",
-        )
-        if downloaded:
-            self._log.info(
-                "[literature] downloaded %d source(s) to data/literature/",
-                downloaded,
-            )
-
-        out: QuestState = {
-            "literature": merged,
-            "literature_iter": this_iter,
-            "literature_query": query.strip(),
-            "literature_queries": queries,
-            "literature_query_derived": derived,
-            "literature_query_set": query_set,
-        }
-        novelty = await self._literature_novelty(state, merged, this_iter)
-        if novelty:
-            out["literature_novelty"] = novelty
-        return out
+        """The literature step: a study starts from a commission, so its sources are the ones the commission gives."""
+        return await self._commission_literature(state)
 
     async def _commission_literature(self, state: QuestState) -> QuestState:
-        """A commissioned study's literature: only the full texts it supplies (inputs/papers/), nothing searched for."""
+        """A study's literature: the sources its commission gives, the papers dropped in inputs/papers/ and the ones pinned in
+        ``knowledge.local_papers``; nothing is searched for."""
         prior = list(state.get("literature") or [])
         seen = {str((e.get("content") if isinstance(e, dict) else "") or "")[:200] for e in prior}
         merged, added = await asyncio.to_thread(_ingest_user_dropped_papers, self.quest_root, prior, seen, self._log)
-        merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
+        merged, pinned = self._pin_local_papers(merged)
+        if self._commissioned():  # type: ignore[attr-defined]  # an engine built without one (a test, a program) reads only the dropped papers
+            merged = _commission.given_sources(merged, self._commission_data())  # type: ignore[attr-defined]
+        merged = await self._check_retractions(merged, int(state.get("literature_iter") or 0) + 1)
         await self._flag_sources(merged, "literature", record_clean=True)  # type: ignore[attr-defined]
         self._log.info("[literature] the commission gives the sources: %d full text(s) read from inputs/papers/, "
-                       "nothing searched for", added)
+                       "%d pinned in knowledge.local_papers, nothing searched for", added, pinned)
         return {"literature": merged, "literature_iter": int(state.get("literature_iter") or 0) + 1}
+
+    def _pin_local_papers(self, merged: list[Any]) -> tuple[list[Any], int]:
+        """The papers the person pinned in ``knowledge.local_papers`` join the study's literature (once: one already there,
+        by DOI, link, text or title, is not added again). Returns ``(literature, how many were added)``."""
+        pinned = list(getattr(self.knowledge, "_local_papers", None) or [])  # type: ignore[attr-defined]
+        if not pinned:
+            return merged, 0
+        out = list(merged)
+        seen = {i for entry in out if isinstance(entry, dict) for i in _entry_identities(entry)}
+        added = 0
+        for doc in pinned:
+            entry = _literature_entry(self.quest_root, doc.content, dict(doc.metadata or {}))  # type: ignore[attr-defined]
+            ids = _entry_identities(entry)
+            if any(i in seen for i in ids):
+                continue
+            seen.update(ids)
+            out.append(entry)
+            added += 1
+        return out, added
+
+    async def _check_retractions(self, merged: list[Any], iteration: int) -> list[Any]:
+        """Every way a paper enters the study's literature (the commission's sources, ``inputs/papers/``, the pinned
+        papers, the ones added at the pause after the literature) goes through this one retraction lookup: each DOI in
+        Crossref (core/retractions.py); a retracted source is marked, never used as support. No answer is "could not be
+        checked", and nothing here stops the quest. Not made when retrieval is off or ``knowledge.offline`` is set (no
+        network is wanted then)."""
+        knowledge = self.config.knowledge  # type: ignore[attr-defined]
+        if not knowledge.enabled or knowledge.offline:
+            return merged
+        merged, rows = await _retractions.check_literature(merged)
+        if rows:
+            self._record_retractions(rows, iteration)
+            self._log.info("[literature] %s", _retractions.summary_line(rows))  # type: ignore[attr-defined]
+        return merged
+
+    def _record_retractions(self, rows: list[dict[str, Any]], iteration: int) -> None:
+        """Keep what Crossref says of each source's retraction in ``.fi/literature_queries.json`` (the record the to-do card
+        and the seal read). Entries are only added. Best-effort: a record never stops a quest."""
+        fi_dir = self.fi_dir  # type: ignore[attr-defined]
+        path = fi_dir / _LITERATURE_QUERIES
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            entries = [e for e in (data.get("entries") if isinstance(data, dict) else None) or [] if isinstance(e, dict)]
+            entries.append({"stage": "retractions", "iteration": iteration, "outcome": "checked", "sources": rows})
+            _write_query_sets(fi_dir, entries)
+        except (OSError, ValueError) as e:
+            self._log.debug("[literature] could not record the retraction lookups: %r", e)  # type: ignore[attr-defined]
+
+    def _study_given(self, state: QuestState) -> str:
+        """The study, for the prompts that name it (skills, design, the design's review): on a commissioned quest the
+        commission's question and scope, which fix the study; else the direction a checkpoint of an earlier FI chose
+        (FI makes no research ideas now), or ``(none)``."""
+        if self._commissioned():  # type: ignore[attr-defined]
+            data = self._commission_data()  # type: ignore[attr-defined]
+            return f"Question: {data.get('question')}\nScope: {data.get('scope')}"
+        chosen = state.get("chosen_idea")
+        return json.dumps(chosen, indent=2) if isinstance(chosen, dict) and chosen else "(none)"
 
     def _commission_block(self, state: QuestState) -> str:
         """What the commission fixes, for the plan's model, with each known value's source by its label ([n])."""
@@ -1341,57 +168,6 @@ class IdeasStageMixin:
                   for label, meta, _item in _labelled_sources(state.get("literature") or [])
                   if meta.get("source") == "user_supplied" and Path(str(meta.get("path") or "")).name in by_name}
         return _commission.prompt_block(data, labels)
-
-    async def _literature_novelty(self, state: QuestState, merged: list, iteration: int) -> dict[str, Any] | None:
-        """One call: do the retrieved sources already answer the study's question, and what does the study add?
-        Disclosed only (core/novelty.py): the checked answer goes to ``.fi/literature_novelty.json`` and into the plan and
-        writer prompts. It never stops the quest; a call that fails or gives nothing usable leaves no record."""
-        if not self.config.knowledge.novelty_check or not merged:
-            return None
-        try:
-            audience = self.config.output.audience  # the labels the writer cites by, so the checked ids can be cited
-            sources = []
-            for label, meta, item in _labelled_sources(merged, audience):
-                full = _item_content(item)
-                title = str(meta.get("title") or meta.get("source") or "")
-                sources.append({
-                    "id": label, "title": title, "year": meta.get("year") or "", "text": full,
-                    "excerpt": " ".join(_format_lit_excerpt(full, title, budget=_novelty.EXCERPT_CHARS).split()),
-                })
-            if not sources:
-                return None
-            chosen = state.get("chosen_idea") or {}
-            question = " ".join(str(chosen.get(k) or "").strip() for k in ("title", "rationale")).strip() or state["topic"]
-            prompt = self._prompts["literature_novelty"].substitute(
-                topic=state["topic"][:1500], question=question[:1200],
-                # Retrieved text is material to read, never instructions (core/source_text.py).
-                sources=_source_text.fence(_novelty.format_sources(sources)),
-            )
-            self.__dict__.setdefault("_last_call_id", {}).pop("literature_novelty", None)
-            raw = await self._chat(prompt, node="literature_novelty")
-            call_id = self.__dict__.get("_last_call_id", {}).get("literature_novelty")
-            record, counts = _novelty.check(_parse_json_lenient(raw, node="literature_novelty"), sources)
-            if record is None:
-                self._log.warning("[literature] the note on what the sources already answer could not be read; "
-                                  "the quest goes on without it")
-                return None
-            dropped = counts["dropped_unknown_source"] + counts["dropped_quote_not_found"]
-            self._log.info(
-                "[literature] sources already answer the question: %s; %d of %d evidence quotes checked and kept"
-                "%s", record["already_answered"], counts["kept"], counts["given"],
-                f" ({dropped} dropped: {counts['dropped_unknown_source']} unknown source, "
-                f"{counts['dropped_quote_not_found']} quote not in the source)" if dropped else "")
-            if not record["backed"]:
-                self._log.info("[literature] no quote backs the %r answer, so it is kept in the record only",
-                               record["already_answered"])
-            _novelty.write_record(self.quest_root, record, call_id=call_id, iteration=iteration,
-                                  model=(self._chat_provenance("literature_novelty") or {}).get("model")
-                                  or self._model_for_node("literature_novelty") or self.config.provider.model)
-            return record
-        except Exception as e:  # noqa: BLE001 - a note that cannot be made never stops a quest
-            self._log.warning("[literature] could not make the note on what the sources already answer (%s: %s); "
-                              "the quest goes on without it", type(e).__name__, str(e)[:200])
-            return None
 
     def _design_feedback(self, state: QuestState) -> str:
         """What a later design pass is told: the review, FI's precision record, the person's words, the points that need a
@@ -1541,18 +317,17 @@ class IdeasStageMixin:
         return design
 
     def _design_prompt(self, state: QuestState) -> str:
-        """The design prompt for this state: the topic, the chosen direction, the literature, the
+        """The design prompt for this state: the topic, the study, the literature, the
         clarifications, the skills and example files, and, on a later pass, what the review and the person said."""
         review_feedback = self._design_feedback(state)
         prompt = self._prompts["design"].substitute(
             topic=state["topic"],
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),
             # The full excerpts, as analyze and write get. At 800 characters a
             # source, design chose a 1% major-outbreak threshold in 6 of 10
             # replays of a real quest (0 of 5 at the full budget): short
             # excerpts cost it the context a sound design rests on.
             literature_block=_format_lit_from_state(state, **self._lit_kwargs(state)),
-            novelty_block=_novelty.design_block(state.get("literature_novelty")),
             review_feedback=review_feedback or "(none — first iteration)",
             timeout_s=str(self.config.execution.timeout_s),
             time_note=self._time_note(state),
@@ -1637,7 +412,7 @@ class IdeasStageMixin:
         review_node = self._review_node("design_review")
         critique_prompt = self._prompts["design_self_critique"].substitute(
             topic=state["topic"],
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),
             clarify_block=_format_clarify(state),
             draft_design=json.dumps(design, indent=2),
         )

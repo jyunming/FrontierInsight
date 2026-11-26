@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import time
@@ -16,10 +17,15 @@ from pathlib import Path
 from typing import Any
 
 STAGED_NAME = "commission.json"  # the quest's frozen copy, in inputs/
-RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exceeds_cap")
-GIVEN_STEPS = ("ideas", "literature", "studies")  # the --from steps the commission gives
-GIVEN_STAGES = {"ideate": "", "scope": "", "literature": "Reading the sources the commission gives."}
+# The fourth: a study run one step at a time (Config.step) whose step would go back to an earlier one (its ``step``).
+RETURN_REASONS = ("known_value_mismatch", "plan_contradicts_sources", "scope_exceeds_cap", "needs_earlier_step")
+GIVEN_STEPS = ("literature",)  # the --from steps the commission gives
+GIVEN_STAGES = {"literature": "Reading the sources the commission gives."}
 MIN_TEXT_CHARS = 200  # the floor of a paper dropped in inputs/papers/
+# How the study gets its evidence (the commission's ``method``): ``simulate`` (the default when it is absent) runs an
+# experiment of FI's own; ``analyze_data`` analyses the data the person puts in data/; ``review_literature`` runs no
+# experiment and needs no data. Each maps to (no experiment, no data) flags of the run.
+METHODS = ("simulate", "analyze_data", "review_literature")
 # A number as a passage may write it: a sign, thousands separators, a bare leading point, an exponent (e-3, x 10^-3)
 # on the same line (a page header "2023" over a line "e20230014" is two numbers, not 2023e20230014).
 _NUMBER = re.compile(r"(?<![\w.])([-+−]?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.\d+|\d+)"
@@ -31,7 +37,14 @@ class CommissionRefused(ValueError):
 
 
 def _number(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    """A finite number (not a bool, not infinity, not NaN): the one rule `fi check` and the start both use."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def hours_ok(v: Any) -> bool:
+    """A time limit in hours FI can use: a finite number above 0 whose seconds are finite too (the start counts in
+    seconds). The one rule `fi check` and the start (``Config._apply_commission``) both use."""
+    return _number(v) and v > 0 and math.isfinite(float(v) * 3600)
 
 
 def _text(v: Any) -> bool:
@@ -51,11 +64,12 @@ def number_value(m: re.Match[str]) -> float | None:
 
 def number_in_text(value: float, text: str) -> bool:
     """Whether ``text`` writes ``value`` with its sign (0.375 as 0.3750 or .375, 1200 as 1,200, 0.001 as 1e-3); a
-    number that is one side of a fraction or ratio of two numbers written with "/" (1/2) is not that value, while a
+    number that is one side of a fraction or ratio of two numbers written with "/" (1/2, 1/((2))) is not that value, while a
     unit written with one (0.25/h) leaves it the value."""
     text = str(text or "")
     for m in _NUMBER.finditer(text):
-        if re.search(r"\d\s*/\s*$", text[:m.start()]) or re.match(r"\s*/\s*[-+−]?\.?\d", text[m.end():]):
+        if (re.search(r"\d[\s)\]]*/[\s(\[]*$", text[:m.start()])
+                or re.match(r"[\s)\]]*/[\s(\[]*[-+−]?\.?\d", text[m.end():])):
             continue
         found = number_value(m)
         if found is not None and math.isclose(found, float(value), rel_tol=1e-9, abs_tol=0.0):
@@ -95,15 +109,35 @@ def read(path: Path) -> dict[str, Any]:
     return data
 
 
+def method_of(data: dict[str, Any]) -> str | None:
+    """The commission's ``method`` as written (None when it has none, or it is not a name FI knows)."""
+    method = data.get("method")
+    return method if isinstance(method, str) and method in METHODS else None
+
+
+def modes(data: dict[str, Any]) -> tuple[bool, bool] | None:
+    """What the commission's ``method`` sets for the run: ``(no_simulation, survey_mode)``, or None when it names no method.
+    ``review_literature`` is a survey, which is also a study with no experiment."""
+    method = method_of(data)
+    if method is None:
+        return None
+    return method != "simulate", method == "review_literature"
+
+
 def form_problems(data: dict[str, Any]) -> list[str]:
     """What is missing or of the wrong type in the commission ``data``, one plain sentence each."""
     out = [f"the commission has no `{k}` (a sentence)" for k in ("question", "scope") if not _text(data.get(k))]
+    if "method" in data and method_of(data) is None:
+        out.append(f"`method` is {data['method']!r}; it is one of {', '.join(f'`{m}`' for m in METHODS)} "
+                   "(or leave it out to run an experiment)")
+    if "title" in data and not _text(data["title"]):
+        out.append("`title` is empty or not text (a short phrase; leave it out to use the question)")
     limits = data.get("limits") if isinstance(data.get("limits"), dict) else None
     if limits is None:
         out.append("the commission has no `limits` (`hours` and `model_calls`)")
     else:
-        if not (_number(limits.get("hours")) and limits["hours"] > 0):
-            out.append("`limits.hours` is missing or is not a number above 0")
+        if not hours_ok(limits.get("hours")):
+            out.append("`limits.hours` is missing, is not a number above 0, or is too large to count")
         if not (_number(limits.get("model_calls")) and float(limits["model_calls"]).is_integer() and limits["model_calls"] > 0):
             out.append("`limits.model_calls` is missing or is not a whole number above 0")
     known = data.get("known_values")
@@ -247,8 +281,34 @@ def stage(path: Path, quest_root: Path) -> dict[str, str]:
     for raw, name in staged_names(read(path)).items():
         shutil.copy2(_resolve(raw, Path(path).resolve().parent), papers / name)
         texts[f"inputs/papers/{name}"] = sha256(papers / name)
-    shutil.copy2(path, staged_path(quest_root))  # last: this copy is what says the quest was staged
-    return {f"inputs/{STAGED_NAME}": sha256(staged_path(quest_root)), **texts}
+    files = {f"inputs/{STAGED_NAME}": sha256(path), **texts}  # the copy is the file itself, byte for byte
+    manifest = _manifest_path(quest_root)  # the hashes are on disk before the copy that says the quest was staged
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.with_name(manifest.name + ".tmp").write_text(json.dumps(files, indent=1), encoding="utf-8")
+    os.replace(manifest.with_name(manifest.name + ".tmp"), manifest)
+    copy = staged_path(quest_root).with_name(STAGED_NAME + ".tmp")  # whole or not there: never half a file
+    shutil.copy2(path, copy)
+    os.replace(copy, staged_path(quest_root))  # last: this copy is what says the quest was staged
+    return files
+
+
+def _manifest_path(quest_root: Path) -> Path:
+    return Path(quest_root) / ".fi" / "commission_files.json"
+
+
+def _manifest(quest_root: Path) -> dict[str, str] | None:
+    """The manifest written with the staging; ``None`` when it is missing or unreadable."""
+    try:
+        kept = json.loads(_manifest_path(quest_root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return kept if isinstance(kept, dict) else None
+
+
+def staged_files(quest_root: Path) -> dict[str, str]:
+    """Each file the staging copied (its path in the quest) -> its sha256: the manifest written with the staging, with
+    what the trace recorded laid over it (so a quest stopped before the trace event is checked all the same)."""
+    return {**(_manifest(quest_root) or {}), **(_recorded(quest_root).get("files") or {})}
 
 
 def _recorded(quest_root: Path) -> dict[str, Any]:
@@ -268,13 +328,70 @@ def recorded_sha(quest_root: Path) -> str | None:
     return sha256(staged_path(quest_root)) if staged_path(quest_root).is_file() else None
 
 
-def door(path: Path | None, quest_root: Path | None) -> None:
-    """Before any model call: a new quest's commission is validated; a resumed quest's must be the one it began with."""
+def topic_problem(path: Path, topic: Any) -> str | None:
+    """Why a config's ``topic:`` cannot go with the commission at ``path`` (it is not the commission's question), or
+    None: no topic, or the same text. The commission sets the question, so the config cannot ask another one."""
+    if not _text(topic):
+        return None
+    question = read(path).get("question")
+    if _text(question) and " ".join(str(topic).split()) == " ".join(str(question).split()):
+        return None
+    return ("the config's `topic:` is not the commission's question, and the commission sets the question; remove "
+            "`topic:` from the config (or make it the commission's question word for word)")
+
+
+def _started(quest_root: Path) -> bool:
+    """Whether the quest has a record of its own (its checkpoint, its trace or its plan): it has begun."""
+    root = Path(quest_root)
+    return any(p.is_file() for p in (root / ".fi" / "state.sqlite", root / ".fi" / "audit.jsonl", root / "plan.md"))
+
+
+def mode_problem(path: Path, asked: Any) -> str | None:
+    """Why a config's ``engine.no_simulation`` / ``engine.survey_mode`` cannot go with the commission at ``path``, or None:
+    neither is on, or the commission's ``method`` says the same. ``asked`` is the config's ``engine`` section (a mapping)
+    or anything with those two attributes; a mode the config turns on is the commission's to say, not the config's."""
+    def on(name: str) -> bool:
+        return (asked.get(name) if isinstance(asked, dict) else getattr(asked, name, None)) is True
+
+    if on("analyze_local_first"):  # ``--analyze <data>`` or ``engine.analyze_local_first: true``: the person's own data
+        method = method_of(read(path))
+        if method != "analyze_data":
+            said = f"it says `method: {method}`" if method else "it has no `method`"
+            return ("analysing the data you give (`--analyze`, or `engine.analyze_local_first: true`) needs the commission "
+                    f"to say so, and {said}; put `method: analyze_data` in the commission")
+    no_sim, survey = on("no_simulation"), on("survey_mode")
+    if not (no_sim or survey):
+        return None
+    key = "engine.survey_mode" if survey else "engine.no_simulation"
+    say = "review_literature" if survey else "analyze_data"
+    method = method_of(read(path))
+    if method is None:
+        return (f"the config sets `{key}: true`, and the commission says how the study is done; put `method: {say}` in "
+                "the commission (and remove the line from the config)")
+    if (survey and method != "review_literature") or (no_sim and method == "simulate"):
+        return (f"the config sets `{key}: true` but the commission says `method: {method}`; the commission decides, so "
+                "remove the line from the config or change the commission's method")
+    return None
+
+
+def door(path: Path | None, quest_root: Path | None, *, topic: Any = None, asked: Any = None) -> None:
+    """Before any model call: a new quest's commission is validated; a resumed quest's must be the one it began with.
+    A study without a commission is refused, new or resumed (``Engine`` itself does not refuse: every start path calls
+    this first), and so is a config whose ``topic`` is not the commission's question (:func:`topic_problem`) or whose
+    ``engine`` section (``asked``) turns on a mode the commission's ``method`` does not give (:func:`mode_problem`;
+    a new quest only, since a quest already begun has its modes in its checkpoint)."""
     had = recorded_sha(quest_root) if quest_root is not None else None
     name = Path(quest_root).name if quest_root is not None else ""
-    if had is None and path is not None and quest_root is not None and (Path(quest_root) / "plan.md").is_file():
-        raise CommissionRefused(f"quest {name} already has a plan.md that was not written from a commission, so the "
-                                f"commission {path} cannot be given to it; start a new quest with it")
+    if had is None and path is None:
+        raise CommissionRefused(
+            "no study was started: every study starts from a commission file, which this config does not name "
+            "(`commission: <file>`); `fi new` writes one to fill in, with a config that names it, and `fi check <file>` "
+            "checks it" if quest_root is None
+            else f"quest {name} was started without a commission file, and FI no longer goes on with a study that has "
+            "none; start a new study from a commission (`fi new`)")
+    if had is None and path is not None and quest_root is not None and _started(quest_root):
+        raise CommissionRefused(f"quest {name} was started without a commission file, so the commission {path} "
+                                "cannot be given to it now; start a new quest with it")
     if had is not None and path is None:
         raise CommissionRefused(f"quest {name} was started from a commission and the config given no longer names one; "
                                 "resume it with the config it was started with")
@@ -283,7 +400,10 @@ def door(path: Path | None, quest_root: Path | None) -> None:
                                 "changed), and a commission cannot change after it is handed over; nothing was run. "
                                 "Resume with the file as it was, or start a new quest")
     root = Path(quest_root or ".")
-    changed = [rel for rel, want in ((_recorded(root).get("files") or {}) if had else {}).items()
+    if had is not None and not _recorded(root) and _manifest(root) is None:
+        raise CommissionRefused(f"quest {name} was staged from a commission but the record of its files is missing, so "
+                                "its copies cannot be checked; nothing was run. Start a new quest")
+    changed = [rel for rel, want in (staged_files(root) if had else {}).items()
                if not (root / rel).is_file() or sha256(root / rel) != want]
     if changed:
         raise CommissionRefused(f"quest {name}'s own copy of what its commission gave is no longer the one it was started "
@@ -291,6 +411,10 @@ def door(path: Path | None, quest_root: Path | None) -> None:
                                 "they were, or start a new quest")
     if path is not None and had is None:
         validate(path)
+    if path is not None and (why := topic_problem(path, topic)) is not None:
+        raise CommissionRefused(why)
+    if path is not None and had is None and (why := mode_problem(path, asked)) is not None:
+        raise CommissionRefused(why)
 
 
 def given_sources(literature: list[Any], data: dict[str, Any]) -> list[Any]:
@@ -391,3 +515,110 @@ def write_return(quest_root: Path, reason: str, problem: str, evidence: Any, tri
     (Path(quest_root) / "needs").mkdir(parents=True, exist_ok=True)
     (Path(quest_root) / "needs" / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
     return record
+
+
+# What `fi new` writes: every key a commission has, each with a line saying what goes there. Left as it is, `fi check`
+# names every key still to fill in.
+TEMPLATE = """\
+# The study FI is asked to run, written by `fi new`. Fill in every key, then check the file:  fi check {name}
+# FI runs the study as written here and never changes it; a study it cannot do is handed back with the reason.
+
+# The research question, in one sentence.
+question: ""
+
+# A short phrase to call the study by; leave it out and the question is used.
+# title: ""
+
+# How the study gets its evidence: simulate (FI runs an experiment; the default), analyze_data (you put the data in
+# the study's data/ folder) or review_literature (no experiment and no data: a review of the sources).
+method: simulate
+
+# What the study covers and what it leaves out: the cases, the ranges of the parameters, the methods compared.
+scope: ""
+
+# The most the study may use: hours of computing and model calls.
+limits:
+  hours: 1
+  model_calls: 60
+
+# Values already known for a case of the study, each stated in a source whose full text you give. FI checks its own
+# results against them. One block per value (remove the leading "# "):
+# - name: ""          # a short name for the value
+#   value: 0.0        # the number
+#   tolerance: 0.0    # how far a result may be from it and still agree
+#   case: ""          # the situation it applies to: which form, which parameter values
+#   passage: ""       # the sentence of the source that states the value, copied as it is written
+#   source:
+#     title: ""       # the source's title
+#     file: ""        # its full text (.pdf, .md or .txt), relative to this file
+#     doi: ""         # its DOI, when it has one
+known_values: []
+
+# true when no value is known yet (the results then have no outside value to agree with).
+no_known_values: false
+
+# What counts as the question answered yes, and how each is checked.
+success:
+  - condition: ""
+    verify: ""
+
+# What counts as the question answered no, and how each is checked.
+failure:
+  - condition: ""
+    verify: ""
+
+# What you already doubt about the study, one sentence each; [] when there is nothing.
+doubts: []
+"""
+
+# The config `fi new` writes beside it: the commission gives the study, the config how FI runs it.
+CONFIG_TEMPLATE = """\
+# How FI runs the study in {commission}, written by `fi new`. Fill in the commission, then start:  fi --config {name}
+
+commission: {commission}
+
+# The model: provider.name (openai, gemini, claude_cli, codex_cli, gemini_cli, ollama or vscode_extension) and, if
+# you like, provider.model.
+provider:
+  name: {provider}
+
+output:
+  output_dir: ./outputs
+"""
+
+
+def write_new(folder: Path, provider: str) -> tuple[Path, Path]:
+    """``fi new``: a commission to fill in and the config that names it, in ``folder``; never over an existing file
+    (``commission-2.yaml`` with ``study-2.yaml``, and so on). Returns (commission, config)."""
+    n = 1
+    while True:
+        tail = "" if n == 1 else f"-{n}"
+        commission, config = Path(folder) / f"commission{tail}.yaml", Path(folder) / f"study{tail}.yaml"
+        if not (commission.exists() or config.exists()):
+            break
+        n += 1
+    for path, text in ((commission, TEMPLATE.format(name=commission.name)),
+                       (config, CONFIG_TEMPLATE.format(commission=commission.name, name=config.name, provider=provider))):
+        with open(path, "x", encoding="utf-8", newline="\n") as fh:  # "x": never over a file that appeared meanwhile
+            fh.write(text)
+    return commission, config
+
+
+def check(path: Path) -> tuple[bool, list[str]]:
+    """``fi check <file>``: whether the commission can be used, and one plain sentence per rule it breaks (the rules
+    FI runs before a study starts), or one saying it can be used. No model is asked."""
+    path = Path(path)
+    try:
+        raw = read(path)
+    except CommissionRefused:
+        raw = {}
+    topic = None
+    if raw.get("commission") and "question" not in raw:  # a config that names its commission: that file is checked
+        path, topic = locate(raw["commission"], path.resolve().parent), raw.get("topic")
+    found = problems(path)
+    if not found and (why := topic_problem(path, topic)) is not None:
+        found = [why]
+    if found:
+        return False, [f"{p[:1].upper()}{p[1:]}." for p in found]
+    sources = " and each passage is in its source" if (read(path).get("known_values") or []) else ""
+    return True, [f"The commission {path} can be used: every key is there{sources}."]

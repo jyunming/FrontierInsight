@@ -8,7 +8,7 @@ updated: 2026-09-30
 A picture of every step of a quest, in seven blocks: understand the question, read the literature, plan the work, build and run the experiment (or use real data), judge the result, write and review. Each step shows a plain title, what it reads and writes, and a status:
 
 - **finished**,
-- **where it stopped**: the step a paused quest waits in (the review decision, the plan, papers to download, the setup questions), the step that failed, or where a killed run was,
+- **where it stopped**: the step a paused quest waits in (the review decision, the plan, papers to download), the step that failed, or where a killed run was,
 - **not reached**, or **off** (a path this quest does not take).
 
 A paused quest is not shown as finished. A quest counts as finished only when nothing is left to run and there is no pause, `NEXT_STEP.md` or failure note.

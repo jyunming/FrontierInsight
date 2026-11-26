@@ -10,20 +10,17 @@ commands:
 
 | Command | What it does | LLM calls |
 |---|---|---|
-| `@fi` *(no command)* | Starts the interactive interview — 8 quick questions (topic, title, outputs, paper format, research approach, clarify mode, reviewer panel, knowledge layer), produces a config, runs the quest. Best first-time path. | ~23–28 (one full quest, see below) |
-| `@fi /new` | Same as bare `@fi`. | ~23–28 |
-| `@fi /start <path-to-yaml>` | Runs a quest from an existing YAML config. | ~23–28 |
+| `@fi` *(no command)* | Shows the help. | **0** |
+| `@fi /start <path-to-yaml>` | Runs a quest from a YAML config that names a commission file (see [The commission file](#the-commission-file); `fi new` in a terminal writes one to fill in). | ~23–28 (one full quest, see below) |
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
-| `@fi /resume <quest_id> --from <step>` | Does the quest again from `ideas`, `literature`, `studies`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
+| `@fi /resume <quest_id> --from <step>` | Does the quest again from `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the model behind the numbers, the design) in the editor, next to your other tabs, to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
-| `@fi /proposal <topic>` | Pre-quest planning doc. Writes both a markdown proposal and a companion YAML under `outputs/_drafts/`. Use to scope a research question BEFORE committing compute to a full quest. | **1** |
-| `@fi /analyze <data-path> <topic>` | No-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `auto_collect_data → wait_for_data → data_load → analyze → write → review`. Inverse of `/proposal` — when you already have the dataset and just want a paper analyzing it. | **~6** |
+| `@fi /analyze <data-path> <commission-file>` | No-simulation quest on pre-staged data; the commission's question is what the analysis answers. Files under `<data-path>` are copied into the new quest's `data/` directory; the engine routes `wait_for_data → data_load → analyze → write → review`. Use it when you already have the dataset and want a paper analyzing it. | **~6** |
 | `@fi /digest [days]` | Weekly project-manager digest across your quests: completed, in-progress, themes, ✅/🆕/⚠️/🛑/❓ diff vs prior digest, suggested next quests. Default window: 7 days. | **1** (or 0 if window is empty) |
-| `@fi /portfolio` | All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next quests. | **1** (or 0 if no quests on disk) |
 | `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
 | `@fi /rename <quest_id> <new title>` | Changes a finished or paused quest's title (see [Changing a quest's title](#changing-a-quests-title)). | **0** |
 | `@fi /help` | Lists the commands. | **0** |
@@ -34,7 +31,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 
 1. **Ideas** — turns your topic into a research question.
 2. **Literature** — finds and reads the papers the question rests on.
-3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from, and each check with a known answer (an oracle) with where its expected value comes from), how we will judge whether the code got better (two to five checks of correctness FI computes after every run, never the study's own finding), the method and the numbers to be reported (under *What the study returns*: what kind of number each result is, which settings it may change with, whether each run returns it, whether it is one number, a curve or a map in each run, its bound where physics fixes one, and the studied system: its parts, what each carries and what touches what; a sub-study or group of results named in code gets a plain title). It also says what kind of study this is: a **measurement** (how a result changes over settings chosen in advance) or a **search for the best design** (the design that makes one result as low or as high as possible, within limits, compared with the design to beat, the baseline). When the topic does not make that clear, the quest asks you one question first (when the setup questions are asked; otherwise the plan decides). A search's plan shows, under *What is being optimised*, the goal, what may change and over what range, the limits, the design to beat and how many evaluations the search and the check at finer settings will take. Such a plan is never run as a plain sweep.
+3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from, and each check with a known answer (an oracle) with where its expected value comes from), how we will judge whether the code got better (two to five checks of correctness FI computes after every run, never the study's own finding), the method and the numbers to be reported (under *What the study returns*: what kind of number each result is, which settings it may change with, whether each run returns it, whether it is one number, a curve or a map in each run, its bound where physics fixes one, and the studied system: its parts, what each carries and what touches what; a sub-study or group of results named in code gets a plain title). It also says what kind of study this is: a **measurement** (how a result changes over settings chosen in advance) or a **search for the best design** (the design that makes one result as low or as high as possible, within limits, compared with the design to beat, the baseline). When the topic does not make that clear, the plan decides. A search's plan shows, under *What is being optimised*, the goal, what may change and over what range, the limits, the design to beat and how many evaluations the search and the check at finer settings will take. Such a plan is never run as a plain sweep.
 4. **Design** — fixes the experiment: settings, runs per setting, what counts as a pass.
 5. **Write the code** — writes the simulation and its analysis as two scripts (one script with `execution.split_analysis: false`), and marks in the simulation where each equation of the plan's model is computed (`# E1`). By default the code is laid out as a small research tool: the model's equations in a package of their own (`code/<package>/`), unit tests from the plan's checks (`code/tests/test_oracles.py`) and `code/METHODS.md` saying which function computes each equation. The plan says what that costs (*How the code will be laid out*); over the limit the quest keeps two scripts and says so.
 6. **Run** — first runs the checks with a known answer: FI runs the simulation on each check's small case itself and compares the result with the plan's expected value (a failing check is sent back for repair, and the quest stops before the main run if it still fails; see [rigor.md](rigor.md)); then runs them; a crash goes back to a fix-and-run loop first. When one of the plan's checks of correctness is not met, FI then changes the simulation one small step at a time (at most `engine.improve_rounds`, 3 by default) and keeps a change only when it makes a check better and none worse; a kept version is run once more in full, and that run is the one analysed. Every round is in `code/CHANGELOG.md`. A topic that needs real data collects and loads it here instead. For a search for the best design, FI itself runs the search: it tries one design after another (the baseline, the design to beat, first, then the coarse scan when the plan has one), calls the simulation once per design, stays within the plan's evaluation budget and the run's time limit, and never picks a design that breaks a limit. It writes every evaluation to `raw/optimisation_ledger.jsonl` and the result to `results/best_design.json`: the best design, the baseline scored the same way, how much better it is, the method, and how many evaluations were used. The methods are FI's own (`bounded_local`, `global_then_local`, `exhaustive`); a `scipy:` or `optuna:` method named in the plan is used when the quest's environment already has that package, and otherwise FI says so and uses its own. The best design is found at the search's own numerical settings; then FI checks it: it evaluates the best designs and the baseline (the design to beat) again at the finer settings the plan names (half, then a quarter, of the search's value when it names none), nudges the best design, and compares the designs the separate searches from different starting points ended at. `run.log` gives one plain verdict (for example "the improvement over the baseline holds at finer numerical settings", or "the improvement over the baseline disappears at finer settings") and a line per check; the full record is `needs/OPTIMUM_CHECK.json`. A design counts as better when it beats the baseline by more than the plan's threshold, or, when the plan gives none, by more than the numerical error of the two designs. A check that fails does not stop the quest: it is reported as the result and keeps the evidence level lower (see [rigor.md](rigor.md)). The check's evaluations come on top of the search's budget; `plan.md` shows how many at most.
@@ -42,24 +39,16 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 8. **Write the paper** — the paper, then a check that each claim is backed. The writer does not type the facts of the run: FI writes one paragraph of them at the end of the Methods from its own records (how many settings and trials ran and how many failed, and how long the experiment took). Each thing the study did not do (a part of the topic, a quantity left out, an equation not tested, an open problem in the code that can change a result, a second version of a function that still disagrees) is one plain sentence FI writes from its records into `QUALITY.md`; the paper carries no list or mark of FI's. A paper that types a run time or a seed that disagrees with the records is sent back to be written again. A value FI has no record of reads "not recorded" and is listed in `QUALITY.md`. How the design was revised and how many runs were made, FI's record of the run and the open points in the code are in `QUALITY.md`, not in the paper.
 9. **Review** — a reviewer reads it; the quest is done, or goes back.
 
-It can go back at several points, each bounded: a crashed script is fixed and run again; a finding that needs a new experiment returns to the design, and one that needs more reading goes back to the literature first; the evidence check can send it back to the literature once, or, when the run produced no results, to the design once (a script that could not run to the end has its code written again from the same design instead, once per design) (with `engine.phased: true`, on by default for research, it also sends an accepted result back to the run once, to confirm the frozen design on held-back data or new seeds); a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. Optional steps are left out above: the setup questions about your topic before the ideas (asked when someone can answer while the quest runs, otherwise answered by the agent; `pauses.clarify: off` skips them), and for a topic with no experiment, data collection instead of running code. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
+It can go back at several points, each bounded: a crashed script is fixed and run again; a finding that needs a new experiment returns to the design, and one that needs more reading goes back to the literature first; the evidence check can send it back to the literature once, or, when the run produced no results, to the design once (a script that could not run to the end has its code written again from the same design instead, once per design) (with `engine.phased: true`, on by default for research, it also sends an accepted result back to the run once, to confirm the frozen design on held-back data or new seeds); a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. Optional steps are left out above: the first node, which asks nothing (it sets from the commission's `method` whether the study runs an experiment, analyses your data or reviews the sources), and for a study with no experiment, data collection instead of running code. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
 
 ### Per-quest LLM call breakdown
 
-A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; the engine settings of those runs — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
+A single `/start` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; the engine settings of those runs — a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
 
 | Node | Calls | Notes |
 |---|---|---|
-| `clarify` | 0–1 | One call unless `pauses.clarify: off`. It asks what you want to see and proposes titles. |
-| `ideate` | 1 | |
-| `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. Skipped when `ideate_tournament` is on. |
-| `ideate_tournament` | 0 or C(N,2) | Off by default. When on with the default 3 ideas, fires 3 parallel pairwise comparisons (~one round-trip wall-clock) and picks the highest-win-count idea. |
-| `ideate_query` | 1 per quest, when the knowledge layer is on | Turns the topic into a keyword query for the few sources the idea step is grounded in. |
-| `literature_query` | 1 per literature pass (a resume that runs the same pass again reuses them) | Turns the topic into keyword search queries. |
-| `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
-| `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
-| `literature_novelty` | 1 per literature pass with sources (`knowledge.novelty_check`, on) | Says whether the sources already answer the question and what the study adds; disclosed only. |
-| `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
+| `clarify` | 0 | No model call: the first node sets from the commission's `method` whether the study runs an experiment, analyses your data or reviews the sources. |
+| `source_router` | 0, or 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
 | `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. A reviewer's job is to find problems: each finding says where, what is wrong, why and how to fix it, and the reply also lists what it checked and found no problem with. A reply with neither is asked once more (one more call) and then recorded as not reviewed. Under `rigor_profile: research` the result reaches *independently validated* only when this review gave a usable answer and the record of the calls shows another model gave it than the one that wrote the checks (a connection that does not name the answering model cannot show that). |
@@ -75,7 +64,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `improve` | 0–3 | One per round, only when a check of correctness in the plan (`criteria`) is not met after a run; at most `engine.improve_rounds` (default 3) in the whole quest (a rerun `--from` the run or earlier starts it again). None when every check is met or the plan names none FI can measure. |
 | `analyze` | 1 per design pass | |
 | `cross_check` | 0–10 | One per key finding that found related literature, up to 10 findings (skipped when `cross_check_per_finding_k = 0`); 0–8 in the measured runs. |
-| `evidence_gate` | 0–1 | Sufficiency check before write (`engine.evidence_gate`, default on); it made no call in 7 of the 17 measured runs. A `broaden` verdict re-enters literature once. |
+| `evidence_gate` | 0–1 | Sufficiency check before write (`engine.evidence_gate`, default on); it made no call in 7 of the 17 measured runs. |
 | `web_plots` | 0–1 | No-simulation mode only — one LLM call to chart the collected data (`engine.web_derived_plots`). |
 | `write` | 1–2 | Twice when the review asks for a rewrite (14 of the 17 measured runs). |
 | `claim_check` | 1 per write | Grounds each paper claim to evidence before review (`engine.claim_grounding`, default on; no call when off). |
@@ -118,14 +107,8 @@ fi --config outputs/<quest_id>/config.yaml --resume <quest_id>
 # Summarize a folder:
 fi --summarize ./papers --summarize-kind literature
 
-# Pre-quest planning doc (writes both <id>-proposal.md + <id>.yaml):
-fi --proposal "Compare RK4 vs Verlet on the Kepler problem with eccentric orbits"
-
 # Weekly PM digest across your quests:
 fi --digest --days 7
-
-# All-time portfolio synthesis (no time window):
-fi --portfolio
 
 # Adversarial second-pass review of a finished quest:
 fi --critique 1778452404-euv-mor-photon-shot-noise-ler-e6bfe5 \
@@ -173,7 +156,7 @@ cd ~/study_b && fi --config b.yaml
 fi --fleet a.yaml b.yaml --max-concurrent 2 --memory-cap-mb 4096   # or several YAMLs from one command
 ```
 
-A fleet writes every quest under the folder it runs from, unless a YAML gives an absolute `output_dir`. In VS Code, open each study folder in its own window (*File → New Window*) and use `@fi /new` or `@fi /start <yaml>` in each: every quest has its own connection to VS Code, and a window's quest lists (`/resume`, `/watch`, `/map`, …) show only its folder's quests (when it has none, the ones FI has run in other folders; see [Finding a quest from any folder](#finding-a-quest-from-any-folder)). (A `fi --serve` you start yourself in a terminal is the exception: it sends its model calls through the window opened first.) With several folders in one window, a command works in the folder holding the YAML it names, else the folder of the file you are editing, else the first folder that is not the FrontierInsight checkout.
+A fleet writes every quest under the folder it runs from, unless a YAML gives an absolute `output_dir`. In VS Code, open each study folder in its own window (*File → New Window*) and use `@fi /start <yaml>` in each: every quest has its own connection to VS Code, and a window's quest lists (`/resume`, `/watch`, `/map`, …) show only its folder's quests (when it has none, the ones FI has run in other folders; see [Finding a quest from any folder](#finding-a-quest-from-any-folder)). (A `fi --serve` you start yourself in a terminal is the exception: it sends its model calls through the window opened first.) With several folders in one window, a command works in the folder holding the YAML it names, else the folder of the file you are editing, else the first folder that is not the FrontierInsight checkout.
 
 The extension finds FrontierInsight without a setting, in this order: the open folder when it is the FrontierInsight folder; the Python in `frontierInsight.pythonPath` when FI is installed in it with `pip install -e`; the folder you picked before; else it asks once, *"Where is FrontierInsight?"*, and remembers the answer in `~/.frontier-insight/fi_location.json` for every window. `frontierInsight.repoPath` still forces one folder when set.
 
@@ -197,9 +180,9 @@ The quest's own folder is always looked at first, as before. A quest found elsew
 
 ### Doing a step again
 
-`--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from, each with one sentence saying what redoing it does; the raw graph names (`ideate`, `cross_check`, `evidence_gate`, `claim_check`, `web_plots`, ...) work as step names too. `figures` exists only for a quest with no simulation. Some parts of the pipeline are not steps: the first question round (`clarify`; that is a new quest), the pauses, the repair of a crashed script (part of `run`) and the human review decision. Beyond this, the web quest page's menu beside **Resume** shows the same list (also while the quest waits for your review decision or setup answers; choosing a step turns the button into **Redo**), and so does `@fi /resume <quest_id> --from` in VSCode.
+`--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from, each with one sentence saying what redoing it does; the raw graph names (`cross_check`, `evidence_gate`, `claim_check`, `web_plots`, ...) work as step names too. `figures` exists only for a quest with no simulation. Some parts of the pipeline are not steps: the first node (`clarify`; redoing it is a new quest), the pauses, the repair of a crashed script (part of `run`) and the human review decision. Beyond this, the web quest page's menu beside **Resume** shows the same list (also while the quest waits for your review decision; choosing a step turns the button into **Redo**), and so does `@fi /resume <quest_id> --from` in VSCode.
 
-The web quest page also has a **Quest map** (hidden while the quest is running), and VS Code has the same one: run **FI: Quest map** from the command palette, or `@fi /map <quest_id>` (it opens next to your other tabs, never in a new split, and opening it again for the same quest brings that tab back). Every step of the pipeline is shown in seven big blocks (Understand the question, Read the literature, Plan the work, Build and run the experiment, Or: use real data, Judge the result, Write and review); open a block to see its small steps, each with a plain title and its own name in small type, so you can match it to the log. Each step is marked **finished**, **where it stopped** or **not reached** (a block for the other path, real data or simulation, is dashed). **Where it stopped** is the step the quest will run next: the pause it waits in (the review decision, the papers or plan pause, the setup questions) or the step that failed. A paused quest is therefore never drawn as finished; every step is marked finished only when the quest has nothing left to run and nothing waiting for you (no `.fi/pause.json`, `NEXT_STEP.md` or `quest_failed.md`). Click a step to see what it does, what it reads and writes, what running again from there would keep and what it would redo, the equivalent terminal command (`python launch.py --config <yaml> --resume <id> --from <step>`) and a **Restart from here** button (it asks you to press it a second time to confirm) that does the same as the menu (in VS Code it sends `@fi /resume <id> --from <step>` to chat). Only a step the quest reached can be restarted from. From the design backwards (`ideate`, `literature`, `plan`, `design`) the page says the frozen protocol has to be approved again with your name, shows the command with `--approve-as`, and leaves the button off: those are run from a terminal.
+The web quest page also has a **Quest map** (hidden while the quest is running), and VS Code has the same one: run **FI: Quest map** from the command palette, or `@fi /map <quest_id>` (it opens next to your other tabs, never in a new split, and opening it again for the same quest brings that tab back). Every step of the pipeline is shown in seven big blocks (Understand the question, Read the literature, Plan the work, Build and run the experiment, Or: use real data, Judge the result, Write and review); open a block to see its small steps, each with a plain title and its own name in small type, so you can match it to the log. Each step is marked **finished**, **where it stopped** or **not reached** (a block for the other path, real data or simulation, is dashed). **Where it stopped** is the step the quest will run next: the pause it waits in (the review decision, the papers or plan pause) or the step that failed. A paused quest is therefore never drawn as finished; every step is marked finished only when the quest has nothing left to run and nothing waiting for you (no `.fi/pause.json`, `NEXT_STEP.md` or `quest_failed.md`). Click a step to see what it does, what it reads and writes, what running again from there would keep and what it would redo, the equivalent terminal command (`python launch.py --config <yaml> --resume <id> --from <step>`) and a **Restart from here** button (it asks you to press it a second time to confirm) that does the same as the menu (in VS Code it sends `@fi /resume <id> --from <step>` to chat). Only a step the quest reached can be restarted from. From the design backwards (`literature`, `plan`, `design`) the page says the frozen protocol has to be approved again with your name, shows the command with `--approve-as`, and leaves the button off: those are run from a terminal.
 
 | Step | What doing it again does |
 |---|---|
@@ -214,7 +197,7 @@ The web quest page also has a **Quest map** (hidden while the quest is running),
 | `claims` | checks every claim in the paper against the results again, then reviews it (the paper is not written again) |
 | `review` | reviews the same paper again (and makes the slides and poster from it again) |
 
-**Changing the ideas, the literature, the plan or the design.** `--from ideas`, `literature`, `plan` or `design` go back to before the experiment was designed, so they replace the plan and the frozen protocol; the old ones are kept in `.fi/previous/<time>/`. FI asks for your name first: add `--approve-as <you>` (without it nothing is changed and the message says so). These four are run from a terminal only: the web page and `@fi /resume <quest_id> --from <step>` in VS Code refuse them and show the command to type. The name and the replaced protocol's fingerprint go into the audit trail, and the earlier designs stay in `needs/DESIGN_HISTORY.json`, with the new one added after them as a change made after the protocol was frozen. `--from skills` and every step after the design leave the protocol alone and need no name.
+**Changing the literature, the plan or the design.** `--from literature`, `plan` or `design` go back to before the experiment was designed, so they replace the plan and the frozen protocol; the old ones are kept in `.fi/previous/<time>/`. FI asks for your name first: add `--approve-as <you>` (without it nothing is changed and the message says so). These three are run from a terminal only: the web page and `@fi /resume <quest_id> --from <step>` in VS Code refuse them and show the command to type. The name and the replaced protocol's fingerprint go into the audit trail, and the earlier designs stay in `needs/DESIGN_HISTORY.json`, with the new one added after them as a change made after the protocol was frozen. `--from skills` and every step after the design leave the protocol alone and need no name.
 
 **Changing the skills.** Edit the quest's YAML (`engine.skills_exclude`, `engine.skills`, `engine.skills_required`) and run `fi --config quest.yaml --resume <quest_id> --from skills`. From the command line it uses the YAML you pass, and the copy saved in the quest folder is updated to match it (the earlier copy is kept as `config.yaml.before-resume-<time>`), so a later resume does not go back to the old settings. The web page's **Redo from the skills** uses the copy saved in the quest folder, so edit `engine.skills_exclude` (or the other two keys) in `<quest folder>/config.yaml` first, or the pick will not change. A skill the new pick no longer carries is named in the console with the reason (excluded in the YAML, no longer approved or usable, or not chosen this time), and the code is written without it: its name is not asked of pip and is not offered to the code-writing step. If the plan or design text names a skill that was dropped, FI says so and leaves the plan as it is; change the plan with `--revise-plan` if you want. A skill whose own packages still cannot be installed after a second try is dropped the same way, with a line in `.fi/run.log`. `--from code` keeps the skills the quest already picked.
 
@@ -282,7 +265,7 @@ Put the model you want in the quest's `config.yaml` (`provider.model`, in the qu
 [FI] model: the model changes from gpt-5.6-luna to claude-opus-5 from here on; steps already done were made by gpt-5.6-luna
 ```
 
-The same line goes into `.fi/run.log`, the change goes into the quest's decision trace (a `model_changed` event) and into the record of its approved settings, and the paper is told to say in its methods that more than one model produced the study (unless nothing had run on the old model yet: then the line says so and the paper is told nothing). Steps already done are not run again; to redo some with the new model, add `--from <step>` (see *Doing a step again*). Single steps you gave their own model in `provider.node_models` keep it, and the line names the ones still on the old model so you can change them there too. `.fi/cost.jsonl` keeps every call ever made, so the calls made before the change still show the old model; the ones after it show the new one. The same holds for the provider and `provider.node_models`. Two things can still stop the quest: under `rigor_profile: research`, every reviewer ending up on one model, also after the reviewers have already read the paper once (the quest says how to give one reviewer another model), and any setting that changes what the result means or how it is checked (the rigor profile, a check turned down, the reviewers, the multi-model ensemble `provider.node_ensemble`, which decides how many models vote on a check): approve those with `fi --update <quest_id>`, the web quest page's **Update**, or `@fi /update <quest_id>` in VS Code, which runs in the chat, shows what stopped the quest, and asks you to approve the settings in `config.yaml` as they are (or opens the file to change it first).
+The same line goes into `.fi/run.log`, the change goes into the quest's decision trace (a `model_changed` event) and into the record of its approved settings, and the paper is told to say in its methods that more than one model produced the study (unless nothing had run on the old model yet: then the line says so and the paper is told nothing). Steps already done are not run again; to redo some with the new model, add `--from <step>` (see *Doing a step again*). Single steps you gave their own model in `provider.node_models` keep it, and the line names the ones still on the old model so you can change them there too. `.fi/cost.jsonl` keeps every call ever made, so the calls made before the change still show the old model; the ones after it show the new one. The same holds for the provider and `provider.node_models`. Two things can still stop the quest: under `rigor_profile: research`, every reviewer ending up on one model, also after the reviewers have already read the paper once (the quest says how to give one reviewer another model), and any setting that changes what the result means or how it is checked (the rigor profile, a check turned down, the reviewers, the multi-model ensemble `provider.node_ensemble`, which decides how many models vote on a check): approve those with `fi --update <quest_id>` (command line only): it approves the settings in the quest's `config.yaml` as they are now, then resumes it; it asks nothing.
 
 If you resume with another config (`fi --config edited.yaml --resume <quest_id>`), that config is what runs, and the quest's own `config.yaml` is updated to match it (each earlier one is kept beside it as `config.yaml.before-resume-<time>`), so the next resume keeps the new model.
 
@@ -307,10 +290,8 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--ingest <file> <file> ...` | one or more PDFs / MDs / TXTs | one-shot Axon ingest, no quest | **0** (embeddings only; no LLM) |
 | `--serve` | none | starts the FastAPI status GUI at 127.0.0.1:8765 | **0** (GUI is read-only over existing outputs) |
 | `--summarize <folder>` | one folder | folder summarizer, pairs with `--summarize-kind` | **1** |
-| `--proposal <topic>` | one topic string | pre-quest planning doc + companion YAML under `outputs/_drafts/` | **1** |
-| `--analyze <data-path>` | one directory + `--analyze-topic "<topic>"` | no-simulation quest on pre-staged data (files copied into the new quest's `data/`); routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review` | **~6** |
+| `--analyze <data-path>` | one directory + `--commission <file>` (its question is what the analysis answers) | no-simulation quest on pre-staged data (files copied into the new quest's `data/`); routes through `wait_for_data → data_load → analyze → write → review` | **~6** |
 | `--digest` | none | weekly PM digest, pairs with `--days N` (default 7) | **1** (or 0 if window is empty) |
-| `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
 | `--why <quest_id> [stop\|review\|evidence\|reasons\|<step>]` | quest_id, then what to ask | why the quest stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or (`reasons`) the reasons the model gave at every step. A step's answer also says whether `.fi/thinking.jsonl` holds the model's reasoning for it and how many characters (the text stays in the file). A reason the model wrote, and a reasoning summary it returned, are its own account of itself, not its hidden reasoning. Web: **Why?** and **Model's reasons** on the quest page; VS Code: `@fi /why`. See [docs/trace.md](trace.md) | 0 |
@@ -323,48 +304,68 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--memory-cap-mb N` | fleet | throttle new quest starts when RSS exceeds N MB |
 | `--profile` | quest | dump per-quest viztracer trace if viztracer installed |
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
-| `--interactive` | quest | talk the topic over first: read the clarify answers (what you want to see, the title, ...) from stdin. Without it a headless run lets the agent answer for itself |
+| `--interactive` | quest | answer the review pause (accept / reject / refine) in the terminal instead of with `--resume`. It asks no setup questions: the commission says what the study is |
 | `--resume <quest_id>` | quest | re-enter a checkpoint. Without `--config` it uses the `config.yaml` saved in the quest's folder; the id may be the short id, and the quest may be one started in another folder (see [Finding a quest from any folder](#finding-a-quest-from-any-folder)) |
 | `--quests` | list | every quest FI has run on this computer, from any folder (`fi tools quests`); `--prune` first forgets those whose folder is gone, `--json` prints JSON |
-| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `ideas`, `literature`, `studies`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
+| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
 | `--days N` | digest | digest window in days, default 7 |
 | `--digest-provider <name>` | digest | LLM provider for the digest |
-| `--portfolio-provider <name>` | portfolio | LLM provider for the portfolio synthesis |
 | `--critique-provider <name>` | critique | LLM provider; set DIFFERENT from quest's original for max adversarial effect |
-| `--proposal-provider <name>` | proposal | LLM provider for the proposal |
-| `--axon-config <yaml>` | ingest, summarize, digest, portfolio, critique, proposal | optional AxonConfig path |
-| `--output-root <dir>` | serve, summarize, digest, portfolio, critique, proposal | quest output dir / scan root |
+| `--axon-config <yaml>` | ingest, summarize, digest, critique | optional AxonConfig path |
+| `--output-root <dir>` | serve, summarize, digest, critique | quest output dir / scan root |
 | `--host`, `--port` | serve | bind elsewhere than 127.0.0.1:8765 |
+
+## The commission file
+
+Every study starts from a commission: one YAML file that says what FI is asked to study. A config names it with `commission: <file>` (relative to the config's folder); a config that does not is refused before anything runs. `fi new` writes a commission to fill in (`commission.yaml`, every key with a one-line comment of what goes there) and the config that names it (`study.yaml`: the model and `output_dir`), never over an existing file (the next pair is `commission-2.yaml` and `study-2.yaml`). Then `fi check commission.yaml` checks it by the same rules FI runs before a study starts, with no model call: one plain sentence per problem and exit code 2, or exit code 0 when the file can be used. Then `fi --config study.yaml`. From a checkout: `python launch.py new` and `python launch.py check <file>`.
+
+| Key | What goes there |
+|---|---|
+| `question` | the research question, one sentence (it becomes the study's topic) |
+| `title` | optional: a short phrase to call the study by (a `title:` in the config wins); left out, the writer proposes the paper's title and the quest folder is named from the question |
+| `method` | how the study gets its evidence: `simulate` (FI runs an experiment; the default when left out, so every earlier commission stays valid), `analyze_data` (you put the data in the study's `data/` folder) or `review_literature` (no experiment and no data: a review of the sources you give). `fi check` refuses any other word. A config that sets `engine.no_simulation: true` or `engine.survey_mode: true` is refused unless the commission's `method` says the same |
+| `scope` | what the study covers and leaves out |
+| `limits` | `hours` and `model_calls` the study may use |
+| `known_values` | values already known, each with `name`, `value`, `tolerance`, `case` (the situation it applies to), `passage` (the sentence of the source that states it) and `source` (`title`, `file`: the full text as .pdf, .md or .txt, and `doi` when it has one). A bound ("at least 0.9") is not a known value: write it as a success or failure condition |
+| `no_known_values` | `true` when `known_values` is `[]` because none is known |
+| `success`, `failure` | lists of a `condition` and how to `verify` it |
+| `doubts` | what you already doubt, one sentence each; `[]` when none |
+
+A minimal commission:
+
+```yaml
+question: How does the error of a midpoint-method solver change with step size on a damped oscillator?
+scope: One oscillator (m = k = 1, c = 0.1), step sizes 0.5, 0.1, 0.05 and 0.01, the midpoint method only.
+limits:
+  hours: 1
+  model_calls: 60
+known_values: []
+no_known_values: true
+success:
+  - condition: The error falls as the step size shrinks, at about the method's order.
+    verify: The slope of log(error) against log(step size).
+failure:
+  - condition: The error does not fall as the step size shrinks.
+    verify: The error at each step size.
+doubts: []
+```
+
+FI runs the study as written and never changes it. It does not search the literature: it reads only the full texts the commission gives. A study that cannot be done in the time allowed is handed back (`needs/STUCK.json`, `return_reason` first), not made smaller. A quest started before commissions existed is not resumed (the CLI says so and points to `fi new`); reading it (`--trace`, `--why`, `--quality`) still works. Every example under `examples/` has a `commission.yaml` beside its config.
 
 ## YAML config schema
 
 ```yaml
-# Required (unless a commission below gives it): the research question. Free text, multi-line is fine.
-topic: |
-  Compare three numerical integrators on a damped harmonic
-  oscillator (RK4 vs Velocity-Verlet vs forward Euler). Report
-  energy drift over 10⁴ periods.
-
-# Optional, instead of a topic: a commission file that fixes the study (read against this file's folder). Its
-# question becomes the topic; FI does not make ideas, choose a study or search the literature, and reads only the
-# full texts the file supplies, whatever this file sets for those steps (run.log names a setting not used). The
-# run's time limit is the smaller of execution.timeout_s and limits.hours (limits.model_calls is shown to the plan,
-# not counted). A file with a key missing or wrong is refused before anything runs, naming it, and a study that
+# Required: the commission file that fixes the study (read against this file's folder; see "The commission file"
+# below). Its question is the topic, so this config needs no `topic:` (one that says anything else is refused).
+# FI does not search the literature, and reads only the full texts the commission supplies, whatever this file sets for those
+# steps (run.log names a setting not used). The run's time limit is the smaller of execution.timeout_s and the
+# commission's limits.hours (limits.model_calls is shown to the plan, not counted). A config without `commission:`
+# is refused before anything runs, and so is a commission with a key missing or wrong, naming it; a study that
 # cannot be done in the time allowed is handed back (needs/STUCK.json, return_reason first), not made smaller.
-# The file (JSON):
-#   {"question": "...", "scope": "...", "limits": {"hours": 2, "model_calls": 60},
-#    "known_values": [{"name": "...", "value": 0.25, "tolerance": 0.01,
-#                      "case": "the situation the value applies to (which form, which parameter values)",
-#                      "passage": "the sentence of the source that states the value, with the value in it",
-#                      "source": {"title": "...", "doi": "...", "file": "source.pdf"}}],
-#    "success": [{"condition": "...", "verify": "..."}], "failure": [{"condition": "...", "verify": "..."}],
-#    "doubts": []}
-# A known value is one number with a tolerance; a bound ("at least 0.9") is not a known value: write it in
-# success or failure as a condition. known_values may be empty only with "no_known_values": true. The passage is the
-# sentence of the source that states the value (at least 25 characters); the source file is .pdf, .md or .txt with
-# at least 200 characters of text, and holds the passage. See docs/capabilities-reference.md.
+commission: commission.yaml
+
 # Before the plan, FI checks each known value with a program a model writes from its source; when a second program
 # is needed, the model set for the numeric referee step writes it. If that is the same model as the first, both
 # can make the same mistake, so set that step to another model family, for example:
@@ -373,30 +374,36 @@ topic: |
 #     model: sonnet
 #     node_providers:
 #       oracle_review.numeric: {name: codex_cli, model: gpt-6.1-terra}
-# commission: commission.json
+
+# Optional, with a commission only: run one step of the study on its own, in its own quest folder, and stop where
+# the step ends. `design` writes plan.md and the design; `compute` takes the design of a finished design step and
+# writes and runs the code (a code/experiment.py left in that folder is run as it is), with its checks and repairs,
+# and stops before the analysis. Each step leaves needs/STEP_RECEIPT.json: how it ended (done, stopped with the
+# reason, returned, paused), what it was given and made, what each of its checks did, the run's result, and the
+# sha256 of the receipt of the step before it. A step that would have to go back to an earlier one hands the study
+# back (needs/STUCK.json, return_reason: needs_earlier_step). Two calls, one config each:
+#   step: {name: design}                                          -> python launch.py --config design.yaml
+#   step: {name: compute, after: outputs/<the design quest's id>} -> python launch.py --config compute.yaml
+# step: {name: design}
 
 # Optional: short identifier used in folder names. Defaults to a
-# slug derived from the topic.
+# slug derived from the commission's question.
 title: integrator-bakeoff
 
 # Optional: `research` turns on, together, what a study needs before its result can be trusted: the plan is held for you
 # to read (pauses.plan: ask), the simulation and its analysis stay in two scripts and a reply without both stops the quest
 # (execution.split_analysis: true, split_failure: block), the protocol / oracle / numeric-warning / run-manifest checks
 # stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. A config that sets
-# one of those to the opposite is refused with the key named. Default: default (nothing changes). The interview sets it
-# from "What is the result for?": research (the default answer) or a decision writes research; exploring leaves it at
-# default and writes the draft's three cheaper engine settings (ideate_reflect: false, cross_check_per_finding_k: 0,
-# enable_analyze_reroute: false), the same on every interface. research also keeps the decision trace on and needs the
+# one of those to the opposite is refused with the key named. Default: default (nothing changes). Set it to research for a result you mean to rely on. research also keeps the decision trace on and needs the
 # reviewers not all on one model (provider.node_models["review_panel.<role>"]); a panel all on one model stops
-# the quest before it runs, saying how to set one. For research or a decision the interview asks for that model
-# right away ("A different model for one reviewer", written as review_panel.statistician); its "I only have one model" writes
-# engine.one_model_review: true instead, so the quest runs and its result says the review was one model's view and
+# the quest before it runs, saying how to set one (for example provider.node_models.review_panel.statistician). With
+# engine.one_model_review: true instead, the quest runs and its result says the review was one model's view and
 # is never publication-ready. Under research the plan's checks count as independent evidence only when a second,
 # different model read them (provider.node_models.oracle_review) and, for invariants, symmetries and second
 # implementations, they also held at a setting FI chose that the code never saw (needs/HIDDEN_CHECK.json).
 # See docs/rigor.md.
 rigor_profile: default
-# What the result is for: explore, research or decision (the interview writes it). Left out, the quest is an
+# What the result is for: explore, research or decision (set it in the config). Left out, the quest is an
 # exploration: it runs, its paper opens with a note that the result is preliminary, and it never reaches
 # publication-ready (with rigor_profile: research, left out means research).
 result_use: explore
@@ -414,7 +421,6 @@ provider:
   # names. Reviewer-panel personas are routed via
   # `review_panel.<persona>`; the moderator via `review_moderator`.
   node_models:
-    clarify:       gpt-4o-mini
     write:         claude-3-5-sonnet
     review:        gpt-5
     oracle_review: claude-3-5-sonnet   # the second reading of the plan's checks; under research a model other than the plan's
@@ -432,15 +438,14 @@ provider:
 
   # Multi-model ensemble per node. Fans out a node's chat call across
   # `models` in parallel and merges with `merge`. Supported on
-  # ideate / analyze / cross_check. Cost: N + 1 calls per ensembled
+  # analyze / cross_check. Cost: N + 1 calls per ensembled
   # node (N fan-out + 1 moderator), except `merge: vote` which is N
-  # (no moderator — pure tally). The interview's `ensemble_profile`
-  # slot writes this block for you; edit by hand when you want a
-  # custom trio or non-default merger.
+  # (no moderator — pure tally). Write this block by hand
+  # for a custom trio or a non-default merger.
   node_ensemble:
-    ideate:
+    analyze:
       models: [gpt-4o, claude-3-5-sonnet, gemini-2.5-pro]
-      merge: tournament          # tournament | synthesize | vote
+      merge: tournament          # tournament | vote (never synthesize for analyze)
       moderator: claude-3-5-sonnet
     cross_check:
       models: [gpt-4o, claude-3-5-sonnet, gemini-2.5-pro]
@@ -454,11 +459,8 @@ engine:
   max_iterations: 2                 # design-revise loop budget
   review_loop: true                 # enable review-driven revise
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
-  phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV table of at least 40 rows, in inputs/data/ or, for a quest that analyses data, data/; whole subjects/sites or the latest period, decided by the plan's `protocol.split`, plan.md's line "Rows that belong together:", or the table's columns; a research quest asks when it cannot tell), or else on new random seeds; only that confirm run can be publication-ready; costs one more full run (a data quest: one more reading of the held-back rows). Without a container the held-back rows are kept encrypted and the code is checked for paths out of the quest folder. Off here (the default profile); on by default under rigor_profile: research, where `phased: false` keeps it off and plan.md says the result is not confirmed on unseen data. A survey or --analyze says it does not apply. Each version is confirmed once: a retry keeps both verdicts and a failure counts; a version changed after its confirm run (improve, a repair, a re-run the review asked for) is confirmed on its own; every verdict is kept in .fi/confirmations.jsonl. The interview asks it as "Confirm the result on data it never saw" (see docs/rigor.md)
+  phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV table of at least 40 rows, in inputs/data/ or, for a quest that analyses data, data/; whole subjects/sites or the latest period, decided by the plan's `protocol.split`, plan.md's line "Rows that belong together:", or the table's columns; a research quest asks when it cannot tell), or else on new random seeds; only that confirm run can be publication-ready; costs one more full run (a data quest: one more reading of the held-back rows). Without a container the held-back rows are kept encrypted and the code is checked for paths out of the quest folder. Off here (the default profile); on by default under rigor_profile: research, where `phased: false` keeps it off and plan.md says the result is not confirmed on unseen data. A survey or --analyze says it does not apply. Each version is confirmed once: a retry keeps both verdicts and a failure counts; a version changed after its confirm run (improve, a repair, a re-run the review asked for) is confirmed on its own; every verdict is kept in .fi/confirmations.jsonl. (see docs/rigor.md)
   one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
-  # clarify_mode:                  # old name of pauses.clarify (off | auto | interactive = ask). Left out (the default), the quest asks its setup questions when someone can answer while it runs, else answers them itself; see Setup questions below
-  ideate_reflect: true              # extra self-critique pass (1 LLM call)
-  ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel
   exec_reflect_max_iterations: 3    # execute-repair loop bound
   pipeline_gate: false              # experimental, default off: true keeps a change to the code (a repair of a reader's finding, a crash repair, a speed-up) only if the analysis still runs from start to end on a small copy of the results the quest already recorded, and runs the first version the same way before the long run. It protects a quest that already has recorded results (a redesign, a resume, a re-implementation), not a first design; the outcome is in .fi/pipeline_gate.json
   improve_rounds: 3                 # after a run, when a check of correctness in the plan is not met: how many times (in the whole quest; a rerun --from the run or earlier starts again) FI may change the simulation, one small change at a time, keeping a change only when no check got worse by more than its own tolerance; a kept version runs once more in full. 0 = off. Under rigor_profile: research a change that made a check worse stops the quest for you
@@ -466,18 +468,14 @@ engine:
   pilot_timeout_frac: 0.2           # Pilot timeout as a fraction of execution.timeout_s, floored at 30s. A pilot that takes as long as the real run buys nothing.
   run_manifest_check: warn          # after the run, FI compares its own record of the trials with the plan: warn records what differs (run.log, QUALITY.md) and goes on; block sends the code back and stops the quest if it still differs (set by rigor_profile: research); off does not look
   cross_check_per_finding_k: 3      # per-finding lit-check hits, 0 to disable
-  enable_analyze_reroute: true      # analyze can request re_experiment / broaden_lit
+  enable_analyze_reroute: true      # analyze can request re_experiment
   review_panel:                     # empty = single reviewer
     - methodologist
     - statistician
     - devil_advocate
     # available: methodologist, statistician, devil_advocate, reproducibility
-  no_simulation: false              # see "Topics that need real data" section below
-  survey_mode: false                # literature/history synthesis: NO experiment AND NO dataset (implies no_simulation). See "Survey mode" below
-  auto_collect_data: true           # try Axon for evidence before pausing for user data (no_simulation mode)
-  auto_collect_top_k: 5             # Axon top_k for auto_collect_data
-  dataset_adapters: []              # structured-data + web-fetch adapters. Available: "worldbank", "wikipedia"
-  dataset_adapter_top_k: 3          # rows per adapter
+  no_simulation: false              # leave to the commission: `method: analyze_data` sets it; set here without that, the study is refused. See "Topics that need real data" below
+  survey_mode: false                # leave to the commission: `method: review_literature` sets it (NO experiment AND NO dataset; implies no_simulation). See "Survey mode" below
 
 execution:
   sandbox: venv                     # venv (default) | docker
@@ -503,7 +501,7 @@ execution:
 
 knowledge:
   enabled: true
-  # Retracted papers: whenever knowledge is on, every source the search finds with a DOI is looked up in Crossref (a paper you pinned or dropped in without one is first matched to its DOI by its exact title, and by first author and year where it states them, else it is "could not be checked"; Crossref holds the Retraction Watch database; arXiv DOIs are not sent, Crossref holds none); there is no switch for it. A retracted one is marked [retracted] for the writer, never counts as support, is left off that pass's list of papers to download, and is named on the to-do card; any sentence that cites one is marked unsupported by the claim check. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest; offline it costs one request's timeout per literature pass (15 s, up to about 30 s behind a proxy that never answers). One line in run.log; each source's answer in .fi/literature_queries.json.
+  # Retracted papers: whenever knowledge is on, every source with a DOI the study was given is looked up in Crossref (a paper you pinned or dropped in without one is first matched to its DOI by its exact title, and by first author and year where it states them, else it is "could not be checked"; Crossref holds the Retraction Watch database; arXiv DOIs are not sent, Crossref holds none); there is no switch for it. A retracted one is marked [retracted] for the writer, never counts as support, and is named on the to-do card; any sentence that cites one is marked unsupported by the claim check. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest; offline it costs one request's timeout per run of the literature step (15 s, up to about 30 s behind a proxy that never answers). One line in run.log; each source's answer in .fi/literature_queries.json.
   # Inline AxonConfig (or pass a path to a YAML). Use Axon's NESTED shape
   # as below, not its flat field names — FI hands this to AxonConfig.load,
   # which does the nesting -> field mapping, env overrides and retired-key
@@ -519,16 +517,8 @@ knowledge:
   axon_config:
     embedding: { provider: ollama, model: nomic-embed-text }
     llm:       { provider: ollama, model: qwen2.5-coder:32b }
-  top_k: 8                          # Axon RAG cap — dense hits are precise, 8 strong matches beat 20 medium ones for the writer prompt. The interview's "Axon hits per quest" question.
+  top_k: 8                          # Axon RAG cap — dense hits are precise, 8 strong matches beat 20 medium ones for the writer prompt.
   external_top_k: 20                # External (arXiv / OpenAlex / Crossref / S2 / ...) cap when Axon misses. Bigger than top_k because web search is coarser; bump to 30 for survey-shaped quests.
-  relevance_min_score: 0.20         # Literature relevance FLOOR: drop retrieved docs whose embedding cosine vs the TOPIC is below this, before they reach analyze/write. Runs in the literature node for EVERY quest (unlike relevance_guard, which only runs on the auto_collect path), so survey/simulation quests don't carry off-topic sources (e.g. change-point-math papers for a sculpture-history topic). 0.0 disables. Fail-open when embeddings are unavailable (FI_OFFLINE).
-  relevance_min_keep: 3             # Never-starve retention: keep at least this many top-scoring docs even if all fall below the floor (the evidence_gate can then broaden).
-  requery_on_low_relevance: true    # When NO doc clears relevance_min_score on its own merits, the query was probably worded badly (a field publishes under different terms than the topic statement uses). Ask the model for an alternative query and search again, instead of handing the writer the relevance_min_keep least-bad hits as if they were evidence. Skipped when embeddings are unavailable — without scores there is no signal the query was bad.
-  requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
-                                    # Your own search queries instead of FI's: write them in <quest folder>/inputs/search_queries.txt, one per line (first three used, # lines skipped); remove the file to go back to FI's. Listed in .fi/literature_queries.json.
-  literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened. Every source's grade and why it was kept or dropped is listed in .fi/literature_queries.json.
-  novelty_check: true               # One call after the literature step says whether the retrieved sources already answer your question and what the study adds. Only disclosed: the plan gets one line, the paper's introduction gets the framing; it never stops the quest or changes the design. Every quoted sentence is checked against the source. Saved in .fi/literature_novelty.json.
-  foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
 
@@ -540,7 +530,7 @@ knowledge:
 
   # Pinned local papers (always first in retrieval):
   local_papers:
-    - ~/papers/foundational-paper.pdf
+    - ~/papers/method-paper.pdf
     - ~/papers/local-note.md
 
   try_fetch_full_text: true         # download the full text of papers that are free to read (a paywalled paper is never downloaded; you add it yourself). false = abstracts only
@@ -675,9 +665,7 @@ HTML/Chromium backend as the fallback above (pandoc + a browser, no
 LaTeX), so it works on a machine without a TeX distribution, and falls
 back to the LaTeX path with a warning when pandoc + a browser aren't
 both present. Because it's HTML, it's single-column regardless of
-`paper_format`. Pick it in YAML (`output.paper_style: briefing`) or
-during the interview (`--new` / `@fi /new` / web — the *Paper style*
-question).
+`paper_format`. Pick it in YAML (`output.paper_style: briefing`) .
 
 ### Author line and poster size
 
@@ -687,16 +675,12 @@ the title (and uses the author as the PDF's Author field), the slides put
 them on the title slide, and the poster puts them in its header, with the
 link as a QR code. Every field is optional: with no author set the byline
 stays "Frontier Insight", and a field left empty is simply not printed.
-The interview does not ask for them up front: they are one folded line,
-*Paper byline (optional)*, on the review screen's "What you get" card, and
-the first time a paper is written from a terminal FI asks the name once
+The first time a paper is written from a terminal FI asks the name once
 (Enter keeps the Frontier Insight byline; with no answer in two minutes the
 paper goes on without one and you are asked next time; the web page and
 VS Code never wait on it). What you give is kept in
 `~/.frontier-insight/profile.json` (`FI_PROFILE_PATH` moves it), which all
-three interfaces read, so later interviews fill it in without asking and
-show it on the review screen, where a change is kept for the next quests
-too.
+three interfaces read, so later quests use it without asking.
 
 These values are written only into the quest's own files and your profile file on this machine (the web page
 reads and keeps it only for a page opened on this machine; a request that came through a proxy
@@ -708,8 +692,7 @@ provider show the author line, as they show the rest of the paper.
 
 `output.poster_size` picks the poster sheet: `a1_portrait` (59.4 × 84.1 cm,
 two columns, the default), `a0_portrait` (84.1 × 118.9 cm, two columns) or
-`landscape_48x36` (48 × 36 in, three columns). It is an advanced
-interview question.
+`landscape_48x36` (48 × 36 in, three columns).
 
 Changing any of these on a finished quest takes effect when the output is
 rendered again: `python launch.py --config <yaml> --resume <id> --emit poster`
@@ -853,12 +836,7 @@ Requires the `docker` Python package (`pip install docker`) and a running Docker
 | `policy_brief` | ✅ 2-4 page brief for policymakers. Tight margins, header strip, dense layout. Picks the **policy analyst** persona — issue → context → single recommendation. |
 | `whitepaper` | ✅ 8-20 page industry analysis. Cover with whitepaper subtitle, modest TOC, sans-serif. Picks the **industry analyst** persona — problem → approach → evidence → conclusions. |
 
-The `clarify` node's `paper_venue` slot accepts both buckets. For
-non-simulatable topics (set via the new `simulatability` clarify
-slot or legacy `empirical_vs_theoretical: empirical`), the agent
-will default to `essay` instead of `article`. The write-persona
-swap is automatic — set `paper_format: policy_brief` in YAML and
-the `write` node loads the policy-analyst voice.
+Set `paper_format: policy_brief` in the YAML and the `write` node loads the policy-analyst voice.
 
 ### `--fleet` concurrency model
 
@@ -899,8 +877,8 @@ fi --resume 479b06
 
 The engine reads the `state.sqlite` checkpoint, detects what node
 last completed, and continues from there. No state is lost — the
-`paper.pdf` engine, the YAML's `provider` block, every clarify answer
-flows through as if the original run never crashed.
+`paper.pdf` engine and the YAML's `provider` block
+flow through as if the original run never crashed.
 
 ## Topics that need real data (not simulation)
 
@@ -909,30 +887,10 @@ Some research questions can't be answered with a Python script —
 balance, public-trust dynamics"* needs real surveys and observations,
 not invented numbers.
 
-**How the engine decides to enter no-simulation mode** (in this
-precedence — first match wins, decision is logged to `run.log` as
-`[clarify] simulatability resolved: ... source=<...>`):
-
-1. `engine.no_simulation: true` in YAML — explicit user override.
-   `source=yaml`.
-2. The clarify question `simulatability` — the agent asks
-   *"can a Python script meaningfully simulate this, or does it
-   need real-world data?"* with `default: yes | no | uncertain`
-   plus a one-line `reason`. `no` triggers no-simulation
-   (`source=clarify_simulatability`); `yes`/`uncertain` keeps the
-   simulation path. With `pauses.clarify: ask` you see the
-   agent's default + reason and can override; with `pauses.clarify:
-   auto` the default is accepted but the reason is still logged.
-   An answer in your own words counts by its first word: *"yes, but
-   more than 100 lines"* is `yes` (*"no idea"* is not a `no`).
-3. Legacy fallback: when that answer is missing, blank, or does not
-   start with yes / no / uncertain, an `empirical_vs_theoretical:
-   empirical` answer still triggers no-simulation
-   (`source=clarify_empirical_legacy`).
-4. Otherwise `simulatability` in `engine.clarify_overrides` (what the
-   setup questions wrote into your YAML), also when clarify is off
-   (`source=yaml_clarify_overrides`).
-5. Otherwise: simulate (`source=default`).
+**How a study enters no-simulation mode:** the commission says `method: analyze_data` (you put the data in the study's
+`data/` folder). That is the only way: FI does not guess it from the topic and asks no question. `run.log` says the
+mode in one line (`[clarify] study mode: ...`). A config that sets `engine.no_simulation: true` is refused at the
+door unless the commission's `method` agrees; leave the line out.
 
 ### Survey mode (a history / overview — no experiment AND no dataset)
 
@@ -940,26 +898,20 @@ Some topics are neither a simulation nor a data-analysis: *"the
 evolution of X"*, *"a history of Y"*, *"an overview of Z"*. These want
 a **descriptive synthesis of the published literature** — there is
 nothing to measure and no dataset to collect. That is **survey mode**,
-a stronger form of no-simulation. Turn it on any of three ways:
-
-* `engine.survey_mode: true` in YAML — explicit override (also forces
-  `no_simulation: true`).
-* Pick **"Literature synthesis (no experiment)"** as the research
-  approach in the interview (CLI / web / VSCode).
-* Automatically — the clarify step classifies the topic shape as
-  `survey` (triggers: "history of", "evolution of", "overview of", …).
+a stronger form of no-simulation. Turn it on with `method: review_literature` in the commission (which also
+sets no-simulation). A config that sets `engine.survey_mode: true` is refused unless the commission says the same.
 
 In survey mode the graph skips BOTH the experiment (`implement` /
-`execute`) AND the whole data path (`auto_collect_data` →
-`wait_for_data` → `data_load` → `web_plots`), routing `design →
+`execute`) AND the whole data path (`wait_for_data` →
+`data_load` → `web_plots`), routing `design →
 web_figures → analyze → write`. `web_figures` still embeds
 license-clean illustrative images; `analyze` synthesises the reviewed
 sources directly; the paper is a narrative history with a References
 section and no fabricated metrics.
 
 For the no-simulation (data-analysis) path — where there IS a dataset
-to analyse — the engine runs `clarify → ideate → literature → design →
-auto_collect_data → wait_for_data → data_load → analyze → ...`. The
+to analyse — the engine runs `clarify → literature → design →
+wait_for_data → data_load → analyze → ...`. The
 two no-simulation-specific stops:
 
 **Confirming a data analysis** (`engine.phased: true`, on by default for research): when you
@@ -975,75 +927,9 @@ in `run.log` and `plan.md`. The held-back rows confirm one version of the design
 changed after that reading is a new version, which cannot be confirmed on rows already read, and
 says so. See docs/rigor.md, *Explore, then confirm*.
 
-**`auto_collect_data`** — agent-side data collection. Before
-pausing for user input, the engine asks the Knowledge layer (Axon)
-for relevant docs using `topic + design.hypothesis` as the query
-and writes the top hits into `<quest_root>/data/auto_collected/`
-as one Markdown file per doc (with YAML provenance front matter so
-the paper can cite back to specific sources). Controlled by:
-
-* `engine.auto_collect_data: true` (default) — try Axon first.
-  Set to `false` for "user-only" data flow when you don't trust
-  the corpus or want a manual pause every time.
-* `engine.auto_collect_top_k: 5` (default) — Axon hits requested.
-  5 fits comfortably in a 16k-context data_load prompt; raise
-  only on long-context models with topics that genuinely need
-  more breadth.
-
-**Dataset adapters**: in addition to the corpus-RAG retrieval,
-`auto_collect_data` can invoke structured-data adapters that hit
-public APIs and write tabular evidence into
-`<quest_root>/data/auto_collected/<adapter>/`. Opt in via:
-
-* `engine.dataset_adapters: [worldbank, wikipedia]` — list of
-  registered adapter names. Empty (default) means "Axon only —
-  no adapters run". Available adapters: `worldbank`, `wikipedia`.
-  Unknown names log a WARNING and are skipped (no hard error on typo).
-* `engine.dataset_adapter_top_k: 3` — rows per adapter. Smaller
-  default than the Axon knob because each row hits an external API.
-
-The WorldBank adapter heuristically extracts country names from the
-query (`"Belgium and Taiwan"` → `[BEL, TWN]`, falling back to
-global aggregates `WLD/OED/EUU/HIC/LIC` when no country named),
-scores ~1500 indicator names against the query keywords, and writes
-the top `top_k` matches as Markdown tables with the last 5 years of
-data. Adapter failures (network down, indicator not found, every
-write failing) fall through silently to the safety net.
-
-The Wikipedia adapter handles the long-tail "qualitative comparison"
-case where neither corpus-RAG nor structured-data fits — e.g.
-*"compare the 1968 student protests in Paris and Mexico City"*. It
-attempts to compress the query to its top-6 informative keywords
-(falls back to the raw trimmed query if every token was filtered
-out as a stop-word), calls `api.php?action=opensearch` to get
-candidate article titles, then fetches
-`api/rest_v1/page/summary/<title>` for each match and writes a
-Markdown file per article. The page's `description` and `extract`
-land in the document body; YAML front matter carries `source:
-wikipedia`, the canonical `title` / `url`, the article's
-`wikipedia_type` (e.g. `standard`, `disambiguation`), and
-`adapter: wikipedia` for downstream provenance. Articles with
-extracts under ~200 characters are dropped as too thin to cite.
-Request budget per quest: `1 + dataset_adapter_top_k` HTTP calls.
-
-Auto-collect falls through to the user-data pause (no files
-written, `auto_collected_count: 0` in state) in four cases:
-
-* `engine.auto_collect_data: false` — INFO log, **no Axon call**.
-* `knowledge.enabled: false` — INFO log, **no Axon call**.
-* `Knowledge.asearch` raised — WARNING log; Axon **was called** but
-  the exception is caught so the quest survives.
-* Axon returned zero hits — INFO log; Axon was called and answered
-  legitimately with nothing.
-
-In all four cases `wait_for_data` then makes the final pause-or-
-proceed decision based on `data/` contents (manual drops still
-count if you pre-staged some).
-
-**`wait_for_data`** — the user-data pause. With files already in
-`data/` (either auto-collected or user-supplied), this node
-passes through immediately. If the dir is empty (Axon returned
-nothing AND no manual drops), the engine exits cleanly (rc=0)
+**`wait_for_data`** — your data. A data study analyses the files you put in
+`data/`; FI looks for no data of its own. With files already in `data/`, this node
+passes through immediately. If the folder is empty, the engine exits cleanly (rc=0)
 with an instruction file at `outputs/<quest_id>/data/README.md`
 telling you what to drop. Then:
 
@@ -1052,12 +938,14 @@ fi --resume <quest_id>
 ```
 
 The engine picks up at the `data_load` node: walks every file in
-`data/` (including `auto_collected/`), classifies them (csv / json
+`data/`, classifies them (csv / json
 / pdf / md / xlsx / png), synthesizes a `result_json` via one LLM
 call grounded in the designed measurement plan, and then continues
 normally through `analyze → cross_check → write → review`. The
-paper cites the *specific files dropped or auto-collected* as
-primary sources, not invented data.
+paper cites the *specific files you dropped* as
+primary sources, not invented data. A note that asks for a number the data
+does not hold is not carried out (FI will not go and find it): the paper says it
+was not added.
 
 Permissive about format — drop whatever's natural. The walker
 deduplicates and budget-caps the prompt the same way `/summarize`
@@ -1109,32 +997,6 @@ provider:
   reasoning_effort: high          # Ollama takes low | medium | high
 ```
 
-### Setup questions
-
-Before it starts, a quest asks about ten setup questions (the `clarify` step): what you most want to see at the end,
-what the study should be called (three suggested titles; a `title:` in the YAML, which the interview always writes,
-skips this one), the baseline to compare against, the success metric, the budget, the outputs, the depth, the venue,
-and whether a simulation can answer the topic. Each comes with the agent's own suggested answer; Enter keeps it.
-
-```yaml
-pauses:
-  clarify: ask        # always stop for the answers; auto: the agent answers itself; off: skip the step
-                      # left out (the default): ask when someone can answer while it runs, else answer itself
-```
-
-Who can answer, by interface:
-
-| Interface | How the questions reach you | Nobody answers |
-|---|---|---|
-| Terminal | `fi --config my.yaml --interactive` (also `fi --new --interactive`) prompts on stdin. Without `--interactive` nobody can answer, so the agent answers itself, unless the YAML says `ask`. | with `ask`, the quest stops; the questions are in `<quest>/.fi/clarify_questions.json`; write a JSON object of question key → answer, one per question, to `<quest>/.fi/clarify_answer.json` and `fi --resume <id>`, or resume with `--interactive` to be asked |
-| Web (`fi --serve`) | a form on the quest page, marked *Waiting for your answers*, for a quest the page starts or resumes | the defaults after `pauses.timeout_s`; with `ask` the quest stops, and answering on the page resumes it |
-| VS Code | one input box per question, for a quest on the VS Code chat model (`@fi /new`, or `@fi /start` / `@fi /resume` of a YAML with `provider.name: vscode_extension`). Esc on any box carries on with the defaults | the defaults after `pauses.timeout_s`; with `ask` the quest stops, and `@fi /resume <id>` asks again |
-
-A YAML that names its own provider (for example Kimi through `@fi /start`) is not on the bridge, so VS Code cannot
-show the boxes: it answers itself, or, with `ask`, stops for the answer file above. `pauses.timeout_s` defaults to
-1800 s; `0` waits with no limit. A web quest waiting for its answers counts as a running quest against the server's
-`--max-concurrent`. A `--fleet` run never asks.
-
 ### Fleet of variations
 
 Stamp out N YAMLs each varying one knob (model, panel, depth), then:
@@ -1142,3 +1004,9 @@ Stamp out N YAMLs each varying one knob (model, panel, depth), then:
 ```bash
 fi --fleet variants/*.yaml --max-concurrent 4
 ```
+
+---
+
+## Removed
+
+FI no longer makes topics itself: `--proposal`, `--portfolio`, `--list-drafts`, `@fi /proposal`, `@fi /portfolio`, `@fi /drafts`, the web `/tools/proposal` and `/tools/portfolio` pages and the drafts picker, and the setting `knowledge.novelty_check` were removed. The setup questions at the start of a study (what you most want to see, the title, the baseline, the success metric, the venue, whether a simulation can answer the topic) were removed too: the commission gives the question, the scope, the success and failure conditions, the title and the `method`, and `--interactive`, the quest page, VS Code and `@fi` no longer ask anything at the start. A config that still sets `pauses.clarify`, `engine.clarify_mode` or `engine.clarify_overrides` loads, and the log says each does nothing. A study starts from a commission file (`fi new` writes one to fill in); a config that still sets `knowledge.novelty_check` loads, and the log says the setting no longer does anything.

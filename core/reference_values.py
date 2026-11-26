@@ -344,11 +344,9 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
             out.append(f"{head} {shape}")
             continue
         ref = normalized(m["reference"])
-        bad_filter = next((k for f in ref.get("when") or [] for k in f if k not in axes and k not in held), None)
+        bad_filter = unscanned_filter(m["reference"], protocol)
         if bad_filter is not None:
-            where = "`protocol.optimisation.grid`" if isinstance(protocol.get("optimisation"), dict) else "`protocol.grid`"
-            out.append(f"{head} holds `when` {bad_filter!r}, which is not a setting of {where} or "
-                       "`protocol.constants`")
+            out.append(f"{head} {bad_filter}")
             continue
         filters = ref.get("when") or []
         off = [(k, v) for f in filters for k, v in f.items() if k not in axes and not _same(held[k], v)]
@@ -370,6 +368,20 @@ def problems(protocol: dict[str, Any] | None) -> list[str]:
             if agreement["state"] == "disagrees":
                 out.append(f"{head} disagrees with a known-answer check: {agreement['why']}")
     return out
+
+
+def unscanned_filter(reference: Any, protocol: dict[str, Any]) -> str | None:
+    """The words (after "its `reference`") saying that the reference's ``when`` names a setting the study does not run (not
+    one of its grid, or its search's scan, nor a constant); ``None`` when it names only settings the study runs, and for a
+    reference that is not written as one (the other checks say so)."""
+    if shape_problem(reference):
+        return None
+    axes, held = study_axes(protocol), held_values(protocol)
+    bad = next((k for f in normalized(reference).get("when") or [] for k in f if k not in axes and k not in held), None)
+    if bad is None:
+        return None
+    where = "`protocol.optimisation.grid`" if isinstance(protocol.get("optimisation"), dict) else "`protocol.grid`"
+    return f"holds `when` {bad!r}, which is not a setting of {where} or `protocol.constants`"
 
 
 _ENTRY = re.compile(r"`protocol\.metrics` entry `([^`]*)`: its `reference`")

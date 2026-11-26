@@ -65,11 +65,6 @@ The observed slope of 3.0 is consistent with the design, and the fit is tight.
 """
 
 _FAKE_RESPONSES = {
-    "Ideation": json.dumps({
-        "ideas": [{"title": "scaling", "summary": "toy power law",
-                   "feasibility": "high", "novelty": "low"}],
-        "chosen": {"title": "scaling", "rationale": "only candidate"},
-    }),
     "Experiment Design": json.dumps({
         "hypothesis": "the metric scales as a power law",
         "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
@@ -109,8 +104,7 @@ def _golden_cfg(tmp_path: Path) -> Config:
         title="scaling",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
-            ideate_reflect=False, auto_accept_on_pass=True,
+            max_iterations=1, review_loop=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120),
         knowledge=KnowledgeConfig(enabled=False),

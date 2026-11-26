@@ -196,7 +196,7 @@ async def test_a_poster_finding_that_matches_no_panel_asks_for_nothing(tmp_path:
 def _engine(tmp_path: Path, replies: list[str]) -> tuple[Engine, AsyncMock]:
     cfg = Config(
         topic="integrators", title="integrators", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )
@@ -307,7 +307,6 @@ async def test_the_launch_gives_the_slides_check_the_restore(tmp_path: Path, mon
             return {"slides_pdf": out_dir / "slides.pdf", "paper_pdf": out_dir / "paper.pdf",
                     "poster_pdf": out_dir / "poster.pdf"}
 
-    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
     monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
     class _Paper:
         def __init__(self, cfg):  # noqa: ANN001

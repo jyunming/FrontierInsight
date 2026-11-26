@@ -50,7 +50,7 @@ def _mk_cfg(tmp_path: Path, *, provider_name: str = "") -> Config:
         topic="x",
         title="x",
         provider=ProviderConfig(name=provider_name) if provider_name else ProviderConfig(),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
@@ -145,9 +145,9 @@ def test_socket_override_respects_every_non_vscode_provider(
 
 # --- PM-command extras helper -----------------------------------------------
 #
-# ``_set_vscode_bridge_extras`` is the helper that the five PM-command
-# runners (``_run_summarize`` / ``_run_digest`` / ``_run_portfolio`` /
-# ``_run_critique`` / ``_run_proposal``) call to wire the bridge port +
+# ``_set_vscode_bridge_extras`` is the helper that the PM-command
+# runners (``_run_summarize`` / ``_run_digest`` /
+# ``_run_critique``) call to wire the bridge port +
 # socket into their freshly-built ``ProviderConfig``. The guard added in
 # PR #134 to ``_apply_vscode_bridge_override`` /
 # ``_apply_vscode_bridge_socket_override`` was missed here, so a user
@@ -267,7 +267,7 @@ def test_extras_respects_every_non_vscode_provider_both(
 
 
 def test_resolve_endpoint_accepts_the_socket_the_extension_passes() -> None:
-    """What ``@fi /update`` and ``@fi /generate`` now put on the command
+    """What ``@fi /generate`` now puts on the command
     line — ``--vscode-bridge-socket <per-user pipe/socket>`` — has to
     resolve to a usable vscode_bridge endpoint. This is the Python half
     of the fix: the extension can only hand over an address, and this is
@@ -288,7 +288,7 @@ def test_resolve_endpoint_accepts_the_socket_the_extension_passes() -> None:
 def test_resolve_endpoint_still_rejects_the_old_bare_terminal_spawn() -> None:
     """Before the fix, ``/update`` and ``/generate`` opened a plain
     terminal, so the YAML's ``provider.name: vscode_extension`` (which
-    every ``@fi /new`` config pins) reached resolution with an EMPTY
+    every config of the old setup interview pinned) reached resolution with an EMPTY
     ``extra``. That must keep raising — it is exactly the error users
     were hitting, and it is the thing the new flag prevents."""
     from core.provider import resolve_endpoint

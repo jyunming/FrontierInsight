@@ -13,22 +13,24 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import launch
-from core import quest_index
+from core import commission, quest_index
+from tests import commissioned
 
 REPO = Path(__file__).resolve().parent.parent
 QID = "1790003131-energy-drift-479b06"
 
 
 def _study(tmp_path: Path, qid: str = QID, title: str = "Energy drift") -> Path:
-    """A quest started in ``study_a`` (its YAML's output_dir is relative, as the interview writes it)."""
+    """A quest started in ``study_a`` from its commission (its YAML's output_dir is relative, as `fi new` writes it)."""
     folder = tmp_path / "study_a"
     root = folder / "outputs" / qid
     (root / ".fi").mkdir(parents=True)
     (root / ".fi" / "state.sqlite").write_bytes(b"")
     (root / "config.yaml").write_text(
-        f"topic: energy drift\ntitle: {title}\nprovider:\n  name: openai\noutput:\n  output_dir: ./outputs\n",
+        f"{commissioned.line(folder)}title: {title}\nprovider:\n  name: openai\noutput:\n  output_dir: ./outputs\n",
         encoding="utf-8",
     )
+    commission.stage(folder / "commission.yaml", root)
     quest_index.register(root, working_folder=folder, title=title)
     return root
 
@@ -83,7 +85,8 @@ async def test_an_explicit_config_with_a_short_id_finds_the_quest_through_the_in
     root = _study(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     mine = elsewhere / "mine.yaml"
-    mine.write_text("topic: t\nprovider:\n  name: openai\noutput:\n  output_dir: ./outputs\n", encoding="utf-8")
+    mine.write_text(f"{commissioned.line(tmp_path / 'study_a')}provider:\n  name: openai\noutput:\n  output_dir: ./outputs\n",
+                    encoding="utf-8")
     seen: dict = {}
 
     async def fake_run_one(cfg, **kw):  # noqa: ANN001, ANN003
@@ -121,7 +124,6 @@ async def test_run_one_records_the_quest_in_the_index_with_its_folder_and_title(
         return art
 
     monkeypatch.setattr(launch, "_maybe_profiled", fake_maybe)
-    monkeypatch.setattr(launch, "_pick_clarify_callback", lambda *a, **kw: None)
     monkeypatch.setattr(launch, "_run_generators", AsyncMock(return_value={}))
     await launch.run_one(cfg, supervisor=MagicMock(), source_yaml_path=src)
     entry = quest_index.load()[engine.quest_id]
@@ -152,38 +154,6 @@ async def test_a_quest_found_elsewhere_runs_from_the_folder_it_was_started_in(
     assert seen["output_dir"].resolve() == root.parent.resolve()
     assert seen["cwd"].resolve() == (tmp_path / "study_a").resolve()
     assert Path(seen["yaml"]) == (root / "config.yaml").resolve()
-
-
-def test_update_resumes_a_quest_from_another_folder_in_its_own_outputs(
-    tmp_path: Path, elsewhere: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import asyncio
-
-    from core.interview import InterviewAnswers, answers_to_yaml
-    from core.interview_update import run_update_flow
-
-    root = _study(tmp_path)
-    (root / "config.yaml").write_text(answers_to_yaml(InterviewAnswers(
-        topic="energy drift", title="Energy drift", output_kinds=["paper_md"], paper_format="generic",
-        no_simulation=False, provider="openai", provider_model="gpt-4o", knowledge_enabled=False,
-        study_depth="journal-length", comparative_baseline="BaselineA", success_metric="AUC >= 0.9",
-        budget="5 minutes", clarify_mode="auto", review_panel=[],
-    ), frontend="cli"), encoding="utf-8")
-    monkeypatch.setattr("launch._cli_prompt_for", lambda q, _p, _o: q.default)
-    seen: dict = {}
-
-    async def fake_run_one(cfg, **kw):  # noqa: ANN001, ANN003
-        seen["output_dir"] = Path(cfg.output.output_dir)
-        return 0
-
-    located = launch._locate_quest("479b06", Path("outputs"))
-    assert located is not None and located.resolve() == root.resolve()
-    rc = asyncio.run(run_update_flow(
-        quest_id=located.name, output_root=located.parent, vscode_bridge_port=0, interactive=False,
-        supervisor=None, run_one=fake_run_one, apply_vscode_bridge_override=lambda _c, _p: None,
-    ))
-    assert rc == 0
-    assert seen["output_dir"].resolve() == root.parent.resolve()
 
 
 def test_trace_takes_a_short_id_from_another_folder(tmp_path: Path, elsewhere: Path,

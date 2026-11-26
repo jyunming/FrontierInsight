@@ -14,15 +14,12 @@ Python → extension::
 
     {"type":"lm_request","id":<int>,"node":"<name>","messages":[...],
      "model_hint":"<optional>","temperature":<float>,"ask_thinking":<bool>}
-    {"type":"clarify_request","id":<int>,"questions":{...}}
 
 Extension → Python::
 
     {"type":"lm_chunk","id":<int>,"delta":"<text>"}
     {"type":"lm_done","id":<int>,"content":"<text>","total_tokens":<int>}
     {"type":"lm_error","id":<int>,"error":"<message>"}
-    {"type":"clarify_response","id":<int>,"answers":{...}}
-    {"type":"clarify_cancelled","id":<int>}
 
 Why a TCP socket (and not stdio): logging, print(), tenacity, and
 pip-install subprocess noise all leak into stdout of a Python process
@@ -134,7 +131,7 @@ class VSCodeBridgeClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         # Per-request futures keyed by id. lm requests resolve to the
-        # response text; clarify requests resolve to the answers dict.
+        # response text; human-review requests resolve to the decision dict.
         # We mix kinds in one map keyed by id because each id is unique
         # across the lifetime of the client.
         self._pending: dict[int, asyncio.Future[Any]] = {}
@@ -228,7 +225,7 @@ class VSCodeBridgeClient:
         ``lm_done``. The extension does the actual ``vscode.lm`` call
         on the user's behalf; we just shuttle JSON.
 
-        ``node`` is the FI engine node name (``"ideate"``,
+        ``node`` is the FI engine node name (``"plan"``,
         ``"review_panel.statistician"``, …) so the extension can render
         progress in the chat panel with the right tag.
 
@@ -303,35 +300,6 @@ class VSCodeBridgeClient:
             self._declined.pop(req_id, None)
             self._protocol.pop(req_id, None)
             self._empty_parts.pop(req_id, None)
-
-    async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
-        """Pause for human-in-the-loop clarify answers. The extension
-        renders one input modal per question (pre-filled with the
-        agent's suggested default) and POSTs the answers back.
-
-        Returns the answers dict on success. Raises ``BridgeError`` if
-        the user cancelled (e.g. pressed Esc) or the bridge dropped —
-        the engine's caller should catch that and fall back to using
-        the per-question defaults rather than crashing the whole quest.
-        """
-        if self._writer is None:
-            await self.connect()
-        req_id = self._next_id
-        self._next_id += 1
-        fut: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
-        self._pending[req_id] = fut
-        await self._send({
-            "type": "clarify_request",
-            "id": req_id,
-            "questions": questions,
-        })
-        try:
-            result = await fut
-        finally:
-            self._pending.pop(req_id, None)
-        if not isinstance(result, dict):
-            raise BridgeError(f"clarify response was not a dict: {result!r}")
-        return result
 
     async def human_review(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop review after the review node.
@@ -428,7 +396,7 @@ class VSCodeBridgeClient:
         if mtype == "lm_chunk":
             req_id = int(msg.get("id", 0))
             # Drop chunks for requests that are no longer pending. The
-            # wait_for timeout path (and clarify-callback errors) pop
+            # wait_for timeout path (and review-callback errors) pop
             # ``_pending``/``_chunks`` before the extension stops
             # streaming, so late chunks can arrive after cleanup. Using
             # ``setdefault`` here would resurrect a buffer for an
@@ -497,26 +465,6 @@ class VSCodeBridgeClient:
                 return
             err = str(msg.get("error", "unknown bridge error"))
             fut.set_exception(BridgeError(err))
-        elif mtype == "clarify_response":
-            req_id = int(msg.get("id", 0))
-            fut = self._pending.get(req_id)
-            if fut is None or fut.done():
-                return
-            answers = msg.get("answers")
-            if not isinstance(answers, dict):
-                fut.set_exception(BridgeError(
-                    f"clarify_response missing 'answers' dict: {msg!r}"
-                ))
-                return
-            fut.set_result(answers)
-        elif mtype == "clarify_cancelled":
-            req_id = int(msg.get("id", 0))
-            fut = self._pending.get(req_id)
-            if fut is None or fut.done():
-                return
-            fut.set_exception(BridgeError(
-                "user cancelled the clarify panel"
-            ))
         elif mtype == "human_review_response":
             req_id = int(msg.get("id", 0))
             fut = self._pending.get(req_id)

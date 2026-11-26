@@ -1,27 +1,20 @@
-"""``fi --analyze <data_path>`` — start a no-simulation quest with
-pre-staged data.
+"""``fi --analyze <data_path> --commission <file>`` — start a no-simulation
+quest with pre-staged data.
 
-The inverse of ``fi --proposal``: rather than asking the engine to
-plan an experiment, the user already has data and wants FI to write
-a paper analyzing it. Workflow:
+The user already has data and wants FI to write a paper analyzing it,
+rather than asking the engine to plan an experiment. Workflow:
 
-1. User runs ``fi --analyze ./my_data --analyze-topic "Compare ..."``.
+1. User runs ``fi --analyze ./my_data --commission commission.yaml`` (the
+   commission's question is what the analysis answers).
 2. We mint a new quest_id, create ``<output_root>/<quest_id>/data/``,
    and copy every file from ``my_data/`` (recursive) into it.
 3. We build a minimal :class:`Config` with
-   ``engine.no_simulation: true`` and ``engine.auto_collect_data:
-   false`` — the engine then routes through ``auto_collect_data``
-   (which passes through because auto_collect is off) → ``wait_for_data``
+   ``engine.no_simulation: true`` — the engine then routes through ``wait_for_data``
    (which passes through because ``data/`` already has files) →
    ``data_load`` → ``analyze → cross_check → write → review``.
 
-The user can still feed ``--config <yaml>`` to override defaults
-(provider, reviewer panel, output kinds) — those merge over the
-minimal config built here. When ``--config`` is absent we ship a
-sensible default tuned for the analyze workflow.
-
 Single LLM cost: ~6 premium requests for a bare analyze run
-(no ideate / no literature / no design / no implement / no execute /
+(no literature / no design / no implement / no execute /
 no execute_reflect). Closely matches the no-simulation cost row in
 ``vscode-frontier-insight/README.md``.
 """
@@ -163,36 +156,33 @@ def stage_data(src: Path, dest: Path) -> int:
 
 
 def build_analyze_config(
-    *, topic: str, output_dir: Path, provider_name: str = "vscode_extension",
+    *, commission: Path, output_dir: Path, provider_name: str = "vscode_extension",
     title: Optional[str] = None,
 ) -> Config:
     """Build a minimal Config for the analyze quest — **local-data-first**.
 
-    The user already supplied the data, so this workflow does NOT ideate,
-    retrieve literature, or design an experiment; it loads and analyses the
+    The user already supplied the data, so this workflow does NOT
+    retrieve literature or design an experiment; it loads and analyses the
     local data directly. Concretely:
-    * ``analyze_local_first: true`` — ideate / literature / design run as
+    * ``analyze_local_first: true`` — literature / design run as
       PASSTHROUGHS (no LLM call, no retrieval). Implies no_simulation.
     * ``knowledge.enabled: false`` + ``web_search: false`` +
       ``external_fallback: []`` — NO external retrieval, web or academic.
-      Without ``web_search: false`` the literature node would still web-
-      search, because ``web_search`` is independent of ``enabled``.
-    * ``auto_collect_data: false`` — no Axon collection either.
+      (The literature node only reads the sources the commission gives.)
     * ``review_loop: false`` — one write+review pass, not a revise cycle.
-    * ``clarify_mode: off`` — the topic is the source of truth here."""
+    * The commission is the source of truth here (its question becomes the topic)."""
+    from core import commission as _commission
+
     return Config(
-        topic=topic,
-        title=title or _slug(topic, max_chars=60),
+        commission=commission,
+        title=title,  # the commission's own title applies (``Config``); with none the writer proposes one
         provider=ProviderConfig(name=provider_name),  # type: ignore[arg-type]
         engine=EngineConfig(
             framework="langgraph",
             max_iterations=1,
             review_loop=False,
-            clarify_mode="off",
             no_simulation=True,
             analyze_local_first=True,
-            auto_collect_data=False,
-            ideate_reflect=False,
             cross_check_per_finding_k=0,
             enable_analyze_reroute=False,
         ),
@@ -209,7 +199,7 @@ def build_analyze_config(
 
 
 def prepare_analyze_quest(
-    *, data_path: Path, topic: str, output_root: Path,
+    *, data_path: Path, commission: Path, output_root: Path,
     provider_name: str = "vscode_extension",
     title: Optional[str] = None,
 ) -> tuple[Config, str, int]:
@@ -218,13 +208,15 @@ def prepare_analyze_quest(
 
     Caller (``launch.py``) wires the Config into ``Engine(cfg).run()``
     afterwards. Split this way so it's testable without spinning up
-    the LLM."""
-    quest_id = mint_quest_id(topic)
+    the LLM. The commission is checked before (``commission.door``)."""
+    from core import commission as _commission
+
+    quest_id = mint_quest_id(str(_commission.read(commission).get("question") or ""))
     quest_root = output_root.expanduser().resolve() / quest_id
     data_dir = quest_root / "data"
     files_staged = stage_data(data_path.expanduser().resolve(), data_dir)
     cfg = build_analyze_config(
-        topic=topic, output_dir=output_root, provider_name=provider_name,
+        commission=commission, output_dir=output_root, provider_name=provider_name,
         title=title,
     )
     return cfg, quest_id, files_staged

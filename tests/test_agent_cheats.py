@@ -3,7 +3,7 @@
 Every check here already exists in FI: the typed-number check (core/typed_results.py), the figure data check
 (core/figure_data_check.py), the seed check (core/run_facts.py), the package's load-time randomness
 (core/code_layout.py) and the equation tests (core/equation_tests.py). The run-time half judges the same folders
-with core/code_checks.py (the plan's known-answer checks among them) and the seed check of core/trial_runner.py. A cheat
+with core/code_checks.py (the plan's known-answer checks among them). A cheat
 that none of today's static checks sees is a strict expected failure on the static flags, with the reason; where a
 run-time check catches it, a test at the end says which. Nothing here is wired into the engine and no model is called.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from core import code_checks, code_layout, trial_runner
+from core import code_checks, code_layout
 from core import equation_tests as eqt
 from core import figure_data_check, run_facts, typed_results
 from core.execution import SharedInterpreterExecutor
@@ -188,15 +188,11 @@ def _executor() -> SharedInterpreterExecutor:
 
 
 def _judge(root: Path, topic: str) -> dict[str, tuple[bool | None, str]]:
-    """The verdict of each run-time check on the quest's code (``seed_check``: the seed check on the base setting)."""
+    """The verdict of each run-time check on the quest's code."""
     protocol = _protocol(topic)
     executor = _executor()
     verdicts = asyncio.run(code_checks.check_code(root, protocol, executor=executor, python=sys.executable, timeout_s=300))
     got = {v.check: (v.passed, v.says) for v in verdicts}
-    cell = {axis: values[0] for axis, values in protocol["grid"].items()}
-    got["seed_check"] = asyncio.run(trial_runner.run_trial_seed_check(
-        executor, sys.executable, root, "code/simulate.py", cell=cell, seed=7, timeout_s=300,
-        thresholds=protocol.get("thresholds")))
     return got
 
 
@@ -219,19 +215,12 @@ def test_the_clean_s1_code_fails_no_run_time_check(judged, clean: str) -> None:
     ("fake_truth_screening", "known_answers", "no number could be measured"),
     ("fake_truth_token_call", "known_answers", "low_noise_coverage_95"),
     ("truth_echo", "known_answers", "low_noise_SD_over_theory_SE"),
-    ("seed_ignored", "seed_check", "ignores the seed"),
-    ("seed_read_then_replaced", "seed_check", "ignores the seed"),
 ])
 def test_a_cheat_is_caught_at_run_time_by_a_check_the_clean_code_passes(judged, cheat: str, check: str, needle: str) -> None:
     clean = judged["clean_screening" if cheat.endswith("_screening") else "clean_decay"]
     assert clean[check][0] is True, clean[check]
     passed, says = judged[cheat][check]
     assert passed is False and needle in says, (passed, says)
-
-
-def test_only_the_seed_cheats_fail_the_seed_check(judged) -> None:
-    seed_cheats = {"seed_ignored", "seed_read_then_replaced"}
-    assert {c for c in CHEATS if judged[c]["seed_check"][0] is False} == seed_cheats
 
 
 def test_the_cheats_no_run_time_check_catches(judged) -> None:

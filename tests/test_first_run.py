@@ -85,7 +85,9 @@ async def test_the_command_line_stops_with_that_message_and_exit_2(tmp_path: Pat
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     cfg = tmp_path / "quest.yaml"
-    cfg.write_text(f"topic: t\ntitle: t\nprovider:\n  name: openai\noutput:\n  output_dir: {tmp_path.as_posix()}/outputs\n", encoding="utf-8")
+    from tests import commissioned
+
+    cfg.write_text(f"{commissioned.line(tmp_path)}title: t\nprovider:\n  name: openai\noutput:\n  output_dir: {tmp_path.as_posix()}/outputs\n", encoding="utf-8")
     assert await launch.main_async(parse_args(["--config", str(cfg), "--no-axon-sidecar"])) == 2
     assert "OPENAI_API_KEY" in capsys.readouterr().err
     assert not (tmp_path / "outputs").exists() or not list((tmp_path / "outputs").iterdir()), "no quest was started"

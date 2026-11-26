@@ -229,12 +229,12 @@
     <div class="p-4 md:p-7 font-mono text-[11px] md:text-code-sm leading-relaxed overflow-x-auto">
       <div class="terminal-line" style="animation-delay:0ms">
         <span class="text-cyan-accent font-semibold">$</span>
-        <span class="text-on-surface"> python launch.py --new</span>
+        <span class="text-on-surface"> python launch.py new</span>
       </div>
-      <div class="terminal-line text-on-surface-variant" style="animation-delay:80ms"># 6 questions, then a review screen. YAML written to outputs/_drafts/.</div>
+      <div class="terminal-line text-on-surface-variant" style="animation-delay:80ms"># writes commission.yaml to fill in and study.yaml, the config that names it.</div>
       <div class="terminal-line" style="animation-delay:160ms">
         <span class="text-cyan-accent font-semibold">$</span>
-        <span class="text-on-surface"> python launch.py --config outputs/_drafts/2026-05-18-1500-coulomb-blockade.yaml</span>
+        <span class="text-on-surface"> python launch.py --config study.yaml</span>
       </div>
       <div class="terminal-line text-on-surface-variant mb-3" style="animation-delay:240ms">&nbsp;</div>
       <div class="terminal-line text-on-surface-variant" style="animation-delay:320ms">[<span class="text-primary">1779140057-coulomb-blockade-2c4ae3</span>] starting quest 1779140057-coulomb-blockade-2c4ae3</div>
@@ -264,7 +264,7 @@
         <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 1</div>
         <span class="material-symbols-outlined text-electric-lime text-[30px] mb-3 block">edit_note</span>
         <h3 class="font-display font-bold text-lg mb-2">Describe your idea</h3>
-        <p class="text-on-surface-variant text-body-md">A sentence or two: what you want to find out, and what would count as success. That's the whole input &mdash; a short interview helps you fill it in.</p>
+        <p class="text-on-surface-variant text-body-md">A sentence or two: what you want to find out, and what would count as success. That's the whole input &mdash; <code class="font-mono text-xs">fi new</code> writes the file for you to fill in.</p>
       </div>
       <div class="card-border-gradient p-6 md:p-7">
         <div class="font-mono text-label-caps text-cyan-accent mb-3">STEP 2</div>
@@ -334,8 +334,7 @@
           <h4 class="font-display font-bold text-lg">Headless CLI</h4>
         </div>
         <p class="text-on-surface-variant text-body-md mb-4">For CI, remote shells, overnight fleets.</p>
-        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py --new
-python launch.py --proposal "RK4 vs Verlet on Kepler"
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>python launch.py new
 python launch.py --fleet a.yaml b.yaml --max-concurrent 2
 python launch.py --resume &lt;quest_id&gt;</code></pre>
       </div>
@@ -345,10 +344,8 @@ python launch.py --resume &lt;quest_id&gt;</code></pre>
           <h4 class="font-display font-bold text-lg">VSCode Copilot</h4>
         </div>
         <p class="text-on-surface-variant text-body-md mb-4">Sanctioned <code class="font-mono text-xs">vscode.lm</code> bridge &mdash; counts as your normal Copilot usage.</p>
-        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>@fi /new
-@fi /start &lt;path-to-config.yaml&gt;
-@fi /resume &lt;quest_id&gt;
-@fi /proposal Compare RK4 vs Verlet</code></pre>
+        <pre class="bg-surface-container-lowest border border-border-subtle rounded-lg p-3 font-mono text-xs text-on-surface overflow-x-auto"><code>@fi /start &lt;path-to-config.yaml&gt;
+@fi /resume &lt;quest_id&gt;</code></pre>
       </div>
       <div class="card-border-gradient p-6 md:p-7">
         <div class="flex items-center gap-3 mb-4">

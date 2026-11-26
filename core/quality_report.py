@@ -31,10 +31,11 @@ SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
 STAGE_NAME = {"plan": "Plan", "checks": "Checks", "design": "Design", "code": "Code", "run": "Run",
               "analysis": "Analysis", "paper": "Paper", "review": "Review"}
-#: Which stage a model call belongs to (the step name, without any ``.suffix``).
+#: Which stage a model call belongs to (the step name, without any ``.suffix``). The ``ideate`` steps are an earlier
+#: FI's, in the record of a quest it ran.
 _NODE_STAGE = {
     "clarify": "plan", "ideate": "plan", "ideate_query": "plan", "ideate_reflect": "plan", "ideate_tournament": "plan",
-    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "literature_novelty": "plan", "source_router": "plan",
+    "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "source_router": "plan",
     "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan", "plan_contract": "plan",
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
@@ -182,7 +183,6 @@ class _Quest:
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.audit_open = [x for x in _list(_dict(_json(fi / "audit_open_items.json")).get("open")) if isinstance(x, dict)]
         self.pause = _dict(_json(fi / "pause.json"))
-        self.scope = _dict(_json(fi / "scope.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
@@ -532,23 +532,6 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
                                       "the results belong to the plan's settings, not to what the redesign meant",
                             "FI's design check", "left out", ".fi/drafted_parts_asked.json"))
     return out
-
-
-def _scope_summary(q: _Quest) -> dict[str, Any] | None:
-    """Which study was picked, or that nobody picked one and which studies the topic could also have meant
-    (``.fi/scope.json``). ``None`` when there is no such record."""
-    if not q.scope:
-        return None
-    from . import scope_cards as _sc
-
-    cards = [_dict(c) for c in _list(q.scope.get("cards"))]
-    chosen = _dict(q.scope.get("chosen"))
-    removed = [str(x) for x in _list(q.scope.get("removed")) if str(x).strip()]
-    if q.scope.get("chosen_by") == "person" and chosen:
-        return {"chosen_by": "person", "chosen": str(chosen.get("question") or ""), "removed": removed,
-                "lines": [f"The person chose this study: {_one(chosen.get('question'), 300)}"]}
-    return {"chosen_by": "nobody", "chosen": "", "removed": removed,
-            "lines": [_sc.nobody_line(), *[_one(c.get("question"), 300) for c in cards if c.get("question")]]}
 
 
 def _plan_problems(q: _Quest) -> list[dict[str, str]]:
@@ -1385,6 +1368,17 @@ def _outcome(q: _Quest) -> dict[str, Any]:
         decide = _one(q.pause.get("decide"), 200)
         out.update(kind="paused", line=f"Paused: {_one(q.pause.get('headline'), 200)}."
                    + (f" It waits for you: {decide}" if decide else ""), needs_person=True)
+    receipt = _dict(_json(root / "needs" / "STEP_RECEIPT.json"))
+    if out["kind"] == "unknown" and receipt.get("step"):
+        # One step of a commissioned study run on its own (core/rerun_from.py ALONE) ends without a paper by design.
+        ended, name = str(receipt.get("ended") or ""), str(receipt["step"])
+        failed = [("design check" if c == "design_audit" else c.replace("_", " ")) for c, v in
+                  _dict(receipt.get("checks")).items() if isinstance(v, dict) and v.get("status") == "fail"]
+        out.update(kind="step_ended", step=name, line=f"The {name} step was run on its own and " + (
+            "finished" + (f" with its {' and '.join(failed)} not passed" if failed else "") + "; its receipt "
+            "(needs/STEP_RECEIPT.json) says what it was given, what it made and what its checks judged."
+            if ended == "done" else f"stopped: {_one(receipt.get('stopped_because'), 300)}." if ended == "stopped"
+            else f"ended {ended}."))
     return out
 
 
@@ -1654,8 +1648,8 @@ def _paper_records(q: _Quest) -> dict[str, Any]:
                                                      "why": " ".join(str(_dict(r).get("evidence") or "").split())}
                                                     for r in q.unsupported_standing
                                                     if str(_dict(r).get("claim") or "").strip()]}
-    # The study as the quest resolved it (clarify can decide a quest needs no simulation, or is a survey, when the YAML did
-    # not say so): the last design route records both. A quest with no such record falls back to the YAML.
+    # The study as the quest resolved it (the commission's method decides whether a quest needs no simulation, or is a survey):
+    # the last design route records both. A quest with no such record falls back to the YAML.
     resolved = next((_dict(e.get("facts")) for e in reversed(q.decisions("design")) if _dict(e.get("facts"))), {})
     no_sim = bool(resolved.get("no_simulation", engine.get("no_simulation")))
     survey = bool(resolved.get("survey_mode", engine.get("survey_mode")))
@@ -1736,7 +1730,6 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "pilot": _pilot_summary(q),
-        "scope": _scope_summary(q),
         "trial_checks": _trial_checks_summary(q),
         "citations": _citations(q),
         "paper_pdf": _paper_pdf(q),
@@ -1990,11 +1983,6 @@ def render(report: dict[str, Any]) -> str:
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
-    scope = report.get("scope")
-    if scope:
-        lines += ["", "## The study", "", scope["lines"][0]]
-        lines += [f"- {line}" for line in scope["lines"][1:]]
-        lines += [f"- Removed: {_cell(x)}" for x in scope.get("removed") or []]
     trials = report.get("trial_checks")
     if trials:
         lines += ["", "## FI's checks of the trials", ""]

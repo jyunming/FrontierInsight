@@ -721,14 +721,6 @@ class TrialRun:
     def ok_trials(self) -> int:
         return sum(1 for c in self.cells for r in c.rows if r.get("status") == "ok")
 
-    def ledger_rows(self) -> list[dict[str, Any]]:
-        """The ledger's trial rows in the run-manifest schema, for :func:`core.run_manifest.manifest_from_ledger`."""
-        return [
-            {"cell": c.key, "trial": r["trial"], "status": "ok" if r.get("status") == "ok" else "failed",
-             **({"reason": r["reason"]} if r.get("reason") else {})}
-            for c in self.cells for r in c.rows
-        ]
-
     def stderr(self) -> str:
         """Every cell's stderr (its warnings and prints), for the numeric-warning scan."""
         return "\n".join(c.stderr for c in self.cells if c.stderr)
@@ -2205,9 +2197,36 @@ class TrialsRunner:
         self.left_out_settings: list[str] = []
         self._plan_seen: list[dict[str, Any]] | None = None
         self._plan_started = 0.0
+        self._baseline: dict[str, int] = {}  # per setting: trials already in its results when it was planned (reused, not run now)
+        self._outs: dict[str, str] = {}  # per setting: its results file as planned (a setting run again alone gets another)
+        self._alarm_off = False  # a study partly done before this run, or a setting run again alone: no range sentence
+        self._counts: tuple[int, int] | None = None  # (trials done in this run, trials of the study) as progress_text last read
+        self._alarm_ref: tuple[Any, Any, bool] | None = None  # the range kept at the start, the estimate said, and whether told
 
     def _note_plan(self, plan: list[dict[str, Any]]) -> None:
-        self._plan_seen, self._plan_started = plan, time.monotonic()
+        """Told the plan so far (again with every batch of a lazily planned study). The clock and the reference for the
+        time-range sentence are those of the first call; a setting whose trials are already in its results is not this run's work."""
+        if self._plan_seen is None:
+            from . import run_estimate as _estimate
+
+            self._plan_started, self._baseline, self._counts = time.monotonic(), {}, None
+            self._outs, self._alarm_off = {}, False
+            record = _estimate.read_record(self.quest_root)
+            self._alarm_ref = (record.get("range_s"), record.get("estimate_s"), bool(record.get("range_said")))
+        self._plan_seen = plan
+        for task in plan:
+            if task["nonce"] not in self._baseline:
+                self._baseline[task["nonce"]] = self._trials_in(task)
+                self._outs[task["nonce"]] = task["out"]
+                if self._baseline[task["nonce"]] > 0:
+                    self._alarm_off = True  # the range is for the whole study, and part of it was not run now
+
+    def _trials_in(self, task: dict[str, Any]) -> int:
+        try:
+            lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0
+        return sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
 
     def progress_text(self) -> str:
         """For the "still running" line: how many settings are done and how long is left, in plain words; empty when the
@@ -2217,18 +2236,36 @@ class TrialsRunner:
             return ""
         from . import run_estimate as _estimate
 
-        done_trials = 0
-        done_cells = 0
+        done_trials = done_cells = new_trials = 0
         for task in plan:
-            try:
-                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            seen = sum(1 for ln in lines if '"status"' in ln and task["nonce"] in ln)
-            done_trials += seen
+            if self._outs.get(task["nonce"], task["out"]) != task["out"]:
+                self._alarm_off = True  # run again alone after a shared process died: what was done is not counted whole
+            seen = self._trials_in(task)
+            base = min(self._baseline.get(task["nonce"], 0), seen)
+            done_trials += seen - base
+            new_trials += len(task["trials"]) - base
             done_cells += seen >= len(task["trials"])
-        return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
-                                       time.monotonic() - self._plan_started)
+        self._counts = (done_trials, new_trials)
+        return _estimate.progress_line(done_cells, len(plan), done_trials, new_trials, time.monotonic() - self._plan_started)
+
+    def progress_alarm(self) -> str:
+        """The sentence saying the study left the time range FI kept at the start, once (kept in the estimate record, so a
+        resumed quest does not say it again); empty before that and after. It uses the counts :meth:`progress_text` just read,
+        and none for a study planned a batch at a time (its total is not known)."""
+        if self._plan_seen is None or self._counts is None or self._alarm_ref is None or self._alarm_off or self.first_cells is not None:
+            return ""
+        range_s, said_s, told = self._alarm_ref
+        if told or not range_s:
+            return ""
+        from . import run_estimate as _estimate
+
+        text = _estimate.left_the_range(self._counts[0], self._counts[1], time.monotonic() - self._plan_started, range_s, said_s)
+        if text:
+            record = _estimate.read_record(self.quest_root)
+            if record.get("estimate_s") != said_s or not _estimate.write_record(self.quest_root, {**record, "range_said": True}):
+                return ""  # the mark was not kept: not said now, or a resumed quest would say it again
+            self._alarm_ref = (range_s, said_s, True)
+        return text
 
     def _without_left_out(self, summary: Path) -> Path:
         """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
@@ -3358,81 +3395,6 @@ async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, mo
     return True, ""
 
 
-async def _seeded_once(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
-                       seed: int, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                       log: Any = None,
-                       kind: str = "scan") -> tuple[dict[str, float] | None, float, str]:
-    """One call of ``run_trial`` in a new process with FI's seed: ``(its numbers by record key, the seconds the call
-    took, "")``, or ``(None, 0, why)``."""
-    rows, result = await _run_batch(executor, python, quest_root, module, entry="run_trial", cell=dict(cell),
-                                    trials=[{"trial": 0, "seed": int(seed)}], timeout_s=timeout_s, env=env,
-                                    thresholds=thresholds, log=log, kind=kind)
-    for row in rows:
-        if row.get("load_error"):
-            return None, 0.0, str(row["load_error"])
-        if row.get("status") == "ok":
-            numbers = {_in_run.record_key(k, n) if k else n: v for k, n, v in _in_run.flat("", row.get("values") or {})}
-            seconds = row.get("duration_s")
-            return numbers, float(seconds) if isinstance(seconds, (int, float)) else 0.0, ""
-        if row.get("status") == "failed":
-            return None, 0.0, str(row.get("reason") or "run_trial failed")
-    return None, 0.0, (TimeLimit("run_trial ran out of time") if getattr(result, "timed_out", False)
-                       else f"run_trial did not report (exit code {result.returncode})")
-
-
-def _is_run_time(first: tuple[Any, float], again: tuple[Any, float]) -> bool:
-    """A number that differs between two same-seed runs is the run's own time when, in both runs, it lies between zero and
-    the seconds the call took (FI's harness times the call): a time cannot be longer than the call it was taken in. No
-    name is read."""
-    return all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= v <= seconds * 1.05 + 1e-3
-               for v, seconds in (first, again))
-
-
-async def run_trial_seed_check(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *,
-                               cell: dict[str, Any], seed: int, timeout_s: int, deterministic: bool = False,
-                               varies: set[str] | frozenset[str] | None = None, env: dict[str, str] | None = None,
-                               thresholds: dict[str, Any] | None = None, log: Any = None,
-                               kind: str = "scan") -> tuple[bool | None, str]:
-    """Whether ``run_trial`` uses the seed FI gives it: FI calls it on one setting with seed ``s``, with ``s`` again and
-    with ``s + 1`` (each call in a new process): ``(True, "")``, ``(False, what is wrong)`` or ``(None, why it could not
-    be judged)``.
-
-    * Two calls with the same seed must return the same numbers. A number that differs and lies within the call's own
-      duration is a time (it is left out of the next step and named in the answer); any other number that differs means
-      the run does not repeat with its seed.
-    * The call with ``s + 1`` must change at least one of the numbers that repeated (only those named in ``varies``,
-      when the protocol says which numbers have spread), or the run ignores the seed (an own generator, an own fixed
-      seed or none).
-
-    A ``deterministic`` study draws nothing and is not checked."""
-    if deterministic:
-        return None, "the study is deterministic, so no seed is used"
-    kw: dict[str, Any] = dict(cell=cell, timeout_s=timeout_s, env=env, thresholds=thresholds, log=log, kind=kind)
-    first = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
-    if first[0] is None:
-        return None, first[2]
-    again = await _seeded_once(executor, python, quest_root, module, seed=seed, **kw)
-    if again[0] is None:
-        return None, again[2]
-    other = await _seeded_once(executor, python, quest_root, module, seed=seed + 1, **kw)
-    if other[0] is None:
-        return None, other[2]
-    a, b, c = first[0], again[0], other[0]
-    names = sorted(set(a) | set(b))
-    moved = [n for n in names if n not in a or n not in b or not _same_value(a[n], b[n])]
-    timings = [n for n in moved if n in a and n in b and _is_run_time((a[n], first[1]), (b[n], again[1]))]
-    unsteady = [n for n in moved if n not in timings]
-    if unsteady:
-        shown = ", ".join(f"{n}: {a.get(n)!r} then {b.get(n)!r}" for n in unsteady[:3])
-        return False, f"the run does not repeat with the same seed ({shown})"
-    stable = [n for n in names if n not in timings and (not varies or n in varies)]
-    if not stable:
-        return None, ("every number the run returned is its own time" if timings else "the run returned no number to compare")
-    if all(n in c and _same_value(a[n], c[n]) for n in stable):
-        return False, "the run ignores the seed FI gives it (another seed returned the same numbers)"
-    return True, ""
-
-
 def _check_from(name: str, measure: str, values: dict[str, Any],
                 case: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str]:
     """The check an oracle's measure gives on what one run returned: ``(check or None, the problem or "")``. ``case``: the
@@ -3833,12 +3795,6 @@ def _value_key(v: Any) -> str | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
     return f"{float(v):.12g}"
-
-
-def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
-    """Every value FI's trials returned, per name, over all settings (see :func:`recorded_values_by_cell`)."""
-    per_cell, problems = recorded_values_by_cell(quest_root)
-    return pooled(per_cell), problems
 
 
 def pooled(per_cell: dict[str, dict[str, Counter]]) -> dict[str, Counter]:

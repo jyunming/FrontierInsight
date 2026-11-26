@@ -76,7 +76,7 @@ async def test_fanout_all_three_succeed(fake: FakeTransport) -> None:
     results = await fanout_chat(
         [{"role": "user", "content": "test"}],
         ["gpt-5", "claude-opus", "gemini-pro"],
-        chat_fn=fake.chat, node="ideate",
+        chat_fn=fake.chat, node="plan",
     )
     assert len(results) == 3
     assert all(r.ok for r in results)
@@ -84,7 +84,7 @@ async def test_fanout_all_three_succeed(fake: FakeTransport) -> None:
     assert [r.text for r in results] == ["from gpt-5", "from claude-opus", "from gemini-pro"]
     # Each call was logged with the ensembled-node tag.
     assert {c["node"] for c in fake.calls} == {
-        "ideate.ensemble[gpt-5]", "ideate.ensemble[claude-opus]", "ideate.ensemble[gemini-pro]",
+        "plan.ensemble[gpt-5]", "plan.ensemble[claude-opus]", "plan.ensemble[gemini-pro]",
     }
 
 
@@ -117,7 +117,7 @@ async def test_fanout_all_fail_raises(fake: FakeTransport) -> None:
     with pytest.raises(EnsembleError) as exc_info:
         await fanout_chat(
             [{"role": "user", "content": "x"}], ["a", "b"],
-            chat_fn=fake.chat, node="ideate",
+            chat_fn=fake.chat, node="plan",
         )
     assert "all 2" in str(exc_info.value)
     assert "boom-1" in str(exc_info.value)
@@ -128,7 +128,7 @@ async def test_fanout_empty_models_raises() -> None:
     """Defensive: empty models list is a caller bug, not a no-op."""
     with pytest.raises(EnsembleError):
         await fanout_chat([{"role": "user", "content": "x"}], [],
-                          chat_fn=lambda *a, **k: None, node="ideate")
+                          chat_fn=lambda *a, **k: None, node="plan")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ async def test_tournament_moderator_picks_winner(fake: FakeTransport) -> None:
     fake.script("moderator", [("ok", "WINNER: [B]\nB is the most rigorous.")])
     result = await merge_tournament(
         raw, moderator_model="moderator", chat_fn=fake.chat,
-        node="ideate", prompt_summary="brainstorm",
+        node="plan", prompt_summary="brainstorm",
     )
     assert result.merged == "GOOD ANSWER"
     assert "[B]" in result.notes and "m2" in result.notes
@@ -164,7 +164,7 @@ async def test_tournament_unparseable_moderator_falls_back(fake: FakeTransport) 
     ]
     fake.script("mod", [("ok", "hmm, I think B but also kinda A")])
     result = await merge_tournament(
-        raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+        raw, moderator_model="mod", chat_fn=fake.chat, node="plan",
     )
     assert result.merged == "first"
     assert "unparseable" in result.notes.lower()
@@ -179,7 +179,7 @@ async def test_tournament_single_survivor_skips_moderator(fake: FakeTransport) -
         FanoutResponse(model="m2", error="failed"),
     ]
     result = await merge_tournament(
-        raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+        raw, moderator_model="mod", chat_fn=fake.chat, node="plan",
     )
     assert result.merged == "only"
     assert "single-survivor" in result.notes
@@ -196,7 +196,7 @@ async def test_tournament_empty_survivors_raises(fake: FakeTransport) -> None:
            FanoutResponse(model="m2", error="y")]
     with pytest.raises(EnsembleError):
         await merge_tournament(
-            raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+            raw, moderator_model="mod", chat_fn=fake.chat, node="plan",
         )
 
 
@@ -207,7 +207,7 @@ async def test_tournament_over_26_candidates_raises(fake: FakeTransport) -> None
     raw = [FanoutResponse(model=f"m{i}", text=f"c{i}") for i in range(27)]
     with pytest.raises(EnsembleError) as exc:
         await merge_tournament(
-            raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+            raw, moderator_model="mod", chat_fn=fake.chat, node="plan",
         )
     assert "26" in str(exc.value)
 
@@ -247,7 +247,7 @@ async def test_tournament_no_moderator_returns_first_survivor(fake: FakeTranspor
         FanoutResponse(model="m2", text="beta"),
     ]
     result = await merge_tournament(
-        raw, moderator_model=None, chat_fn=fake.chat, node="ideate",
+        raw, moderator_model=None, chat_fn=fake.chat, node="plan",
     )
     assert result.merged == "alpha"
     assert "no moderator" in result.notes
@@ -294,7 +294,7 @@ async def test_tournament_moderator_failure_falls_back(fake: FakeTransport) -> N
     ]
     fake.script("mod", [("err", "timeout")])
     result = await merge_tournament(
-        raw, moderator_model="mod", chat_fn=fake.chat, node="ideate",
+        raw, moderator_model="mod", chat_fn=fake.chat, node="plan",
     )
     assert result.merged == "alpha"
     assert "moderator call failed" in result.notes
@@ -402,7 +402,7 @@ def test_cost_jsonl_tournament_has_fanout_plus_moderator() -> None:
         FanoutResponse(model="m2", text="y"),
     ]
     result = EnsembleResult(merged="x", raw=raw, moderator_model="mod-7")
-    rows = cost_jsonl_entries(result, base_node="ideate", merge_strategy="tournament")
+    rows = cost_jsonl_entries(result, base_node="plan", merge_strategy="tournament")
     assert len(rows) == 3  # 2 fanout + 1 moderator
     roles = [r["role"] for r in rows]
     assert roles.count("fanout") == 2
@@ -436,7 +436,7 @@ def test_cost_jsonl_skips_moderator_row_when_none_was_called() -> None:
     raw = [FanoutResponse(model="m1", text="x")]
     # Single-survivor early-return → moderator_model stays None.
     result = EnsembleResult(merged="x", raw=raw, moderator_model=None)
-    rows = cost_jsonl_entries(result, base_node="ideate", merge_strategy="tournament")
+    rows = cost_jsonl_entries(result, base_node="plan", merge_strategy="tournament")
     assert all(r["role"] != "moderator" for r in rows)
 
 
@@ -448,7 +448,7 @@ def test_cost_jsonl_marks_failed_calls() -> None:
         FanoutResponse(model="m2", error="timeout"),
     ]
     result = EnsembleResult(merged="ok", raw=raw)
-    rows = cost_jsonl_entries(result, base_node="ideate", merge_strategy="tournament")
+    rows = cost_jsonl_entries(result, base_node="plan", merge_strategy="tournament")
     failed = [r for r in rows if r.get("role") == "fanout" and not r["ok"]]
     assert len(failed) == 1
     assert failed[0]["model"] == "m2"
@@ -534,7 +534,7 @@ async def test_singleshot_propagates_merger_ensemble_error() -> None:
     with pytest.raises(EnsembleError) as exc:
         await run_singleshot_with_ensemble(
             prompt="hi", chat_fn=fake_chat, ensemble=ensemble,
-            default_merge="tournament", node="proposal",
+            default_merge="tournament", node="critique",
         )
     # Error must be the merger's 26-cap, NOT silently swallowed by
     # the fallback (which would have called fake_chat with model=None

@@ -494,10 +494,10 @@ def test_disabled_knowledge_does_not_web_search(monkeypatch) -> None:
 
 
 def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
-    """When the caller passes ``top_k=3`` (e.g. ideate seeding, cross_check)
+    """When the caller passes ``top_k=3`` (e.g. cross_check)
     WITHOUT an explicit ``external_top_k``, the external layer must
     respect the per-call cap. PR #113's first cut regressed this:
-    an ideate seed asking for 3 papers got 20 web hits instead."""
+    a seed asking for 3 papers got 20 web hits instead."""
     from core.knowledge import Knowledge
 
     k = Knowledge(KnowledgeConfig(enabled=False))
@@ -531,7 +531,7 @@ def test_external_top_k_honours_caller_per_call_cap(monkeypatch) -> None:
 
     monkeypatch.setattr("core.knowledge.httpx.Client", _FakeClient)
     import asyncio as _asyncio
-    _asyncio.run(k.asearch("ideate seed", top_k=3))
+    _asyncio.run(k.asearch("a seed", top_k=3))
     assert captured["params"]["per-page"] == "3"
 
 
@@ -1665,7 +1665,7 @@ def test_ingest_distinct_files_with_same_basename_dont_collide(
 
 def test_mint_doc_id_uses_paper_id_and_rel_path_for_disambiguation() -> None:
     """``_mint_doc_id`` previously only checked the top-level
-    quest_id / proposal_id / etc. keys, so ``fi_summary_input`` docs
+    quest_id / critique_id / etc. keys, so ``fi_summary_input`` docs
     that share a summary_id but live at different paths would all
     collide to the same id. New behaviour: composite key including
     ``paper_id``, ``rel_path``, and ``tag`` discriminators."""

@@ -7,7 +7,7 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
-    Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, _FRESH_SCRIPT, _ModelAnswerProblem,
+    Any, NON_SCIENTIFIC_PAPER_FORMATS, Path, QuestState, SCIENTIFIC_PAPER_FORMATS, paper_format_with_old_venue, _FRESH_SCRIPT, _ModelAnswerProblem,
     _STOPPED_BEFORE_THE_STUDY, _UNPLACED_FINDING, _aggregate_result_json_replicates,
     _analysis_frame, _code_findings, _code_project, _code_reach, _code_review, _compact_result_json_block, _controls,
     _cross_check_items, _elide_value_lists, _evidence_gate_rule, _figure_list_for_prompt, _finding_repair,
@@ -636,23 +636,15 @@ class AnalyzeStageMixin:
         return verdicts
 
     def _resolve_write_persona(self, state: QuestState) -> str:
-        """Pick a persona prefix for the ``write`` node based on the
-        format hint in clarify answers + output config.
+        """Pick a persona prefix for the ``write`` node from the
+        output config's paper format.
 
         Scientific venues return empty so ``write.md``'s built-in
         IMRAD framing carries the prompt unchanged. Non-scientific
         formats load their persona prefix from
         ``agents/write_persona_<name>.md`` via ``_load_persona_prefix``
         — same pattern as the ``review_persona_*`` files. Unknown
-        format values fall back to empty (defense-in-depth for the
-        clarify path, which accepts free-form strings from the LLM).
-
-        Resolution order (first match wins):
-        1. ``state["clarify_answers"]["paper_venue"]`` — clarify
-           agent's pick (LLM-generated; normalized via ``.strip().lower()``).
-        2. ``self.config.output.paper_format`` — YAML default
-           (Pydantic-validated against ``PaperFormat`` so case is
-           already canonical).
+        format values fall back to empty.
         """
         venue = self._write_venue(state)
         if venue in SCIENTIFIC_PAPER_FORMATS:
@@ -663,11 +655,7 @@ class AnalyzeStageMixin:
 
     def _write_venue(self, state: QuestState) -> str:
         """The paper format the write persona is chosen by (see :meth:`_resolve_write_persona`)."""
-        venue = ""
-        answers = state.get("clarify_answers") or {}
-        if isinstance(answers, dict):
-            venue = str(answers.get("paper_venue") or "").strip().lower()
-        return venue or self.config.output.paper_format or ""
+        return paper_format_with_old_venue(self.config.output.paper_format or "", state.get("clarify_answers"))
 
     async def _node_evidence_gate(self, state: QuestState) -> QuestState:
         """Weigh the assembled evidence against the research question
@@ -683,9 +671,7 @@ class AnalyzeStageMixin:
         profile). Under ``rigor_profile: research`` an unknown status
         additionally pauses the quest for a human to resolve or accept
         the risk, rather than silently writing on unverified evidence.
-        The only action a genuinely-decided gate can take that changes
-        control flow is ONE bounded ``broaden_lit`` re-entry (capped by
-        ``evidence_gate_max_broaden``).
+        The model's verdict never changes the route: only FI's own facts below do.
         """
         # With the gate turned off (``engine.evidence_gate: false``) the model's judgement of the evidence is skipped,
         # but not FI's own facts: a search whose objective never moved, an analysis FI cannot read, a run with no
@@ -813,7 +799,7 @@ class AnalyzeStageMixin:
                 _, parsed = await self._chat_json(
                     prompt, node="evidence_gate", want=("verdict",),
                     usable=lambda p: str(p.get("verdict") or "").strip().lower() in (
-                        "sufficient", "broaden", "insufficient"),
+                        "sufficient", "insufficient", "broaden"),
                 )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
             claim_stop: dict[str, Any] | None = None
@@ -839,27 +825,17 @@ class AnalyzeStageMixin:
         else:
             status, failure = "ok", ""
         verdict = str(parsed.get("verdict") or "").strip().lower()
-        if verdict not in ("sufficient", "broaden", "insufficient"):
+        if verdict == "broaden":
+            # A model that still names the verdict an earlier prompt offered (thin evidence, search again) means
+            # insufficient: FI does not go back to the literature.
+            verdict = "insufficient"
+        if verdict not in ("sufficient", "insufficient"):
             if status == "ok":
                 # The call succeeded but the reply named no recognised verdict —
                 # equally unknown as a raised exception, not a silent "sufficient".
                 status = "unknown"
                 failure = f"the gate's reply named no recognised verdict: {parsed!r}"[:300]
-            verdict = "sufficient"  # keeps existing routing (write, not broaden)
-        broadened = int(state.get("evidence_broaden_count", 0) or 0)
-        # A broaden goes back through the literature step for more sources. With retrieval off (or --analyze, where
-        # that step is skipped) nothing can come back, and the loop only redesigned the experiment after its results
-        # were seen: a live quest threw away a complete first run and changed its hypothesis that way. The verdict
-        # stands (the writer is told the evidence is thin, and the evidence level names it as a gap); the route is write.
-        can_broaden = self.config.knowledge.enabled and not self.config.engine.analyze_local_first
-        will_broaden = (
-            status == "ok"
-            and verdict == "broaden"
-            and can_broaden
-            and broadened < self.config.engine.evidence_gate_max_broaden
-        )
-        if status == "ok" and verdict == "broaden" and not can_broaden:
-            self._log.info("[evidence_gate] broaden asked, but there is no literature step to broaden (retrieval is off); writing with the gap recorded")
+            verdict = "sufficient"  # keeps existing routing (write)
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
@@ -914,7 +890,7 @@ class AnalyzeStageMixin:
             "status": status,
             "failure": failure,
             "route": ("stuck" if no_findings else "repair_crash" if crash_repair else "rewrite_code" if rewrite_code
-                      else "redesign" if redesign else "broaden_lit" if will_broaden else "write"),
+                      else "redesign" if redesign else "write"),
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -924,10 +900,10 @@ class AnalyzeStageMixin:
         }
         self._log.info(
             "[evidence_gate] verdict=%s status=%s route=%s decided=%s type=%s policy=%s "
-            "(sources=%d, findings=%d, supporting=%d, broadened=%d)",
+            "(sources=%d, findings=%d, supporting=%d)",
             verdict, status, assessment["route"], decided_by, protocol.topic_type,
             protocol.source_policy, n_sources, n_findings,
-            n_supporting, broadened,
+            n_supporting,
         )
         self._write_receipt(
             "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
@@ -950,8 +926,6 @@ class AnalyzeStageMixin:
             "evidence_assessment": assessment,
             "research_protocol": protocol.model_dump(),
         }
-        if will_broaden:
-            patch["evidence_broaden_count"] = broadened + 1
         patch.update(self._figures_after_taken_out(state))
         if rewrite_code:
             # The design stays as it is (no design iteration is spent); the new code gets its own repairs.
@@ -1151,6 +1125,9 @@ class AnalyzeStageMixin:
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
                                   "why_repairs_ended": ended}
+        findings = (state.get("exec_result") or {}).get(f"{reason}_findings")
+        if isinstance(findings, list) and findings:
+            record["findings"] = [str(f) for f in findings]  # what each check found, whole (the problem is its short form)
         aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
         for name in [n for n in _rerun_from._PAPER
                      if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
@@ -1173,7 +1150,8 @@ class AnalyzeStageMixin:
         elif reason == "returned" and isinstance(back := (state.get("exec_result") or {}).get("returned_for"), dict):
             own_words = True
             record = self._return_to_qc(back["reason"], problem, back.get("evidence"), tried,  # type: ignore[attr-defined]
-                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")})
+                                        **{k: v for k, v in record.items() if k not in ("problem", "tried", "say")},
+                                        **(back.get("rest") or {}))
         else:
             try:
                 needs = self.quest_root / "needs"

@@ -1150,21 +1150,3 @@ def test_explore_then_confirm_is_an_approved_setting_a_hand_edit_cannot_flip(tmp
     assert any("`engine.phased`" in line and "approved on, now off" in line for line in changed), changed
 
 
-def test_the_interview_writes_explore_then_confirm_and_keeps_it_on_update(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.interview import QUESTIONS, InterviewAnswers, answers_to_yaml
-    from core.interview_update import load_current_answers
-
-    (question,) = [q for q in QUESTIONS if q.id == "phased"]
-    assert question.mid_quest_editable is False and {"cli", "serve", "vscode"} <= set(question.frontends)
-    answers = InterviewAnswers(topic="t", title="t", output_kinds=["paper_md"], paper_format="generic",
-                               no_simulation=False, study_depth="journal-length", comparative_baseline="",
-                               success_metric="", budget="", clarify_mode="auto", review_panel=[],
-                               knowledge_enabled=False, provider="openai", provider_model="gpt-4o", phased=True)
-    root = tmp_path / "q"
-    root.mkdir()
-    (root / "config.yaml").write_text(answers_to_yaml(answers), encoding="utf-8")
-    assert Config.from_yaml(root / "config.yaml").engine.phased is True
-    assert load_current_answers(root)[0].phased is True
-    answers.phased = False
-    assert "phased" not in answers_to_yaml(answers)

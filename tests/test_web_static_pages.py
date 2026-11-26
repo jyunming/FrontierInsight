@@ -715,7 +715,7 @@ def test_cost_endpoint_returns_records(tmp_path: Path) -> None:
     fi_dir.mkdir(parents=True)
     (fi_dir / "cost.jsonl").write_text(
         "\n".join([
-            _json.dumps({"ts": 1.0, "node": "ideate", "model": "gpt-4o",
+            _json.dumps({"ts": 1.0, "node": "plan", "model": "gpt-4o",
                          "usage": {"prompt_tokens": 100, "completion_tokens": 50,
                                    "total_tokens": 150},
                          "cost_usd": 0.0008}),
@@ -750,7 +750,7 @@ def test_cost_endpoint_summary_is_not_partial_when_every_call_is_priced(tmp_path
     client = _client(tmp_path)
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     _write_cost_rows(client, "q-priced", [
-        {"node": "ideate", "model": "gpt-4o", "usage": usage, "cost_usd": 0.001},
+        {"node": "plan", "model": "gpt-4o", "usage": usage, "cost_usd": 0.001},
         {"node": "write", "model": "gpt-4o", "usage": usage, "cost_usd": 0.002},
     ])
     summary = client.get("/api/quests/q-priced/cost").json()["summary"]
@@ -763,9 +763,9 @@ def test_cost_endpoint_summary_keeps_a_null_total_when_no_call_is_priced(tmp_pat
     client = _client(tmp_path)
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     _write_cost_rows(client, "q-unpriced", [
-        {"node": "ideate", "model": "gpt-5.6-luna", "usage": usage, "cost_usd": None},
+        {"node": "plan", "model": "gpt-5.6-luna", "usage": usage, "cost_usd": None},
         # a breadcrumb row is not a call, priced or not
-        {"node": "ideate.ensemble[m1]", "model": "m1", "ensemble": True, "role": "fanout"},
+        {"node": "plan.ensemble[m1]", "model": "m1", "ensemble": True, "role": "fanout"},
     ])
     summary = client.get("/api/quests/q-unpriced/cost").json()["summary"]
     assert summary["total_cost_usd"] is None
@@ -779,7 +779,7 @@ def test_cost_endpoint_tolerates_a_row_that_is_not_an_object(tmp_path: Path) -> 
     fi_dir = client.app.state.output_root / "q-stray" / ".fi"  # type: ignore[attr-defined]
     fi_dir.mkdir(parents=True)
     (fi_dir / "cost.jsonl").write_text(
-        '[1, 2]\n{"node": "ideate", "model": "gpt-4o", "usage": null, "cost_usd": 0.5}\n',
+        '[1, 2]\n{"node": "plan", "model": "gpt-4o", "usage": null, "cost_usd": 0.5}\n',
         encoding="utf-8",
     )
     res = client.get("/api/quests/q-stray/cost")
@@ -1283,7 +1283,7 @@ def test_paused_quest_is_needs_you_not_complete(tmp_path: Path) -> None:
 
 
 def test_quest_pending_signals(tmp_path: Path) -> None:
-    """_quest_pending recognises the unified pause markers + the clarify
+    """_quest_pending recognises the unified pause markers + the review
     snapshot, and reports None when nothing is pending."""
     from web.server import _quest_pending
     import json as _json
@@ -1298,46 +1298,14 @@ def test_quest_pending_signals(tmp_path: Path) -> None:
     (q / "NEXT_STEP.md").write_text("# Action needed", encoding="utf-8")
     assert _quest_pending(q) == "paused"
     (q / "NEXT_STEP.md").unlink()
-    # clarify questions without an answer → clarify.
-    (q / ".fi" / "clarify_questions.json").write_text("{}", encoding="utf-8")
-    assert _quest_pending(q) == "clarify"
-    (q / ".fi" / "clarify_answer.json").write_text("{}", encoding="utf-8")
+    # a review snapshot without an answer → review.
+    (q / ".fi" / "human_review.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) == "review"
+    (q / ".fi" / "human_review_answer.json").write_text("{}", encoding="utf-8")
     assert _quest_pending(q) is None
-
-
-def test_clarify_disk_fallback_endpoints(tmp_path: Path) -> None:
-    """A subprocess clarify pause has no in-process future, so the web reads the
-    questions from .fi/clarify_questions.json and writes the answers to
-    .fi/clarify_answer.json for the next --resume to consume."""
-    import json as _json
-    output_root = tmp_path / "outputs"
-    output_root.mkdir()
-    qid = "1782000002-test-quest-clarify"
-    fi = output_root / qid / ".fi"
-    fi.mkdir(parents=True)
-    client = TestClient(make_app(output_root))
-
-    # No questions on disk → not pending.
-    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
-
-    (fi / "clarify_questions.json").write_text(
-        _json.dumps({"success_metric": {"prompt": "How to measure success?",
-                                        "default": "accuracy"}}),
-        encoding="utf-8",
-    )
-    r = client.get(f"/api/quests/{qid}/clarify").json()
-    assert r["pending"] is True and r["source"] == "disk"
-    assert "success_metric" in r["questions"]
-    # get_quest also reports the pause from disk.
-    assert client.get(f"/api/quests/{qid}").json()["pending_clarify"] is True
-
-    # Submitting writes the answer file (no in-process future for a subprocess).
-    p = client.post(f"/api/quests/{qid}/clarify",
-                    json={"answers": {"success_metric": "F1"}})
-    assert p.status_code == 200 and p.json()["in_process_resolved"] is False
-    assert _json.loads((fi / "clarify_answer.json").read_text())["success_metric"] == "F1"
-    # With the answer staged, the gate is no longer pending.
-    assert client.get(f"/api/quests/{qid}/clarify").json()["pending"] is False
+    # setup questions left by an earlier FI are no pause now.
+    (q / ".fi" / "clarify_questions.json").write_text("{}", encoding="utf-8")
+    assert _quest_pending(q) is None
 
 
 def test_generalized_upload_targets(tmp_path: Path) -> None:

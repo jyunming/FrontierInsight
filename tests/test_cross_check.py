@@ -2,8 +2,8 @@
 
 Validates:
   - `_node_cross_check`: per-finding literature search + LLM classification.
-  - `_route_after_cross_check`: publish / re_experiment / broaden_lit routing.
-  - Iteration accounting: re_experiment/broaden_lit consume `max_iterations`.
+  - `_route_after_cross_check`: publish / re_experiment routing (nothing goes back to the literature).
+  - Iteration accounting: re_experiment consumes `max_iterations`.
   - `_format_cross_check`: renders the write-prompt block correctly.
 """
 
@@ -39,7 +39,6 @@ def _mk_cfg(
             max_iterations=max_iter, review_loop=False,
             enable_analyze_reroute=enable_analyze_reroute,
             cross_check_per_finding_k=per_finding_k,
-            ideate_reflect=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
@@ -254,15 +253,16 @@ async def test_a_result_with_no_value_is_not_searched_and_says_why(tmp_path: Pat
 async def test_a_run_with_no_item_still_routes_by_next_step_and_spends_the_round(tmp_path: Path,
                                                                                   _what_is_looked_up: list[cci.Item]) -> None:
     """A study with nothing to look up (no protocol, a survey) used to write at once; the node now decides the route
-    itself and bumps the round, so a literature loop stays bounded by engine.max_iterations."""
+    itself and bumps the round, so a redesign loop stays bounded by engine.max_iterations."""
     _what_is_looked_up.clear()
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
-    state = {"analysis": {"key_findings": [], "next_step": "broaden_lit"}, "iteration": 0}
+    eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
+    state = {"analysis": {"key_findings": [], "next_step": "re_experiment"}, "iteration": 0}
 
     patch = await eng._node_cross_check(dict(state))
 
-    assert patch["cross_check"] == [] and patch["cross_check_route"] == "broaden_lit" and patch["iteration"] == 1
+    assert patch["cross_check"] == [] and patch["cross_check_route"] == "redesign" and patch["iteration"] == 1
     last = {"analysis": state["analysis"], "iteration": 2}
     assert (await eng._node_cross_check(dict(last)))["cross_check_route"] == "write"
 
@@ -607,34 +607,14 @@ def test_a_missed_precision_is_said_in_the_paper_from_the_record(tmp_path: Path)
     assert "precision" not in disclosure.run_record(tmp_path)
 
 
-def test_route_after_cross_check_broaden_lit_routes_to_literature(
-    tmp_path: Path,
-) -> None:
-    """``broaden_lit`` re-enters the literature node so the next pass
-    can fetch fresh evidence. Until this routing existed, the signal
-    collapsed onto ``redesign`` and the design node re-ran with the
-    SAME literature it already had — defeating the whole point of
-    saying "broaden_lit"."""
+def test_an_analysis_that_asks_to_look_at_the_literature_again_is_written_up(tmp_path: Path) -> None:
+    """FI no longer goes back to the literature: an analysis that still names ``broaden_lit`` (the next step an earlier
+    prompt offered) is written up, and so is a checkpoint of an earlier FI whose cross_check had chosen it. No round
+    is spent."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
-    assert eng._route_after_cross_check({
-        "cross_check": _CC_NON_EMPTY,
-        "analysis": {"next_step": "broaden_lit"},
-        "iteration": 0,
-    }) == "broaden_lit"
-
-
-def test_route_after_cross_check_broaden_lit_falls_through_when_budget_exhausted(
-    tmp_path: Path,
-) -> None:
-    """Like the re_experiment branch, broaden_lit respects the
-    shared ``engine.max_iterations`` budget — at the cap the quest
-    publishes instead of looping again."""
-    eng = Engine(_mk_cfg(tmp_path, max_iter=2))
-    assert eng._route_after_cross_check({
-        "cross_check": _CC_NON_EMPTY,
-        "analysis": {"next_step": "broaden_lit"},
-        "iteration": 2,
-    }) == "write"
+    state = {"cross_check": _CC_NON_EMPTY, "analysis": {"next_step": "broaden_lit"}, "iteration": 0}
+    assert eng._route_after_cross_check(state) == "write"
+    assert eng._route_after_cross_check({**state, "cross_check_route": "broaden_lit"}) == "write"
 
 
 def test_route_after_cross_check_falls_through_to_write_when_budget_exhausted(
@@ -667,18 +647,10 @@ def test_route_after_cross_check_empty_cross_check_terminates_loop(
     """Audit BLOCK #11: ``_node_cross_check`` returns ``{"cross_check": []}``
     early when ``analysis.key_findings`` is empty (or ``cross_check_per_finding_k
     <= 0``) BEFORE the iteration-bump block runs. If analyze still emits
-    ``next_step: "broaden_lit"`` in that case, iteration never increments,
-    the cap never fires, and the engine loops literature → design →
-    implement → execute → analyze → cross_check → broaden_lit forever —
-    unbounded LLM cost. The empty-cross_check guard must terminate the
+    ``next_step: "re_experiment"`` in that case, iteration never increments and
+    the cap never fires. The empty-cross_check guard must terminate the
     loop by routing to ``write`` regardless of analyze's recommendation."""
     eng = Engine(_mk_cfg(tmp_path, max_iter=10))
-    assert eng._route_after_cross_check({
-        "cross_check": [],
-        "analysis": {"next_step": "broaden_lit"},
-        "iteration": 0,
-    }) == "write"
-    # Same for ``re_experiment`` — no findings to re-experiment against either.
     assert eng._route_after_cross_check({
         "cross_check": [],
         "analysis": {"next_step": "re_experiment"},
@@ -686,74 +658,36 @@ def test_route_after_cross_check_empty_cross_check_terminates_loop(
     }) == "write"
     # Missing key entirely (defensive — early aborts may not even set it).
     assert eng._route_after_cross_check({
-        "analysis": {"next_step": "broaden_lit"},
+        "analysis": {"next_step": "re_experiment"},
         "iteration": 0,
     }) == "write"
 
 
-# --- _node_literature iterative-loop behaviour ------------------------------
+# --- the literature step reads what it is given and searches for nothing ----------------------------------
 
 
 @pytest.mark.asyncio
-async def test_node_literature_first_pass_sets_iter_to_one(tmp_path: Path) -> None:
-    """First entry into the literature node — no prior literature, no
-    counter. Result: literature populated, ``literature_iter`` == 1."""
+async def test_node_literature_reads_the_given_papers_searches_nothing_and_keeps_what_it_had(tmp_path: Path) -> None:
+    """The literature step takes the full texts dropped in inputs/papers/ and never searches (a study starts from a
+    commission, which gives its sources). A second pass keeps the sources of the first and adds only new ones."""
     eng = Engine(_mk_cfg(tmp_path))
 
-    async def fake_search(query, **kw):  # noqa: ANN001
-        return [
-            RetrievedDoc(content="abstract A", metadata={"doi": "10.1/a", "url": "u1"}),
-            RetrievedDoc(content="abstract B", metadata={"doi": "10.1/b", "url": "u2"}),
-        ]
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
+    async def no_search(query, **kw):  # noqa: ANN001
+        raise AssertionError("the literature step does not search")
+    eng.knowledge.asearch = no_search  # type: ignore[method-assign]
+    papers = eng.quest_root / "inputs" / "papers"
+    papers.mkdir(parents=True)
+    (papers / "first.md").write_text("# A first paper\n\n" + "Its method is described here. " * 40, encoding="utf-8")
 
-    patch = await eng._node_literature({
-        "topic": "first-pass topic",
-        "chosen_idea": {"title": "T"},
-    })
-    assert patch["literature_iter"] == 1
-    assert len(patch["literature"]) == 2
-    assert patch["literature"][0]["metadata"]["doi"] == "10.1/a"
+    first = await eng._node_literature({"topic": "first-pass topic"})
+    assert first["literature_iter"] == 1
+    assert len(first["literature"]) == 1 and "first paper" in first["literature"][0]["content"].lower()
 
-
-@pytest.mark.asyncio
-async def test_node_literature_broaden_lit_reentry_accumulates_and_dedups(
-    tmp_path: Path,
-) -> None:
-    """When ``broaden_lit`` routes back into ``literature``, the second
-    pass MUST keep the previously-retrieved docs and only append new
-    ones (DOI- / URL- / content-prefix dedup). Without accumulation
-    the design node would lose context every time the loop fires."""
-    eng = Engine(_mk_cfg(tmp_path))
-
-    # Second pass returns one overlap (doi 10.1/a) and two genuinely new.
-    async def fake_search(query, **kw):  # noqa: ANN001
-        return [
-            RetrievedDoc(content="abstract A (dup)", metadata={"doi": "10.1/a"}),
-            RetrievedDoc(content="abstract C", metadata={"doi": "10.1/c"}),
-            RetrievedDoc(content="abstract D", metadata={"url": "uniq-url-d"}),
-        ]
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-
-    prior_state = {
-        "topic": "re-entry topic",
-        "chosen_idea": {"title": "T"},
-        "design": {"hypothesis": "specific design hypothesis"},
-        "literature_iter": 1,
-        "literature": [
-            {"content": "abstract A", "metadata": {"doi": "10.1/a", "url": "u1"}},
-            {"content": "abstract B", "metadata": {"doi": "10.1/b", "url": "u2"}},
-        ],
-    }
-    patch = await eng._node_literature(prior_state)
-    assert patch["literature_iter"] == 2
-    # Original 2 + 2 new (C, D) — the duplicate A is dropped.
-    assert len(patch["literature"]) == 4
-    dois = [e.get("metadata", {}).get("doi") for e in patch["literature"]]
-    assert dois.count("10.1/a") == 1, "duplicate DOI must be dropped on re-entry"
-    assert "10.1/c" in dois
-    urls = [e.get("metadata", {}).get("url") for e in patch["literature"]]
-    assert "uniq-url-d" in urls
+    (papers / "second.md").write_text("# A second paper\n\n" + "Its result is stated here. " * 40, encoding="utf-8")
+    again = await eng._node_literature({"topic": "first-pass topic", "literature": first["literature"],
+                                        "literature_iter": 1})
+    assert again["literature_iter"] == 2
+    assert len(again["literature"]) == 2, "the first source is kept once and the new one added"
 
 
 # --- ensemble cross_check + merge_vote integration -------------------------
@@ -1023,21 +957,20 @@ async def test_the_last_round_is_followed_not_spent_with_no_re_route(tmp_path: P
     eng = Engine(_mk_cfg(tmp_path, max_iter=2))
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value="{}")})()
     eng.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
-    for step, route in (("broaden_lit", "broaden_lit"), ("re_experiment", "redesign")):
-        eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
-        state = {"analysis": {"key_findings": ["x"], "next_step": step}, "iteration": 1}
-        patch = await eng._node_cross_check(dict(state))
-        assert patch["iteration"] == 2 and patch["cross_check_route"] == route
-        assert eng._route_after_cross_check({**state, **patch}) == route
+    eng._precision_missed = lambda s, quiet=False: ["p"]  # type: ignore[method-assign]
+    state = {"analysis": {"key_findings": ["x"], "next_step": "re_experiment"}, "iteration": 1}
+    patch = await eng._node_cross_check(dict(state))
+    assert patch["iteration"] == 2 and patch["cross_check_route"] == "redesign"
+    assert eng._route_after_cross_check({**state, **patch}) == "redesign"
     # no round left: written up, and no round is spent
-    patch = await eng._node_cross_check({"analysis": {"key_findings": ["x"], "next_step": "broaden_lit"}, "iteration": 2})
+    patch = await eng._node_cross_check({"analysis": {"key_findings": ["x"], "next_step": "re_experiment"}, "iteration": 2})
     assert "iteration" not in patch and patch["cross_check_route"] == "write"
 
 
 @pytest.mark.asyncio
 async def test_a_skipped_cross_check_never_follows_an_earlier_route(tmp_path: Path) -> None:
     eng = Engine(_mk_cfg(tmp_path, max_iter=3))
-    stale = {"analysis": {"key_findings": [], "next_step": "publish"}, "iteration": 1, "cross_check_route": "broaden_lit"}
+    stale = {"analysis": {"key_findings": [], "next_step": "publish"}, "iteration": 1, "cross_check_route": "redesign"}
     patch = await eng._node_cross_check(dict(stale))
     assert eng._route_after_cross_check({**stale, **patch}) == "write"
 

@@ -61,7 +61,6 @@ def cfg(tmp_path: Path) -> Config:
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=2, review_loop=False,
-            clarify_mode="off", ideate_reflect=False,
             exec_reflect_max_iterations=3,
             enable_analyze_reroute=True,
             # Default gate is "after_review"; auto-accept finalises
@@ -94,17 +93,6 @@ async def test_full_dag_with_execute_repair_loop(
         head = prompt.lstrip().splitlines()[0]
         if "scoping a research quest" in prompt[:200]:
             return "{}"
-        if "Ideation Reflection" in head:
-            return json.dumps({
-                "strongest_objection": "x",
-                "swap_to": "",
-                "refined_rationale": "ok",
-            })
-        if "Ideation" in head:
-            return json.dumps({
-                "ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
-                "chosen": {"title": "t", "rationale": "r"},
-            })
         if "Experiment Design" in head:
             return json.dumps({
                 "hypothesis": "h",
@@ -200,11 +188,6 @@ async def test_full_dag_with_analyze_re_experiment_reroute(
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
         head = prompt.lstrip().splitlines()[0]
-        if "Ideation" in head and "Reflection" not in head:
-            return json.dumps({
-                "ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
-                "chosen": {"title": "t", "rationale": "r"},
-            })
         if "Experiment Design" in head:
             state_flags["design_calls"] += 1
             return json.dumps({
@@ -275,9 +258,6 @@ async def test_a_rewritten_script_gets_its_own_repairs(
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
         head = prompt.lstrip().splitlines()[0]
-        if "Ideation" in head and "Reflection" not in head:
-            return json.dumps({"ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
-                               "chosen": {"title": "t", "rationale": "r"}})
         if "Experiment Design" in head:
             flags["design_calls"] += 1
             return json.dumps({"hypothesis": "h", "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
@@ -326,9 +306,6 @@ async def test_a_review_that_could_not_run_stops_and_runs_again_on_resume(
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
         head = prompt.lstrip().splitlines()[0]
-        if "Ideation" in head and "Reflection" not in head:
-            return json.dumps({"ideas": [{"title": "t", "summary": "s", "feasibility": "high", "novelty": "low"}],
-                               "chosen": {"title": "t", "rationale": "r"}})
         if "Experiment Design" in head:
             return json.dumps({"hypothesis": "h", "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
                                "method": "m", "expected_outcome": "monotonic", "figures_planned": ["result.png"],

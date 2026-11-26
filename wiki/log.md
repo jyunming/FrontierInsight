@@ -2,6 +2,12 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-11-25 — no search by topic
+
+Updated [[literature-screening-record|Literature screening record]] (only the retraction lookup is left) and [[pauses|Pauses]] (no papers pause), and the fence page. FI no longer searches the literature by topic, finds no foundational works and collects no data by search: the literature step reads the commission's own sources, and a study with no simulation goes from `design` straight to `wait_for_data`. A checkpoint stopped before the removed data-search step is refused with one line.
+
+Sources: core/engine.py, core/engine_ideas.py, core/engine_data.py, core/config.py, dev/registry.md.
+
 ## 2026-11-14 — the engine is split by stage
 
 No page changed. `core/engine.py` now holds the `Engine` class, its graph and its run loop; what was at module level is in `core/engine_base.py`, and the methods of each stage are in `core/engine_<stage>.py` (ideas, plan, data, code, improve, run, analyze, write, review). A page whose sources list `core/engine.py` may mean any of these files; `dev/registry.md` says which.
@@ -34,7 +40,7 @@ Sources: core/contract.py, core/contract_parts.py, core/dependent_map.py, core/o
 
 ## 2026-10-24 — picking the study to run
 
-New page: [[study-cards|Picking the study to run]] (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).
+New page: *Picking the study to run* (`study-cards`, removed on 2026-11-25) (the `scope` step: three or four study cards after the literature, the pick through the terminal, the web quest page, VS Code or `.fi/scope_answer.json`, `pauses.scope`, the record in `.fi/scope.json`, and `--from studies`).
 
 Sources: core/scope_cards.py, agents/scope.md, core/config.py, core/rerun_from.py, core/quality_report.py, core/run_checks.py, launch.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
 
@@ -154,3 +160,26 @@ Sources: core/accepted_checks.py, core/engine.py, core/oracle_card.py, core/evid
 Pages updated: [[study-types|Study types]] (the *Best design found* section now opens with one line of what the search found against the baseline; the writer is told not to word it, and words about it that the record contradicts are listed in the quality report, never rewritten or removed).
 
 Sources: core/best_design_report.py, core/record_claims.py, core/quality_report.py, core/paper_facts.py, core/accepted_checks.py.
+
+## 2026-11-25 — No research ideas, no study cards, no second literature search
+
+Pages removed: *Picking the study to run* (`study-cards`): FI no longer offers study cards before the plan (`pauses.scope` loads and does nothing).
+Pages updated: [[doing-a-step-again|Doing a step again]] (the `ideas` step is gone; `--from ideas` and `--from studies` get one plain sentence and change nothing).
+
+Sources: core/engine.py, core/rerun_from.py, core/config.py, core/engine_analyze.py.
+
+## 2026-11-25 — Every study starts from a commission
+
+Pages added: [[starting-a-study|Starting a study]] (the commission's keys, `fi new` and `fi check`, `fi demo`'s pair,
+`--analyze --commission`, the refusal at every start, `--update` without questions). Pages updated:
+[[pauses|Pauses]], [[explore-then-confirm|Explore then confirm]], [[how-fi-judges-correctness|How FI judges
+correctness]] (the setup interview is gone).
+
+Sources: core/commission.py, core/config.py, core/demo.py, core/analyze_cli.py, core/plan_settings.py, launch.py,
+web/server.py, vscode-frontier-insight/src/extension.ts.
+
+## 2026-11-25 - the setup questions are gone
+
+The first node asks nothing and makes no model call: the commission's `method` and `title` set the study mode and name. Updated [[pauses|Pauses]] and [[study-types|Study types]]; the setup interview is no longer described.
+
+Sources: core/commission.py, core/config.py, core/engine_ideas.py, launch.py.

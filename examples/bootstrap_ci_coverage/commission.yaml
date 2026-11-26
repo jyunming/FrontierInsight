@@ -1,0 +1,38 @@
+# The study this example asks FI to run (a commission). `fi check examples/bootstrap_ci_coverage/commission.yaml`
+# checks it.
+
+question: >-
+  How often do 95% confidence intervals for the mean (the t-interval, the percentile bootstrap and the BCa bootstrap)
+  contain the true mean when the sample is small and the data are skewed?
+
+scope: >-
+  Simulation only, no data needed. Samples of size n in {5, 10, 20, 50, 100} from a normal (the control), an
+  exponential and a lognormal with sigma = 1 (true mean e^0.5); for each sample the three 95% intervals; 2000 samples
+  per setting and 1000 bootstrap resamples each; the coverage (the fraction of intervals that contain the true mean)
+  with its standard error, and the interval width. One Python script (numpy, scipy, matplotlib with the Agg backend),
+  CPU only, under 2 minutes, vectorised across samples in chunks of about 100 so memory stays below about 500 MB, with
+  fixed random seeds. Two figures: coverage against n with the 95% line drawn, and interval width against n. A short
+  paper of at most 4 pages.
+
+limits:
+  hours: 1
+  model_calls: 80
+
+known_values: []
+no_known_values: true
+
+success:
+  - condition: >-
+      For each method and distribution, the coverage is classified against 93% with its standard error: it reaches 93%
+      when the estimate minus 2 standard errors is at least 93%, does not when the estimate plus 2 standard errors is
+      below 93%, and is borderline otherwise; the first n at which each method reaches 93% is given, or that it does not
+      by n = 100.
+    verify: The coverage and its standard error for every (method, distribution, n) cell.
+  - condition: The normal control's t-interval covers at about 95% at every n.
+    verify: Its coverage minus 2 standard errors is at least 93% at every n.
+failure:
+  - condition: The normal control's t-interval falls short of 93% at some n.
+    verify: Its coverage plus 2 standard errors is below 93% at that n.
+
+doubts:
+  - With 2000 samples the coverage estimate moves by about 0.5 percentage points between seeds.

@@ -346,7 +346,7 @@ model genuinely isn't cached.
 
 The companion VSCode chat extension is published separately. Once
 installed in VSCode, typing `@fi` in Copilot Chat gives you the
-guided interview, status streaming, and `/resume` / `/summarize` /
+status streaming, and `/start` / `/resume` / `/summarize` /
 `/fleet` chat commands.
 
 ```bash

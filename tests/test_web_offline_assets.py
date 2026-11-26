@@ -52,7 +52,7 @@ def test_the_vendored_assets_ship_in_the_package() -> None:
 
 # --- in a browser, offline --------------------------------------------------------------------------------------------
 
-_ROUTES = ["/", "/interview", "/settings", "/jobs", "/skills", "/tools/digest", "/trash", "/compare", "/quest/no-such-quest"]
+_ROUTES = ["/", "/settings", "/jobs", "/skills", "/tools/digest", "/trash", "/compare", "/quest/no-such-quest"]
 
 # Every visible icon: its name, its width and its font size. A name shown as text is several ems wide; an icon is one.
 _ICONS_JS = """() => [...document.querySelectorAll('.material-symbols-outlined')]

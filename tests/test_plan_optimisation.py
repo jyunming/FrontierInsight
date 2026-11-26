@@ -259,13 +259,8 @@ def test_the_freeze_covers_the_block_and_a_bigger_budget_shows_as_a_change(tmp_p
     ("Nash equilibrium best response dynamics in auctions", "measure"),
     ("控制器增益如何影響超調量，最佳值在哪裡", "ambiguous"),
 ])
-def test_the_topic_decides_whether_the_person_is_asked(topic: str, kind: str) -> None:
+def test_the_topic_s_words_decide_the_kind_of_study(topic: str, kind: str) -> None:
     assert op.classify_topic(topic) == kind
-    questions: dict[str, Any] = {}
-    assert op.add_study_type_question(questions, topic) is (kind == "ambiguous")
-    if kind == "ambiguous":
-        assert questions["study_type"]["default"] == op.LET_THE_PLAN_DECIDE
-        assert "Answer 1 or 2" in questions["study_type"]["question"]
 
 
 @pytest.mark.parametrize("answer, kind", [
@@ -280,10 +275,10 @@ def test_an_answer_is_read_as_a_number_or_in_words(answer: str, kind: str | None
 # --- the engine ------------------------------------------------------------------------------------------------------
 
 
-def _engine(tmp_path: Path, replies: list[str], clarify: str = "off", **pauses: Any) -> Engine:
+def _engine(tmp_path: Path, replies: list[str], **pauses: Any) -> Engine:
     eng = Engine(Config(
         topic="heat sink fin geometry", title="fins", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode=clarify),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"), pauses=PausesConfig(**pauses),
     ))
@@ -418,19 +413,6 @@ async def test_the_persons_answer_reaches_the_plan_and_is_kept(tmp_path: Path) -
     assert seen == []
     stop = eng._search_cannot_start_stop(state, patch["design"])
     assert stop is not None and "what the search should make as low or as high as possible" in stop["exec_result"]["no_search"]
-
-
-@pytest.mark.asyncio
-async def test_an_ambiguous_topic_adds_one_question_to_the_clarify_step(tmp_path: Path) -> None:
-    reply = json.dumps({"success_metric": {"question": "What counts?", "default": "overshoot"}})
-    eng = _engine(tmp_path, [reply], clarify="auto")
-    patch = await eng._node_clarify_questions({"topic": "Best controller gain for low overshoot"})
-    assert patch["clarify_questions"]["study_type"]["default"] == op.LET_THE_PLAN_DECIDE
-    assert op.resolve_answer(patch["clarify_answers"]["study_type"]) is None  # nobody answered: the plan decides
-
-    clear = _engine(tmp_path / "clear", [reply], clarify="auto")
-    patch = await clear._node_clarify_questions({"topic": "Effect of controller gain on overshoot"})
-    assert "study_type" not in patch["clarify_questions"]
 
 
 @pytest.mark.asyncio

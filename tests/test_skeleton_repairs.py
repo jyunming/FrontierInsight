@@ -44,7 +44,9 @@ def _sha(text: str) -> str:
 
 #: sha256 (first 16 hex digits) of the requests the unframed repair paths made at dd7865ff, taken from that code; the crash
 #: request since says a capped value is recorded as one, not rejected (a cap is a warning, never a send-back).
-PROMPTS_AT_DD7865FF: dict[str, Any] = {"finding": ["8ea57a1bb5da9895", "3ee0c3c6803ed282"], "crash": "851ccac16d793583"}
+# The crash hash differs from the one dd7865ff made only by the setup block's placeholder line, now
+# "(none — no setup questions were asked)" (it said "clarify mode is off").
+PROMPTS_AT_DD7865FF: dict[str, Any] = {"finding": ["8ea57a1bb5da9895", "3ee0c3c6803ed282"], "crash": "0f01bd2afa9a0ff3"}
 
 #: The same simulation as a model wrote it before there was a frame (the default today).
 UNFRAMED = '''import random
@@ -236,7 +238,7 @@ def test_without_a_frame_the_finding_repair_asks_and_accepts_exactly_as_before(t
 
 def _cfg(tmp_path: Path) -> Config:
     return Config(topic="repairs keep the frame", title="frame-repairs", provider=ProviderConfig(name="openai"),
-                  engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3, ideate_reflect=False),
+                  engine=EngineConfig(max_iterations=1, review_loop=False, exec_reflect_max_iterations=3),
                   execution=ExecutionConfig(sandbox="venv", timeout_s=60, split_analysis=True),
                   knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"))
 

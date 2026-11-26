@@ -61,12 +61,17 @@ def test_a_redraw_with_nothing_to_draw_from_or_that_fails_is_reported(tmp_path: 
     assert fine["layout_missed"] == [] and eng._route_after_replot({**STATE, **fine}) == "check"  # type: ignore[arg-type]
 
 
-def test_a_collection_that_is_switched_off_says_what_was_not_added(tmp_path: Path) -> None:
+def test_a_note_that_asks_a_data_study_for_a_number_it_lacks_says_what_was_not_added(tmp_path: Path) -> None:
+    """FI looks for no data of its own: a data study's ask for another number is reported as not added, not dropped."""
     eng = _engine(tmp_path)
-    eng.config.engine.auto_collect_data = False  # type: ignore[assignment]
-    out = asyncio.run(eng._node_auto_collect_data(  # type: ignore[arg-type]
+    (eng.quest_root / "data").mkdir(parents=True)
+    (eng.quest_root / "data" / "table.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    out = asyncio.run(eng._node_wait_for_data(  # type: ignore[arg-type]
         {**STATE, "no_simulation_resolved": True, "refine_extend": ["GDP of Peru in 2019"]}))
     assert out["extend_missed"] == ["GDP of Peru in 2019"] and out["refine_extend"] == []
+    assert eng._route_after_write({**STATE, "no_simulation_resolved": True, "refine_extend": ["x"]}) == "collect"  # type: ignore[arg-type]
+    plain = asyncio.run(eng._node_wait_for_data({**STATE, "no_simulation_resolved": True}))  # type: ignore[arg-type]
+    assert "extend_missed" not in plain and "refine_extend" not in plain
 
 
 def test_the_paper_is_told_once_what_could_not_be_done(tmp_path: Path) -> None:

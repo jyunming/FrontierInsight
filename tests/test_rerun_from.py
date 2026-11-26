@@ -19,7 +19,7 @@ def test_step_names_are_plain_and_the_node_names_work_too() -> None:
     assert rerun_from.resolve("Code") == "code" and rerun_from.resolve("execute") == "run"
     assert rerun_from.resolve("design") == "design" and rerun_from.resolve("") is None
     assert rerun_from.resolve("clarify") is None and rerun_from.resolve("human_feedback") is None
-    assert rerun_from.choices() == "ideas, literature, studies, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
+    assert rerun_from.choices() == "literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
 
 
 def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_inputs(tmp_path: Path) -> None:
@@ -44,7 +44,6 @@ def test_a_new_plan_and_a_new_design_are_asked_again() -> None:
     asks = {name: getattr(_engine, name) for name in dir(_engine)
             if (name.endswith("_ASKED") or "_ASKED_" in name or name == "_FILL_MARKER")
             and isinstance(getattr(_engine, name), str) and getattr(_engine, name).endswith(".json")}
-    asks.pop("_PAPERS_ASKED")  # the pause for papers to add, before the plan: not the plan's
     assert len(asks) >= 12, sorted(asks)  # the sweep finds the records it is meant to
     for name, file in asks.items():
         assert f".fi/{file}" in rerun_from.OUTPUTS["plan"], name
@@ -150,10 +149,10 @@ class _Graph:
 @pytest.mark.asyncio
 async def test_a_step_of_several_nodes_is_done_again_from_its_first_node_of_the_latest_pass() -> None:
     # Two passes of a no-simulation quest; the second is paused at wait_for_data.
-    graph = _Graph([("design",), ("auto_collect_data",), ("wait_for_data",), ("data_load",), ("analyze",),
-                    ("review",), ("design",), ("auto_collect_data",), ("wait_for_data",)])
+    graph = _Graph([("design",), ("wait_for_data",), ("data_load",), ("analyze",),
+                    ("review",), ("design",), ("wait_for_data",)])
     found = await rerun_from.checkpoint_before(graph, {}, "run")
-    assert found == {"configurable": {"checkpoint_id": "7"}}, "the second pass's collection, not the first pass's"
+    assert found == {"configurable": {"checkpoint_id": "6"}}, "the second pass's wait for data, not the first pass's"
     graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("analyze",)])
     assert (await rerun_from.checkpoint_before(graph, {}, "code"))["configurable"]["checkpoint_id"] == "1"
     assert await rerun_from.checkpoint_before(graph, {}, "review") is None

@@ -4,14 +4,11 @@ environment is the one the experiment ran on, and the trace hashes the evidence 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 from core import evidence, metric_spec
 from core.engine import Engine
-from core.interview import answers_to_yaml
 from tests.test_evidence import ON, _quest, _state
-from tests.test_interview_roundtrip import _full_answers
 
 PAIRED = {
     "shared_draws": True,
@@ -77,19 +74,11 @@ def test_fis_summary_names_the_trial_behind_every_value() -> None:
 
 
 def test_an_exploration_is_kept_and_is_never_publication_ready(tmp_path: Path) -> None:
-    yaml_text = answers_to_yaml(replace(_full_answers(), result_use="explore"), frontend="cli")
-    assert 'result_use: "explore"' in yaml_text
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
     explored = evidence.assess(root, _state(), settings={**ON, "result_use": "explore"})
     assert explored["status"] != "publication_ready"
     assert any("set up to explore" in g for g in explored["gaps"])
-
-
-def test_the_vscode_interview_writes_the_result_use_too() -> None:
-    ts = (Path(__file__).resolve().parent.parent / "vscode-frontier-insight" / "src" / "interview-core.ts").read_text(
-        encoding="utf-8")
-    assert "lines.push(`result_use: \"${answers.result_use}\"`);" in ts
 
 
 def test_a_package_list_that_could_not_be_made_is_a_gap_even_in_its_own_environment(tmp_path: Path) -> None:

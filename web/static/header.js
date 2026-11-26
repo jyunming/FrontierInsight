@@ -10,10 +10,8 @@
 
 (function () {
   const TOOLS_FALLBACK = [
-    { name: 'proposal',  label: 'Proposal'  },
     { name: 'critique',  label: 'Critique'  },
     { name: 'digest',    label: 'Digest'    },
-    { name: 'portfolio', label: 'Portfolio' },
     { name: 'summarize', label: 'Summarize' },
     { name: 'analyze',   label: 'Analyze'   },
     { name: 'fleet',     label: 'Fleet'     },
@@ -69,10 +67,6 @@
             </div>
           </div>
           <div class="flex items-center gap-4">
-            <a href="/interview" class="hidden md:inline-flex items-center gap-1 bg-gradient-to-r from-primary-container to-secondary-container text-on-primary-container font-label-sm text-label-sm px-4 py-2 rounded uppercase tracking-wider hover:opacity-90 transition-opacity">
-              <span class="material-symbols-outlined text-[16px]">add</span>
-              <span>New Quest</span>
-            </a>
             <div class="flex items-center gap-3 text-on-surface-variant">
               <a href="/trash" class="hover:text-primary transition-colors duration-200" title="Trash">
                 <span class="material-symbols-outlined">delete</span>

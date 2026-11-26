@@ -1,7 +1,7 @@
 # Frontier Insight — recipes & detailed how-to
 
 > Moved out of the README to keep the landing page short. This is the
-> full cookbook: provider setup, the headless interview, writing your own
+> full cookbook: provider setup, writing a commission, writing your own
 > quest, the human-in-the-loop pauses, and ~30 task-oriented recipes.
 > For the YAML schema see [`USAGE.md`](USAGE.md); for the full feature
 > catalogue see [`capabilities-reference.md`](capabilities-reference.md).
@@ -31,7 +31,7 @@ npm run package    # → vscode-frontier-insight.vsix (in this folder)
 #   CLI:  code --install-extension vscode-frontier-insight.vsix
 ```
 
-In Copilot Chat, just type `@fi` — the extension walks you through the interview (topic, outputs, paper format, research approach, study depth, comparative baseline, success metric, budget, clarify mode, reviewer panel, Axon, web research, multi-model ensemble preset, …) via input modals, generates the config.yaml, and runs the quest. The chat panel streams every step. `@fi /update <quest_id>` opens the same interview pre-filled with the editable subset for a mid-quest tweak. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
+In Copilot Chat, `@fi /start <config.yaml>` runs a study from a config that names a commission file (see below), and the chat panel streams every step. **See [`vscode-frontier-insight/README.md`](https://github.com/jyunming/FrontierInsight/blob/main/vscode-frontier-insight/README.md) for details.**
 
 #### Option B — Headless CLI (no VSCode running)
 
@@ -98,33 +98,28 @@ Then change `provider.name` to `ollama`. Slower but $0.
 
 ---
 
-## Headless interactive interview — `python launch.py --new`
+## Write a commission — `fi new` and `fi check`
 
-If you're outside VSCode (CI, a remote shell, or just prefer the terminal), the CLI ships the same interview the VSCode `@fi /new` flow uses. Its last questions are the optional author line (author, affiliation, contact email, project link) that the paper, slides and poster print; press Enter to skip any of them.
+Every study starts from a commission file: your question, what the study covers, the hours and model calls you allow, the values you already know from a source, and what counts as success and as failure. In any terminal (CI, a remote shell, your laptop):
 
 ```bash
-python launch.py --new                  # walks you through, then auto-starts the quest
-python launch.py --new --draft-only     # writes the YAML to outputs/_drafts/<id>.yaml and stops
-python launch.py --update <quest_id>    # mid-quest re-entry; pre-fills the editable fields
+python launch.py new                      # writes commission.yaml and study.yaml, never over an existing file
+python launch.py check commission.yaml    # one plain sentence per problem; no model call; exit 2 if any
+python launch.py --config study.yaml      # run it
 ```
 
-CLI-only questions: `provider.name` (openai / codex / claude_cli / codex_cli / copilot_cli / gemini_cli / ollama) and `provider.model` (curated list per provider with "Other (type your own)" escape hatch). VSCode skips both because the active Copilot model is captured automatically.
-
-The interview makes ONE LLM call after the first 5 questions to suggest topic-tuned defaults for `comparative_baseline` / `success_metric` / `budget`; the answers land in `engine.clarify_overrides` so the engine's clarify node short-circuits in auto mode (no wasted call). Pick `--draft-only` when you want to hand-edit the YAML before launching (e.g. tune `engine.cross_check_per_finding_k`, add `knowledge.local_papers`).
+`commission.yaml` has every key with a one-line comment of what goes there; `study.yaml` names it and holds the model and `output_dir`. Open `study.yaml` to tune anything else (for example `engine.cross_check_per_finding_k`). The keys are described in [USAGE.md](USAGE.md#the-commission-file).
 
 ---
 
 ## Write your own quest
 
-Copy `examples/integrator_bakeoff/config.yaml` to `my_quest.yaml` and edit the `topic:` field (root-level `.yaml` files are git-ignored, so it stays personal; to share it, move it into a folder such as `examples/<name>/config.yaml`). Keep everything else as-is until you want to tune.
+Run `fi new` for a commission and a config to fill in, or copy `examples/integrator_bakeoff/config.yaml` and its `commission.yaml` and edit them (the question, scope and limits go in the commission; root-level `.yaml` files are git-ignored, so they stay personal; to share them, move them into a folder such as `examples/<name>/`). Keep everything else as-is until you want to tune.
 
 Minimum viable config:
 
 ```yaml
-topic: |
-  <Your research question, 1-3 paragraphs.
-  Be specific about what's known, what you want to test,
-  and what success looks like.>
+commission: my_commission.yaml   # the question, scope, limits and known values (`fi new` writes one)
 
 title: my-quest
 
@@ -162,26 +157,24 @@ Run it: `python launch.py --config my_quest.yaml`
 
 A quest runs on its own and only stops when it genuinely needs you. Every stop is one of just **two kinds of interaction**:
 
-- **ANSWER** — the quest asks you something (the setup questions; accept / reject / refine at the end).
-- **SUPPLY** — the quest needs files (a paywalled paper it found; a dataset).
+- **ANSWER** — the quest asks you something (accept / reject / refine at the end).
+- **SUPPLY** — the quest needs files (a dataset, or a paper to read).
 
-There are five places it can stop, all configured in one place — the `pauses:` section of your YAML:
+There are four places it can stop, all configured in one place — the `pauses:` section of your YAML:
 
 ```
    you set up ──▶ the quest runs on its own, stopping only when it needs you:
 
-   clarify ─ literature ─ design ─ (build·run │ gather data) ─ analyse ─ write ─ review
-      ▲          ▲           ▲            ▲                                        ▲
-   ANSWER      SUPPLY      SUPPLY       SUPPLY                                  ANSWER
-   setup       paywalled   any papers   a dataset                             accept /
-   questions   papers it   or data                                            reject /
-               listed                                                         refine
+   literature ─ design ─ (build·run │ the data you gave) ─ analyse ─ write ─ review
+       ▲           ▲                ▲                                        ▲
+     SUPPLY      SUPPLY           SUPPLY                                  ANSWER
+     papers      any papers       a dataset                             accept /
+     it needs    or data                                                reject /
+                                                                        refine
 ```
 
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
-| **clarify** (start) | ANSWER | answer the setup questions (what you want to see, the title, the baseline, ...) | on by default when someone can answer (the terminal with `--interactive`, the web quest page, VS Code for a quest on the VS Code chat model); `pauses.clarify: ask` always stops, `auto` lets the agent answer, `off` skips ([USAGE.md](USAGE.md#setup-questions)) |
-| **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below), or resume without them: they are read from their abstracts and not asked for again | `pauses.papers: true` (the default; `false` turns it off) |
 | **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
 | **the plan** | SUPPLY | read `plan.md` (what the literature says, the gap, the design), edit it or ask for a change (`--revise-plan`); the design block in it is what runs | `pauses.plan: ask` |
 | **design / write** | SUPPLY | drop any papers or data you want it to use | `pauses.supply: before_build` \| `before_review` \| `both` \| `all` |
@@ -195,15 +188,13 @@ There are five places it can stop, all configured in one place — the `pauses:`
 3. You **resume**: `fi --resume <quest-id>` on the CLI, or click **Resume** in the Web GUI / VSCode, where an *Action needed* banner shows the same thing.
 
 ```yaml
-# A quest that involves you at both ends and lets you feed it papers mid-run:
+# A quest that lets you feed it papers mid-run and asks you at the end:
 pauses:
-  clarify: ask            # answer setup questions before it starts
-  papers: true            # default: pause to let you download paywalled papers it finds (false = never)
   supply: before_build    # one drop-in point for your own papers/data
   review: ask             # accept / reject / refine before the paper is final
 ```
 
-> Legacy flag names (`engine.clarify_mode`, `engine.human_feedback_gate`, `engine.pause_for_user_input`, `knowledge.pause_for_user_papers`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
+> Legacy flag names (`engine.human_feedback_gate`, `engine.pause_for_user_input`) still work — they're mapped into `pauses:` automatically — but `pauses.*` is the way going forward.
 
 The sections below cover each pause in more detail.
 
@@ -420,7 +411,7 @@ The YAML's `provider` block is honored on resume; everything else (topic, design
 
 ### Pull more (or fewer) prior-work citations
 
-Each quest's literature step retrieves `knowledge.top_k` documents from Axon, the academic source router, **and a general web search** (Brave or keyless DuckDuckGo) run in parallel and merged — and those are what end up in the References of the paper, poster, and slides alike. The retrieved sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by the interview's **Web research** toggle (`knowledge.web_search`, on by default) — it doesn't need an Axon corpus, but it does require the knowledge layer's master switch `knowledge.enabled: true` (the default). Setting `knowledge.enabled: false` turns off **all** retrieval — Axon, the academic router, **and** web search. The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block fits comfortably in the writer prompt alongside the design + analysis blocks; each source contributes up to `knowledge.literature_excerpt_chars` (default 4000) of its **most relevant** passages, not its first N characters. Override per-quest:
+Each quest's literature step reads the sources its commission gives, the papers in `inputs/papers/` and those pinned in `knowledge.local_papers` (nothing is searched for by topic) — and those are what end up in the References of the paper, poster, and slides alike. The sources are also **downloaded to `data/literature/`** (one `lit_NNN_*.md` per source, with provenance front matter) for **every** quest — simulation and observational alike — so the corpus is always auditable on disk. The general web layer is controlled by `knowledge.web_search` (on by default) — it doesn't need an Axon corpus, but it does require the knowledge layer's master switch `knowledge.enabled: true` (the default). Setting `knowledge.enabled: false` turns off **all** retrieval — Axon, the academic router, **and** web search. The web layer is what makes a non-academic question (company financials, markets, current events) retrieve real sources instead of irrelevant papers; see [Research the open web](#research-the-open-web-not-just-academic-papers) below. The default `top_k` is **5**, picked so the prior-work block fits comfortably in the writer prompt alongside the design + analysis blocks; each source contributes up to `knowledge.literature_excerpt_chars` (default 4000) of its **most relevant** passages, not its first N characters. Override per-quest:
 
 ```yaml
 knowledge:
@@ -428,7 +419,7 @@ knowledge:
   top_k: 12        # pull more — costs ~5K extra tokens per LLM call that uses the block
 ```
 
-Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`ideate`, `design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
+Trade-offs: higher `top_k` gives the writer + cross-check nodes more sources to draw on but inflates every prompt that includes the literature block (`design`, `write`, `cross_check`, `review`), which means more tokens billed AND more chance of the model losing focus across a sprawling context. 5–10 is the sweet spot for a journal-length paper; bump to 15–20 only for a `comprehensive review` study depth.
 
 ### Keep internal docs out of an externally-published paper
 
@@ -450,9 +441,7 @@ High-quality content is the foundation of the research, so the fetch layer works
 
 - **Clean extraction.** Pages run through `trafilatura` (when installed) to isolate the article body and drop nav / menus / reference cruft; a built-in extractor is the fallback.
 - **Open-access full-text cascade.** For an academic source (PMC, a DOI, a preprint, a major publisher) FI resolves the `PMCID` / `DOI` / arXiv-id and pulls the clean open-access full text directly — preferring the **PMC BioC API** (section-labelled, no HTML cruft), then **Europe PMC**, the **preprint** server (arXiv / bioRxiv / medRxiv), **Unpaywall** (every OA location, repository copies first), and **Semantic Scholar** / **CORE** when a key is set.
-- **Off-topic retrievals are re-searched, not accepted.** The relevance floor keeps at least `knowledge.relevance_min_keep` sources (default 3) so a quest is never left with nothing — but when *no* source clears `relevance_min_score` on its own merits, that padding is the only thing keeping the corpus alive, and handing it to the writer is what produces "it found me three irrelevant papers". Instead FI asks the model for a better-worded query (the usual cause is vocabulary: a field publishes under different terms than the topic statement uses) and searches again, up to `knowledge.requery_max` times (default 2). Set `knowledge.requery_on_low_relevance: false` to disable. Skipped when embeddings are unavailable — without scores there is no signal that the query was bad, and retrying blind only multiplies cost.
-- **Only free papers are downloaded.** FI fetches a paper's full text only when it is confirmed free (arXiv, PubMed Central, bioRxiv / medRxiv, a fully open-access publisher such as MDPI, PLOS or Frontiers, or a free copy that OpenAlex, OpenAIRE, DOAJ, Unpaywall, Europe PMC, Semantic Scholar or CORE lists), and then only from that free copy. It does not request a paper that is not confirmed free from the publisher, even from a network with a subscription (VPN, campus login): journal pages are recognised by their site, DOI or article path, every redirect is checked again (also in the headless browser), and a page or PDF from an unknown site that says it is a journal article is discarded unread (at worst one request for that landing page, or two if it answered 403 and was then rendered). Those papers go on `needs/WANTED_PAPERS.md` for you to download. With `pauses.papers: false` the run does not stop: it logs one line with the number of papers left for a person and carries on with their abstracts.
-- **Open access is never treated as paywalled.** An arXiv / PMC / bioRxiv / medRxiv source (or anything OpenAlex reports as `is_oa`) that came back abstract-only means FI's *download* failed, not that the paper costs money — typically the host is unreachable behind a proxy or firewall. Those never trigger the `pauses.papers` stop: asking a person to hand-fetch a free arXiv PDF is asking them to work around a network fault. They are logged as a WARNING and listed in a separate "Open access — FI's download failed" section of `needs/WANTED_PAPERS.md`, since a browser often succeeds where the agent's HTTP client is blocked. The quest pauses only when something is *genuinely* paywalled.
+- **Only free papers are downloaded.** FI fetches a paper's full text only when it is confirmed free (arXiv, PubMed Central, bioRxiv / medRxiv, a fully open-access publisher such as MDPI, PLOS or Frontiers, or a free copy that OpenAlex, OpenAIRE, DOAJ, Unpaywall, Europe PMC, Semantic Scholar or CORE lists), and then only from that free copy. It does not request a paper that is not confirmed free from the publisher, even from a network with a subscription (VPN, campus login): journal pages are recognised by their site, DOI or article path, every redirect is checked again (also in the headless browser), and a page or PDF from an unknown site that says it is a journal article is discarded unread (at worst one request for that landing page, or two if it answered 403 and was then rendered). A paper that is not free is never requested; put its PDF into `inputs/papers/` to have it read.
 - **Walls rejected, not stored.** reCAPTCHA / "checking your browser" interstitials and paywall / abstract-only stubs (detected via a schema.org `isAccessibleForFree` / paywall-vendor check) are discarded; the real search snippet is kept instead of challenge garbage, and the cascade above is tried for the genuine full text.
 - **Relevance-selected excerpts.** Full text is stored uncapped on disk, but each node's prompt gets the passages most relevant to the question — so a number buried mid-document reaches the writer, not just the abstract.
 
@@ -469,7 +458,6 @@ knowledge:
   web_fetch_pages: true          # fetch full page text, not just snippets
   literature_excerpt_chars: 4000 # relevant chars of each source put into a prompt
   passage_ranking: auto          # hybrid semantic+lexical when a model loads, else lexical
-  relevance_guard: true          # drop confident-but-off-topic hits; pause if nothing fits
   # brave_api_key: BSA...        # or set the BRAVE_API_KEY env var instead
   # openalex_api_key: ...        # or OPENALEX_API_KEY — full OpenAlex budget (arXiv is searched through it)
   # semantic_scholar_api_key: .. # or SEMANTIC_SCHOLAR_API_KEY — the keyless pool mostly 429s
@@ -485,43 +473,19 @@ Beyond charting numbers, `knowledge.fetch_web_figures` (off by default) embeds a
 python launch.py --serve --output-root ./outputs
 ```
 
-Then open <http://127.0.0.1:8765/>. You'll see every quest, live log, paper preview, and figure browser. If a quest is paused waiting for clarifying questions, a panel appears for you to answer.
-
-### Let the agent ask you 5 clarifying questions before it runs
-
-Add to your YAML:
-```yaml
-pauses:
-  clarify: ask
-```
-
-Run with `--interactive`:
-```bash
-python launch.py --config my_quest.yaml --interactive
-```
-
-The agent asks its setup questions one at a time (the banner says "5 questions", but there are usually more: one per open slot); press Enter to accept each suggested default, or type your own answer.
+Then open <http://127.0.0.1:8765/>. You'll see every quest, live log, paper preview, and figure browser. If a quest is paused for your review, a panel appears for you to answer.
 
 ### Topics that need real data, not a Python script
 
-Some research questions can't honestly be answered by a self-contained Python experiment — cultural comparisons, historical analyses, qualitative cross-case studies, policy reviews. For those, set:
+Some research questions can't honestly be answered by a self-contained Python experiment — cultural comparisons, historical analyses, qualitative cross-case studies, policy reviews. For those, put `method: analyze_data` in the commission file (a config that sets `engine.no_simulation: true` without it is refused).
 
-```yaml
-engine:
-  no_simulation: true
-  auto_collect_data: true              # default — try Axon first
-  dataset_adapters: [worldbank, wikipedia]  # opt-in external lookups
-```
+The engine skips `implement → execute` entirely and waits for your data: drop your own files into `outputs/<id>/data/` and run `python launch.py --config <yaml> --resume <quest_id>`. The `web_plots` step then turns any quantitative data into source-attributed figures, and the quest continues through `analyze → cross_check → write → review`.
 
-The engine skips `implement → execute` entirely. Instead, `auto_collect_data` queries Axon **and the general web** for relevant sources, runs each enabled adapter (WorldBank pulls country-indicator tables, Wikipedia fetches article summaries), and writes everything into `outputs/<id>/data/auto_collected/`. A relevance guard drops confident-but-off-topic hits; the `web_plots` step then turns any quantitative data it found into source-attributed figures. If real sources land, the quest continues through `analyze → cross_check → write → review`. If nothing on-topic lands, the engine pauses cleanly with a `data/README.md` telling you what to drop. Drop your own files into `data/` and re-run:
+To carry on from a pause:
 
 ```bash
 python launch.py --config <yaml> --resume <quest_id>
 ```
-
-The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `pauses.clarify` is `auto` or `ask` (or left unset) — setting `no_simulation: true` in YAML is just the explicit override.
-
-The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred). The interview pre-fills this for review-shaped topics.
 
 ### Make the PDF compile a hard gate
 
@@ -572,14 +536,13 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 ### Use a different model per node
 
-A cheaper model for the light nodes and a stronger one where you want it. Only `cross_check`, `select_skills`, `literature_screen`, `slides` and `poster` have been measured on a cheaper model (about 15% fewer tokens, no score drop seen in three runs per arm on one topic); the other nodes below are illustrations, not measured advice:
+A cheaper model for the light nodes and a stronger one where you want it. Only `cross_check`, `select_skills`, `slides` and `poster` (and a literature-screening step FI no longer has) have been measured on a cheaper model (about 15% fewer tokens, no score drop seen in three runs per arm on one topic); the other nodes below are illustrations, not measured advice:
 
 ```yaml
 provider:
   name: vscode_extension
   model: gpt-5                                 # global default
   node_models:
-    clarify:     gpt-4o-mini
     cross_check: gpt-4o-mini
     write:       claude-3-5-sonnet
     review:      gpt-5
@@ -620,39 +583,16 @@ engine:
 
 Each persona reviews independently; a moderator synthesizes. The panel costs ~4× the LLM calls of a single reviewer but catches different failure modes (design flaws, statistical issues, alternative explanations).
 
-### Project-manager commands — when to reach for each
+### Project-manager commands: when to reach for each
 
-FI ships four commands that live *outside* the per-quest loop. They turn FI from a single-quest tool into a portfolio assistant. One LLM call each (cheap; cap'd content); each ingests its output into Axon so future quests can retrieve it.
+FI ships two commands that live *outside* the per-quest loop. One LLM call each (cheap; cap'd content); each ingests its output into Axon so future quests can retrieve it.
 
 | Command | Use it when |
 |---|---|
-| `@fi /proposal <topic>` | About to run a quest. Want to sanity-check the plan first before committing a full run (23–28 LLM calls in a measured default quest with slides and a poster). |
 | `@fi /critique <quest_id>` | Quest finished. Want a second opinion that didn't already write the paper — pick a different model family in the picker. |
 | `@fi /digest [days]` | End of week. Want a 1-pager "what I shipped + what's stuck", with a structured diff vs last week. |
-| `@fi /portfolio` | End of month, or scoping the next push. Want a synthesis of themes + gaps + meta-paper candidates across *every* quest. |
 
-The next four sections walk through each in detail.
-
-### Plan a quest before you commit compute
-
-```
-@fi /proposal Compare RK4 vs Verlet on the Kepler problem with eccentric orbits
-```
-
-Or:
-
-```bash
-python launch.py --proposal "Compare RK4 vs Verlet on the Kepler problem"
-```
-
-Inverts the usual flow. Instead of running a full quest and discovering the question was poorly scoped, get a 1-page LLM-written proposal *first* — background, hypothesis, plan, success criteria, risks, recommended next step. The user reviews the plan; if it looks good, runs the auto-generated companion YAML. Writes two files under `outputs/_drafts/`:
-
-- `<id>-proposal.md` — the planning doc (read this, edit if needed).
-- `<id>.yaml` — minimal config.yaml with the user's original topic. Run `python launch.py --config outputs/_drafts/<id>.yaml` to start the actual quest.
-
-Ingested into Axon as `kind=fi_proposal` so future quests can retrieve "have I considered this before?"
-
-Every PM-command (`--proposal`, `--critique`, `--digest`, `--portfolio`, `--summarize`, `--analyze`) accepts a `--<tool>-model <id>` companion to `--<tool>-provider` so the picker selection from `/tools/<tool>` actually routes the LLM call. For `vscode_extension` the id is the model id surfaced by the live Copilot catalog (e.g. `gemini-3-flash-preview`); for CLI providers it's the same identifier the CLI's own `--model` flag accepts. Omit the flag to keep the provider default (or — for `vscode_extension` — fall through to whatever the user has selected in their Copilot Chat model picker).
+Every PM-command (`--critique`, `--digest`, `--summarize`, `--analyze`) accepts a `--<tool>-model <id>` companion to `--<tool>-provider` so the picker selection from `/tools/<tool>` actually routes the LLM call. For `vscode_extension` the id is the model id surfaced by the live Copilot catalog (e.g. `gemini-3-flash-preview`); for CLI providers it's the same identifier the CLI's own `--model` flag accepts. Omit the flag to keep the provider default (or — for `vscode_extension` — fall through to whatever the user has selected in their Copilot Chat model picker).
 
 ### Get an adversarial second opinion on a completed quest
 
@@ -667,29 +607,6 @@ python launch.py --critique <quest_id> --critique-provider claude_cli
 ```
 
 The in-quest review is biased — the same model wrote the paper AND reviewed it. `/critique` runs a fresh adversarial pass that has "never seen this paper before." For maximum effect, pick a different model family in your Copilot Chat picker (or pass `--critique-provider`) from the one that wrote the paper. Writes `outputs/<quest_id>/critique.md` with: a Verdict (accept / revise / reject / inconclusive), Methodology challenges (with quoted objections), Statistical issues (effect sizes, missing baselines, cherry-picked metrics), Reproducibility gaps, Alternative explanations the experiment doesn't rule out, an explicit "What the in-quest review missed" comparison, and Recommended follow-up experiments. Ingested into Axon as `kind=fi_critique`.
-
-### See your whole research portfolio at a glance
-
-```
-@fi /portfolio
-```
-
-Or from the terminal:
-
-```bash
-python launch.py --portfolio
-```
-
-Walks every quest under `outputs/` (no time window) and produces `outputs/_portfolio/<YYYY-MM-DD>.md` with:
-
-- **Topic clusters** — 2-6 thematic groupings; for each, the convergent finding (if any) and an open question the cluster surfaces.
-- **Near-duplicate detection** — pairs of quests asking substantially the same question with different wording. Recommendation: merge / keep both / retire.
-- **Meta-paper candidates** — places where ≥3 quests could be combined into a review/synthesis paper, with an effort estimate.
-- **Coverage gaps** — specific research directions the existing themes *should* but *do not* cover, each grounded in a future-work section of a real quest.
-- **Suggested next quests** — top 3 most-actionable topic strings ranked, each citing the prior quest it builds on.
-- **Portfolio statistics** — total quests, completion split, time span, completion cadence (median days between completions), provider breakdown.
-
-The portfolio also lands in Axon as `kind=fi_portfolio`. Use it monthly or when you're scoping the next research push.
 
 ### Get a weekly project-manager digest of your quests
 
@@ -731,7 +648,6 @@ The agent reads them and cites them, every page: a scanned PDF (an older paper i
 
 Their figures are cut out too, each with its caption, into `data/literature/figures/`, and the ones that show values your question can use are read by the model (`knowledge.read_figures`; set a model for the step `figures` in `provider.node_models`, one that reads images).
 
-**Or let the agent ask.** Turn on **Supply paywalled papers** in the interview (`pauses.papers: true`). When a relevant paper is paywalled (SPIE / IEEE / Elsevier …) and only its abstract is reachable, the quest pauses and writes a **ranked `needs/WANTED_PAPERS.md`** — most relevant first, each with a download link and a one-line reason (and `NEXT_STEP.md` points you there). Download the few that matter, drop the PDFs into `inputs/papers/`, and resume — they're ingested as real full text. In the **Web GUI** the quest page shows the list with an upload box + Resume; the **VSCode** extension shows it with drop-and-resume instructions. See [When the quest needs you](#when-the-quest-needs-you) for how this fits the bigger picture.
 
 ---
 
@@ -740,6 +656,6 @@ Their figures are cut out too, each with its caption, into `data/literature/figu
 | Example | What it does | Wall time |
 |---|---|---|
 | [`examples/integrator_bakeoff/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/integrator_bakeoff) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
-| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bootstrap_ci_coverage) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Searches the literature, so it needs network access. | not timed end to end (its simulation runs in under a minute) |
+| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bootstrap_ci_coverage) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Reads the sources its commission names, so it needs network access. | not timed end to end (its simulation runs in under a minute) |
 | [`examples/bernstein_vazirani_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bernstein_vazirani_noise) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 

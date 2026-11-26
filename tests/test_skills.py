@@ -423,3 +423,22 @@ def test_provenance_still_does_not_lapse_approval_under_the_new_hash(
         encoding="utf-8",
     )
     assert evaluate(s, ledger=ledger).status is Status.TRUSTED
+
+
+def test_selftest_never_opens_a_plot_window(tmp_path: Path, monkeypatch) -> None:
+    """A self-test (and the skill scripts it runs) that plots must draw to a file, not open a window on the desktop."""
+    from core.skills.registry import run_selftest
+
+    monkeypatch.setenv("MPLBACKEND", "TkAgg")  # the user's own setting must not reach a skill's code
+    skill = make_skill(tmp_path, "plotter", selftest="""
+        import os, sys
+        backend = os.environ.get("MPLBACKEND")
+        try:
+            import matplotlib
+            backend = matplotlib.get_backend()
+        except ImportError:
+            pass
+        sys.exit(0 if str(backend).lower() == "agg" else 3)
+    """)
+    ok, output = run_selftest(skill)
+    assert ok, output

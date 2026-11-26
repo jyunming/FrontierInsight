@@ -6,7 +6,7 @@ One page, in plain words. Every item links to where it is described in full: the
 
 ## The research loop
 
-FI runs a topic through: ideate, literature search, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
+FI runs a commission through: its literature, a written plan, experiment design, code, a run (it repairs its own code when the run fails), analysis, a cross-check against the papers, the paper, and a review that can send it back. The experiment is repeated over several random seeds. What you see while it runs — the CLI console, the web page's **Progress** panel, VS Code's chat — is one plain line per stage, not the internal log behind it (`.fi/run.log` in the quest folder keeps everything). [Details](capabilities-reference.md#engine--execution) · [the graph](architecture.md)
 
 ## Checking its own experiments
 
@@ -25,7 +25,7 @@ Every quest keeps an ordered, tamper-evident diary of its steps, checks and rout
 
 ## You in the loop
 
-FI stops for you at set points: to read and edit the plan, to let you download paywalled papers, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
+FI stops for you at set points: to read and edit the plan, to accept or reject the paper, to approve a protocol change or a skill. `NEXT_STEP.md` in the quest folder says what to do; `fi --resume <quest id>` continues. [Details](capabilities-reference.md#engine--execution) · [USAGE.md](USAGE.md)
 
 ## Literature and memory
 
@@ -37,7 +37,7 @@ A paper (Markdown, plus PDF with LaTeX or a fallback), in scientific formats (ge
 
 ## Three ways to drive it
 
-The command line (`fi`), a local web UI (`fi --serve`), and a VSCode chat extension (`@fi`). All three use the same interview (`fi --new`, `/interview`, `@fi /new`), can change a running quest (`--update`), and can resume it. [Details](capabilities-reference.md#interviews--frontends) · [VSCode extension](../vscode-frontier-insight/README.md)
+The command line (`fi`), a local web UI (`fi --serve`), and a VSCode chat extension (`@fi`). All three start a study from a commission file (`fi new` writes one to fill in; `fi check` checks it) and can resume it; `--update` (command line) approves changed settings. [Details](capabilities-reference.md#approving-settings--frontends) · [VSCode extension](../vscode-frontier-insight/README.md)
 
 ## Models and cost
 
@@ -49,7 +49,7 @@ Experiments can run in the same Python, in a per-quest virtual environment, or i
 
 ## Other command-line tools
 
-`fi tools --help` lists them: summarise a folder, write a weekly digest, synthesise across quests, get an adversarial second review of a finished quest, plan a quest without running it (`fi tools proposal`), analyse data you already have (`fi tools analyze`), load documents into the knowledge layer (`fi tools ingest`), and remove out-of-date copies of quest results from it (`fi tools tidy-knowledge`). [Details](capabilities-reference.md#cli-tools)
+`fi tools --help` lists them: summarise a folder, write a weekly digest, get an adversarial second review of a finished quest, analyse data you already have (`fi tools analyze`), load documents into the knowledge layer (`fi tools ingest`), and remove out-of-date copies of quest results from it (`fi tools tidy-knowledge`). [Details](capabilities-reference.md#cli-tools)
 
 ## Example quests
 

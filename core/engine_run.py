@@ -22,6 +22,7 @@ from .engine_base import (  # noqa: F401
     _stamp_figure_credit, _strip_outer_fence, _trial_runner, _unread_results, _unseeded_rng_calls, _with_newline, ast,
     asyncio, hashlib, json, os, re, scrub_secrets, shutil, time,
 )
+from . import agent_build as _agent_build_mod
 
 
 def _said_on_bounds(warned: list[Any]) -> list[Any]:
@@ -63,6 +64,15 @@ class RunStageMixin:
             return self._agent_failure_as_run(asked, lines.lines)
         finally:
             self._log.removeHandler(lines)
+
+    def _script_layout(self, state: QuestState) -> tuple[bool, frozenset[str]]:
+        """How the code in ``code/`` is laid out now: ``(two scripts, the functions simulate.py gives FI)`` -- two scripts
+        when ``execution.split_analysis`` is on and ``simulate.py`` is there; the functions are those of
+        :func:`core.trial_runner.entries` (``run_trial``, ``run_cell``), empty for one script. Read from the folder each
+        time: in agent mode a round of the coding agent can change it after the run step has set up."""
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        split = bool(self._split_on(state) and simulate.is_file())
+        return split, frozenset(_trial_runner.entries(simulate) if split else ())
 
     async def _node_execute_steps(self, state: QuestState) -> QuestState:
         # Unconditional tamper check (the re-audit's P1-6): every other frozen-protocol reader
@@ -198,7 +208,10 @@ class RunStageMixin:
         # seed checks read.
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
         runner: Any = self.executor
-        split = self._split_on(state) and simulate_path.is_file()
+        # What the code in code/ is (one script or two, and the function simulate.py gives FI): it decides the runner, the
+        # script the seed checks read and whether FI runs the trials, so it is read from the folder each time.
+        layout = self._script_layout(state)
+        split, trial_entries = layout
         if self._split_on(state) and not split:
             self._log.info(
                 "[execute] execution.split_analysis is on but this quest has no %s "
@@ -207,7 +220,6 @@ class RunStageMixin:
             )
         # The trial contract: simulate.py defines run_trial (or run_cell) and FI runs every trial and keeps their record
         # (core/trial_runner.py). A simulation that still loops by itself is the older contract, whose record is its own.
-        trial_entries = _trial_runner.entries(simulate_path) if split else set()
         self._trial_mode = bool(trial_entries & {"run_trial", "run_cell"})
         self._trial_entries = set(trial_entries)
         # A search for the best design (core/optimise.py): FI runs the search and calls the simulation for each design it
@@ -258,7 +270,7 @@ class RunStageMixin:
             _trial_checks.record_not_run(self.quest_root, "own_loop" if split else "one_script")
 
         # Clear figures from a PRIOR experiment version before this run. On a
-        # re_experiment / broaden / repair loop the implement node rewrites
+        # re_experiment / repair loop the implement node rewrites
         # experiment.py, which may emit a DIFFERENT set of figure filenames —
         # the old ones aren't overwritten, so without this they linger, get
         # counted in figures=N, and pollute the paper/slides/poster with a mix
@@ -371,7 +383,14 @@ class RunStageMixin:
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
         if self._agent_mode():
             # The coding agent fixes what the checks find, round by round, until they pass (core/agent_build.py).
-            stop, oracle_code, gate_repaired = await self._agent_build(state, py, exec_env, seed_path)
+            stop, oracle_code, gate_repaired = await self._agent_build(state, py, exec_env, seed_path, layout=layout)
+            if stop is _agent_build_mod.LAYOUT_CHANGED:
+                # A round of the agent changed what the code is (simulate.py written, or its function changed): everything
+                # this step set up from the folder (the runner, the script the checks run, the packages) is set up again
+                # for the code that is there now, and the checks judge it from the start.
+                self._log.info("[execute] the coding agent's last round changed how the code is laid out (%s); setting "
+                               "up the run again for it", _agent_build_mod.layout_words(self._script_layout(state)))
+                return await self._node_execute_steps(state)
         else:
             stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
@@ -533,6 +552,7 @@ class RunStageMixin:
                 ),
                 label="running simulate.py and experiment.py" if split else "running experiment.py",
                 progress=getattr(runner, "progress_text", None),
+                alarm=getattr(runner, "progress_alarm", None),
             )
         except _optimise_search.TooManySettings as exc:
             # A plan that names more settings than FI lists, and no earlier size check met it (a frozen or resumed run): the

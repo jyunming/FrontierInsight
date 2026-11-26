@@ -101,7 +101,7 @@ def test_the_scan_cells_of_a_search_are_given_the_values_every_evaluation_goes_t
     from tests.test_optimise_runner import BLOCK
 
     eng = Engine(Config(topic="a neutral topic", title="capture", provider=ProviderConfig(name="openai"),
-                        engine=EngineConfig(clarify_mode="off"), execution=ExecutionConfig(sandbox="venv"),
+                        engine=EngineConfig(), execution=ExecutionConfig(sandbox="venv"),
                         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out")))
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
     (eng.quest_root / "code" / "simulate.py").write_text("def run_cell(cell):\n    return {}\n", encoding="utf-8")

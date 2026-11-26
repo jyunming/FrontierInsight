@@ -49,7 +49,6 @@ def _record_checks(monkeypatch) -> list[tuple[str, str]]:
 
 
 def _install_fake_generators(monkeypatch, calls: list[str]) -> None:
-    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
 
     def mk(name: str, is_async: bool, retkey: str, fname: str):
         if is_async:
@@ -164,7 +163,6 @@ async def test_the_pptx_is_checked_after_the_slides_have_settled(tmp_path: Path,
 async def test_slides_and_poster_are_redone_with_the_feedback(
     tmp_path: Path, monkeypatch, capsys,
 ):
-    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
     made: list[tuple[str, str]] = []
 
     def generator(name: str, key: str, fname: str):
@@ -218,7 +216,6 @@ async def test_slides_and_poster_are_redone_with_the_feedback(
 
 @pytest.mark.asyncio
 async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
     compiled: list[tuple[str, int]] = []
 
     class _Paper:
@@ -256,7 +253,6 @@ async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(
 
 @pytest.mark.asyncio
 async def test_text_over_an_edge_is_repaired_by_setting_the_tables_smaller(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
     compiled: list[tuple[int, bool]] = []
 
     class _Paper:

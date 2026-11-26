@@ -3,7 +3,7 @@
 The profile turns it on where the config is silent; a config that says ``phased: false`` keeps it off (and the plan and
 run.log say the result is not confirmed on unseen data); the default profile is unchanged; a research quest that began
 before this default goes on as it began; a quest that runs no experiment of its own says so in one sentence and holds
-nothing back; the interview shows it on for research on all three surfaces.
+nothing back.
 
 No real model is called."""
 
@@ -178,13 +178,12 @@ def test_an_older_research_quest_resumed_runs_as_it_began_and_does_not_stop(tmp_
 
 def test_an_update_of_an_older_research_quest_approves_what_runs(tmp_path: Path) -> None:
     """--update of a research quest that began before the default: approved off (as it runs), not "approved on"."""
-    from core.interview_update import approve_settings
 
     engine, cfg = _quest(tmp_path, config_text=_OLD_CONFIG, ran=True)
     before = cfg.model_copy(update={"engine": cfg.engine.model_copy(update={"phased": False})})
     plan_settings.record(engine.fi_dir, before, engine.quest_root)
     said: list[str] = []
-    changed = approve_settings(engine.quest_root, cfg, say=said.append)
+    changed = plan_settings.approve(engine.quest_root, cfg, say=said.append)
     assert not any("engine.phased" in line for line in changed + said), (changed, said)
     record = json.loads((engine.fi_dir / plan_settings.NAME).read_text(encoding="utf-8"))
     assert record["settings"]["engine.phased"] is False
@@ -298,7 +297,7 @@ def test_a_quest_that_runs_an_experiment_is_not_marked(tmp_path: Path) -> None:
     import asyncio
 
     async def clarify(state):  # noqa: ANN001
-        return {**engine._resolve_modes({}), "clarify_answers": {}}
+        return {"no_simulation_resolved": False, "survey_mode_resolved": False, "clarify_done": True}
 
     engine._node_clarify = clarify  # type: ignore[method-assign]
     asyncio.run(engine._node_clarify_then_phased({}))
@@ -351,102 +350,3 @@ def test_the_plan_renders_the_section(tmp_path: Path) -> None:
     text = _plan.render("topic", {}, {"hypothesis": "h"}, confirm=lines)
     assert f"## {phased.PLAN_HEADING}" in text
     assert _plan.parse(text).error is None
-
-
-# ---- the interview, on all three surfaces --------------------------------------------------------------------------
-
-
-def test_the_interview_default_is_on_for_research_and_a_decision_off_for_exploring() -> None:
-    from core.interview import QUESTIONS, build_smart_defaults, derive_tier3
-
-    (q,) = [q for q in QUESTIONS if q.id == "phased"]
-    assert q.default is True and q.mid_quest_editable is False
-    for use, want in (("research", True), ("decision", True), ("explore", False), ("", True)):
-        assert derive_tier3({"result_use": use})["phased"] is want, use
-        assert build_smart_defaults({"result_use": use})["phased"] is want, use
-    labels = [c.label for c in q.choices]
-    assert any("default for research" in label for label in labels)
-    assert not any(label == "No (default)" for label in labels)
-
-
-def test_the_schema_snapshot_carries_the_new_default() -> None:
-    from core.interview import export_schema_json
-
-    snapshot = json.loads((REPO / "core" / "interview_schema.json").read_text(encoding="utf-8"))
-    (q,) = [q for q in snapshot["questions"] if q["id"] == "phased"]
-    assert q["default"] is True
-    assert snapshot == json.loads(json.dumps(export_schema_json())), "regenerate core/interview_schema.json"
-
-
-def _answers(**over: Any):  # noqa: ANN202
-    from core.interview import InterviewAnswers
-
-    base = dict(topic="t", title="t", output_kinds=["paper_md"], paper_format="generic", no_simulation=False,
-                study_depth="journal-length", comparative_baseline="", success_metric="", budget="",
-                clarify_mode="auto", review_panel=[], knowledge_enabled=False, provider="openai",
-                provider_model="gpt-4o", second_reviewer_model="m-other")
-    return InterviewAnswers(**{**base, **over})
-
-
-def test_the_cli_writes_off_under_research_and_nothing_when_unanswered(tmp_path: Path) -> None:
-    from core.interview import answers_to_yaml
-
-    def load(text: str) -> Config:
-        path = tmp_path / "c.yaml"
-        path.write_text(text, encoding="utf-8")
-        return Config.from_yaml(path)
-
-    on = answers_to_yaml(_answers(result_use="research", phased=True))
-    assert "  phased: true" in on.splitlines() and load(on).engine.phased is True
-    off = answers_to_yaml(_answers(result_use="research", phased=False))
-    assert "  phased: false" in off.splitlines() and load(off).engine.phased is False
-    unset = answers_to_yaml(_answers(result_use="research"))
-    assert "phased" not in unset and load(unset).engine.phased is True
-    explore_off = answers_to_yaml(_answers(result_use="explore", phased=False))
-    assert "phased" not in explore_off and load(explore_off).engine.phased is False
-
-
-def test_an_update_keeps_a_research_quest_s_unsaid_setting_unsaid(tmp_path: Path) -> None:
-    from core.interview import answers_to_yaml
-    from core.interview_update import load_current_answers
-
-    root = tmp_path / "q"
-    root.mkdir()
-    (root / "config.yaml").write_text(answers_to_yaml(_answers(result_use="research")), encoding="utf-8")
-    current = load_current_answers(root)[0]
-    assert current.phased is None
-    assert "phased" not in answers_to_yaml(current), "an update must not write the default back as off"
-
-
-def test_the_web_page_and_the_vscode_interview_default_it_from_the_result_use() -> None:
-    html = (REPO / "web" / "static" / "interview.html").read_text(encoding="utf-8")
-    assert "phased: ((tier1 && tier1.result_use) || 'research') !== 'explore'" in html
-    ts = (REPO / "vscode-frontier-insight" / "src" / "interview.ts").read_text(encoding="utf-8")
-    assert 'phased: resultUse !== "explore"' in ts
-    assert "if (phasedWasDefault) a.phased = v.value !== \"explore\";" in ts
-    assert "Yes: explore first, then confirm once (default for research)" in ts
-    core_ts = (REPO / "vscode-frontier-insight" / "src" / "interview-core.ts").read_text(encoding="utf-8")
-    assert 'answers.phased === false && rigorProfile === "research"' in core_ts
-
-
-def test_the_web_form_writes_off_under_research_and_leaves_a_missing_answer_to_the_profile(tmp_path: Path) -> None:
-    from tests.test_web_interview import _client, _ok_answers_payload
-
-    client = _client(tmp_path)
-    research = {**_ok_answers_payload(), "result_use": "research", "second_reviewer_model": "m-other"}
-    for sent, want in (({"phased": False}, False), ({"phased": True}, True), ({}, True)):
-        res = client.post("/api/interview/submit", json={**research, **sent})
-        assert res.status_code == 200, res.text
-        assert Config.from_yaml(Path(res.json()["yaml_path"])).engine.phased is want, sent
-    assert client.post("/api/interview/submit", json={**research, "phased": "no"}).status_code == 400
-
-
-def test_the_vscode_emitter_writes_off_under_research(tmp_path: Path) -> None:
-    from tests.test_vscode_interview_yaml import _emit
-
-    yaml_text, cfg = _emit(tmp_path, result_use="research", second_reviewer_model="m-other", phased=False)
-    assert "  phased: false" in yaml_text.splitlines() and cfg.engine.phased is False
-    yaml_text, cfg = _emit(tmp_path, result_use="research", second_reviewer_model="m-other", phased=True)
-    assert cfg.engine.phased is True
-    yaml_text, cfg = _emit(tmp_path, result_use="research", second_reviewer_model="m-other")
-    assert "phased" not in yaml_text and cfg.engine.phased is True

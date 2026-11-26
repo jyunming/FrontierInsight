@@ -82,8 +82,9 @@ Text [1].
 """
 
 
-def _topic(path: str) -> str:
-    return yaml.safe_load((REPO / path).read_text(encoding="utf-8"))["topic"]
+def _limit(path: Path) -> int | None:
+    """The page limit a shipped example runs with (its commission's question is the topic)."""
+    return resolve_page_limit(Config.from_yaml(path))
 
 
 # --- reading the limit ---------------------------------------------------------
@@ -93,25 +94,25 @@ def _topic(path: str) -> str:
     "examples/bernstein_vazirani_noise/config.yaml",
     "examples/bootstrap_ci_coverage/config.yaml",
 ])
-def test_the_example_topics_state_four_pages(path: str) -> None:
-    assert page_limit_from_text(_topic(path)) == 4
+def test_the_examples_whose_commission_states_four_pages_run_with_four(path: str) -> None:
+    assert page_limit_from_text(str(yaml.safe_load((REPO / path).parent.joinpath("commission.yaml").read_text(
+        encoding="utf-8"))["scope"])) == 4
+    assert _limit(REPO / path) == 4
 
 
 def test_the_sir_trend_topic_states_four_pages() -> None:
     assert page_limit_from_text(SIR_TOPIC) == 4
 
 
-def test_no_other_example_topic_states_a_limit() -> None:
+def test_no_other_example_has_a_limit() -> None:
     stated = {"integrator_bakeoff", "bernstein_vazirani_noise", "bootstrap_ci_coverage"}
-    others = [
-        p for p in sorted((REPO / "examples").glob("*/*.yaml"))
-        if p.parent.name not in stated and "topic" in (yaml.safe_load(p.read_text(encoding="utf-8")) or {})
-    ]
+    others = [p for p in sorted((REPO / "examples").glob("*/*.yaml"))
+              if p.parent.name not in stated and p.name != "commission.yaml"]
     # The format_validation set: a brief preprint and journal-length papers
     # in nine formats, none with a page limit.
     assert len(others) >= 9
     for path in others:
-        assert page_limit_from_text(_topic(str(path.relative_to(REPO)))) is None, path
+        assert _limit(path) is None, path
 
 
 @pytest.mark.parametrize("text, limit", [

@@ -310,19 +310,13 @@ async def test_a_stop_to_change_the_figure_model_exits_cleanly_through_the_real_
         engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1, pilot_run=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
-        pauses=PausesConfig(review="off", clarify="off"),
+        pauses=PausesConfig(review="off"),
     )
-    asked: list = []
-
-    async def clarify(questions):  # noqa: ANN001
-        asked.append(questions)
-        return {}
-
     first = Engine(cfg)
-    await first.run(clarify_callback=clarify)
+    await first.run()
     descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
     assert descriptor["kind"] == "figures" and entered["n"] == 1
-    assert not asked and not (first.fi_dir / "clarify_questions.json").exists(), "the stop asks no questions"
+    assert not (first.fi_dir / "clarify_questions.json").exists(), "the stop asks no questions"
     assert not (first.quest_root / "code").exists() or not any((first.quest_root / "code").iterdir())
     resumed = Engine(cfg, resume_quest_id=first.quest_id)
     monkeypatch.setattr(Engine, "_node_select_skills", _stop_here)

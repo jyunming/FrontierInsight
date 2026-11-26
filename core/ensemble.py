@@ -1,10 +1,10 @@
 """Multi-model ensemble primitive — N parallel LLM calls + a merger.
 
 Used by:
-* in-quest nodes (``ideate``, ``analyze``, ``cross_check``) when the
+* in-quest nodes (``analyze``, ``cross_check``) when the
   YAML carries ``provider.node_ensemble[node]``, and
-* standalone tools (``--proposal``, ``--critique``) when the user passes
-  ``--proposal-ensemble`` / ``--critique-ensemble``.
+* standalone tools (``--critique``, ``--digest``) when the user passes
+  ``--critique-ensemble`` / ``--digest-ensemble``.
 
 The design rests on three primitives:
 
@@ -512,7 +512,7 @@ async def run_singleshot_with_ensemble(
         raise EnsembleError(
             "merge='vote' is only supported for structured-output "
             "nodes (cross_check). For single-shot tools "
-            "(digest/portfolio/summarize/critique/proposal) pick "
+            "(digest/summarize/critique) pick "
             "'tournament' (one canonical answer) or 'synthesize' "
             "(merge with disagreement flags) instead."
         )

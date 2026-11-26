@@ -1,7 +1,7 @@
 """FastAPI server smoke tests.
 
 Uses FastAPI's TestClient (no real network). The server reads quest
-state from disk and routes clarify-resume via an in-process registry;
+state from disk and routes the review decision via an in-process registry;
 both are testable without spawning real Engine.run() background tasks.
 """
 
@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from core.engine import QuestArtifacts
+from tests import commissioned
 from web.server import (
     _QuestRegistry, _scan_quests, _read_log_tail, _current_node_from_log,
     make_app,
@@ -86,7 +87,7 @@ def test_scan_quests_stale_quest_is_incomplete_not_running(tmp_path: Path) -> No
     NOT be reported as running (that's the 'N running' over-count bug)."""
     import os
     import time
-    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [ideate]\n")
+    q = _mk_quest_dir(tmp_path, "1700000000-stale-aaaa11", log_body="[x] [literature]\n")
     old = time.time() - 3600  # an hour ago, no recent activity
     os.utime(q / ".fi" / "run.log", (old, old))
     quests = {x["quest_id"]: x for x in _scan_quests(tmp_path)}
@@ -112,7 +113,7 @@ def test_read_log_tail_handles_missing_file(tmp_path: Path) -> None:
 
 def test_current_node_extracted_from_log_lines() -> None:
     lines = [
-        "[1234-foo-aa] [ideate] topic=...",
+        "[1234-foo-aa] [clarify] topic=...",
         "[1234-foo-aa] [literature] retrieved 0 docs",
         "[1234-foo-aa] [execute] pip install ['matplotlib']",
     ]
@@ -149,7 +150,6 @@ def test_a_checks_own_narrower_tag_still_names_the_node_running_it() -> None:
         ("goal_coverage", "review"),
         ("number_provenance", "review"),
         ("page_limit", "review"),
-        ("auto_collect", "auto_collect_data"),
     ],
 )
 def test_every_aliased_sub_step_tag_resolves_to_the_node_that_logs_it(tag: str, node: str) -> None:
@@ -157,27 +157,6 @@ def test_every_aliased_sub_step_tag_resolves_to_the_node_that_logs_it(tag: str, 
 
 
 # --- _QuestRegistry --------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_quest_registry_resolves_clarify_future() -> None:
-    """The registry connects POST /clarify to the engine's clarify
-    callback. We simulate the engine awaiting the future; the resolver
-    sets the result and the future unblocks."""
-    reg = _QuestRegistry()
-    fut = reg.register_clarify("q1", {"comparative_baseline": {"q": "?", "default": "x"}})
-    assert reg.pending_clarify("q1") is not None
-
-    answers = {"comparative_baseline": "user-chosen"}
-    ok = reg.resolve_clarify("q1", answers)
-    assert ok is True
-    assert reg.pending_clarify("q1") is None
-    assert await fut == answers
-
-
-def test_quest_registry_resolve_unknown_quest_returns_false() -> None:
-    reg = _QuestRegistry()
-    assert reg.resolve_clarify("does-not-exist", {"x": 1}) is False
 
 
 # --- FastAPI app endpoint smoke -------------------------------------------
@@ -238,7 +217,7 @@ def test_jobs_endpoint_finished_cli_quest_not_alive(tmp_path: Path) -> None:
 def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
     _mk_quest_dir(
         tmp_path, "q-detail",
-        log_body="[q-detail] [ideate] topic=...\n[q-detail] [literature] retrieved 0 docs\n",
+        log_body="[q-detail] [clarify] topic=...\n[q-detail] [literature] retrieved 0 docs\n",
         paper_md="# Hello\n\nFake paper body.\n",
         figure_names=["result.png", "loss.png"],
         summary={"quest_id": "q-detail", "provider": "openai"},
@@ -255,7 +234,7 @@ def test_app_quest_detail_endpoint(tmp_path: Path) -> None:
     assert set(body["figures"]) == {"result.png", "loss.png"}
     assert body["summary"]["provider"] == "openai"
     assert body["alive"] is False  # no real Engine task registered
-    assert body["pending_clarify"] is False
+    assert "pending_clarify" not in body
 
 
 def test_app_quest_detail_404_for_unknown_quest(tmp_path: Path) -> None:
@@ -372,53 +351,6 @@ def test_app_paper_endpoint_404_when_paper_missing(tmp_path: Path) -> None:
     app = make_app(tmp_path)
     client = TestClient(app)
     assert client.get("/api/quests/qnopaper/paper").status_code == 404
-
-
-def test_app_clarify_get_returns_no_pending_when_nothing_registered(tmp_path: Path) -> None:
-    _mk_quest_dir(tmp_path, "qc")
-    app = make_app(tmp_path)
-    client = TestClient(app)
-    r = client.get("/api/quests/qc/clarify")
-    assert r.status_code == 200
-    assert r.json() == {"pending": False, "questions": None}
-
-
-def test_app_clarify_post_resolves_pending(tmp_path: Path) -> None:
-    """Pre-populate the registry with a pending clarify future, then
-    POST answers and assert the registry resolves it. Mirrors the live
-    flow: Engine awaits → user submits in GUI → graph resumes."""
-    app = make_app(tmp_path)
-    reg = app.state.registry
-    fut = reg.register_clarify("qc", {"x": {"q": "?", "default": "a"}})
-
-    client = TestClient(app)
-    r = client.post(
-        "/api/quests/qc/clarify",
-        json={"answers": {"x": "chosen"}},
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["in_process_resolved"] is True
-    # The future has been set.
-    assert fut.done()
-    assert fut.result() == {"x": "chosen"}
-
-
-def test_app_clarify_post_409_when_no_pending(tmp_path: Path) -> None:
-    app = make_app(tmp_path)
-    client = TestClient(app)
-    r = client.post("/api/quests/q/clarify", json={"answers": {"a": "b"}})
-    assert r.status_code == 409
-
-
-def test_app_clarify_post_400_on_missing_answers_key(tmp_path: Path) -> None:
-    app = make_app(tmp_path)
-    reg = app.state.registry
-    reg.register_clarify("qc", {"x": {"q": "?", "default": "a"}})
-    client = TestClient(app)
-    r = client.post("/api/quests/qc/clarify", json={"wrong_key": {}})
-    assert r.status_code == 400
 
 
 def test_app_start_400_on_invalid_yaml(tmp_path: Path) -> None:
@@ -628,10 +560,9 @@ def test_app_index_html_loads(tmp_path: Path) -> None:
     assert "quest-list" in r.text  # quest cards land here
     # The dashboard delegates per-quest detail (paper preview,
     # review panel rendering, log tail) to the /quest/<id> page.
-    # The dashboard itself just shows a list + a "+ New Quest" CTA
-    # so it stays simple. The renderReviewPanel function lives in
-    # the quest detail page; the test there pins it.
-    assert "New Quest" in r.text, "dashboard must surface the New Quest CTA"
+    # The dashboard itself shows the list and says how a study starts:
+    # from a commission written with `fi new` (there is no start form).
+    assert "fi new" in r.text and "New Quest" not in r.text
 
 
 def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
@@ -676,9 +607,8 @@ def test_app_detail_endpoint_surfaces_review_panel_when_recorded(
 # --- in-process quests: the output pass ------------------------------------
 
 
-def _start_yaml(kinds: list[str], *, require_pdf: bool = False) -> str:
-    return textwrap.dedent(f"""\
-        topic: start-route output pass
+def _start_yaml(folder: Path, kinds: list[str], *, require_pdf: bool = False) -> str:
+    return commissioned.line(folder / "order") + textwrap.dedent(f"""\
         title: start-outputs
         provider:
           name: openai
@@ -739,7 +669,7 @@ async def test_a_quest_started_in_process_gets_the_outputs_its_config_asks_for(
 
     monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", fake_compile)
     app = make_app(tmp_path)
-    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md", "paper_pdf"]))
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md", "paper_pdf"]))
 
     assert compiled == ["paper.md"]
     assert (quest_root / "paper.md").read_text(encoding="utf-8").startswith("# A finished quest")
@@ -771,7 +701,7 @@ async def test_an_output_failure_is_logged_and_recorded_for_the_quest(
     monkeypatch.setattr("generation.paper.PaperGenerator._compile_pdf", broken_compile)
     app = make_app(tmp_path)
     _quest_id, quest_root, detail = await _start_and_finish(
-        app, _start_yaml(["paper_md", "paper_pdf"], require_pdf=require_pdf),
+        app, _start_yaml(tmp_path, ["paper_md", "paper_pdf"], require_pdf=require_pdf),
     )
 
     assert detail["errors"] is not None and len(detail["errors"]) == 1
@@ -792,7 +722,7 @@ async def test_a_failed_quest_is_recorded_and_gets_no_output_pass(
 
     monkeypatch.setattr("core.engine.Engine.run", failing_run)
     app = make_app(tmp_path)
-    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(["paper_md"]))
+    _quest_id, quest_root, detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md"]))
 
     assert detail["errors"] == [{"stage": "quest", "error": "RuntimeError('the design node broke')"}]
     assert not (quest_root / "frontier_insight_summary.json").exists()
@@ -818,7 +748,7 @@ async def test_the_server_keeps_answering_while_the_paper_compiles(
     app = make_app(tmp_path)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            r = await client.post("/api/quests/start", json={"yaml": _start_yaml(["paper_md"])})
+            r = await client.post("/api/quests/start", json={"yaml": _start_yaml(tmp_path, ["paper_md"])})
             quest_id = r.json()["quest_id"]
             for _ in range(200):
                 if started.is_set():
@@ -833,3 +763,21 @@ async def test_the_server_keeps_answering_while_the_paper_compiles(
         release.set()
     assert listing.status_code == 200
     assert answered_mid_compile, "the request waited for the paper compile to finish"
+
+
+@pytest.mark.asyncio
+async def test_a_quest_started_from_the_web_keeps_the_config_it_ran_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume (the quest page's, or `--resume <id>`) reads the quest's own config.yaml: the web start writes it, with the
+    commission's whole path, as a start from the command line does."""
+    from core.config import Config
+
+    monkeypatch.setattr("core.engine.Engine.run", _engine_run_that_writes_a_paper())
+    app = make_app(tmp_path)
+    _quest_id, quest_root, _detail = await _start_and_finish(app, _start_yaml(tmp_path, ["paper_md"]))
+    saved = quest_root / "config.yaml"
+    assert saved.is_file()
+    kept = Config.from_yaml(saved)
+    assert kept.commission == (tmp_path / "order" / "commission.yaml").resolve()
+    assert Path(kept.output.output_dir).resolve() == tmp_path.resolve(), "the server's outputs folder, not the YAML's"

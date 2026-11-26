@@ -10,7 +10,7 @@
  *   3. Forward every Python `lm_request` to `vscode.lm.*` and stream
  *      the response back. Render progress in the chat panel.
  *
- * The Python engine drives the actual research loop (clarify, ideate,
+ * The Python engine drives the actual research loop (clarify,
  * literature, design, implement, execute, execute_reflect, analyze,
  * cross_check, write, review). All LLM calls go through `vscode.lm`,
  * which means: sanctioned API, user-consented, normal Copilot quota.
@@ -35,21 +35,14 @@ import {
 import { Bridge } from "./bridge";
 import { splitRevisePlan, unknownResumeFlags } from "./resume-args";
 import { cardButtons, cardOf } from "./stop-card";
-import { chatModelArgs, servedModel } from "./lm-messages";
+import { chatModelArgs } from "./lm-messages";
 import { forgetFoundFi, rootsForCommand, workFolderForCommand } from "./roots-config";
 import type { Roots } from "./roots";
 import { PersistentBridge } from "./persistent-bridge";
-import { persistentBridgePath } from "./bridge-path";
-import {
-    ShellKind,
-    detectShell,
-    updateTerminalCommand,
-} from "./terminal-command";
-import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { openQuestMap, tabAreaColumn } from "./quest-map";
-import { IndexEntry, describeAmbiguous, findInIndex, loadIndex, matchIds, shortId } from "./quest-index";
+import { IndexEntry, describeAmbiguous, findInIndex, matchIds, shortId } from "./quest-index";
 import { runFollow, runLaunch, runQuality, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
 import { LIST_TIMEOUT_MS, ListedQuest, isRunning, loadQuestList, runningMark, stillRunningMessage } from "./quest-list";
 
@@ -168,15 +161,6 @@ async function waitForChildExit(
 
 let persistentBridge: PersistentBridge | null = null;
 
-/**
- * The bridge address for a Python this window starts in a terminal: this window's own
- * (a second window open at the same time listens somewhere else than the first), else
- * the per-user one.
- */
-function thisWindowsBridge(): string {
-    return persistentBridge?.boundPath ?? persistentBridgePath();
-}
-
 export function activate(context: vscode.ExtensionContext): void {
     const participant = vscode.chat.createChatParticipant(
         "frontier-insight.fi",
@@ -251,14 +235,6 @@ async function handleRequest(
         await runQuest(prompt, /*fleet*/ true, stream, token, userPickedModel);
         return;
     }
-    if (cmd === "new" || (!cmd && !prompt)) {
-        // Interview-driven quest creation. When the user types `@fi`
-        // alone (no command, no extra prompt text), we assume they're
-        // exploring and the easiest thing is to walk them through
-        // setup rather than dump a help screen at them.
-        await runInterviewAndQuest(stream, token, userPickedModel);
-        return;
-    }
     if (cmd === "map") {
         await vscode.commands.executeCommand("frontierInsight.questMap", prompt.trim().split(/\s+/)[0] || undefined);
         stream.markdown("Opened the quest map in its own tab.\n");
@@ -291,29 +267,12 @@ async function handleRequest(
         await runDigest(prompt, stream, token, userPickedModel);
         return;
     }
-    if (cmd === "portfolio") {
-        await runPortfolio(stream, token, userPickedModel);
-        return;
-    }
     if (cmd === "critique") {
         await runCritique(prompt, stream, token, userPickedModel);
         return;
     }
-    if (cmd === "proposal") {
-        await runProposal(prompt, stream, token, userPickedModel);
-        return;
-    }
     if (cmd === "analyze") {
         await runAnalyze(prompt, stream, token, userPickedModel);
-        return;
-    }
-    if (cmd === "update") {
-        // Mid-quest re-entry. Runs `launch.py --update <quest_id>` here in
-        // the chat, like /resume (never in a terminal): it approves the
-        // settings in the quest's config.yaml and resumes. ``prompt``
-        // should be the quest_id; the Python side validates it exists and
-        // refuses gracefully if not.
-        await runUpdate(prompt, stream, token, userPickedModel);
         return;
     }
     if (cmd === "ingest") {
@@ -330,14 +289,6 @@ async function handleRequest(
             ["--ingest", ...paths], stream, token, userPickedModel,
             `📚 Ingesting ${paths.length} file(s) into Axon.`,
         );
-        return;
-    }
-    if (cmd === "drafts") {
-        // List proposal-draft YAMLs in outputs/_drafts/ so the user
-        // can pick one to /start without remembering paths. Mirrors
-        // the CLI `--list-drafts` flag and the Web /interview
-        // drafts picker. Three-interface parity.
-        await runListDrafts(stream, token);
         return;
     }
     if (cmd === "skills") {
@@ -445,22 +396,17 @@ function helpText(): string {
         "**Frontier Insight** — run a research quest end-to-end inside VSCode.",
         "",
         "Commands:",
-        "- `@fi` or `@fi /new` — interactive setup (recommended for first-time users).",
-        "- `@fi /start <path-to-config.yaml>` — run one quest from an existing YAML.",
+        "- `@fi /start <path-to-config.yaml>` — run one study from its config, which names its commission (`commission: <file>`: the question, what the study covers, the time allowed and what counts as supported). Every study starts from one: in a terminal, `fi demo` writes a small example and `fi new` writes an empty commission to fill in; `fi check <file>` checks it.",
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly. The short id (the six characters after the last dash) is enough, and the quest may be one started in another folder: FI remembers every quest it has run on this computer. When this folder has no quests, `@fi /resume` offers those.",
         "- `@fi /map <quest_id>` — open the quest map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button (also **FI: Quest map** in the command palette).",
-        "- `@fi /update [<quest_id>]` — approve the settings in a quest's config.yaml after you changed them (a quest stopped for a changed setting says so), then resume it, here in the chat. A different model needs no approval: `/resume` takes it and says so.",
         "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
         "- `@fi /rename <quest_id> <new title>` — change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched; a PDF, slides or poster already made keep the old title until you `/generate` them again.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
-        "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",
         "- `@fi /critique <quest_id>` — adversarial second-pass review of a completed quest: methodology challenges, statistical issues, reproducibility gaps, alternative explanations. Lands at `<outputDir>/<quest_id>/critique.md`. For strongest effect, pick a Copilot model different from the one that wrote the paper.",
-        "- `@fi /proposal <topic>` — pre-quest planning doc: background, hypothesis, plan, success criteria, risks, recommended next step. Writes both a markdown proposal and a companion YAML ready for `/start`. Lands at `<outputDir>/_drafts/<id>-proposal.md` + `<outputDir>/_drafts/<id>.yaml`.",
-        "- `@fi /drafts` — list proposal drafts you've made (most-recent first) with a one-click `/start` command for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.",
         "- `@fi /skills [--config <quest.yaml>]` — list the skill library with each entry's promotion status, scan findings, and domain tags. Mirrors `python launch.py --skills`; `--config` also looks in the skill folders that quest names (`engine.skills_dirs`).",
         "- `@fi /scan-skill <name> [--config <quest.yaml>]` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
         "- `@fi /approve-skill <name> [--config <quest.yaml>]` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
@@ -473,7 +419,7 @@ function helpText(): string {
         "- `@fi /teach-skill <name> <module>` — draft a skill from an installed library, reading its real signatures by introspection.",
         "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable. Its port is discovered automatically; override it with the `frontierInsight.axonUrl` setting. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
         "- `@fi /probe [all]` — ask the model selected in the Chat picker (or, with `all`, every model VS Code lists, after a confirmation that states the request count) whether text FI did not send appears to be in its context: a hidden system prompt, tool definitions, a persona. Two small requests per model. It is behavioural evidence only: `vscode.lm` reports no usage figures, so real overhead is not measured. `@fi /probe image` sends the selected model one small test image, as FI sends the figures it reads, and says whether it read it.",
-        "- `@fi /analyze <data-path> <topic>` — run a no-simulation quest on pre-staged data. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `auto_collect_data → wait_for_data → data_load → analyze → write → review`. The inverse of `/proposal`: when you already have the dataset and just want a paper analyzing it.",
+        "- `@fi /analyze <data-path> <commission-file>` — run a no-simulation quest on pre-staged data; the commission's question is what the analysis answers. Files under `<data-path>` are copied into the new quest's `data/` directory and the engine routes through `wait_for_data → data_load → analyze → write → review`. When you already have the dataset and just want a paper analyzing it.",
         "- `@fi /trace <quest_id> [--node <name>] [--detail summary|checks|debug]` — what the quest did, why, and a check that its record was not edited. Mirrors `python launch.py --trace` and the web quest page's Trace panel.",
         "",
         "All LLM calls go through your Copilot subscription via the",
@@ -495,10 +441,9 @@ function helpText(): string {
  * 2. `@fi /resume <quest_id>` — resume that specific quest.
  *
  * For each resume we auto-discover the YAML by title-slug match
- * against `outputs/_drafts/`. The interview writer names YAMLs as
- * `<timestamp>-<slug>.yaml` where the slug also appears in the
- * quest_id (`<unix>-<slug>-<nonce>`). If no YAML matches, we fall
- * back to a file picker.
+ * against `outputs/_drafts/` (`<timestamp>-<slug>.yaml`, where the
+ * slug also appears in the quest_id `<unix>-<slug>-<nonce>`). If no
+ * YAML matches, we fall back to a file picker.
  *
  * The actual graph state lives in the per-quest `state.sqlite`; the
  * YAML only contributes provider/execution/output settings — so a
@@ -606,7 +551,7 @@ async function runResume(
                 ? `❌ No quest under \`${outputsDir}\` has a plan yet (none has \`plan.md\`). The plan is written after the literature and before the experiment is designed.`
                 : watch
                 ? `❌ No quest under \`${outputsDir}\` is waiting on a background job (none has \`.fi/pending.json\`).`
-                : `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Run \`@fi /new\` to start one.`,
+                : `❌ No quests with a \`.fi/state.sqlite\` checkpoint under \`${outputsDir}\`. Start one with \`@fi /start <config.yaml>\` (its config names its commission).`,
         );
         return;
     }
@@ -873,7 +818,7 @@ interface RunWhere {
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
 const RERUN_STEPS = ["skills", "code", "run", "figures", "analysis", "crosscheck", "evidence", "writing", "claims", "review"];
 // These replace the plan and need `--approve-as <name>`, which is given on the command line.
-const RERUN_STEPS_NEEDING_NAME = ["ideas", "literature", "plan", "design"];
+const RERUN_STEPS_NEEDING_NAME = ["literature", "plan", "design"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users
@@ -889,16 +834,6 @@ function parsePathsFromPrompt(prompt: string): string[] {
         if (v) out.push(v);
     }
     return out;
-}
-
-/**
- * How to spell a command line for the shell VSCode will start in a
- * new terminal. PowerShell parses a line beginning with a quoted
- * string as an expression and needs the call operator; cmd.exe
- * rejects a leading `&`. See ./terminal-command.
- */
-function currentShell(): ShellKind {
-    return detectShell(vscode.env.shell, process.platform);
 }
 
 async function runCommandInChat(
@@ -937,188 +872,6 @@ async function runCommandInChat(
 }
 
 
-async function runUpdate(
-    promptArgs: string,
-    stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken,
-    userPickedModel: vscode.LanguageModelChat,
-): Promise<void> {
-    if (token.isCancellationRequested) return;
-
-    const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = await rootsForCommand();
-    if ("error" in roots) {
-        stream.markdown(roots.error);
-        return;
-    }
-    const { repoPath, workDir } = roots;
-
-    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
-    const outputsDir = path.isAbsolute(outputDirSetting)
-        ? outputDirSetting
-        : path.join(workDir, outputDirSetting);
-
-    let questId = (promptArgs.trim().split(/\s+/)[0] || "").replace(/^["']+|["']+$/g, "");
-    if (!questId) {
-        if (!(await fsExists(outputsDir))) {
-            stream.markdown(
-                `❌ No outputs directory at \`${outputsDir}\` — nothing to update. Pass a quest_id explicitly: \`@fi /update <quest_id>\`.`,
-            );
-            return;
-        }
-        type Candidate = { questId: string; mtimeMs: number };
-        const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
-        const candidates: Candidate[] = [];
-        await Promise.all(entries.map(async (entry) => {
-            if (!entry.isDirectory() || entry.name.startsWith("_")) return;
-            const configYaml = path.join(outputsDir, entry.name, "config.yaml");
-            try {
-                const stat = await fsPromises.stat(configYaml);
-                if (!stat.isFile()) return;
-                candidates.push({ questId: entry.name, mtimeMs: stat.mtimeMs });
-            } catch {
-                // Quest has no config.yaml — can't be updated. Skip.
-            }
-        }));
-        if (candidates.length === 0) {
-            stream.markdown(
-                `❌ No quests with a \`config.yaml\` under \`${outputsDir}\`. ` +
-                `Only quests started after the \`--new\` interview support \`--update\`.`,
-            );
-            return;
-        }
-        candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-        const picked = await vscode.window.showQuickPick(
-            candidates.map((c) => ({
-                label: `$(beaker) ${c.questId}`,
-                description: new Date(c.mtimeMs).toLocaleString(),
-                questId: c.questId,
-            })),
-            {
-                placeHolder: "Pick a quest to update (most recent config.yaml first)",
-                matchOnDescription: true,
-            },
-        );
-        if (!picked) return;
-        questId = picked.questId;
-    }
-
-    // The id as typed may be a short id (the six characters after the last dash) or a quest FI ran in another folder,
-    // which `launch.py --update` finds too: resolved here the same way, so the card shown, the config.yaml opened and
-    // the end of the run reported are that quest's.
-    let questDir = path.join(outputsDir, questId);
-    let questsDir = outputsDir;
-    if (!(await fsExists(path.join(questDir, "config.yaml")))) {
-        let local: string[] = [];
-        try {
-            local = (await fsPromises.readdir(outputsDir, { withFileTypes: true }))
-                .filter((e) => e.isDirectory() && !e.name.startsWith("_")).map((e) => e.name);
-        } catch { /* no outputs folder here */ }
-        const matched = matchIds(questId, local);
-        const here = path.resolve(outputsDir).toLowerCase();
-        const elsewhere = loadIndex().filter((e) => path.resolve(path.dirname(e.questRoot)).toLowerCase() !== here);
-        const found = matched.length === 0 ? findInIndex(questId, elsewhere) : { kind: "none" as const };
-        if (matched.length === 1) {
-            questId = matched[0];
-            questDir = path.join(outputsDir, questId);
-        } else if (matched.length > 1) {
-            stream.markdown("❌ " + describeAmbiguous(questId, matched.map((q) => ({
-                questId: q, title: "", questRoot: path.join(outputsDir, q),
-            }))));
-            return;
-        } else if (found.kind === "found") {
-            questId = found.entry.questId;
-            questDir = found.entry.questRoot;
-            questsDir = path.dirname(questDir);
-            stream.markdown(`📁 \`${questId}\` is in \`${questsDir}\`.\n\n`);
-        } else if (found.kind === "ambiguous") {
-            stream.markdown("❌ " + describeAmbiguous(questId, found.entries));
-            return;
-        } else {
-            stream.markdown(
-                `❌ No quest \`${questId}\` with a \`config.yaml\` under \`${outputsDir}\`, nor among the quests FI has ` +
-                "run in other folders on this computer. `python launch.py tools quests` lists every one with its short id.",
-            );
-            return;
-        }
-    }
-
-    // `/update` runs here in the chat, like `/resume`: never in a terminal. The settings it approves are the ones in
-    // the quest's config.yaml as it is now; the person sees what stopped the quest, then says whether to approve them
-    // as they are, or opens config.yaml to change it first.
-    const configPath = path.join(questDir, "config.yaml");
-    try {
-        const card = await fsPromises.readFile(path.join(questDir, "NEXT_STEP.md"), "utf-8");
-        stream.markdown(`**Why \`${questId}\` is waiting:**\n\n${card}\n\n---\n\n`);
-    } catch { /* not stopped for anything: the update approves config.yaml as it is */ }
-    const choice = await vscode.window.showQuickPick(
-        [
-            { label: "$(check) Approve the settings in config.yaml as they are, and resume", value: "approve" },
-            { label: "$(edit) Open config.yaml to change it first", value: "edit" },
-            { label: "$(close) Cancel", value: "cancel" },
-        ],
-        { placeHolder: `Update ${questId}: its settings are the ones in its config.yaml` },
-    );
-    if (!choice || choice.value === "cancel") {
-        stream.markdown("Nothing was changed.\n");
-        return;
-    }
-    // The setup questions one by one need a terminal to answer in; FI does not open one. This is the line to run in
-    // one yourself (it reaches this window's models through its session-long bridge).
-    const byQuestion = updateTerminalCommand({
-        pythonPath,
-        questId,
-        // This folder's outputs (the resolved `frontierInsight.outputDir`):
-        // launch.py would otherwise default to ./outputs and reject a quest
-        // just listed. A quest from another folder is found by its full id
-        // among every quest FI has run, and launch.py then runs it from the
-        // folder it was started in (its relative paths).
-        outputRoot: outputsDir,
-        bridgeSocket: thisWindowsBridge(),
-        shell: currentShell(),
-    });
-    if (choice.value === "edit") {
-        stream.markdown(
-            `📝 Opened \`${configPath}\`. Change it and save, then \`@fi /update ${questId}\` again to approve it and ` +
-            `resume. (A different model needs no approval: \`@fi /resume ${questId}\` takes it and says so.)\n\n` +
-            `To answer the setup questions one by one instead, run this in a terminal yourself:\n\n` +
-            "```\n" + byQuestion + "\n```\n",
-        );
-        try {
-            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
-            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn(doc.uri) });
-        } catch {
-            stream.markdown(`(Could not open it in the editor; open \`${configPath}\` yourself.)\n`);
-        }
-        return;
-    }
-    stream.markdown(`🔧 Approving the settings in \`${configPath}\` and resuming \`${questId}\`\n\n`);
-    const startedAt = Date.now();
-    // FI_UPDATE_APPROVE_AS_IS: the person chose to approve config.yaml as it is, so launch.py asks no question
-    // (without it, --update asks the setup questions, and with no terminal to answer in it approves nothing).
-    // `--output-root` is this folder's outputs even for a quest from another folder: launch.py finds that one by its
-    // full id and runs it from the folder it was started in, so its config's relative paths mean what they meant.
-    const ran = await runLaunchInChat(
-        ["--update", questId, "--output-root", outputsDir], stream, token, userPickedModel,
-        {
-            pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir,
-            env: { FI_UPDATE_APPROVE_AS_IS: "1" },
-        },
-    );
-    if (!ran) return;
-    await reportQuestEnd(ran, stream, { outputsDir: questsDir, questId, startedAt });
-}
-
-
-/**
- * `@fi /generate [<quest_id>] [<kind>]` — produce ONE more output format
- * (paper_pdf / slides / poster / speech) for an ALREADY-finished quest
- * without re-running the research. Mirrors `python launch.py --emit` and
- * the web Outputs panel. Quest + kind are quick-picked when omitted; the
- * generation runs here in the chat, its model calls through this chat's
- * bridge, as `/resume`'s do.
- */
 async function runGenerate(
     promptArgs: string,
     stream: vscode.ChatResponseStream,
@@ -1224,71 +977,6 @@ async function runGenerate(
 }
 
 
-async function runInterviewAndQuest(
-    stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken,
-    userPickedModel: vscode.LanguageModelChat,
-): Promise<void> {
-    if (token.isCancellationRequested) return;
-
-    // The picked model is left out of the second reviewer's list (research needs a reviewer on another model).
-    const answers = await runInterview(stream, userPickedModel);
-    if (!answers) return;  // user hit Esc somewhere
-
-    // Snapshot the active chat model into provider.model (a start or resume from the chat later uses the model the
-    // chat panel then has; a terminal or web run uses this one). The interview produces ``provider_model: ""`` as a
-    // placeholder; we overwrite here with the model's id (what the bridge matches first and what VS Code reports as the model that answered), so a later start or
-    // resume from this chat, which passes the same id, is not taken for a change of model. "Auto" names no model.
-    answers.provider_model = servedModel(userPickedModel)?.id ?? "";
-
-    // Resolve repo path the same way runQuest does.
-    const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = await rootsForCommand();
-    if ("error" in roots) {
-        stream.markdown(roots.error);
-        return;
-    }
-    const { repoPath, workDir } = roots;
-
-    // `writeInterviewYaml` does sync mkdir + writeFile; both can throw
-    // on EACCES, ENOSPC, or a OneDrive sync lock. Without this catch,
-    // the chat handler unwinds and the user sees the interview "finish"
-    // with no quest and no error.
-    let yamlPath: string;
-    try {
-        yamlPath = writeInterviewYaml(answers, workDir);
-    } catch (err) {
-        const draftDir = path.join(workDir, "outputs", "_drafts");
-        const rawMsg = err instanceof Error ? err.message : String(err);
-        // Node FS errors often already end with punctuation
-        // (e.g. ``EACCES: permission denied, open '...'``); strip a
-        // trailing period to avoid the awkward double-dot.
-        const msg = rawMsg.replace(/\.\s*$/, "");
-        stream.markdown(
-            `❌ Failed to write quest YAML to \`${draftDir}\`: ${msg}. ` +
-            `Common causes: disk full, read-only mount, OneDrive sync conflict, missing parent dir permissions.`,
-        );
-        return;
-    }
-    const rel = path.relative(workDir, yamlPath).split(path.sep).join("/");
-    stream.markdown(`📝 Wrote config: \`${rel}\`\n\n`);
-    // The author line is kept for later quests now that the config is written (the profile the CLI and web read).
-    keepAuthorLine(answers);
-    // Surface which model the user's calls will route through so the
-    // budget impact is visible upfront.
-    stream.markdown(
-        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n`,
-    );
-    stream.markdown(`▶️ Starting quest…\n\n`);
-
-    // Hand off to the existing runQuest path. We pass the workspace-
-    // relative path so the spawned Python's cwd resolves correctly.
-    await runQuest(
-        rel, /*fleet*/ false, stream, token, userPickedModel,
-        undefined, false, undefined, undefined, roots,
-    );
-}
-
 /** How a `launch.py` run started from the chat ended (see runLaunchInChat). */
 interface ChatRun {
     /** The exit code, or null when the process was killed by a signal. */
@@ -1319,7 +1007,7 @@ async function runLaunchInChat(
     userPickedModel: vscode.LanguageModelChat,
     opts: {
         pythonPath: string; launchScript: string; cwd: string; fleet?: boolean; showAllOutput?: boolean;
-        /** Extra environment for this run only (`/update` says the person approved config.yaml as it is). */
+        /** Extra environment for this run only. */
         env?: Record<string, string>;
     },
 ): Promise<ChatRun | undefined> {
@@ -1442,7 +1130,7 @@ async function runLaunchInChat(
             stream.markdown(`  🤖 ${model[1]}\n\n`);
             return;
         }
-        // What `--update` approved and did, run here with no terminal (core/interview_update.py).
+        // What `--update` approved and did (core/plan_settings.py approve), when a run shows it.
         const update = line.match(/^\[FI\] update: (.*)$/);
         if (update) {
             if (update[1].trim()) stream.markdown(`  ${update[1]}\n\n`);
@@ -1521,9 +1209,7 @@ async function runQuest(
     // --vscode-bridge-port selects the vscode_extension provider only
     // when the YAML has not already named a different one: a config
     // that explicitly picked claude_cli / openai / etc. keeps its own
-    // transport (launch.py:_apply_vscode_bridge_override). Every YAML
-    // the /new interview writes pins vscode_extension, so on the
-    // common path every LLM call does come back through this bridge.
+    // transport (launch.py:_apply_vscode_bridge_override).
     // The model picked in this chat panel wins over the config's provider.model for a quest started or resumed here
     // (launch.py says so in run.log when it replaces one); a terminal or web run keeps the config's.
     const args: string[] = [...chatModelArgs(userPickedModel)];
@@ -1577,7 +1263,7 @@ async function runQuest(
 
 
 /**
- * What a quest run started from the chat ended with (`/start`, `/resume`, `/update`): the to-do card when it stopped
+ * What a quest run started from the chat ended with (`/start`, `/resume`): the to-do card when it stopped
  * for you (a quest that stops also exits 0), "finished" with what is worth a look when it finished, the papers it
  * wants, or the end of stderr when Python failed.
  */
@@ -1671,7 +1357,7 @@ async function readNextStep(
                 questId = knownQuestId;
             } catch { return null; }
         } else {
-            // /new: the quest whose NEXT_STEP.md this run wrote (never an older quest's card).
+            // A new quest: the one whose NEXT_STEP.md this run wrote (never an older quest's card).
             const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
             let best: { id: string; mtime: number } | null = null;
             for (const e of entries) {
@@ -2116,106 +1802,6 @@ async function runDigest(
 
 
 /**
- * Implementation of `@fi /portfolio`. Spawns
- * `python launch.py --portfolio --vscode-bridge-port <P>` and streams
- * the result back. Takes no arguments — portfolio is unbounded by
- * design (covers every quest under `outputs/`).
- */
-async function runPortfolio(
-    stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken,
-    userPickedModel: vscode.LanguageModelChat,
-): Promise<void> {
-    if (token.isCancellationRequested) return;
-
-    const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = await rootsForCommand();
-    if ("error" in roots) {
-        stream.markdown(roots.error);
-        return;
-    }
-    const { repoPath, workDir } = roots;
-    const launchScript = path.join(repoPath, "launch.py");
-    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
-    const outputsDir = path.isAbsolute(outputDirSetting)
-        ? outputDirSetting
-        : path.join(workDir, outputDirSetting);
-
-    stream.markdown(
-        `📚 Synthesizing portfolio across every quest under \`${outputsDir}\`.\n\n` +
-        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
-        `▶️ Walking quests…\n\n`,
-    );
-
-    const bridge = new Bridge({
-        progress: stream,
-        cancellationToken: token,
-        defaultModel: userPickedModel,
-    });
-    const port = await bridge.listen();
-
-    const argv: string[] = [
-        "-u", launchScript,
-        "--vscode-bridge-port", String(port),
-        "--portfolio",
-        "--output-root", outputsDir,
-    ];
-
-    const child = spawn(pythonPath, argv, {
-        cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stderrTail: string[] = [];
-    const STDERR_TAIL_LINES = 80;
-    bridge.attachChild(child, (line) => {
-        stderrTail.push(line);
-        if (stderrTail.length > STDERR_TAIL_LINES) {
-            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
-        }
-    });
-    token.onCancellationRequested(() => {
-        try { child.kill("SIGTERM"); } catch { /* noop */ }
-    });
-
-    child.stdout.setEncoding("utf-8");
-    let stdoutBuf = "";
-    child.stdout.on("data", (chunk: string) => {
-        stdoutBuf += chunk;
-        const lines = stdoutBuf.split(/\r?\n/);
-        stdoutBuf = lines.pop() || "";
-        for (const line of lines) {
-            const m = line.match(/^\[FI\] portfolio -> (.+)$/);
-            if (m) {
-                stream.markdown(`  ✅ portfolio written → \`${m[1]}\`\n\n`);
-                continue;
-            }
-            if (line.match(/^\[FI\] \d+ quests;/)) {
-                stream.markdown(`  📈 ${line.slice(5)}\n\n`);
-            }
-        }
-    });
-
-    const result = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (result.kind === "spawn-error") return;
-    const exitCode = result.code;
-
-    if (exitCode === 0) {
-        stream.markdown("\n✅ Portfolio done.\n");
-    } else {
-        const tail = stderrTail.join("\n");
-        stream.markdown(
-            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
-            (tail.trim()
-                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
-                : "stderr was empty.\n"),
-        );
-    }
-}
-
-
-/**
  * Implementation of `@fi /critique <quest_id>`. Spawns
  * `python launch.py --critique <quest_id> --vscode-bridge-port <P>`
  * and streams the result back to the chat panel.
@@ -2342,19 +1928,6 @@ async function runCritique(
 }
 
 
-/**
- * Implementation of `@fi /proposal <topic>`. Spawns
- * `python launch.py --proposal "<topic>"` and streams the result
- * back. The Python side writes BOTH a planning markdown and a
- * companion YAML under outputs/_drafts/; the chat panel surfaces
- * both paths so the user can read the .md and (if they like the plan)
- * launch the quest via `/start <yaml>`.
- *
- * Argument parsing: the entire prompt after `/proposal ` is the topic
- * — we don't split on whitespace. This matches `/start` semantics
- * for path-like arguments and accepts free-form topic strings with
- * spaces, punctuation, newlines pasted from chat.
- */
 /**
  * Look for the Axon sidecar (``python -m axon.api``) when the extension
  * activates. If nothing is reachable, show an info notification with a
@@ -2531,201 +2104,14 @@ async function runAxonStatus(stream: vscode.ChatResponseStream): Promise<void> {
     );
 }
 
-/**
- * Implementation of `@fi /drafts`. Walks ``<workspaceRoot>/outputs/_drafts/``
- * for ``*.yaml`` files (proposal companions) and renders them as a
- * markdown table with a clickable ``/start <path>`` hint for each.
- * Mirrors `python launch.py --list-drafts` (CLI) and the
- * "Continue a draft" picker on /interview (Web). Three-interface
- * parity for the drafts-discovery feature.
- */
-async function runListDrafts(
-    stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken,
-): Promise<void> {
-    if (token.isCancellationRequested) return;
-    const fs = require("node:fs") as typeof import("node:fs");
-    const pathMod = require("node:path") as typeof import("node:path");
-    const ws = workFolderForCommand();
-    if (!ws) {
-        stream.markdown("Open a folder in VSCode first (the workspace root is where `outputs/_drafts/` lives).\n");
-        return;
-    }
-    const draftsDir = pathMod.join(ws, "outputs", "_drafts");
-    if (!fs.existsSync(draftsDir)) {
-        stream.markdown(`No \`outputs/_drafts/\` directory yet. Run \`@fi /proposal "<topic>"\` to create one.\n`);
-        return;
-    }
-    let entries: string[];
-    try {
-        entries = fs.readdirSync(draftsDir).filter((f) => f.endsWith(".yaml"));
-    } catch (e: any) {
-        stream.markdown(`Failed to read \`${draftsDir}\`: ${e?.message ?? String(e)}\n`);
-        return;
-    }
-    if (entries.length === 0) {
-        stream.markdown("No proposal drafts in `outputs/_drafts/` yet. Run `@fi /proposal \"<topic>\"` to create one.\n");
-        return;
-    }
-    // Sort by mtime descending. Parse each YAML's `topic:` + `title:`
-    // for preview — we keep it dependency-free (no js-yaml) by line
-    // scanning, which is enough for the top-level scalar fields the
-    // proposal generator writes.
-    const items = entries
-        .map((name) => {
-            const full = pathMod.join(draftsDir, name);
-            const stat = fs.statSync(full);
-            let title = "";
-            let topic = "";
-            try {
-                const text = fs.readFileSync(full, "utf-8");
-                const titleMatch = text.match(/^title:\s*(.+)$/m);
-                if (titleMatch) title = titleMatch[1].trim();
-                // ``topic:`` is often a block scalar (``|``); grab the
-                // next non-blank line of the body when so.
-                const topicMatch = text.match(/^topic:\s*(?:\|[+-]?\s*)?\n((?:  .*\n)+)/m);
-                if (topicMatch) {
-                    topic = topicMatch[1].split("\n").map(l => l.trim()).filter(Boolean).join(" ").trim();
-                } else {
-                    const inline = text.match(/^topic:\s*(.+)$/m);
-                    if (inline) topic = inline[1].trim();
-                }
-            } catch (_) {}
-            return { name, full, mtime: stat.mtimeMs, title, topic };
-        })
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, 40);
-
-    stream.markdown(`📂 **${items.length} proposal draft(s) in \`outputs/_drafts/\`:**\n\n`);
-    for (const it of items) {
-        const when = new Date(it.mtime).toLocaleString();
-        const titleShown = it.title || it.name.replace(/\.yaml$/, "");
-        const topicShown = it.topic ? (it.topic.length > 120 ? it.topic.slice(0, 120) + "…" : it.topic) : "";
-        stream.markdown(`### ${titleShown}\n`);
-        stream.markdown(`*${when}*\n\n`);
-        if (topicShown) stream.markdown(`> ${topicShown}\n\n`);
-        stream.markdown(`Run: \`@fi /start ${it.full}\`\n\n`);
-        stream.markdown(`---\n\n`);
-    }
-}
-
-async function runProposal(
-    promptArgs: string,
-    stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken,
-    userPickedModel: vscode.LanguageModelChat,
-): Promise<void> {
-    if (token.isCancellationRequested) return;
-
-    const topic = promptArgs.trim();
-    if (!topic) {
-        stream.markdown(
-            "Need a topic. Example: `@fi /proposal Bell inequality violations under quantum-classical coupling`.\n\n" +
-            "The proposal will be saved to `outputs/_drafts/` along with a companion YAML you can feed to `/start` once the plan looks good.\n",
-        );
-        return;
-    }
-
-    const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = await rootsForCommand();
-    if ("error" in roots) {
-        stream.markdown(roots.error);
-        return;
-    }
-    const { repoPath, workDir } = roots;
-    const launchScript = path.join(repoPath, "launch.py");
-    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
-    const outputsDir = path.isAbsolute(outputDirSetting)
-        ? outputDirSetting
-        : path.join(workDir, outputDirSetting);
-
-    stream.markdown(
-        `📝 Drafting proposal for topic:\n> ${topic.split("\n").slice(0, 3).join("\n> ")}\n\n` +
-        `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
-        `▶️ Asking the LLM for a planning doc…\n\n`,
-    );
-
-    const bridge = new Bridge({
-        progress: stream,
-        cancellationToken: token,
-        defaultModel: userPickedModel,
-    });
-    const port = await bridge.listen();
-
-    const argv: string[] = [
-        "-u", launchScript,
-        "--vscode-bridge-port", String(port),
-        "--proposal", topic,
-        "--output-root", outputsDir,
-    ];
-
-    const child = spawn(pythonPath, argv, {
-        cwd: workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stderrTail: string[] = [];
-    const STDERR_TAIL_LINES = 80;
-    bridge.attachChild(child, (line) => {
-        stderrTail.push(line);
-        if (stderrTail.length > STDERR_TAIL_LINES) {
-            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
-        }
-    });
-    token.onCancellationRequested(() => {
-        try { child.kill("SIGTERM"); } catch { /* noop */ }
-    });
-
-    child.stdout.setEncoding("utf-8");
-    let stdoutBuf = "";
-    child.stdout.on("data", (chunk: string) => {
-        stdoutBuf += chunk;
-        const lines = stdoutBuf.split(/\r?\n/);
-        stdoutBuf = lines.pop() || "";
-        for (const line of lines) {
-            const m = line.match(/^\[FI\] proposal -> (.+)$/);
-            if (m) {
-                stream.markdown(`  ✅ proposal written → \`${m[1]}\`\n\n`);
-                continue;
-            }
-            const ym = line.match(/^\[FI\] companion YAML -> (.+)$/);
-            if (ym) {
-                stream.markdown(`  📄 companion YAML → \`${ym[1]}\`\n\n`);
-                continue;
-            }
-            if (line.startsWith("[FI] To run the quest: ")) {
-                stream.markdown(`  ▶️ ${line.slice(5)}\n\n`);
-            }
-        }
-    });
-
-    const result = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (result.kind === "spawn-error") return;
-    const exitCode = result.code;
-
-    if (exitCode === 0) {
-        stream.markdown("\n✅ Proposal done. Read the markdown, edit either file if needed, then `/start` the YAML when ready.\n");
-    } else {
-        const tail = stderrTail.join("\n");
-        stream.markdown(
-            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
-            (tail.trim()
-                ? "Stderr tail:\n\n```\n" + tail + "\n```\n"
-                : "stderr was empty.\n"),
-        );
-    }
-}
-
 
 /**
- * Implementation of `@fi /analyze <path> <topic>`. The inverse of
- * `/proposal`: the user already has data in a directory and wants
- * FI to write a paper analyzing it. Spawns `python launch.py
- * --analyze <abs-data-path> --analyze-topic "<topic>"`. Argument
- * parsing: the first whitespace-delimited token is the data
- * directory path (single-quoted if it contains spaces), everything
- * after that is the topic.
+ * Implementation of `@fi /analyze <path> <commission>`. The user already
+ * has data in a directory and wants FI to write a paper analyzing it.
+ * Spawns `python launch.py --analyze <abs-data-path> --commission
+ * <abs-commission>`. The first whitespace-delimited token is the data
+ * directory (double-quoted if it contains spaces), the rest is the
+ * commission file (the study's question is in it).
  */
 async function runAnalyze(
     promptArgs: string,
@@ -2735,46 +2121,19 @@ async function runAnalyze(
 ): Promise<void> {
     if (token.isCancellationRequested) return;
 
-    const trimmed = promptArgs.trim();
-    if (!trimmed) {
-        stream.markdown(
-            "Need a data directory + topic. Examples:\n" +
-            "- `@fi /analyze ./my_data Compare ridership trends across regions`\n" +
-            "- `@fi /analyze \"C:/My Data\" Find common failure modes in these logs`\n\n" +
-            "The directory's files are copied into the new quest's `data/` dir, " +
-            "then the engine runs the no-simulation path: " +
-            "`auto_collect_data → wait_for_data → data_load → analyze → write → review`.\n",
-        );
+    const usage =
+        "Give a data folder and the study's commission file. Examples:\n" +
+        "- `@fi /analyze ./my_data commission.yaml`\n" +
+        "- `@fi /analyze \"C:/My Data\" \"C:/My Data/commission.yaml\"`\n\n" +
+        "The commission says what the analysis answers (`fi new` in a terminal writes one to fill in). " +
+        "The folder's files are copied into the new quest's `data/` dir, then the engine runs the " +
+        "no-simulation path: `wait_for_data → data_load → analyze → write → review`.\n";
+    const parts = (promptArgs.trim().match(/"[^"]+"|\S+/g) || []).map((t) => t.replace(/^"|"$/g, ""));
+    if (parts.length !== 2) {
+        stream.markdown(usage);
         return;
     }
-
-    // Split off the first token (path) — supports double-quoted paths
-    // with spaces. Everything after that token is the topic.
-    let dataPath: string;
-    let topic: string;
-    const quoted = trimmed.match(/^"([^"]+)"\s+(.+)$/s);
-    if (quoted) {
-        dataPath = quoted[1];
-        topic = quoted[2].trim();
-    } else {
-        const idx = trimmed.search(/\s/);
-        if (idx < 0) {
-            stream.markdown(
-                "Need BOTH a data directory AND a topic. " +
-                "Example: `@fi /analyze ./my_data Compare ridership trends`.\n",
-            );
-            return;
-        }
-        dataPath = trimmed.slice(0, idx);
-        topic = trimmed.slice(idx).trim();
-    }
-    if (!topic) {
-        stream.markdown(
-            "Need a topic after the data path. " +
-            "Example: `@fi /analyze ./my_data Compare ridership trends`.\n",
-        );
-        return;
-    }
+    const [dataPath, commissionPath] = parts;
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
@@ -2793,11 +2152,12 @@ async function runAnalyze(
     const dataAbs = path.isAbsolute(dataPath)
         ? dataPath
         : path.join(workDir, dataPath);
+    const commissionAbs = path.isAbsolute(commissionPath) ? commissionPath : path.join(workDir, commissionPath);
 
     stream.markdown(
         `📊 Analyzing pre-staged data:\n` +
         `  - data dir: \`${dataAbs}\`\n` +
-        `  - topic: ${topic.split("\n").slice(0, 3).join("\n    ")}\n\n` +
+        `  - commission: \`${commissionAbs}\`\n\n` +
         `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
         `▶️ Staging files into the quest's data/ directory, then running the no-simulation graph…\n\n`,
     );
@@ -2813,7 +2173,7 @@ async function runAnalyze(
         "-u", launchScript,
         "--vscode-bridge-port", String(port),
         "--analyze", dataAbs,
-        "--analyze-topic", topic,
+        "--commission", commissionAbs,
         "--output-root", outputsDir,
     ];
 

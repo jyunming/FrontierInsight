@@ -13,9 +13,9 @@ from __future__ import annotations
 # Every module-level name of the engine (imports, constants, QuestState, helpers) lives in core/engine_base.py; they
 # are imported here by name so that `from core.engine import X` and `core.engine.X` read the same objects.
 from .engine_base import (  # noqa: F401
-    AgentBuildMixin, Any, AsyncProcessTree, AsyncSqliteSaver, Awaitable, BridgeError, Callable, ClarifyCallback,
-    Command, Config, Counter, DEFAULT_PAPER_FORMAT, DockerLimits, END, ExecutionResult, FOUNDATIONAL_MAX_SUGGESTED,
-    FOUNDATIONAL_SUGGESTED, FallbackLLMClient, GraphBubbleUp, GraphInterrupt, HumanFeedbackCallback, Knowledge,
+    AgentBuildMixin, Any, AsyncProcessTree, AsyncSqliteSaver, Awaitable, BridgeError, Callable,
+    Command, Config, Counter, DEFAULT_PAPER_FORMAT, DockerLimits, END, ExecutionResult, 
+    FallbackLLMClient, GraphBubbleUp, GraphInterrupt, HumanFeedbackCallback, Knowledge,
     LLMClient, ModelAnswerTruncated, ModelUnavailable, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_KINDS,
     PRELIMINARY_NOTE, PROGRESS_LOG_NAME, PROMPTS_DIR, PROXY_PROVIDERS, Path, ProviderLimitError, ProviderUnusable,
     ProxySupervisor, QuestArtifacts, QuestState, RepairForAgent, ResultChecksMixin, RetrievedDoc, RunChecksMixin,
@@ -40,19 +40,19 @@ from .engine_base import (  # noqa: F401
     _MATH_LETTER_DIGIT_RE, _MATH_PAREN_SCRIPT_RE, _MATH_SCRIPT_MARK_RE, _MATH_SPACE_RE, _MD_FENCE_LINE_RE,
     _MIN_PAPER_CHARS, _ModelAnswerProblem, _NL, _NOT_A_CITATION_NUMBER, _NOT_GIVEN, _NOT_LITERATURE_FAILURES,
     _NOT_PROSE_RE, _NOT_SOLID, _NO_CRITERIA_LINE, _NO_SIM_DESIGN_DIRECTIVE, _NO_SIM_WRITE_NOTE, _ONCE_PARTS,
-    _ORACLE_HIDDEN, _OUTSIDE_WORK_STEPS, _PAGE_LIMIT_HIT, _PANEL_COLS, _PANEL_ROWS, _PAPERS_ASKED, _PAPERS_DECLINED,
+    _ORACLE_HIDDEN, _OUTSIDE_WORK_STEPS, _PAGE_LIMIT_HIT, _PANEL_COLS, _PANEL_ROWS, 
     _PAPERS_README, _PAPER_BASIS_KEYS, _PAPER_IMAGE_RE, _PAPER_PROMPT_CHARS, _PARA, _PART_ASKED, _PART_HEADING,
-    _PERSONA_NAME_RE, _PERSON_QUERIES, _PIP_FREEZE_TIMEOUT_S, _PLAN_DIRECTIVE, _PROPORTION_NAME_RE, _PROSE_NUMBER,
-    _PROXY_WARN_SHOWN, _PY_FENCE_RE, _PartsRefused, _PlanEditedMeanwhile, _ProgressOnly, _ProviderName,
-    _QUERY_SET_HASHED, _QUEST_MEMORY_KINDS, _QUOTE_MIN_CHARS, _QuerySetsUnreadable, _RANDOM_SOURCE_PATTERN,
+    _PERSONA_NAME_RE, _PIP_FREEZE_TIMEOUT_S, _PLAN_DIRECTIVE, _PROPORTION_NAME_RE, _PROSE_NUMBER,
+    _PROXY_WARN_SHOWN, _PY_FENCE_RE, _PartsRefused, _PlanBeyondTheBlock, _PlanEditedMeanwhile, _ProgressOnly, _ProviderName,
+    _QUEST_MEMORY_KINDS, _QUOTE_MIN_CHARS, _RANDOM_SOURCE_PATTERN,
     _REDERIVE_BECAUSE, _REDESIGN_OWNED_PARTS, _REFERENCES_HEADING_LINE_RE, _REFERENCES_HEADING_RE,
     _REFERENCE_FORMS, _REFINE_POINT_RE, _REFINE_WHY_RE, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS, _REPAIR_REPLY_KEYS,
     _REPAIR_TEXT_KEYS, _REPLOT_STYLE_KEYS, _RESULT_LINE_RE, _RESULT_MARKER_RE, _RUN_FIGURE_IMAGE_RE,
     _SAME_STATEMENT_SHARE, _SAME_STATEMENT_WORDS, _SCHEMA_RETRY_ASKS, _SEARCH_ASKED, _SEARCH_ASKS, _SEARCH_CALLS,
     _SEARCH_CALLS_PER_ASK, _SEARCH_PROTOCOL, _SEARCH_REFLECT_ANALYSIS, _SEARCH_REFLECT_SIMULATE, _SEARCH_REFUSED,
     _SEARCH_SIZE_KEYS, _SEEDING_CALLS, _SEED_KEYWORDS, _SEED_REPAIR_DIRECTIVE, _SENTENCE_END_RE, _SETTING_FIELDS,
-    _SIMULATABILITY_LEAD, _SIZE_PARTS, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE,
-    _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, _SOURCE_VERDICT_HASHED,
+    _SIZE_PARTS, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE,
+    _SOURCE_SLIDE_CHARS_PER_LINE, _SOURCE_SLIDE_LINES, _SOURCE_SLIDE_MAX, 
     _SPACED_HYPHEN_BREAK_RE, _SPLIT_PROTOCOL, _SPLIT_REFLECT_ANALYSIS, _SPLIT_REFLECT_SIMULATE, _SPLIT_REPLY_REMINDER,
     _SPLIT_RERUN_NOTE, _SPREAD, _SPREAD_IN_PARENS_RE, _SPREAD_RE, _STATE_TEXT_CHARS, _STOPPED_BEFORE_THE_STUDY,
     _STUDY_TYPE_DIRECTIVE, _SURVEY_DESIGN_DIRECTIVE, _SURVEY_WRITE_NOTE, _TEXT_ONLY_HITS,
@@ -68,11 +68,11 @@ from .engine_base import (  # noqa: F401
     _checked, _ci_bounds, _citation_counts, _citation_labels, _citations_unchecked, _cite_labels, _citing_sentences,
     _claim_cell, _claim_choice, _claim_choice_problem, _claim_code_block, _claim_code_order,
     _claim_faults_from_sources, _claim_fi_record_block, _claim_findings_parts, _claim_keys, _claim_method_block,
-    _claim_result_units, _claim_results_block, _claim_source_block, _clean_title, _close_quest_logger, _code_delta,
+    _claim_result_units, _claim_results_block, _claim_source_block, _close_quest_logger, _code_delta,
     _code_findings, _code_layout, _code_names_replicate_seed, _code_project, _code_reach, _code_review,
     _coerce_dep_list, _compact_result_json_block, _confirmations, _constant_expr, _content_quality, _content_stems,
     _contract, _contract_parts, _crash_kind, _criteria, _cross_check_items, _cs, _declare_scope, _declared_metrics,
-    _default_clarify_questions, _deps_from_tail, _deps_to_warmup_modules, _depth_change, _design_parts,
+    _deps_from_tail, _deps_to_warmup_modules, _depth_change, _design_parts,
     _design_parts_listing, _disclosure, _discover_skill_names, _doc_dedup_keys, _dotted_name, _drawn_metrics,
     _elide_value_lists, _entries_as_written, _entry_identities, _equation_tests, _evidence, _evidence_gate_rule,
     _experiment_deps, _extend_directive, _extension_values, _extract_pdf, _extract_result_json, _fault_from_record,
@@ -86,37 +86,36 @@ from .engine_base import (  # noqa: F401
     _fit_scope, _flat_fact_sentence, _flat_moved, _flat_request, _flat_shown, _format_claim_grounding,
     _format_clarify, _format_cross_check, _format_evidence_note, _format_lit, _format_lit_excerpt,
     _format_lit_from_state, _format_lit_header, _format_reflect_history, _format_review_for_writer, _forms,
-    _foundational_line, _foundational_outcomes, _foundational_review_block, _foundational_sources,
-    _foundational_work_text, _foundational_write_block, _frozen, _function_steps, _further_reading_block,
+    _frozen, _function_steps, _further_reading_block,
     _further_reading_lines, _gate_inputs, _gate_receipt, _grid_keys, _grounding_after_trim, _guarded_absent,
     _has_full_text, _hidden, _hidden_series, _hit_name, _hits_need_only_a_rewrite, _imported_module_names, _improve,
-    _in_run, _ingest_user_dropped_papers, _input_numbers, _is_abstract_only, _is_audience_appropriate,
+    _in_run, _ingest_user_dropped_papers, _input_numbers, _is_audience_appropriate,
     _is_bot_check_title, _is_citable, _is_degenerate_result, _is_fatal_provider_error, _is_metric_key,
-    _is_not_a_paper, _is_open_access, _is_os_environ, _is_preliminary_memory, _is_replicate_seed_literal,
-    _is_scholarly_record, _is_web_page, _item_content, _json_file_is_answer, _labelled_sources, _last_error_line,
-    _latex_esc, _layout_views, _leading_simulatability_word, _ledger, _list_user_data_files, _lit_query,
-    _literature_entry, _literature_in_citation_order, _literature_key, _literature_query_prompt,
-    _literature_text_gaps, _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
+    _is_not_a_paper, _is_os_environ, _is_preliminary_memory, _is_replicate_seed_literal,
+    _is_web_page, _item_content, _labelled_sources, _last_error_line,
+    _latex_esc, _layout_views, _ledger, _list_user_data_files, _lit_query,
+    _literature_entry, _literature_in_citation_order, _literature_key, 
+    _load_persona_prefix, _load_prompts, _log_parse_failure, _lower_first,
     _manifest_repair_budget, _mark_preliminary, _mark_seeded_targets, _mask_prose, _matching_brace_end, _math_folded,
-    _math_safe_cut, _mc_error, _merge_round_robin, _metric_spec, _names_a_verdict,
-    _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls, _novelty,
+    _math_safe_cut, _mc_error, _metric_spec, _names_a_verdict,
+    _names_seeded_from_replicate_env, _new_quest_id, _normalize_title, _normalized_text, _note_from_calls,
     _number_list, _numeric, _object_among_prose, _object_spans, _objection_key, _ok_call_ids, _ok_calls, _one_line,
     _optim, _optimise, _optimise_refine, _optimise_search, _oracle, _oracle_card, _oracle_challenge, _oracle_triage,
     _oracle_with_reader_flags, _outcome_of, _outside_run, _own_modules, _package_block_text, _page_limit_note, _pairs,
-    _panel_draws_nothing, _panel_place, _paper_basis, _paper_body, _paper_copies, _paper_display_title, _paper_facts,
-    _paper_figure_count, _paper_for_prompt, _paper_gist, _paper_key, _paper_resolve_link, _paper_scope,
-    _paper_sections, _paper_values, _papers_dir_has_files, _papers_next_step, _papers_to_ask,
+    _panel_draws_nothing, _panel_place, _paper_basis, _paper_body, _paper_copies, _paper_facts,
+    _paper_figure_count, _paper_for_prompt, _paper_scope,
+    _paper_sections, _paper_values, 
     _parse_implement_response, _parse_json_lenient, _parse_json_lenient_once, _parse_split_deps, _part_in_layouts,
-    _claim_numbers_shown, _passage_names_claim, _passage_stands, _person_queries, _phased, _phased_isolation, _physical_bound_paths,
+    _claim_numbers_shown, _passage_names_claim, _passage_stands, _phased, _phased_isolation, _physical_bound_paths,
     _pick_up_user_dropped_datasets, _place_figures, _places_as_placeholders, _plan, _plan_checks_note, _plan_scope,
     _plan_search_mark, _plan_settings, _plan_steps, _planned_figure_order, _plot_scope, _pool_evidence,
     _precision_target_on, _preliminary_reminders, _printed_in_figure, _prose_value, _protocol, _protocol_directive,
-    _provider_is_auth_error, _provider_sign_in_advice, _put_back_paper_copies, _quality_report, _query_set_digest,
-    _query_set_key, _query_set_standing, _quest_logger, _quote_in_source, _raise_if_required_skills_unusable,
-    _random_source_found, _rank_papers_by_relevance, _read_a_search_block, _read_figure_records, _read_hit_places,
-    _read_json_or_none_path, _read_key_set, _read_latex_object, _read_object_keys, _read_primary_figures,
-    _read_query_sets, _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor,
-    _record_numbers, _record_query_set, _redrawn_band_text, _ref_citation_text, _reference_entry, _reference_values,
+    _provider_is_auth_error, _provider_sign_in_advice, _put_back_paper_copies, _quality_report, 
+    _quest_logger, _quote_in_source, _raise_if_required_skills_unusable,
+    _random_source_found, _read_a_search_block, _read_figure_records, _read_hit_places,
+    _read_json_or_none_path, _read_latex_object, _read_object_keys, _read_primary_figures,
+    _readable_json_keys, _reading, _reads_replicate_env, _receipts, _record_anchor,
+    _record_numbers, _redrawn_band_text, _ref_citation_text, _reference_entry, _reference_values,
     _refine, _refine_count, _refine_round, _rejudges_oracles_after, _rename_code_names, _render_auto_collected_md,
     _render_data_readme, _renumber_citations, _reorder_literature, _repair_reply_json, _repair_template_values,
     _replicate_assertions, _replicate_env, _replicate_line_figure, _replicate_metric_kinds,
@@ -124,27 +123,26 @@ from .engine_base import (  # noqa: F401
     _rerun_directive, _rerun_from, _resolve_selected_skills, _restore_primary_figures, _result_comparison_stats,
     _results_by_setting, _retractions, _review, _review_answer_problem, _review_decision, _review_items,
     _review_sends_the_experiment_back, _review_was_real, _rng_aliases, _rng_call_is_seeded, _rooted, _run_facts,
-    _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures, _scope_cards,
-    _screen_grades, _script_has_random_source, _script_reads_replicate_seed, _script_reply,
-    _search_record_has_abstract, _second_impl, _seed_label, _seeds_only_constants, _series_at,
-    _set_model_call_archive, _sf_snapshot, _shown_reach, _shrink_json_value, _simulatability_answer,
-    _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_ref, _source_text, _spaced_pattern,
-    _spell_out_title_options, _split_figure_readings, _split_run, _stamp_figure_credit, _stats, _step_passages,
+    _run_manifest, _run_settings, _same_record_numbers, _same_statement, _save_literature_figures,
+    _script_has_random_source, _script_reads_replicate_seed, _script_reply,
+    _second_impl, _seed_label, _seeds_only_constants, _series_at,
+    _set_model_call_archive, _shown_reach, _shrink_json_value, _single_seed_note, _skeleton, _skill_mount_plan, _slugify, _source_text, _spaced_pattern,
+    _split_figure_readings, _split_run, _stamp_figure_credit, _stats, _step_passages,
     _stop_power, _strip_outer_fence, _strip_plan_numbers, _strip_source_lists, _stripped, _study_size,
-    _summarise_long_arrays, _take_out_unpointed, _take_papers_declined, _take_refine_points, _take_refine_why,
-    _temperature_for_node, _thin_source, _thinking, _title_only_sentences, _titles_match, _todo,
+    _summarise_long_arrays, _take_out_unpointed, _take_refine_points, _take_refine_why,
+    _temperature_for_node, _thin_source, _thinking, _title_only_sentences, _todo,
     _top_level_json_objects, _topic_req, _trial_code, _trial_runner, _trial_table, _trim_further_reading,
-    _unchecked_quest_memory, _uncited_foundational_works, _unnamed_curve, _unread_results, _unseeded_rng_calls,
-    _unseeded_rng_directive, _unsupported_claim_hit, _unsupported_still_in, _usable_queries,
+    _unchecked_quest_memory, _unnamed_curve, _unread_results, _unseeded_rng_calls,
+    _unseeded_rng_directive, _unsupported_claim_hit, _unsupported_still_in, 
     _user_feedback_review_block, _walk_paths, _warn_if_unsanctioned_provider, _web_labels_cited, _with_newline,
     _with_reminders, _without_comments, _without_figure_embeds, _without_numbers, _without_reviewer_page_limit_hits,
-    _words_to_cut, _write_key_set, _write_paper_need_stubs, _write_personas, _write_query_sets,
-    _write_wanted_papers_md, _writes_code, _zero_expected_paths, append_cost_row, ast, asyncio, billing_stop,
+    _words_to_cut, _write_personas, _write_query_sets,
+    _writes_code, _zero_expected_paths, append_cost_row, ast, asyncio, billing_stop,
     blocked_stop, build_further_reading, build_references, cited_references, claude_cli_account_line, concurrent,
-    copy, dataclass, derive_protocol, escape_latex_backslashes, field, fnmatch, forget_papers_asked, functools,
+    copy, dataclass, derive_protocol, escape_latex_backslashes, field, fnmatch, functools,
     further_reading_listed, get_args, goal_coverage, hashlib, inspect, interrupt, io, json, langchain_core,
     limit_resumes_at, logging, make_executor, math, mint_quest_id, missing_step_api_keys, model_for_node,
-    node_provider_for, os, paper_patch, paper_trim, papers_declined_count, pip_failure_summary, platform, re,
+    node_provider_for, os, paper_patch, paper_trim, pip_failure_summary, platform, re,
     references_web_listed, render_references_marp_slide, replicate_seed_reaches_rng, resolve_endpoint_async,
     resolve_page_limit, route_for_topic_type, scrub_secrets, shutil, step_provider_config, step_provider_lines,
     string, sys, tempfile, threading, time, tokenize, traceback, unicodedata, unseeded_rng_calls, uuid, warnings,
@@ -160,6 +158,44 @@ from .engine_analyze import AnalyzeStageMixin
 from .engine_write import WriteStageMixin
 from .engine_review import ReviewStageMixin
 from . import commission as _commission
+
+
+class _StepGraph(StateGraph):
+    """The quest graph of a study run one step at a time (``Config.step``): every edge from one of the step's nodes to a
+    node outside them goes to END instead, and ``exits`` keeps where each route led (source, route) -> node."""
+
+    keep: frozenset[str] = frozenset()
+
+    def add_edge(self, start_key: Any, end_key: str) -> Any:
+        if isinstance(start_key, str) and start_key in self.keep and end_key not in self.keep:
+            end_key = END
+        return super().add_edge(start_key, end_key)
+
+    def add_conditional_edges(self, source: str, path: Any, path_map: Any = None) -> Any:
+        if source in self.keep and isinstance(path_map, dict):
+            self.exits.update({(source, k): v for k, v in path_map.items() if v not in self.keep})
+            path_map = {k: (v if v in self.keep else END) for k, v in path_map.items()}
+        return super().add_conditional_edges(source, path, path_map)
+
+
+# The nodes an earlier FI had that this one does not, by what a person called them. LangGraph reads a checkpoint about to
+# run one of them as having nothing left to run, which would look like a finished quest.
+_STUDY_FROM_COMMISSION = "a study now starts from a commission, which gives its question and its study"
+_REMOVED_NODES = {
+    "ideate": ("making research ideas", _STUDY_FROM_COMMISSION),
+    "scope": ("choosing a study from study cards", _STUDY_FROM_COMMISSION),
+    "auto_collect_data": ("looking for data on the topic",
+                          "a study that analyses data now uses the data the person puts in data/"),
+}
+
+
+async def _removed_step_waiting(saver: Any, run_config: dict[str, Any]) -> tuple[str, str]:
+    """What the latest checkpoint was about to run that FI no longer has, and why it is gone (``("", "")``: nothing of the
+    kind). The edge into a node is the channel ``branch:to:<node>`` of the saved checkpoint."""
+    saved = await saver.aget_tuple(run_config)
+    values = ((saved.checkpoint or {}).get("channel_values") or {}) if saved is not None else {}
+    return next((_REMOVED_NODES[key.split(":", 2)[2]] for key in values
+                 if key.startswith("branch:to:") and key.split(":", 2)[2] in _REMOVED_NODES), ("", ""))
 
 
 class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, ImproveStageMixin, RunStageMixin, AnalyzeStageMixin, WriteStageMixin, ReviewStageMixin,
@@ -217,7 +253,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # Where .fi leads now (it may be kept elsewhere through a link): the improve loop touches its own copies only
         # while .fi still leads here, so a run that moves .fi cannot steer those writes (core/improve.py:own_dir).
         self._fi_real: Path = Path(os.path.realpath(self.fi_dir))  # realpath: a link loop does not raise
-        self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
         self._log = _quest_logger(self.quest_id, self.fi_dir)
         self.executor = make_executor(
@@ -312,9 +347,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     async def run(
         self,
         *,
-        clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
-        scope_callback: ClarifyCallback | None = None,
         reopen: bool = False,
         from_step: str | None = None,
         approved_by: str | None = None,
@@ -323,14 +356,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
         ``from_step`` (see ``core/rerun_from.py``) runs it again from that step. The steps up to the design replace the
         frozen protocol, so they need ``approved_by`` (``--approve-as <you>``); without it nothing is changed.
-
-        ``clarify_callback`` is called only when ``engine.clarify_mode``
-        is ``"interactive"`` AND the clarify node fires an
-        ``interrupt()``. The callback receives the questions dict and
-        must return the answers dict; the engine then resumes the graph
-        with ``Command(resume=answers)``. When the callback is None and
-        clarify is interactive, the engine raises — set the mode to
-        ``"auto"`` or ``"off"`` for headless runs.
 
         The entire body is wrapped in a try/finally that calls
         ``_close_quest_logger(self.quest_id)`` on every exit path —
@@ -364,11 +389,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # before then is an earlier run's (launch.py prints only this run's).
         self._step_retries: dict[str, tuple[str, int]] = {}
         self._run_started_at = time.time()
-        self._clarify_answerable = (
-            clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
-        # The study cards have an answer channel of their own (its own files on the web page): the setup questions'
-        # channel would hand back the setup answer, and a rerun from the cards would reuse an old pick.
-        self._scope_answerer = scope_callback
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
@@ -397,7 +417,16 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # Before anything is written: lines another program added to the quest's records since FI last wrote them
             # are moved aside (core/record_anchor.py), so this run does not chain onto them.
             await self._check_records_changed_outside()
+            # The commission is staged before this run's first record, so a first start that stops at any check after
+            # it (the reviewer check, a changed setting) or is killed is still a commissioned quest on resume.
+            staged_now = None
+            if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
+                staged_now = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            if staged_now is not None:
+                sha = staged_now[f"inputs/{_commission.STAGED_NAME}"]
+                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=staged_now)
+                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             # Research explores first and confirms once by default (engine.phased); a research quest that began before
             # that default goes on as it began. Decided before the approved settings are compared, so a quest approved
             # with it off is compared as it runs.
@@ -474,13 +503,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             self._preflight_paper_pdf()
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
-            if self._commissioned() and not _commission.staged_path(self.quest_root).is_file():
-                files = await asyncio.to_thread(_commission.stage, Path(self.config.commission), self.quest_root)
-                sha = files[f"inputs/{_commission.STAGED_NAME}"]
-                self._audit("commission_recorded", sha256=sha, source=str(self.config.commission), files=files)
-                self._log.info("[commission] started from %s (sha256 %s), kept in inputs/", self.config.commission, sha)
             if self._commissioned() and self.config._commission_note:
                 self._log.warning("[commission] %s", self.config._commission_note)
+            if self._step() is not None:
+                await asyncio.to_thread(self._step_stage)
+            elif (ran_as := self._step_started().get("step")):  # the quest's own record says what it is
+                raise ValueError(f"quest {self.quest_id} ran the {ran_as} step on its own, so it goes on only with "
+                                 f"`step: {{name: {ran_as}}}` in its config; nothing was run")
             if _phased.enabled(self.config):
                 self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
@@ -510,11 +539,19 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     # Resume detection: if the thread already has checkpointed
                     # state (a prior run died mid-pipeline), pass `None` to
                     # ainvoke so LangGraph continues from the last-completed
-                    # node instead of replaying from `ideate` with the
+                    # node instead of replaying from `clarify` with the
                     # current YAML's topic. Without this, --resume only
                     # reused the quest_id; LangGraph still treated the
                     # `initial` payload as a fresh START.
                     prior_snapshot = await graph.aget_state(run_config)
+                    gone, why_gone = await _removed_step_waiting(saver, run_config) if not from_step else ("", "")
+                    if gone:
+                        # Said like the other refusals of a resume (a plain line, nothing run), not as a crash.
+                        self._log.warning("[run] the checkpoint waits at a step this FI does not have (%s)", gone)
+                        print(f"[FI] quest {self.quest_id} stopped just before {gone}, a step an earlier FI had and this "
+                              f"one does not ({why_gone}), so it cannot go on; nothing was run. Start the study again "
+                              "from a commission.")
+                        return self._collect_artifacts({})
                     if getattr(prior_snapshot, "values", None):
                         # A resumed quest: files an older FI left in code/tests/ with expected values in them go first.
                         stale = _equation_tests.remove_stale(self.quest_root / "code")
@@ -543,6 +580,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                   f"`--resume {self.quest_id} --from` with no step lists the steps it did reach.")
                             return self._collect_artifacts({})
                         replaced_sha = ""
+                        if self._step() is not None:  # a redo of a step starts inside it
+                            self._step_inside((await graph.aget_state(fork_config)).next)
                         if _rerun_from.needs_approval(from_step):
                             if not (approved_by or "").strip():
                                 self._log.warning("[run] --from %s replaces the frozen protocol and needs --approve-as", from_step)
@@ -559,7 +598,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                             _frozen.record_replacement(self.quest_root, approved_by=approved_by.strip(), step=from_step)
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
-                        forget_papers_asked(self.fi_dir, declined=False)
                         if _rerun_from.picks_skills(from_step):
                             fork_config = await self._repick_skills(graph, fork_config)
                         try:
@@ -618,8 +656,12 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                         # consumes a loop slot and guarantees the prior review
                         # JSON is embedded (the design node skips it at
                         # iteration==0).
+                        if self._step() is not None:  # a resume goes on only inside the step it was started as
+                            if reopen and not prior_snapshot.next:
+                                raise ValueError(f"quest {self.quest_id} ran one step on its own and is not re-opened: "
+                                                 "run that step again in a new quest folder; nothing was run")
+                            self._step_inside(prior_snapshot.next)
                         if reopen and not prior_snapshot.next:
-                            forget_papers_asked(self.fi_dir, declined=False)
                             self._set_aside_stuck_record()
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
@@ -648,6 +690,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                             )
                     else:
                         payload = initial
+                        if self._step() is not None and (seeded := await self._step_seed()) is not None:
+                            # A step that does not start the graph: its state is written as the node before it finished.
+                            await graph.aupdate_state(run_config, {**initial, **seeded[0]}, as_node=seeded[1])
+                            payload = None
 
                     # Clear any stale ``quest_failed.md`` NOW, at the start of
                     # this run — not only on the pause/completion paths below.
@@ -671,10 +717,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                     except OSError:
                         pass
 
-                    # Run, handling interrupts as they fire. Two kinds:
-                    #   (a) clarify-interactive — pause to collect answers
-                    #       via clarify_callback, then resume the graph.
-                    #   (b) wait_for_data (no-simulation mode) — pause and
+                    # Run, handling interrupts as they fire. The one that matters most:
+                    #   wait_for_data (no-simulation mode) — pause and
                     #       EXIT cleanly with rc=0. User drops files
                     #       into <quest_root>/data/, then re-runs
                     #       `fi --resume <quest_id>` which lands here
@@ -944,106 +988,19 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                                 self.quest_id, self.quest_id, self.quest_id,
                             )
                             break
-                        # Clarify node raised `interrupt(...)`. Resolve answers
-                        # via (1) the in-process callback, (2) a pre-staged
-                        # on-disk answer file, or (3) clean pause-exit — the
-                        # same three-path pattern the human-review gate uses, so
-                        # a subprocess- / CLI-launched quest (no callback) pauses
-                        # cleanly instead of crashing.
-                        questions = intr_value.get("clarify_questions", {})
-                        clarify_answer_path = self.fi_dir / "clarify_answer.json"
-                        if clarify_callback is not None:
-                            try:
-                                self._log.info(
-                                    "[run] clarify interrupt fired with %d questions; "
-                                    "invoking callback", len(questions),
-                                )
-                                if self.human_feedback_timeout_s > 0:
-                                    answers = await asyncio.wait_for(
-                                        clarify_callback(questions),
-                                        timeout=self.human_feedback_timeout_s,
-                                    )
-                                else:
-                                    answers = await clarify_callback(questions)
-                                self._clear_clarify_snapshot()
-                                # LangGraph reads an empty dict as an (empty) map of interrupt ids, so nothing is
-                                # resumed and the pause re-fires forever; an empty answer is wrapped and the node
-                                # fills in the defaults.
-                                payload = Command(resume={"clarify_answers": answers or {}})
-                                continue
-                            except asyncio.TimeoutError:
-                                if _json_file_is_answer(clarify_answer_path):
-                                    # An answer written just as the wait ran out is used below, never dropped.
-                                    pass
-                                elif self.config.pauses.clarify is None:
-                                    # Nobody set "ask": an unattended start must not stall, so answer for itself.
-                                    self._log.warning(
-                                        "[run] nobody answered the setup questions within %ss — using the defaults",
-                                        self.human_feedback_timeout_s,
-                                    )
-                                    self._clear_clarify_snapshot()
-                                    payload = Command(resume={"clarify_answers": {}})
-                                    continue
-                                self._log.warning(
-                                    "[run] clarify callback timed out after %ss — "
-                                    "falling back to answer-file / pause-exit",
-                                    self.human_feedback_timeout_s,
-                                )
-                            except BridgeError as e:
-                                # The person dismissed the VS Code prompt: carry on with the defaults.
-                                self._log.warning("[run] setup questions dismissed (%s) — using the defaults", e)
-                                self._clear_clarify_snapshot()
-                                payload = Command(resume={"clarify_answers": {}})
-                                continue
-                        if clarify_answer_path.is_file():
-                            try:
-                                answers = json.loads(
-                                    clarify_answer_path.read_text(encoding="utf-8"),
-                                )
-                            except (OSError, json.JSONDecodeError) as e:
-                                # A corrupt answer file would re-fail on every
-                                # resume and strand the quest — drop it so the
-                                # user can re-stage a fresh answer.
-                                self._log.warning(
-                                    "[run] couldn't read %s: %r — discarding it "
-                                    "and pausing instead", clarify_answer_path, e,
-                                )
-                                try:
-                                    clarify_answer_path.unlink(missing_ok=True)
-                                except OSError:
-                                    pass
-                                answers = None
-                            if isinstance(answers, dict) and answers:
-                                self._log.info(
-                                    "[run] consuming pre-staged clarify answers",
-                                )
-                                self._clear_clarify_snapshot()
-                                payload = Command(resume=answers)
-                                continue
-                        # Genuine pause (no callback, no staged answer): persist
-                        # the questions so the web can render a form for this
-                        # subprocess quest. Only here — never on the resume path
-                        # above — so a consumed answer isn't re-shown as pending.
-                        try:
-                            self.fi_dir.mkdir(parents=True, exist_ok=True)
-                            (self.fi_dir / "clarify_questions.json").write_text(
-                                json.dumps(questions, indent=2) + "\n",
-                                encoding="utf-8",
-                            )
-                        except OSError as e:
-                            self._log.debug(
-                                "[clarify] questions snapshot write failed: %r", e,
-                            )
+                        # Any other stop that waits for the person (no node asks a question now): exit cleanly, as the
+                        # stops above do; NEXT_STEP.md, when the node wrote one, says what to do.
                         data_paused = True
                         self._log.info(
-                            "[FI] paused for clarify. Answer in the web / VSCode "
-                            "panel, or write your answers into %s and re-run "
-                            "`fi --resume %s`.",
-                            clarify_answer_path, self.quest_id,
+                            "[FI] paused: %s. See NEXT_STEP.md, then run `fi --resume %s`",
+                            descriptor.get("headline") or descriptor.get("kind") or "action needed", self.quest_id,
                         )
                         break
                     # No more of the quest's code runs in this call: the values its tests compare with are written now.
                     await self._deliver_check_values(final_state if isinstance(final_state, dict) else {})
+                    if self._step() is not None:
+                        await asyncio.to_thread(self._step_finish, final_state if isinstance(final_state, dict) else {},
+                                                data_paused)
             finally:
                 # Guard against early failure: if ``resolve_endpoint_async``
                 # raised (unknown provider / proxy spawn failure / etc.),
@@ -1096,7 +1053,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 # the prior failure was recovered — leaving the file
                 # would mislead ("paused for data, but also failed?").
                 self._clear_stale_quest_failed_diagnostic()
-                self._write_evidence(final_state)
+                if self._step() is None:  # a step alone claims no evidence level (its receipt says what it judged)
+                    self._write_evidence(final_state)
                 self._record_stop(final_state, await self._attempt_context(final_state, kind="in_progress"))
                 return self._collect_artifacts(final_state)
 
@@ -1104,7 +1062,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # Finishing is two steps: everything the quest keeps is written first (the evidence, the attempt records),
             # then the seal naming their hashes is the trace's last event. The evidence is assessed before the seal it
             # cannot yet see; readers check that seal (core/evidence.py::verify_seal).
-            evidence_record = self._write_evidence(final_state, sealing=True)
+            evidence_record = self._write_evidence(final_state, sealing=True) if self._step() is None else None
             end_context = await self._attempt_context(final_state, kind="quest_end")
 
             def _quest_record() -> dict[str, Any]:
@@ -1138,13 +1096,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
             # snapshots so a finished quest never shows a stale "Action needed"
-            # (a clarify node re-executes on resume, re-writing its snapshot).
+            # (a node that paused re-executes on resume, re-writing its snapshot).
             for p in (
                 self.quest_root / "NEXT_STEP.md",
                 self.fi_dir / "pause.json",
-                self.fi_dir / "clarify_questions.json",
-                self.fi_dir / "clarify_answer.json",
-                self.fi_dir / self._CLARIFY_ASKED,
                 # The human-review snapshot too — the node re-writes it on the
                 # resume pass, so a finished quest could otherwise look like it's
                 # still waiting for review on the dashboard / quest page.
@@ -1459,6 +1414,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # The record of the search queries likewise: an empty one when no query was ever derived (every derivation,
         # failed or not, leaves an entry); missing after an answered derivation, it is the gap.
         if not (self.fi_dir / _LITERATURE_QUERIES).exists() and not (
+                # ``ideate_query``: the same derivation as an earlier FI's idea step named it, in a quest it began.
                 _ok_call_ids(self.fi_dir, "literature_query") or _ok_call_ids(self.fi_dir, "ideate_query")):
             _write_query_sets(self.fi_dir, [])
         call_gaps, call_summary = _attempts.model_call_gaps(
@@ -1639,41 +1595,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
 
     def _audit_stated_reasons(self, node: str, out: dict[str, Any]) -> None:
         """The reasons a model already wrote in its answer at the steps that choose between options, as ``model_claim``
-        events (no extra call, no extra tokens): the idea it chose (and, when they ran, what the pairwise comparison
-        and the self-critique said), the skills it picked or declined, how each finding sits against the literature,
+        events (no extra call, no extra tokens): the skills it picked or declined, how each finding sits against the literature,
         what a repair of the script changed and why (or why it gave up), and the reasons of the setup questions'
         answers it chose. Each carries the provenance of the call that wrote it. A reason is the model's own account,
         not evidence."""
-        if node == "ideate":
-            chosen = out.get("chosen_idea") if isinstance(out.get("chosen_idea"), dict) else {}
-            ideas = [i for i in out.get("ideas") or [] if isinstance(i, dict)]
-            options = [str(i.get("title") or "") for i in ideas if i.get("title")]
-            tournament = out.get("ideate_tournament") if isinstance(out.get("ideate_tournament"), dict) else {}
-            critique = out.get("ideate_critique") if isinstance(out.get("ideate_critique"), dict) else {}
-            first = str(chosen.get("rationale") or "")
-            decision = chosen.get("title")
-            if tournament:
-                first = first.split("[tournament]", 1)[0]  # the tournament's reasons follow, under their own call
-                if tournament.get("outcome") == "swapped":
-                    decision = "its first pick (the pairwise comparison then chose another idea)"
-            elif critique.get("swap_to") or critique.get("refined_rationale"):
-                first = ""  # the self-critique replaced it; its own words are recorded under its call below
-            self._claim(node, "ideate", "idea_chosen", first, decision=decision,
-                        options=options if len(options) > 1 else None)
-            winner = tournament.get("winner_idx")
-            for m in tournament.get("matches") or []:
-                if not isinstance(m, dict):
-                    continue
-                won = m.get("a_idx") if m.get("winner") == "A" else m.get("b_idx") if m.get("winner") == "B" else None
-                if winner is not None and won == winner:
-                    self._claim(node, "ideate_tournament", "idea_compared", m.get("reason"),
-                                decision=chosen.get("title"), margin=m.get("margin"))
-            if critique:
-                self._claim(node, "ideate_reflect", "idea_reconsidered",
-                            critique.get("refined_rationale") or critique.get("strongest_objection"),
-                            decision=(f"switched to {critique['swap_to']}" if critique.get("swap_to")
-                                      else "kept the first choice"))
-        elif node == "select_skills":
+        if node == "select_skills":
             record = out.get("skill_selection") if isinstance(out.get("skill_selection"), dict) else {}
             forced = set(record.get("forced") or [])  # required by the config: the engine's decision, not the model's
             for name, why in (record.get("reasons") or {}).items():
@@ -1720,15 +1646,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             elif summary and not summary.startswith("(") and not give_up:
                 self._claim(node, "execute_reflect", "repair", summary,
                             decision=f"repaired the script (attempt {attempt})")
-        elif node == "clarify":
-            questions = out.get("clarify_questions") if isinstance(out.get("clarify_questions"), dict) else {}
-            answers = out.get("clarify_answers") if isinstance(out.get("clarify_answers"), dict) else {}
-            for slot, q in questions.items():
-                if not isinstance(q, dict) or not isinstance(q.get("reason"), str):
-                    continue
-                answered = answers.get(slot)
-                self._claim(node, "clarify", f"setup/{slot}", q["reason"], decision=str(q.get("default") or ""),
-                            **({"answer_used": str(answered)} if answered not in (None, "") and str(answered) != str(q.get("default")) else {}))
 
     def _progress(self, text: str) -> None:
         """One line for whoever is watching the quest, not debugging it: the CLI console, VS Code's chat, and the web
@@ -1763,6 +1680,198 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         record = _commission.write_return(self.quest_root, reason, problem, evidence, tried, **rest)
         self._audit("returned", return_reason=reason, problem=problem)
         return record
+
+    # ---- one step of the study run on its own (Config.step, core/rerun_from.py ALONE) ---------------------------------
+
+    def _step(self) -> Any:
+        """The one step of the study this quest runs on its own (``Config.step``), or None: the whole study."""
+        return getattr(getattr(self, "config", None), "step", None)
+
+    def _step_started(self) -> dict[str, Any]:
+        """The trace's record of what this step was given (empty before it was staged)."""
+        events = _audit_log.read(self.audit.path) if self.audit.path.is_file() else []
+        return next((e for e in reversed(events) if e.get("kind") == "step_started"), {})
+
+    def _step_stage(self) -> None:
+        """Once, before anything runs: what the step is given, recorded in the trace. ``compute`` first checks the receipt
+        of the design step in ``step.after`` (it ended, for this commission, with the plan.md that folder holds), then
+        copies the plan and its records (``rerun_from.HANDED_ON``)."""
+        step, previous, started = self._step(), {}, self._step_started()
+        if started:  # a resume: it goes on as the step it was started as
+            if started.get("step") != step.name:
+                raise ValueError(f"quest {self.quest_id} ran the {started.get('step')} step, so it cannot go on as the "
+                                 f"{step.name} step; nothing was run")
+            return
+        if any(e.get("kind") == "node_started" for e in _audit_log.read(self.audit.path)):
+            raise ValueError(f"quest {self.quest_id} was started as a whole study, so it cannot go on as the {step.name} "
+                             "step alone; nothing was run")
+        if step.name == "compute":
+            after = Path(step.after)
+            try:
+                raw = (after / _rerun_from.RECEIPT).read_bytes()
+                receipt = json.loads(raw)
+            except (OSError, ValueError):
+                raw, receipt = b"", {}
+            why = ("it has no readable receipt of a design step" if receipt.get("step") != "design"
+                   else f"its design step ended {receipt.get('ended')!r}, not done" if receipt.get("ended") != "done"
+                   else "its design step was run for another commission" if receipt.get("commission_sha256")
+                   != _commission.recorded_sha(self.quest_root)
+                   else untraced if (untraced := _rerun_from.receipt_not_traced(after, raw))
+                   else "its plan.md is not the one its receipt names" if _rerun_from.files_sha(after, ["plan.md"]).get(
+                       "plan.md") != (receipt.get("outputs") or {}).get("plan.md")
+                   else "its receipt names none of the files it hands on" if not isinstance(receipt.get("handed_on"), dict)
+                   else _rerun_from.changed_since(after, receipt["handed_on"]))
+            if why:
+                raise ValueError(f"the compute step runs the design of a finished design step, and {after} cannot give "
+                                 f"one: {why}; nothing was run")
+            _rerun_from.hand_on(after, self.quest_root)
+            previous = {"after": str(after), "previous_receipt_sha256": hashlib.sha256(raw).hexdigest(),
+                        "after_quest": receipt.get("quest_id") or after.name, "design_sha256": receipt.get("design_sha256")}
+        given = _rerun_from.files_sha(self.quest_root, ["inputs", *(_rerun_from.HANDED_ON if step.name == "compute" else [])])
+        self._audit("step_started", step=step.name, inputs=given, **previous)
+
+    def _step_inside(self, next_nodes: Any) -> None:
+        """Refuse to go on when the quest's next node is not one of its step's (``rerun_from.ALONE``)."""
+        step = self._step()
+        outside = [n for n in (next_nodes or ()) if n not in _rerun_from.ALONE[step.name]]
+        if outside:
+            raise ValueError(f"quest {self.quest_id} would go on at {', '.join(outside)}, which is not part of the "
+                             f"{step.name} step, so it cannot go on as that step; nothing was run")
+
+    async def _step_seed(self) -> tuple[dict[str, Any], str] | None:
+        """The state a step that does not start the graph begins from, and the node it is written as. ``compute``: the
+        state the design step ended with (its checkpoint), holding the design its receipt names; a script handed on in
+        code/ (experiment.py) is run as it is, so no code is written."""
+        if self._step().name != "compute":
+            return None
+        started = self._step_started()
+        # The folder is the config's: the trace keeps paths with the home folder written as ~, so its copy is not one.
+        after = Path(self._step().after)
+        if _audit_log.redact_text(str(after)) != started.get("after"):
+            raise ValueError(f"the compute step was started after {started.get('after')}, not after {after}; "
+                             "nothing was run")
+        opened = await self._open_readonly_graph(after / ".fi")
+        values: dict[str, Any] = {}
+        if opened is not None:
+            graph, conn = opened
+            try:
+                values = dict((await graph.aget_state({"configurable": {"thread_id": started["after_quest"]}})).values or {})
+            finally:
+                await conn.close()
+        if not values.get("design") or _attempts._json_sha(values["design"]) != started.get("design_sha256"):
+            raise ValueError(f"the state the design step in {after} ended with does not hold the design its receipt names; "
+                             "nothing was run")
+        values = {k: v for k, v in values.items() if k not in ("quest_root", "model_call_counts", "record_anchor", "stuck")}
+        if self._route_after_design(values) != "implement":  # the design's own route decides, not the files handed on
+            raise ValueError(f"the design in {after} is a study with no simulation, and the compute step runs a "
+                             "simulation only; nothing was run")
+        script = self.quest_root / "code" / "experiment.py"
+        if script.is_file():
+            return {**values, **_FRESH_SCRIPT, "code": script.read_text(encoding="utf-8")}, "implement"
+        return values, "design"
+
+    def _step_finish(self, state: dict[str, Any], paused: bool) -> None:
+        """When the step ends: a route out of it back to an earlier step hands the study back (``needs_earlier_step``,
+        with what that route read), since the caller decides; then the receipt (``rerun_from.RECEIPT``) says how the step
+        ended, what it was given and made, what its checks judged, and the sha256 of the previous step's receipt."""
+        step = self._step()
+        stuck_path = self.quest_root / "needs" / "STUCK.json"
+        last = next((e for e in reversed(_audit_log.read(self.audit.path)) if e.get("kind") == "route_decision"), {})
+        target = getattr(self, "_step_exits", {}).get((last.get("node"), last.get("chosen")))
+        back = _rerun_from.step_back_to(step.name, target) if target and not paused else ""
+        if back and not stuck_path.is_file():
+            why = str((state.get("evidence_assessment") or {}).get("rationale") or "")
+            self._return_to_qc("needs_earlier_step", f"needs an earlier step: {back} (FI's {last['node']} step would send "
+                               f"the study back to it{': ' + why if why else ''})",
+                               {"step": back, "from": last["node"], "route": last["chosen"], "facts": last.get("facts") or {}},
+                               [f"the {step.name} step, up to its {last['node']} step"], step=back)
+        if step.name == "design" and not paused:
+            self._judge_the_search_the_design_hands_on(state, stuck_path)
+        try:
+            stuck = json.loads(stuck_path.read_text(encoding="utf-8")) if stuck_path.is_file() else {}
+        except (OSError, ValueError):
+            stuck = {"kind": "unreadable"}
+        ended = "paused" if paused else "returned" if stuck.get("return_reason") else "stopped" if stuck else "done"
+        why = str(stuck.get("problem") or stuck.get("say") or "") if ended == "stopped" else ""
+        if ended == "done" and step.name == "compute" and not state.get("result_json"):
+            # A compute step is done only with a result: one whose script gave none stopped, and says why.
+            rc, gave_up = (state.get("exec_result") or {}).get("returncode"), str(state.get("exec_give_up_reason") or "")
+            ended, why = "stopped", ("the run gave no result: " + (
+                f"the script still failed after its repairs (exit code {rc})" if rc not in (0, None)
+                else f"the script printed no result (exit code {rc})") + (f"; {gave_up.strip()[:300]}" if gave_up.strip() else ""))
+        started, design = self._step_started(), state.get("design")
+        self._seed_call_counts(state)
+        checks = {name: _rerun_from.judged(self.quest_root, rel, getattr(self.config.engine, key, None) if key else None)
+                  for name, (rel, key) in _rerun_from.STEP_CHECKS[step.name].items()}
+        if "known_values" in checks and not self._commission_data().get("known_values"):
+            checks["known_values"] = {"judged": "not_applicable", "why": "the commission gives no known values"}
+        record = {
+            "step": step.name, "quest_id": self.quest_id, "ended": ended,
+            **({"return_reason": stuck["return_reason"], "problem": stuck.get("problem")} if ended == "returned" else {}),
+            **({"stopped_because": why} if ended == "stopped" else {}),
+            "previous_receipt_sha256": started.get("previous_receipt_sha256"), "after": started.get("after"),
+            "commission_sha256": _commission.recorded_sha(self.quest_root),
+            # What it was given: the files handed on as they were at its start, and inputs/ as it is now (a person can
+            # add to it during a pause).
+            "inputs": {**{k: v for k, v in (started.get("inputs") or {}).items() if not k.startswith("inputs/")},
+                       **_rerun_from.files_sha(self.quest_root, ["inputs"])},
+            "outputs": _rerun_from.files_sha(self.quest_root, _rerun_from.STEP_OUTPUTS[step.name]),
+            "design_sha256": _attempts._json_sha(design) if design else None,
+            # The model calls this step made (a caller adds the steps up against the commission's limit).
+            "model_calls": sum(int(n or 0) for n in (self.__dict__.get("_model_call_counts") or {}).values()),
+            # What the compute step may take from this folder, as it is now (it refuses a folder changed since).
+            **({"handed_on": _rerun_from.files_sha(self.quest_root, _rerun_from.BOUND)} if step.name == "design" else {}),
+            # What the run measured (its RESULT_JSON, FI's own record of it): the numbers are in no other file.
+            **({"result": state.get("result_json") or None} if step.name == "compute" else {}), "checks": checks,
+        }
+        text = json.dumps(record, indent=1)
+        (self.quest_root / _rerun_from.RECEIPT).parent.mkdir(parents=True, exist_ok=True)
+        (self.quest_root / _rerun_from.RECEIPT).write_bytes(text.encode("utf-8"))  # the bytes its hash names
+        self._audit("step_receipt", step=step.name, ended=ended, sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self._log.info("[step] the %s step %s; its receipt is %s", step.name, ended, _rerun_from.RECEIPT)
+
+    def _judge_the_search_the_design_hands_on(self, state: dict[str, Any], stuck_path: Path) -> None:
+        """The design step's check ``search_ready``: a plan that is a search for the best design must hand on the search FI
+        can run. A design step that ends with a plan that lacks it ends ``stopped`` with the plain reason (the stop the code
+        and run stages make, ``needs/STUCK.json``), never ``done``, for the compute step would only find the same."""
+        try:
+            judged = self._search_ready(state, state.get("design"))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 -- the check never stops a step that would otherwise end
+            judged = {"status": "unreadable", "detail": f"{type(exc).__name__}: {exc}"}
+            self._log.warning("[step] the check that the plan hands on a search FI can run could not be made (%r)", exc)
+        try:
+            (self.fi_dir / "search_ready.json").write_text(json.dumps(judged, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[step] could not write the record of the search check (%r)", exc)
+        if judged.get("status") in ("ready", "not_applicable"):
+            self._remove_own_search_stop(stuck_path)  # an earlier stop of this check, for a plan that is complete now
+            return
+        if judged.get("status") != "not_ready":
+            return  # the check could not be made: an earlier stop of its own stays, none is added
+        if stuck_path.is_file():
+            return
+        problem = str(judged["detail"])
+        record = {"at": time.time(), "kind": "no_findings", "source": "search_ready", "problem": problem,
+                  "tried": judged.get("tried") or [problem],
+                  "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
+                  "why_repairs_ended": "the plan's model could not write a search FI can run"}
+        stuck_path.parent.mkdir(parents=True, exist_ok=True)
+        stuck_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        self._log.warning("[step] the design step ends stopped: %s", problem)
+
+    def _remove_own_search_stop(self, stuck_path: Path) -> None:
+        """Remove ``needs/STUCK.json`` only when the design step's search check wrote it (``source: search_ready``); a stop
+        any other step wrote is never touched."""
+        try:
+            record = json.loads(stuck_path.read_text(encoding="utf-8")) if stuck_path.is_file() else None
+        except (OSError, ValueError):
+            return
+        if isinstance(record, dict) and record.get("source") == "search_ready":
+            try:
+                stuck_path.unlink()
+                self._log.info("[step] the earlier stop of the search check is removed: the plan's search is ready now")
+            except OSError as exc:
+                self._log.warning("[step] could not remove the earlier stop of the search check (%r)", exc)
 
     def _sign_in_message(self, exc: BaseException, requested_model: str | None = None) -> str:
         """The plain sign-in message for a call that a provider refused (which provider and model, what to run)."""
@@ -1970,7 +2079,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         return [_rerun_from.step_info(step, reached=step in reached) for step in _rerun_from.STEPS]
 
     async def rerun_no_simulation(self) -> bool:
-        """Whether this quest takes the no-simulation path: what the clarify node resolved into the checkpoint, or what
+        """Whether this quest takes the no-simulation path: what the first node resolved into the checkpoint, or what
         the config says (a survey or a local-data analysis has no experiment either). No model call, nothing written."""
         cfg = self.config
         if cfg.engine.no_simulation or cfg.engine.survey_mode or cfg.engine.analyze_local_first:
@@ -2031,10 +2140,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         finally:
             await conn.close()
 
-    async def _open_readonly_graph(self) -> tuple[Any, Any] | None:
+    async def _open_readonly_graph(self, fi_dir: Path | None = None) -> tuple[Any, Any] | None:
         import aiosqlite
 
-        path = self.fi_dir / "state.sqlite"
+        path = (fi_dir or self.fi_dir) / "state.sqlite"
         if not path.is_file():
             return None
         # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
@@ -2067,11 +2176,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
         g: StateGraph[QuestState] = StateGraph(QuestState)
+        if getattr(self.config, "step", None) is not None:  # one step alone (core/rerun_from.py ALONE): it ends where its nodes end
+            g = _StepGraph(QuestState)
+            g.keep, g.exits = frozenset(_rerun_from.ALONE[self.config.step.name]), {}
+            self._step_exits = g.exits
         g.add_node("clarify", self._audited("clarify", self._node_clarify_then_phased))
-        g.add_node("ideate", self._audited("ideate", self._node_ideate))
         g.add_node("literature", self._audited("literature", self._node_literature))
         g.add_node("pause_after_literature", self._audited("pause_after_literature", self._node_pause_after_literature))
-        g.add_node("scope", self._audited("scope", self._node_scope))
         g.add_node("select_skills", self._audited("select_skills", self._node_select_skills))
         g.add_node("plan", self._audited("plan", self._node_plan))
         g.add_node("design", self._audited("design", self._node_design))
@@ -2096,8 +2207,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("cross_check", self._audited("cross_check", self._node_cross_check))
         # evidence_gate sits on the cross_check → write happy path: it
         # weighs the assembled evidence and either proceeds to write or
-        # sends the quest back for ONE bounded literature broaden. A
-        # logged passthrough when engine.evidence_gate is off.
+        # sends it back to the design, the code or the run when FI's own record says so.
         g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
         g.add_node("stuck_no_findings", self._audited("stuck_no_findings", self._node_stuck_no_findings))
         g.add_edge("stuck_no_findings", END)
@@ -2107,11 +2217,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
         g.add_node("review", self._audited("review", self._node_review))
         g.add_node("human_feedback", self._audited("human_feedback", self._node_human_feedback))
-        # no-simulation mode: design → auto_collect_data → wait_for_data
-        # → (pause + resume) → data_load → analyze. All three new nodes
-        # are conditional and only fire when
-        # ``state.no_simulation_resolved`` is True.
-        g.add_node("auto_collect_data", self._audited("auto_collect_data", self._node_auto_collect_data))
+        # no-simulation mode: design → wait_for_data (the person's own data in data/; a pause + resume when it is not
+        # there yet) → data_load → analyze. These nodes only run when ``state.no_simulation_resolved`` is True.
         g.add_node("wait_for_data", self._audited("wait_for_data", self._node_wait_for_data))
         g.add_node("data_load", self._audited("data_load", self._node_data_load))
         # no-simulation mode only: turn the collected web/data content into
@@ -2121,24 +2228,19 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_node("web_figures", self._audited("web_figures", self._node_web_figures))
 
         g.add_edge(START, "clarify")
-        g.add_edge("clarify", "ideate")
-        g.add_edge("ideate", "literature")
-        # Selection sits between literature and design so it sees the
-        # chosen direction and the retrieved sources — the direction is
-        # what actually names the instrument a quest needs.
+        g.add_edge("clarify", "literature")
+        # Selection sits between literature and design so it sees the retrieved sources.
         # ``pause_after_literature`` is a passthrough unless pauses.supply asks
         # for a stop there: the search is saved, and a resume starts here
         # rather than searching again.
         g.add_edge("literature", "pause_after_literature")
-        g.add_edge("pause_after_literature", "scope")
-        g.add_edge("scope", "select_skills")
+        g.add_edge("pause_after_literature", "select_skills")
         g.add_edge("select_skills", "plan")
         # A study handed back at the plan (core/known_values.py) ends there. The edge writes the same channel as the plain
         # edge it replaced (``branch:to:design``), so a checkpoint saved between plan and design resumes into design.
         g.add_conditional_edges("plan", self._audited_route("plan", self._route_after_plan), {"design": "design", "returned": END})
-        # design → implement (normal sim path) OR auto_collect_data
-        # (no-simulation, agent attempts auto-collect via Axon first
-        # then wait_for_data handles the pause-if-still-empty case).
+        # design → implement (normal sim path) OR wait_for_data
+        # (no-simulation: the person's own data in data/, asked for when it is not there yet).
         g.add_conditional_edges(
             "design",
             self._audited_route("design", self._route_after_design),
@@ -2152,7 +2254,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 # bypasses the outline and falls into the body's
                 # legacy single-shot prompt.
                 "implement": "implement_outline",
-                "auto_collect_data": "auto_collect_data",
+                "wait_for_data": "wait_for_data",
                 # survey mode: no experiment AND no dataset — jump straight
                 # to web_figures (illustrative images) → analyze, skipping
                 # the whole data-collection chain.
@@ -2174,15 +2276,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             self._audited_route("improve", self._route_after_improve),
             {"rerun": "execute", "proceed": "analyze"},
         )
-        # auto_collect_data: best-effort Axon retrieval that
-        # writes hits into <quest_root>/data/auto_collected/<idx>_<slug>.md
-        # so wait_for_data's rglob walk picks them up. Always proceeds —
-        # if Axon is disabled, returns zero docs, or the feature flag
-        # is off, the node is a logged passthrough.
-        g.add_edge("auto_collect_data", "wait_for_data")
         # wait_for_data uses LangGraph's ``interrupt()`` to pause when
-        # the user hasn't dropped any files yet AND auto_collect_data
-        # didn't land any either. On resume (with files present), the
+        # the user hasn't dropped any files yet. On resume (with files present), the
         # node returns and we proceed to data_load.
         g.add_edge("wait_for_data", "data_load")
         # data_load → web_plots → analyze. web_plots is a no-op in the
@@ -2196,16 +2291,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             "cross_check",
             self._audited_route("cross_check", self._route_after_cross_check),
             {
-                # The happy-path "write" label now lands on evidence_gate,
-                # which makes the real write-vs-broaden call.
+                # The happy-path "write" label lands on evidence_gate, which makes the real call.
                 "write": "evidence_gate",
                 "redesign": "design",
-                "broaden_lit": "literature",
             },
         )
-        # evidence_gate → write (sufficient / insufficient-but-write) OR
-        # back to literature for ONE bounded broaden pass.
-        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
+        # evidence_gate → write (sufficient / insufficient-but-write), or back to the design, the code or the run.
+        after_gate = {"write": "write", "redesign": "design", "stuck": "stuck_no_findings",
                       "repair_crash": "execute", "rewrite_code": "implement"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
@@ -2224,7 +2316,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         g.add_conditional_edges(
             "write",
             self._audited_route("write", self._route_after_write),
-            {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "auto_collect_data",
+            {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "wait_for_data",
              "replot": "replot_layout"},
         )
         g.add_conditional_edges(
@@ -2275,14 +2367,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     def _route_after_design(self, state: QuestState) -> str:
         """When ``no_simulation_resolved`` is set, skip the
         implement → execute → execute_reflect chain entirely. Instead
-        route to ``auto_collect_data``, which best-effort-pulls
-        relevant docs from Axon into ``<quest_root>/data/auto_collected/``,
-        then hands off to ``wait_for_data`` → ``data_load`` → ``analyze``.
+        route to ``wait_for_data`` (the person's own data in ``data/``),
+        then ``data_load`` → ``analyze``.
 
-        ``no_simulation_resolved`` is set by the clarify node from
-        either the ``engine.no_simulation`` YAML flag (wins) or the
-        ``empirical_vs_theoretical == 'empirical'`` clarify answer.
-        See ``_resolve_no_simulation_from_clarify``.
+        ``no_simulation_resolved`` is set by the first node (``clarify``) from the commission's ``method``.
 
         Note: this routing decision is made AFTER design runs, so the
         no-simulation flow still benefits from the LLM's experimental
@@ -2296,7 +2384,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         """
         # Survey mode is the strongest form of no-simulation: no experiment
         # AND no dataset. Skip the data-collection chain entirely
-        # (auto_collect_data → wait_for_data → data_load → web_plots) and go
+        # (wait_for_data → data_load → web_plots) and go
         # straight to web_figures → analyze, so the paper synthesises the
         # literature directly. web_figures still runs (it is guarded on
         # no_simulation_resolved, which survey implies) and sources its
@@ -2308,7 +2396,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._warn_route_matrix_mismatch(
             state, "no_simulation" if no_sim else "simulation")
         if no_sim:
-            return "auto_collect_data"
+            return "wait_for_data"
         return "implement"
 
     def _warn_route_matrix_mismatch(
@@ -2320,10 +2408,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         authoritative — routing is NOT overridden here; this only makes
         the divergence visible in run.log.
 
-        Distinct from ``_log_topic_shape_mismatch`` (which fires earlier,
-        at clarify time, and only for non-experimental shape + SIMULATE):
-        this is bidirectional and keyed on the richer
-        ``ResearchProtocol.topic_type``, so it also catches a future
+        Bidirectional and keyed on
+        ``ResearchProtocol.topic_type``, so it also catches an
         ``engineering`` topic that resolved to NO_SIMULATION. Pure + no
         LLM call; fail-open (never blocks routing on its own error)."""
         try:
@@ -2336,8 +2422,8 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._log.warning(
             "[route] topic_type=%r expects the %s path but the quest "
             "resolved to the %s path. Routing follows the resolved "
-            "no_simulation flag (config/clarify wins); set "
-            "``simulatability`` in clarify_overrides to align. Declared "
+            "no_simulation flag (the commission's ``method`` sets it); change "
+            "``method`` in the commission to align. Declared "
             "source policy for this type: %s.",
             protocol.topic_type, expected, actual_path, protocol.source_policy,
         )
@@ -2430,56 +2516,49 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     def _route_after_cross_check(self, state: QuestState) -> str:
         """Route based on analyze's ``next_step`` field.
 
-        Three outcomes:
+        Two outcomes:
 
-        * ``next_step == "broaden_lit"`` → ``broaden_lit`` (re-enter
-          ``literature`` so the next pass can fetch fresh evidence;
-          design then re-runs with the accumulated literature block).
-          Until this routing existed, ``broaden_lit`` collapsed onto
-          ``redesign`` and the design node re-ran with the SAME
-          literature it already had — defeating the signal.
         * ``next_step == "re_experiment"`` → ``redesign`` (re-enter
           ``design`` with the same literature; only the experimental
           plan changes).
         * Anything else (or budget exhausted, or rerouting disabled
           via ``engine.enable_analyze_reroute: false``) → ``write``.
 
-        Both re-entry branches share the same ``engine.max_iterations``
-        budget so the whole quest stays bounded.
+        The re-entry shares the ``engine.max_iterations`` budget with the review loop, so the whole quest stays bounded.
 
         ``_node_cross_check`` returns ``{"cross_check": []}`` early only when ``cross_check_per_finding_k <= 0`` (the draft
         profile skips this step); that return also carries ``cross_check_route: "write"``. Every other pass bumps the
-        iteration itself on a route that is not ``write``, so a ``broaden_lit`` loop is bounded by
+        iteration itself on a route that is not ``write``, so a redesign loop is bounded by
         ``engine.max_iterations`` whatever the number of results looked up (a run with none routes by ``next_step``).
 
         The cross_check node decides the route (``cross_check_route``) before it spends a round, and this router reads
         it, as the evidence gate's router does: a router that decided again after the node raised ``iteration`` saw the
         last round as already spent and wrote instead. Without the field (a state the node did not make), the route is
-        decided here from the state as it is.
+        decided here from the state as it is. A checkpoint of an earlier FI whose cross_check chose to search the
+        literature again writes instead: FI no longer goes back to the literature.
         """
         route = state.get("cross_check_route")
-        if route in ("write", "broaden_lit", "redesign"):
+        if route == "broaden_lit":
+            return "write"
+        if route in ("write", "redesign"):
             return route
         if not state.get("cross_check"):
             return "write"  # a checkpoint the new node did not write: this router bumps no round, so it never loops
         return self._cross_check_route(state)
 
     def _cross_check_route(self, state: QuestState) -> str:
-        """``write``, ``broaden_lit`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
+        """``write`` or ``redesign`` from the analysis's ``next_step``, FI's precision record, the
         confirm stage of ``engine.phased`` and the rounds left (``iteration`` before this round is spent)."""
         if not self.config.engine.enable_analyze_reroute:
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
-        if next_step in ("broaden_lit", "re_experiment") and self._phased_confirming():
-            self._log.info("[phased] confirm stage: the frozen design is run once, so the analysis's request to %s is "
-                           "not followed; the confirm result is written up as it is",
-                           "look at the literature again" if next_step == "broaden_lit" else "redesign")
+        if next_step == "re_experiment" and self._phased_confirming():
+            self._log.info("[phased] confirm stage: the frozen design is run once, so the analysis's request to "
+                           "redesign is not followed; the confirm result is written up as it is")
             return "write"
         if state.get("iteration", 0) >= self.config.engine.max_iterations:
             return "write"
-        if next_step == "broaden_lit":
-            return "broaden_lit"
         if next_step == "re_experiment":
             missed = self._precision_missed(state)
             if missed:
@@ -2578,11 +2657,13 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
                 "settings and what is measured; change the number of trials so each target is reached.")
 
     def _route_after_evidence_gate(self, state: QuestState) -> str:
-        """The evidence_gate node already decided write vs broaden (it
-        owns the bounded-broaden bookkeeping); the router just reads it.
-        Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
-        exploration goes to the confirm run first (``_phased_route``)."""
+        """The evidence_gate node already decided the route; the router just reads it.
+        Fails open to ``write`` when the gate was a passthrough, and for a checkpoint of an earlier FI whose gate chose
+        to search the literature again (FI no longer goes back to the literature). Under ``engine.phased`` a write at the
+        end of exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
+        if route == "broaden_lit":
+            route = "write"
         if route in ("stuck", "repair_crash", "rewrite_code"):
             return route  # no findings to write up, a crash to repair first, code to write again: the same in every mode
         if _phased.enabled(self.config):
@@ -3283,11 +3364,6 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     #: A reply up to this long is shown back with the request for a re-answer, so the model can restate what it said; a
     #: longer one (a real Haiku audit reply was 67,963 characters) is not repeated, and the request is answered afresh.
     _REANSWER_ECHO_CHARS = 12000
-
-    # The setup questions the clarify node put to the person, kept across its pause (see _node_clarify_questions).
-    # Not the web form's ``clarify_questions.json``: that one is cleared as soon as an answer is taken, before the
-    # node runs again, and its presence means "a form is waiting".
-    _CLARIFY_ASKED = "clarify_asked.json"
 
     _RUN_DATA_SUFFIXES = frozenset({
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",

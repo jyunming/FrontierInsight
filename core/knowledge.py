@@ -2,8 +2,8 @@
 
 Two responsibilities:
 
-1. **Retrieval** (`Knowledge.asearch`) for the engine's `ideate` and
-   `literature` nodes. Three layers, in order:
+1. **Retrieval** (`Knowledge.asearch`) for the engine's `literature`
+   node. Three layers, in order:
      a. Pinned `local_papers` — files the user dropped into the config;
         always at the head of the result.
      b. Axon — the FI long-term, curated store.
@@ -483,39 +483,7 @@ def _openalex_work_doc(w: dict, **extra: Any) -> RetrievedDoc:
     )
 
 
-# Foundational works: the original method papers and standard textbooks a
-# keyword search does not reach. OpenAlex matches every word of a search, so on
-# the validation quest none of its three facet queries returned Verlet (1967),
-# Hairer, Lubich & Wanner, or Butcher in the first 200 hits, and sorting by
-# citations only pulled in famous off-topic work. A lookup by title finds each
-# at rank 1, and the works several retrieved papers cite include the textbooks.
-# Books count here whatever the quest's work scope.
-_FOUNDATIONAL_TYPES = ("article", "review", "preprint", "conference-paper", "book", "book-chapter", "dissertation")
-_OPENALEX_WORK_ID_RE = re.compile(r"openalex\.org/(W\d+)", re.IGNORECASE)
-FOUNDATIONAL_SUGGESTED = "suggested as a foundational work"
-# How many suggested works one literature pass looks up, one OpenAlex request
-# each. The suggestion prompt asks for this many and any beyond it are ignored.
-FOUNDATIONAL_MAX_SUGGESTED = 8
-# Between the lookups' requests, which go one at a time.
-_OPENALEX_GAP_S = 1.0
-# A suggestion whose title matched nothing is looked up once more, by its author and
-# year. The model usually has both right and the title wrong: for one topic it named
-# Whittle (1955) under four different invented titles, and OpenAlex holds the real one
-# ("The outcome of a stochastic epidemic -- a note on Bailey's paper") as the first
-# result for that surname and year. The same lookup found Gillespie (1977) and Kermack
-# (1927) when the model paraphrased their titles.
-FOUNDATIONAL_BY_AUTHOR = (
-    "suggested as a foundational work; found by author and year, the suggested title did not match"
-)
-# Years either side of the suggested one. The title lookup allows two; a wrong year is
-# the model's other habit, and a wider window finds that author's neighbouring papers.
-_AUTHOR_YEAR_WINDOW = 1
-# Works fetched per suggestion, most cited first. A common surname (Bernstein) puts
-# famous work from other fields ahead of the one wanted, so the page is deep enough
-# to reach past it; the word check below thins it and the literature screen decides.
-_AUTHOR_YEAR_PER_PAGE = 25
-# Words that say nothing about a title's subject, so sharing one is not evidence the
-# record is the work the model meant.
+# Words that say nothing about a title's subject, so sharing one is not evidence two texts are about the same thing.
 _TITLE_STOP_WORDS = frozenset(
     "a an the of in on for and or to with without its their from by at as is are be not this that these those "
     "after before between into over under about using use via toward towards new some general introduction "
@@ -534,173 +502,6 @@ def _content_stems(title: str) -> set[str]:
     title comes in they are the articles, conjunctions and prepositions ("der",
     "und", "les"), which the English stop list cannot name."""
     return {w[:6] for w in _title_words(title) if len(w) >= 4 and w not in _TITLE_STOP_WORDS}
-
-
-def foundational_work_text(work: dict[str, Any]) -> str:
-    """A work the model suggested as ``title (year, authors)``, on one line: how the
-    run log names it, and what a record found for it by author and year remembers of
-    it. The year and the authors are part of it because two suggestions can share a
-    title (Whittle's 1955 note and Bailey's 1962 book carry the same one)."""
-    title = " ".join(str(work.get("title") or "").split())
-    who = work.get("authors")
-    if isinstance(who, list):
-        who = ", ".join(str(a) for a in who if a)
-    bits = [b for b in (str(work.get("year") or "").strip(), " ".join(str(who or "").split())) if b]
-    return f"{title} ({', '.join(bits)})" if bits else title
-
-
-def _surname_among(surname: str, names: list[str]) -> bool:
-    """Whether ``surname`` is a whole word of one of the names ("Ball" is not in
-    "Ballesteros")."""
-    return any(surname in re.findall(r"[^\W\d_]+", str(n).lower()) for n in names)
-
-
-def _titles_match(suggested: str, found: str) -> bool:
-    """Every word of the shorter title is in the longer one. A title of one or
-    two words must match exactly."""
-    a, b = _title_words(suggested), _title_words(found)
-    if not a or not b:
-        return False
-    short, longer = sorted((a, b), key=len)
-    if len(short) < 3:
-        return short == longer
-    return set(short) <= set(longer)
-
-
-def _first_surname(authors: Any) -> str:
-    first = authors[0] if isinstance(authors, list) and authors else authors
-    first = re.split(r";|,|&|\band\b", str(first or ""))[0]
-    words = re.findall(r"[^\W\d_][^\W\d_'\-]+", first)
-    return words[-1].lower() if words else ""
-
-
-def _openalex_filter_text(text: str) -> str:
-    # Commas separate filters and "|" joins values, so neither may stay in a value.
-    return " ".join(re.sub(r"[,|:]", " ", text).split())
-
-
-def _openalex_title_lookup(
-    work: dict, *, timeout_s: float = 15.0, api_key: str = "",
-) -> RetrievedDoc | None:
-    """The OpenAlex record of a suggested work: a title match whose year is
-    within two of the suggested one or whose authors include the suggested
-    first author. None when OpenAlex has no such record."""
-    title = " ".join(str(work.get("title") or "").split())
-    if len(_title_words(title)) < 2:
-        return None
-    params = {
-        "filter": f"title.search:{_openalex_filter_text(title)},type:{'|'.join(_FOUNDATIONAL_TYPES)}",
-        "sort": "cited_by_count:desc",
-        "per-page": "5",
-    }
-    data = _http_get_json(
-        "https://api.openalex.org/works", params, timeout_s, source="openalex",
-        headers=_openalex_headers(api_key),
-    )
-    try:
-        year: int | None = int(work.get("year"))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        year = None
-    surname = _first_surname(work.get("authors"))
-    for w in (data or {}).get("results") or []:
-        if not _titles_match(title, _clean_openalex_title(w.get("title"))):
-            continue
-        found_year = w.get("publication_year")
-        same_year = year is not None and isinstance(found_year, int) and abs(found_year - year) <= 2
-        same_author = bool(surname) and any(surname in a.lower() for a in _openalex_authors(w))
-        if same_year or same_author:
-            return _openalex_work_doc(w, foundational=FOUNDATIONAL_SUGGESTED)
-    return None
-
-
-def _openalex_author_year_lookup(
-    work: dict, *, timeout_s: float = 15.0, api_key: str = "",
-) -> RetrievedDoc | None:
-    """The record of a suggested work whose title matched nothing, found by its
-    author and year instead: the most cited work by that surname within a year
-    of the suggested one that shares a word of the subject with the suggested
-    title. One request; None when there is no such work, or no author, year or
-    subject word to go on.
-
-    The suggested title is only used to tell the author's papers apart, never to
-    match: the model invents titles for works it knows the author and year of. So
-    the record's own title is what the paper cites, and it need not resemble the
-    suggestion. The result is a candidate, not a finding: a wrong work by the
-    right author (a sequel, a neighbouring paper) can pass the word check, and
-    the literature screen that grades every foundational candidate is what keeps
-    off-topic ones out: tried on six topics, the screen dropped the works from
-    other fields this fetches (surgery, genetics, marketing) and let through the
-    author's neighbouring papers and, once, a wrong paper of the right field."""
-    title = " ".join(str(work.get("title") or "").split())
-    surname = _first_surname(work.get("authors"))
-    try:
-        year = int(work.get("year"))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    stems = _content_stems(title)
-    if not surname or not stems:
-        return None
-    params = {
-        "filter": (
-            f"raw_author_name.search:{_openalex_filter_text(surname)},"
-            f"publication_year:{year - _AUTHOR_YEAR_WINDOW}-{year + _AUTHOR_YEAR_WINDOW},"
-            f"type:{'|'.join(_FOUNDATIONAL_TYPES)}"
-        ),
-        "sort": "cited_by_count:desc",
-        "per-page": str(_AUTHOR_YEAR_PER_PAGE),
-    }
-    data = _http_get_json(
-        "https://api.openalex.org/works", params, timeout_s, source="openalex",
-        headers=_openalex_headers(api_key),
-    )
-    for w in (data or {}).get("results") or []:
-        if not _surname_among(surname, _openalex_authors(w)):
-            continue
-        if stems & _content_stems(_clean_openalex_title(w.get("title"))):
-            return _openalex_work_doc(w, foundational=FOUNDATIONAL_BY_AUTHOR)
-    return None
-
-
-def _openalex_cited_by_retrieved(
-    docs: list[RetrievedDoc], *, min_citing: int = 2, limit: int = 5,
-    timeout_s: float = 15.0, api_key: str = "",
-) -> list[RetrievedDoc]:
-    """The works at least ``min_citing`` of the retrieved OpenAlex records
-    cite, most cited first and not already retrieved. Two requests: the
-    reference lists, then the works."""
-    ids: list[str] = []
-    for doc in docs:
-        m = _OPENALEX_WORK_ID_RE.search(str((doc.metadata or {}).get("url") or ""))
-        if m and m.group(1) not in ids:
-            ids.append(m.group(1))
-    ids = ids[:50]
-    if len(ids) < min_citing:
-        return []
-    url = "https://api.openalex.org/works"
-    data = _http_get_json(url, {
-        "filter": "openalex:" + "|".join(ids), "select": "id,referenced_works", "per-page": "50",
-    }, timeout_s, source="openalex", headers=_openalex_headers(api_key))
-    counts: dict[str, int] = {}
-    for w in (data or {}).get("results") or []:
-        cited = {m.group(1) for m in map(_OPENALEX_WORK_ID_RE.search, map(str, w.get("referenced_works") or [])) if m}
-        for ref in cited - set(ids):
-            counts[ref] = counts.get(ref, 0) + 1
-    top = sorted((ref for ref, n in counts.items() if n >= min_citing), key=lambda ref: -counts[ref])[:limit]
-    if not top:
-        return []
-    time.sleep(_OPENALEX_GAP_S)
-    data = _http_get_json(url, {
-        "filter": "openalex:" + "|".join(top), "per-page": str(len(top)),
-    }, timeout_s, source="openalex", headers=_openalex_headers(api_key))
-    works: dict[str, dict] = {}
-    for w in (data or {}).get("results") or []:
-        m = _OPENALEX_WORK_ID_RE.search(str(w.get("id") or ""))
-        if m and w.get("type") in _FOUNDATIONAL_TYPES:
-            works[m.group(1)] = w
-    return [
-        _openalex_work_doc(works[ref], foundational=f"cited by {counts[ref]} of the retrieved papers")
-        for ref in top if ref in works
-    ]
 
 
 def _openalex_reconstruct_abstract(inverted: dict | None) -> str:
@@ -1210,15 +1011,6 @@ def _free_locations(md: dict | None) -> list[str]:
         if key == "free_url" or _is_free_host_url(u):
             out.append(u)
     return out
-
-
-def has_free_route(md: dict | None) -> bool:
-    """True when a paper marked free can actually be fetched: it has a free address, or an id (arXiv / PMC /
-    bioRxiv DOI) the free-copy lookups resolve. A record marked free with none of these is left for a person."""
-    md = md or {}
-    return bool(
-        _free_locations(md) or md.get("arxiv_id") or md.get("pmcid") or _BIORXIV_DOI_RE.match(str(md.get("doi") or ""))
-    )
 
 
 _SCHOLARLY_META_RE = re.compile(
@@ -3623,7 +3415,6 @@ def _doc_dedup_keys(d: RetrievedDoc) -> list[str]:
     return keys
 
 
-
 def _rank_by_relevance(docs: list[RetrievedDoc], query: str) -> list[RetrievedDoc]:
     """Order pooled candidates by how well they answer the query.
 
@@ -3975,7 +3766,6 @@ def _axon_config_from(spec: Any) -> Any:
 # ---------------------------------------------------------------------------
 # Knowledge facade
 # ---------------------------------------------------------------------------
-
 
 
 #: The kinds a quest's result is written under, by its standing (Knowledge.add_quest_artifacts): spine, paper, summary.
@@ -4444,14 +4234,14 @@ class Knowledge:
           caller's ``top_k`` → otherwise ``self.cfg.external_top_k``.
         The merged result is capped at ``max(k, external_k)`` so a broad
         caller (the literature node) keeps web + Axon + academic breadth
-        while a narrow caller (an ideate seed asking for 3) stays small.
+        while a narrow caller (one asking for 3) stays small.
         Local papers count toward the cap so the user isn't flooded."""
         k = top_k if top_k is not None else self.cfg.top_k
         if external_top_k is not None:
             external_k = external_top_k
         elif top_k is not None:
-            # Caller pinned a per-call cap (e.g. ideate seed wants 3
-            # papers) — honour it for external too. Otherwise the cheap
+            # Caller pinned a per-call cap (e.g. 3 papers) — honour it
+            # for external too. Otherwise the cheap
             # callers would silently trigger a 20-result fetch.
             external_k = top_k
         else:
@@ -4673,98 +4463,6 @@ class Knowledge:
             chat_fn=chat_fn, fallback_sources=fallback,
         )
 
-    async def find_foundational_works(
-        self, suggestions: list[dict], docs: list[RetrievedDoc],
-    ) -> list[RetrievedDoc]:
-        """Foundational works for a literature pass: each suggested work (the
-        first ``FOUNDATIONAL_MAX_SUGGESTED``) looked up by title in OpenAlex,
-        or, when no title matches, by its author and year (kept only when found),
-        then the works the retrieved papers cite most. None already in ``docs``
-        comes back, and a failed lookup only loses its own works.
-
-        A record found by author and year carries ``suggested_works``, the
-        suggestions it answers (:func:`foundational_work_text`), so the run log can
-        say what became of each. When the record is one the search already returned, or one
-        another suggestion found, it is the record that is annotated (the caller
-        never gets a work twice)."""
-        api_key = str(getattr(self.cfg, "openalex_api_key", "") or "")
-
-        def refused() -> int:
-            # OpenAlex answers that were HTTP 429, as this quest has counted them.
-            qid = _sf.current_quest.get()
-            if qid is None:
-                return 0
-            return int((_sf.snapshot(qid)["by_source"].get("openalex") or {}).get("http_429", 0))
-
-        def lookups() -> list[RetrievedDoc]:
-            # One request at a time: fired together, three of five title
-            # lookups came back 429 from OpenAlex's keyless pool.
-            found: list[RetrievedDoc] = []
-            for suggestion in [
-                s for s in suggestions[:FOUNDATIONAL_MAX_SUGGESTED] if isinstance(s, dict)
-            ]:
-                turned_away = refused()
-                try:
-                    doc = _openalex_title_lookup(suggestion, api_key=api_key)
-                except Exception:  # noqa: BLE001 — one lookup, not the rest
-                    doc = None
-                if doc is None and refused() == turned_away:
-                    # Not a refusal (a spent budget would refuse this one too): the title
-                    # matched nothing, so ask for the author's work of that year instead.
-                    time.sleep(_OPENALEX_GAP_S)
-                    try:
-                        doc = _openalex_author_year_lookup(suggestion, api_key=api_key)
-                    except Exception:  # noqa: BLE001
-                        doc = None
-                    if doc is not None:
-                        doc.metadata["suggested_works"] = [foundational_work_text(suggestion)]
-                if doc is not None:
-                    found.append(doc)
-                time.sleep(_OPENALEX_GAP_S)
-            try:
-                found += _openalex_cited_by_retrieved(docs, api_key=api_key)
-            except Exception:  # noqa: BLE001
-                pass
-            return found
-
-        def keys_of(d: RetrievedDoc) -> set[str]:
-            md = d.metadata or {}
-            return {str(v).lower() for v in (md.get("url"), md.get("doi")) if v}
-
-        # Every record the search returned and, as they are kept, every one this pass
-        # returns, by url and doi: where a later find turns out to be one of them.
-        holders: dict[str, RetrievedDoc] = {k: d for d in docs for k in keys_of(d)}
-        seen = set(holders)
-        before = refused()
-        found = await asyncio.to_thread(lookups)
-        # A refused lookup looks exactly like a work OpenAlex does not hold, so
-        # say so: on a real day four quests got 13-15 refusals each and logged
-        # "0 new candidate(s)" with nothing to tell a spent budget from a miss.
-        n_refused = refused() - before
-        if n_refused:
-            _log.warning(
-                "foundational works: OpenAlex refused %d request(s) with HTTP 429, so works it "
-                "holds may be missing. Without a key the daily budget is about 100 searches; "
-                "OPENALEX_API_KEY raises it tenfold (docs/INSTALL.md).",
-                n_refused,
-            )
-        out: list[RetrievedDoc] = []
-        for doc in found:
-            keys = keys_of(doc)
-            if keys & seen:
-                # A work the search already had, or another suggestion found: the record
-                # already there answers this suggestion too, so it takes note of it.
-                held = next((holders[k] for k in keys if k in holders), None)
-                answers = doc.metadata.get("suggested_works")
-                if held is not None and answers:
-                    md = held.metadata
-                    md["suggested_works"] = sorted({*(md.get("suggested_works") or []), *answers})
-                continue
-            seen |= keys
-            holders.update({k: doc for k in keys})
-            out.append(doc)
-        return out
-
     async def fetch_full_text(self, docs: list[RetrievedDoc]) -> list[RetrievedDoc]:
         """Fetch legal full text for the scholarly records in ``docs`` when
         ``try_fetch_full_text`` is on. Web pages already carry their page text
@@ -4875,8 +4573,8 @@ class Knowledge:
         True iff the call succeeded.
 
         Used by the post-quest write-back path (``add_quest_artifacts``)
-        and by every PM-command (``/proposal``, ``/digest``,
-        ``/portfolio``, ``/critique``, ``/summarize``) to land their
+        and by every PM-command (``/digest``,
+        ``/critique``, ``/summarize``) to land their
         respective ``fi_*`` documents. Tolerates a disabled or missing
         Axon brain — returns False silently in those cases.
 
@@ -4906,9 +4604,8 @@ class Knowledge:
         """Stable doc id derived from metadata when possible so
         re-ingesting the same logical doc updates rather than
         duplicates. Order of preference: explicit ``id`` in metadata,
-        ``quest_id`` (post-quest writebacks), ``proposal_id`` (from
-        /proposal), ``critique_id``, ``digest_id``, ``summary_id``,
-        ``portfolio_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
+        ``quest_id`` (post-quest writebacks), ``critique_id``,
+        ``digest_id``, ``summary_id``. Falls back to ``<kind>-<epoch>-<uuid4[:8]>``
         when none are present."""
         md = metadata or {}
         # Stable-key preference list. For per-quest writebacks the
@@ -4922,8 +4619,8 @@ class Knowledge:
         # under one id and the later one overwrites the earlier"
         # failure mode.
         primary_keys = (
-            "id", "quest_id", "proposal_id", "critique_id",
-            "digest_id", "summary_id", "portfolio_id",
+            "id", "quest_id", "critique_id",
+            "digest_id", "summary_id",
         )
         primary: str | None = None
         for key in primary_keys:

@@ -228,7 +228,7 @@ def test_an_unsourced_expected_value_is_a_gap_at_the_independently_validated_lev
 def _cfg(tmp_path: Path, **over: Any) -> Config:
     return Config(
         topic="RK4 convergence on y' = -y", title="rk4", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"), pauses=PausesConfig(plan="off"), **over,
     )

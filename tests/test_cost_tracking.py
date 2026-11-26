@@ -224,7 +224,7 @@ def test_aggregate_cost_rows_sums_per_node_and_model() -> None:
     ``estimated_rows`` so the cost tool can mark the bar accordingly."""
     from core.engine import _aggregate_cost_rows
     rows = [
-        {"node": "ideate", "model": "gpt-4o",
+        {"node": "plan", "model": "gpt-4o",
          "usage": {"prompt_tokens": 100, "completion_tokens": 50,
                    "total_tokens": 150},
          "cost_usd": 0.0008},
@@ -232,7 +232,7 @@ def test_aggregate_cost_rows_sums_per_node_and_model() -> None:
          "usage": {"prompt_tokens": 200, "completion_tokens": 100,
                    "total_tokens": 300, "estimated": True},
          "cost_usd": None},
-        {"node": "ideate", "model": "claude-3-5-sonnet",
+        {"node": "plan", "model": "claude-3-5-sonnet",
          "usage": {"prompt_tokens": 80, "completion_tokens": 40,
                    "total_tokens": 120},
          "cost_usd": 0.0006},
@@ -244,7 +244,7 @@ def test_aggregate_cost_rows_sums_per_node_and_model() -> None:
     assert summary["total_tokens"] == 570
     assert summary["total_cost_usd"] == pytest.approx(0.0014, abs=1e-6)
     assert summary["estimated_rows"] == 1
-    assert summary["by_node"]["ideate"]["requests"] == 2
+    assert summary["by_node"]["plan"]["requests"] == 2
     assert summary["by_node"]["analyze"]["estimated_rows"] == 1
     assert summary["by_model"]["gpt-4o"]["requests"] == 2
 
@@ -254,12 +254,12 @@ def test_aggregate_cost_rows_skips_ensemble_breadcrumbs() -> None:
     log. Counting them again would double-bill the quest."""
     from core.engine import _aggregate_cost_rows
     rows = [
-        {"node": "ideate.ensemble[m1]", "model": "m1",
+        {"node": "plan.ensemble[m1]", "model": "m1",
          "usage": {"prompt_tokens": 50, "completion_tokens": 25,
                    "total_tokens": 75},
          "cost_usd": 0.0001},
         # Breadcrumb shadow row — should be skipped.
-        {"node": "ideate.ensemble[m1]", "model": "m1",
+        {"node": "plan.ensemble[m1]", "model": "m1",
          "ensemble": True, "role": "fanout", "ok": True},
     ]
     summary = _aggregate_cost_rows(rows)
@@ -273,14 +273,14 @@ def test_aggregate_cost_rows_no_pricing_data_surfaces_null_cost() -> None:
     ``0.00`` so the UI can distinguish 'free' from 'unknown'."""
     from core.engine import _aggregate_cost_rows
     rows = [
-        {"node": "ideate", "model": "vscode_extension",
+        {"node": "plan", "model": "vscode_extension",
          "usage": {"prompt_tokens": 100, "completion_tokens": 50,
                    "total_tokens": 150, "estimated": True},
          "cost_usd": None},
     ]
     summary = _aggregate_cost_rows(rows)
     assert summary["total_cost_usd"] is None
-    assert summary["by_node"]["ideate"]["cost_usd"] is None
+    assert summary["by_node"]["plan"]["cost_usd"] is None
 
 
 def _priced(node: str, model: str, cost: float) -> dict:
@@ -298,7 +298,7 @@ def _unpriced(node: str, model: str) -> dict:
 def test_aggregate_cost_rows_all_priced_is_not_partial() -> None:
     from core.engine import _aggregate_cost_rows
     summary = _aggregate_cost_rows([
-        _priced("ideate", "gpt-4o", 0.0008),
+        _priced("plan", "gpt-4o", 0.0008),
         _priced("write", "gpt-4o", 0.0012),
         _priced("write", "llama3.1:8b", 0.0),  # a free local model is priced at zero
     ])
@@ -314,7 +314,7 @@ def test_aggregate_cost_rows_none_priced_is_null_not_partial() -> None:
     every call is counted as unpriced."""
     from core.engine import _aggregate_cost_rows
     summary = _aggregate_cost_rows([
-        _unpriced("ideate", "gpt-5.6-luna"),
+        _unpriced("plan", "gpt-5.6-luna"),
         _unpriced("write", "gpt-5.6-luna"),
         {"node": "speech", "model": "", "usage": None, "cost_usd": None},
     ])
@@ -332,12 +332,12 @@ def test_aggregate_cost_rows_mixed_total_is_a_lower_bound_and_says_so() -> None:
     in total and in each node and model bucket. The token counts stay complete."""
     from core.engine import _aggregate_cost_rows
     rows = [
-        _priced("ideate", "gpt-4o", 0.0008),
+        _priced("plan", "gpt-4o", 0.0008),
         _priced("write", "gpt-4o", 0.0012),
         _unpriced("write", "gpt-5.6-luna"),
         _unpriced("review", "gpt-5.6-luna"),
         # A breadcrumb mirrors a call already in the log: neither a request nor unpriced.
-        {"node": "ideate.ensemble[m1]", "model": "m1", "ensemble": True,
+        {"node": "plan.ensemble[m1]", "model": "m1", "ensemble": True,
          "role": "fanout", "ok": True},
     ]
     summary = _aggregate_cost_rows(rows)
@@ -347,13 +347,13 @@ def test_aggregate_cost_rows_mixed_total_is_a_lower_bound_and_says_so() -> None:
     assert summary["unpriced_requests"] == 2
     assert summary["total_tokens"] == 150 + 150 + 500 + 500  # tokens are complete
     by_node = summary["by_node"]
-    assert by_node["ideate"]["unpriced_requests"] == 0
-    assert by_node["ideate"]["cost_usd"] == pytest.approx(0.0008)
+    assert by_node["plan"]["unpriced_requests"] == 0
+    assert by_node["plan"]["cost_usd"] == pytest.approx(0.0008)
     assert by_node["write"]["unpriced_requests"] == 1
     assert by_node["write"]["cost_usd"] == pytest.approx(0.0012)
     assert by_node["review"]["unpriced_requests"] == 1
     assert by_node["review"]["cost_usd"] == 0.0   # a priced-run node with no priced call
-    assert "ideate.ensemble[m1]" not in by_node
+    assert "plan.ensemble[m1]" not in by_node
     by_model = summary["by_model"]
     assert by_model["gpt-4o"]["unpriced_requests"] == 0
     assert by_model["gpt-5.6-luna"]["unpriced_requests"] == 2
@@ -365,7 +365,7 @@ def test_write_cost_summary_carries_the_partial_flag(tmp_path: Path) -> None:
     from core.engine import write_cost_summary
     (tmp_path / "cost.jsonl").write_text(
         "\n".join(json.dumps(r) for r in [
-            _priced("ideate", "gpt-4o", 0.001),
+            _priced("plan", "gpt-4o", 0.001),
             _unpriced("write", "gpt-5.6-luna"),
         ]) + "\n",
         encoding="utf-8",

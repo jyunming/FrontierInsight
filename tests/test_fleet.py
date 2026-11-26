@@ -40,10 +40,6 @@ print('RESULT_JSON: {"score": 0.5}')
 
 
 _FAKE_RESPONSES = {
-    "Ideation": json.dumps({
-        "ideas": [{"title": "fleet-fake", "summary": "x", "feasibility": "high", "novelty": "low"}],
-        "chosen": {"title": "fleet-fake", "rationale": "only candidate"},
-    }),
     "Experiment Design": json.dumps({
         "hypothesis": "fleet hypothesis",
         "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
@@ -265,7 +261,7 @@ def _split_engine(tmp_path: Path, simulate: str) -> Engine:
     from unittest.mock import AsyncMock
 
     cfg = Config(topic="toy study", title="toy", provider=ProviderConfig(name="openai"),
-                 engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", pilot_run=False),
+                 engine=EngineConfig(max_iterations=1, review_loop=False, pilot_run=False),
                  execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
                  knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"))
     assert cfg.execution.settings_at_once == "auto"

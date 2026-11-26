@@ -16,7 +16,9 @@ model again. In agent mode the code is the agent's (:mod:`core.agent_coder`, the
   the run log, and gets one round to put it back. The loop ends early when a round makes nothing newly pass, or when a
   round that broke a check is followed by another round that is not progress. FI does not undo a round: its checks
   judge the code the last round left. The agent's own account counts for nothing: the code is accepted only when FI's
-  checks pass it, and a stop says which check did not;
+  checks pass it, and a stop says which check did not. A round that changes how the code is laid out (one script or
+  two, the function simulate.py gives) goes back to the run step, which sets up again for it (:data:`LAYOUT_CHANGED`);
+  the round after the freeze is not taken from the :data:`FIX_ROUNDS` (:func:`fixes_before_the_run`);
 * after the freeze the run's own failure gets :data:`AFTER_FREEZE_ROUNDS` agent round
   (:meth:`AgentBuildMixin._reflect_by_agent`), then the stop the chat path has; the improve loop does not run.
 
@@ -70,6 +72,14 @@ _SITE = {
 #: The checks of :func:`core.code_checks.check_code` and the run of the code, in a scientist's words.
 _CHECK_WORDS = {
     "run": "running the code",
+    "before_run": "a check of the code before the run (the code was not run)",
+    "code_layout": "the check that the code folder is laid out as the quest needs (equation labels, package, tests)",
+    "fis_stub": "the check that each function of derive.py a result needs is written, not FI's stub",
+    "unread_compared_setting": "the check that the simulation reads every setting the study compares",
+    "pilot_run": "FI's trial run of the study before it starts",
+    "small_run_crash": "FI's small run of the simulation (it failed)",
+    "small_run_plan": "FI's small run of the simulation compared with the plan",
+    "analysis_gate": "the run of the analysis on the recorded results",
     "two_scripts": "the check that the simulation is in simulate.py, as the function FI calls for each setting",
     "protocol": "the check that the code runs the plan's settings, runs and results as the plan gives them",
     "typed_results": "the check that the results are computed, not typed into the code",
@@ -87,15 +97,75 @@ _CHECK_WORDS = {
 
 
 def check_words(check: str) -> str:
-    """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``),
-    in plain words."""
+    """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``, a
+    check before the run ``before_run:<check>``), in plain words."""
+    if check.startswith(BEFORE_RUN + ":"):
+        return _CHECK_WORDS.get(check.split(":")[1]) or _CHECK_WORDS[BEFORE_RUN]
     return _CHECK_WORDS.get(check) or _SITE.get(check) or check
 
 
 def _from_gate(check: str) -> bool:
-    """A check the gate reports by stopping at it (a refused repair's node, or ``run``): it is never seen to pass, so
-    a later round that gets past it counts as having fixed it."""
-    return check in ("run", "two_scripts") or writes_code(check)
+    """A check the gate reports by stopping at it (a refused repair's node, ``run``, a check before the run that sent the
+    code back): it is never seen to pass, so a later round that gets past it counts as having fixed it."""
+    return check in ("run", "two_scripts") or check.startswith(BEFORE_RUN) or writes_code(check)
+
+
+#: The checks before the run that send the code back (``exec_result["check"]`` of ``Engine._code_review_failed_run``):
+#: ``before_run:<check>``, each its own check; ``before_run`` alone for one that does not name itself.
+BEFORE_RUN = "before_run"
+
+#: What the agent is given of one finding at most; a longer one loses its middle, never its opening sentence or its end.
+FINDING_CHARS = 8000
+
+
+def before_run_check(check: Any, finding: str = "") -> str:
+    """The name a check before the run is judged under: ``before_run:<check>:<what it found>``, the last part a short
+    fingerprint of the finding with its numbers and spacing set aside. One check can find one fault after another (the
+    first of several functions still FI's stub): a round that fixes the one it was sent and meets the next has made
+    progress, and the same finding again has not. ``before_run`` alone for a check that does not name itself."""
+    import hashlib
+
+    if not check:
+        return BEFORE_RUN
+    said = " ".join(without_numbers(str(finding or "")).split())
+    return f"{BEFORE_RUN}:{check}:{hashlib.sha256(said.encode('utf-8')).hexdigest()[:10]}" if said else f"{BEFORE_RUN}:{check}"
+
+
+#: What a stop's record (needs/STUCK.json ``findings``) keeps of all the findings together; the earliest are kept whole.
+RECORD_CHARS = 40000
+
+
+def findings_for_record(found: list[str]) -> list[str]:
+    """The findings a stop's record keeps: each at most :data:`FINDING_CHARS` (its middle cut, :func:`shorten_middle`),
+    the earliest whole while they fit :data:`RECORD_CHARS` together, then one line saying how many were left out."""
+    out: list[str] = []
+    total = 0
+    items = [shorten_middle(f, FINDING_CHARS) for f in found if f.strip()]
+    for i, f in enumerate(items):
+        if total + len(f) > RECORD_CHARS:
+            out.append(f"[{len(items) - i} more finding(s) left out: the record keeps {RECORD_CHARS} characters]")
+            break
+        out.append(f)
+        total += len(f)
+    return out
+
+
+def shorten_middle(text: str, limit: int) -> str:
+    """``text`` as it is when it fits ``limit``, else its opening and its end with what was left out said in the middle:
+    a finding's opening sentence names the check and its end the detail (a traceback's last frame)."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    head = limit // 3
+    tail = limit - head - 60
+    return text[:head] + f"\n[... {len(text) - head - tail} characters left out ...]\n" + text[-tail:]
+
+
+def one_line(finding: str, limit: int = 300) -> str:
+    """A finding on one line, its words kept: what a stop and its list of what was tried say. A finding's first line can be
+    a heading alone ("FI ran ... and compared it with the plan:"), so the whole finding is joined, never only that line."""
+    text = " ".join(str(finding or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
 def compare_rounds(earlier: list[tuple[int, dict[str, bool | None]]], now: dict[str, bool | None]) -> dict[str, Any]:
@@ -236,6 +306,33 @@ def _record_round(quest_root: Path, n: int) -> dict[str, Any]:
 
 def after_freeze_rounds(quest_root: Path) -> int:
     return sum(1 for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict) and r.get("after_freeze"))
+
+
+def fixes_before_the_run(quest_root: Path) -> int:
+    """The coding agent's fix rounds for the checks before the run: every fix round of the record but the round(s) given
+    to a failure of the study's own run after the freeze (:data:`AFTER_FREEZE_ROUNDS`), which are not taken from these."""
+    return sum(1 for r in _record(quest_root).get("rounds") or [] if isinstance(r, dict) and r.get("kind") == "fix"
+               and not r.get("after_freeze"))
+
+
+class _LayoutChanged:
+    """The mark :meth:`AgentBuildMixin._agent_build` returns in place of a stop when a round changed how the code is
+    laid out: the run step sets up again for the code that is there (``Engine._node_execute_steps``)."""
+
+    def __repr__(self) -> str:
+        return "LAYOUT_CHANGED"
+
+
+LAYOUT_CHANGED: Any = _LayoutChanged()
+
+
+def layout_words(layout: tuple[bool, frozenset[str]]) -> str:
+    """A layout of the code (``Engine._script_layout``) in plain words, for run.log."""
+    split, entries = layout
+    if not split:
+        return "one script"
+    return ("simulate.py and experiment.py, simulate.py giving " + " and ".join(f"`{e}`" for e in sorted(entries))
+            if entries else "simulate.py and experiment.py, simulate.py running its own loop")
 
 
 class AgentBuildMixin:
@@ -459,8 +556,18 @@ class AgentBuildMixin:
             result = stop.get("exec_result") or {}
             if stop.get("exec_give_up_reason"):
                 return (stop, None, False), [], {}   # a stop that is not the code's (a plan's fault, FI's limit)
-            checks["run"] = False
-            found.append("Running the code failed:\n" + str(result.get("stderr_tail") or "")[-2000:])
+            text = str(result.get("stderr_tail") or "").strip()
+            if result.get("directive"):
+                # A check before the run sent the code back with what it found (FI's small run, the layout of the code
+                # folder, a stub of FI's): the code did not run, and the finding is the check's own text, whole. Each
+                # check is its own (``before_run:<check>``), so a round that fixes one and meets the next is progress.
+                checks[before_run_check(result.get("check"), text)] = False
+                found.append(shorten_middle(text, FINDING_CHARS)
+                             or "A check of the code before the run sent it back without saying why.")
+            else:
+                checks["run"] = False
+                found.append(f"Running the code failed (exit code {result.get('returncode', '?')}): "
+                             + (shorten_middle(text, FINDING_CHARS) or "it printed no error message."))
         finally:
             self._log.removeHandler(lines)  # type: ignore[attr-defined]
         self._shown_findings(state, found, checks)
@@ -491,14 +598,22 @@ class AgentBuildMixin:
             self._log.warning("[implement] FI's own finding, not the coding agent's to fix: %s", line)  # type: ignore[attr-defined]
         return None, found, checks
 
-    async def _agent_build(self, state: Any, py: Any, exec_env: Any, seed_path: Path) -> tuple[Any, str | None, bool]:
+    async def _agent_build(self, state: Any, py: Any, exec_env: Any, seed_path: Path, *,
+                           layout: tuple[bool, frozenset[str]] | None = None) -> tuple[Any, str | None, bool]:
         """The checks before the run in agent mode, in place of ``Engine._gate_pass`` and with its result: the agent fixes
         what FI's checks find, round by round, until they pass, the rounds or the time run out, or the rounds stop making
         progress (:func:`compare_rounds`); then the honest stop names what still fails. A round is never undone: FI's
-        checks judge the code the last round left."""
+        checks judge the code the last round left.
+
+        ``layout`` is how the code was laid out when the run step set up (``Engine._script_layout``: one script or two, the
+        function simulate.py gives). When a round changes it, :data:`LAYOUT_CHANGED` is returned before the checks judge
+        the new code: the runner, the script the checks run and whether FI runs the trials were all set up for the old
+        layout, and the checks made on them judged code FI would not run that way."""
         coder = await self._code_agent()
         self._repairs_go_to = "agent"
         while True:
+            if layout is not None and self._script_layout(state) != layout:  # type: ignore[attr-defined]
+                return LAYOUT_CHANGED, None, False
             passed, found, checks = await self._agent_judge(state, py, exec_env, seed_path)
             n = coder.rounds_made()
             earlier = [r for r in judged_rounds(self.quest_root) if r[0] < n]  # type: ignore[attr-defined]
@@ -522,8 +637,11 @@ class AgentBuildMixin:
                 why = "its last round made no check of FI's pass that failed before"
             elif earlier and after_break and not progress:
                 why = "its round to put back what it broke was not progress either"
-            elif coder.fixes_left() <= AFTER_FREEZE_ROUNDS:
-                why = f"its {FIX_ROUNDS} round(s) of fixes before the run are used"
+            elif coder.fixes_left() <= 0:
+                why = f"all {coder.total_rounds} of its rounds are used (round {n} of {coder.total_rounds})"
+            elif fixes_before_the_run(self.quest_root) >= FIX_ROUNDS:  # type: ignore[attr-defined]
+                why = (f"its {FIX_ROUNDS} round(s) of fixes before the run are used (round {n} of {coder.total_rounds}; "
+                       f"the last {AFTER_FREEZE_ROUNDS} is kept for a failure of the study's own run)")
             elif seconds_used(self.quest_root) >= TOTAL_S:  # type: ignore[attr-defined]
                 why = f"its {TOTAL_S // 60} minutes for the code are used"
             if why:
@@ -531,13 +649,16 @@ class AgentBuildMixin:
                 if still:
                     why += " (passed in an earlier round and fails now: " + "; ".join(still) + ")"
                 text = ("FI's checks still find faults in the coding agent's code, and " + why + ": "
-                        + "; ".join(f.splitlines()[0] for f in found if f.strip())[:1500])
+                        + "; ".join(one_line(f) for f in found if f.strip()))
                 if getattr(self, "_fi_own_findings", None):
                     text += (" FI's own findings, which the agent may not change and which did not count against it: "
                              + "; ".join(self._fi_own_findings)[:800])  # type: ignore[attr-defined]
-                return self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
+                stop = self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
                     "the coding agent wrote the code and fixed what FI's checks found, round by round",
-                    *[f.splitlines()[0][:300] for f in found[:3] if f.strip()]]), None, False
+                    *[one_line(f) for f in found[:3] if f.strip()]])
+                # every finding whole, for needs/STUCK.json (the stop's line above is the short form)
+                stop["exec_result"]["cannot_repair_findings"] = findings_for_record(found)
+                return stop, None, False
             if broke:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
                              "while you keep what you fixed: a round that breaks a check that passed is not progress.")
@@ -553,7 +674,8 @@ class AgentBuildMixin:
                            "it", len(found))
             # A round that has only the run's failure to fix is limited to the code the traceback names; a round with
             # other findings (the checks before the run) is not, since FI cannot name their place.
-            only_run = [c for c, ok in checks.items() if ok is False] == ["run"]
+            failing = [c for c, ok in checks.items() if ok is False]
+            only_run = len(failing) == 1 and (failing[0] == "run" or failing[0].startswith(BEFORE_RUN))
             scope = _agent_scope.scope_from_traceback("\n\n".join(found), self.quest_root) if only_run else None  # type: ignore[attr-defined]
             await _agent_scope.scoped_continue(coder, "\n\n".join(found), scope, self._log)  # type: ignore[attr-defined]
 
@@ -580,7 +702,8 @@ class AgentBuildMixin:
                     f"{str(exec_result.get('stderr_tail') or '')[-2000:]}")
         feedback = own_failure + feedback  # the failed function's own failure from FI's record (worded by its template)
         scope = _agent_scope.scope_from_traceback(feedback, self.quest_root)  # type: ignore[attr-defined]
-        result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log)  # type: ignore[attr-defined]
+        result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log,  # type: ignore[attr-defined]
+                                                    marks={"after_freeze": True} if frozen else None)
         if result.exhausted:
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
             if kept is not None:  # a run the results check sent back keeps its results

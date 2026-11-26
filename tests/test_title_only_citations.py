@@ -4,9 +4,7 @@ A record with nothing but its title contains no statement, so a sentence that ci
 records and says more than the title names is unsupported, whatever the claim check made of it.
 On the 72 stored SIR papers 9 sentences were of that kind: the check had marked 6 unsupported and
 had not listed the other 3 as claims at all; the graded D1 loss of one final draft was one of the
-3. The review's advisory about foundational works still not cited carries the same mark the
-writer's prior-work block has, so the reviewer does not ask for a title-only record to back a
-finding.
+3.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ from core.config import (
 from core.engine import (
     Engine,
     _apply_title_only_rule,
-    _foundational_review_block,
     _same_statement,
     _title_only_sentences,
 )
@@ -205,33 +202,3 @@ def test_the_claim_check_marks_a_title_only_citation_unsupported_and_says_so(tmp
     ledger = json.loads((tmp_path / "paper" / "claims.json").read_text(encoding="utf-8"))
     assert ledger["unsupported"] == grounding["unsupported"]
     assert "held as its title only" in (tmp_path / "paper" / "CLAIMS.md").read_text(encoding="utf-8")
-
-
-# --- the review's advisory ------------------------------------------------------------------
-
-def _foundational(title: str, text: str, year: int, authors: list[str], **meta: Any) -> dict[str, Any]:
-    return {"content": text, "metadata": {
-        "title": title, "year": year, "authors": authors, "source": "openalex", "venue": "V",
-        "doi": "10.1/" + title[:8].lower().replace(" ", "-"), "work_type": "book",
-        "foundational": "cited by 6 of the retrieved papers", **meta,
-    }}
-
-
-def test_the_review_advisory_marks_a_title_only_record_and_asks_only_for_what_its_title_states() -> None:
-    lit = [
-        _foundational("A primer", LONG, 2017, ["L. Allen"], work_type="article"),
-        _foundational(AB_TITLE, AB_TITLE, 2000, ["H. Andersson", "T. Britton"]),
-    ]
-    block = _foundational_review_block(lit, "# T\n\nCites [1].\n", "external")
-    assert "## Foundational works this paper does not cite (advisory)" in block
-    assert f"H. Andersson & T. Britton (2000). {AB_TITLE} [title only]" in block
-    assert "ask for it only to say the work exists or for what its title states" in block
-    assert "never to back a finding, a number or a mechanism" in block
-    # The advice is still advisory: nothing is forced.
-    assert "Do not add anything to `must_flag_hits`" in block
-
-
-def test_the_review_advisory_has_no_caution_when_every_record_has_text() -> None:
-    lit = [_foundational("A treatise on epidemics", LONG, 1950, ["M. Bartlett"], work_type="article")]
-    block = _foundational_review_block(lit, "# T\n\nNothing cited.\n", "external")
-    assert "[title only]" not in block and "short blurb only" not in block and "ask for it only to say" not in block

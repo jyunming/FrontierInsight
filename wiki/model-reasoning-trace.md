@@ -13,6 +13,6 @@ It is the reasoning summary the provider returned, **not the model's hidden or c
 
 On the VS Code connection FI asks Copilot for Claude's thinking by default (Copilot's undocumented internal model option `_enableThinking`; Opus returns a summary, not its full thinking; a model that refuses is asked again without it). For GPT models FI also sends `includeEncryptedThinking: true`, without which Copilot withholds their reasoning summary from other extensions; only the readable summary is kept. Codex's `reasoning` items from `codex exec --json` are kept too. A thinking part whose value is a list of strings is joined.
 
-**Stated reasons.** Separately, every reason a model already writes in its answer (idea choice, skill choice, literature support or conflict, repair summary, setup answers, review verdict and moderator) goes into the audit trace as a `model_claim`, and `--why <quest> reasons` lists them per step. A stated reason and a reasoning summary are both the model's own account, not its hidden reasoning.
+**Stated reasons.** Separately, every reason a model already writes in its answer (idea choice, skill choice, literature support or conflict, repair summary, review verdict and moderator) goes into the audit trace as a `model_claim`, and `--why <quest> reasons` lists them per step. A stated reason and a reasoning summary are both the model's own account, not its hidden reasoning.
 
 Related: [[literature-screening-record|Literature screening record]], [[provider-outages|Waiting out provider outages]].

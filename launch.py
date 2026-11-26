@@ -12,7 +12,7 @@ Optional fleet hardening:
     --profile              dump a per-quest viztracer trace if viztracer is installed
 
 `python launch.py --help` shows the handful of commands most quests need; `fi tools --help` lists the
-rarer one-shot utilities (a weekly digest, a cross-quest portfolio, an adversarial critique, ...), and
+rarer one-shot utilities (a weekly digest, an adversarial critique, ...), and
 `--help-all` shows every flag, old and new spellings both working identically.
 """
 
@@ -211,12 +211,8 @@ def _import_runtime() -> None:
     """The engine and the generators, as module globals (every command but the quick doctor needs them)."""
     global _acceptance, Config, Engine, QuestArtifacts, write_cost_summary, ProxySupervisor, ExternalSkillDirs
     global PaperGenerator, PosterGenerator, LABELS, check_and_redo, check_pdf, check_pptx, report_summary
-    global SlideGenerator, SpeechGenerator, _VALID_PAPER_FORMATS
+    global SlideGenerator, SpeechGenerator
     try:
-        from typing import get_args as _get_args
-
-        from core.config import PaperFormat as _PaperFormat
-        _VALID_PAPER_FORMATS = frozenset(_get_args(_PaperFormat))
         from core import acceptance as _acceptance
         from core.config import Config
         from core.engine import Engine, QuestArtifacts, write_cost_summary
@@ -271,23 +267,20 @@ def _check_mode(
 #: unchanged (a value right after the subcommand name lands exactly where that flag already expects one, and a flag's
 #: own qualifiers — ``--digest-provider``, ``--critique-model``, ...  — keep their names). Nothing here changes what a
 #: flag does or removes it: ``--digest`` still works on its own, same as always. This only gives the ~15 report /
-#: portfolio / one-shot utilities their own place, one level down from the handful of commands most quests need
-#: (``--config``, ``--new``, ``--serve``, ``--resume``, ...), which is what ``fi --help`` now shows by default.
+#: one-shot utilities their own place, one level down from the handful of commands most quests need
+#: (``--config``, ``--serve``, ``--resume``, ...), which is what ``fi --help`` now shows by default.
 _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "summarize": ("--summarize", "Summarize a folder of mixed content into one report. `fi tools summarize <folder>`."),
     "digest": ("--digest", "A weekly project-manager digest across your quests. `fi tools digest [--days N]`."),
-    "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
     "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
     "quality": ("--quality", "Where a quest went wrong, who caught it, what was fixed and what it cost; with several quests, a table to compare settings. `fi tools quality <quest_or_folder>...`."),
     "rename": ("--rename", "Change the title of a finished or paused quest. `fi tools rename <quest_id> <new title>`."),
     "quests": ("--quests", "Every quest FI has run on this computer, from any folder: its short id, where it is, its title and folder. `fi tools quests [--prune]`."),
-    "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
-    "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
+    "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path> --commission <file>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
     "tidy-knowledge": ("--tidy-knowledge", "Remove out-of-date copies of quest results (accepted vs preliminary), and quests that are now preliminary from cited papers' entries, in the knowledge layer. `fi tools tidy-knowledge [check]`."),
     "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
     "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
-    "list-drafts": ("--list-drafts", "List proposal drafts `fi tools proposal` wrote. `fi tools list-drafts`."),
     "export-models": ("--export-models", "Download the knowledge-layer models for an air-gapped machine. `fi tools export-models <dir>`."),
     "install-tectonic": ("--install-tectonic", "Install the LaTeX binary paper.pdf needs. `fi tools install-tectonic`."),
     "install-tectonic-from": ("--install-tectonic-from", "... from a local archive, no network or admin needed. `fi tools install-tectonic-from <path>`."),
@@ -354,18 +347,20 @@ def _expand_tools_argv(argv: list[str]) -> list[str]:
 
 
 _SHORT_HELP = """\
-usage: fi [-h] [--help-all] demo | --config CONFIG | --new | --update QUEST_ID | --serve | --resume QUEST_ID |
+usage: fi [-h] [--help-all] demo | new | check FILE | --config CONFIG | --serve | --resume QUEST_ID |
           --watch QUEST_ID | --trace QUEST_ID | --why QUEST_ID | --skills | tools <name> ...
 
 Run a research quest end to end: literature, an experiment, the paper, and the checks that hold it to what
 it found. `fi --help-all` lists every flag; `fi tools --help` lists the less common one-shot commands
-(a weekly digest, a cross-quest portfolio, an adversarial critique, ...).
+(a weekly digest, an adversarial critique, ...).
 
 Run a quest
   demo                   Start here: writes a small example quest (fi-demo.yaml) in this folder, checks your
                           model at no cost, and asks before running it.
-  --config CONFIG        YAML for one quest. Also resumes / updates / traces it with the flags below.
-  --new                  Answer a few questions and write the YAML for you (also: the web form, `@fi /new`).
+  new                    Write a commission to fill in (commission.yaml: the question, the scope, the time allowed,
+                          known values and what counts as supported) and the config that names it (study.yaml).
+  check FILE             Check a commission before a run: one sentence per problem; no model is called.
+  --config CONFIG        YAML for one quest; it names its commission. Also resumes / traces it with the flags below.
   --serve                Local web UI at http://127.0.0.1:8765.
 
 While a quest is running, or after
@@ -373,7 +368,7 @@ While a quest is running, or after
   --watch QUEST_ID       Wait for a quest's background job (HPC / a cluster) and continue it when it is done.
   --trace QUEST_ID       Print what a quest did, in order, and check nothing in its record was edited. Add --follow to watch it live.
   --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
-  --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
+  --update QUEST_ID      Approve the settings in a quest's config.yaml after you changed them, then resume it.
   --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
   --accept-checks QUEST_ID       For a quest an earlier FI stopped at checks whose expected value has no stated source:
                                  go on with them marked unconfirmed (needs --approve-as).
@@ -385,7 +380,7 @@ Skills (what FI has learned about driving one piece of software on this machine)
                           network. Add --deep to also check sign-in and the network (can take a minute).
 
 Less common
-  tools <name>           A weekly digest, a cross-quest portfolio, an adversarial critique, and more:
+  tools <name>           A weekly digest, an adversarial critique, and more:
                           `fi tools --help` for the list.
   --help-all             Every flag, including each tool's own provider / model / ensemble options.
 """
@@ -393,7 +388,8 @@ Less common
 
 #: What bare `fi` offers in a terminal: (label, what it runs). Each is an existing command, nothing new to learn.
 START_CHOICES: tuple[tuple[str, list[str]], ...] = (
-    ("Start a new quest (answer three questions)", ["--new"]),
+    ("Run a small example study first", ["demo"]),
+    ("Write a commission for a new study", ["new"]),
     ("Open the web app", ["--serve"]),
     ("Check my setup (a few seconds, no network)", ["--doctor"]),
 )
@@ -562,16 +558,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "future quests can retrieve prior-week context.",
     )
     mode.add_argument(
-        "--portfolio",
-        action="store_true",
-        help="Generate a cross-quest portfolio synthesis across every "
-             "quest under --output-root (no time window). Writes "
-             "outputs/_portfolio/<YYYY-MM-DD>.md with topic clusters, "
-             "near-duplicate detection, meta-paper candidates, coverage "
-             "gaps, and prioritized next-quest suggestions. Ingests "
-             "into Axon as kind=fi_portfolio.",
-    )
-    mode.add_argument(
         "--critique",
         type=str,
         help="Adversarial second-pass review of a completed quest. "
@@ -586,30 +572,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "family from the one that wrote the paper.",
     )
     mode.add_argument(
-        "--proposal",
-        type=str,
-        help="Pre-quest planning doc. Pass a topic string (1-3 "
-             "paragraphs). The LLM produces a structured proposal "
-             "(background, hypothesis, plan, success criteria, "
-             "risks, scope limits, recommended next step) for the "
-             "user to review BEFORE committing compute to the full "
-             "quest. Writes outputs/_drafts/<id>-proposal.md plus a "
-             "companion outputs/_drafts/<id>.yaml ready to feed into "
-             "--config. Ingests as kind=fi_proposal.",
-    )
-    mode.add_argument(
         "--analyze",
         type=Path,
         help="Run a no-simulation quest with pre-staged data. Pass a "
              "directory path; every file under it (recursive, "
              "symlinks skipped) is copied into the new quest's "
              "data/ directory before the engine starts. The engine "
-             "then routes auto_collect_data (passthrough) → "
-             "wait_for_data (passthrough, data is already there) → "
+             "then routes wait_for_data (passthrough, data is already there) → "
              "data_load → analyze → cross_check → write → review. "
-             "Requires --analyze-topic to describe what to analyze. "
+             "Requires --commission: the commission of the study (its question is what the analysis answers). "
              "Use when you already have the dataset and just want a "
-             "paper analyzing it — the inverse of --proposal.",
+             "paper analyzing it.",
     )
     mode.add_argument(
         "--doctor",
@@ -1011,40 +984,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "person decides, so there is no anonymous approver.",
     )
     mode.add_argument(
-        "--list-drafts",
-        action="store_true",
-        help="List proposal drafts (YAML companions) that ``--proposal`` "
-             "previously wrote to ``outputs/_drafts/``. Pairs with "
-             "``--config <yaml>`` to launch the chosen quest. Web UI "
-             "exposes the same surface as the 'Continue a draft' "
-             "picker on /interview; VSCode chat as ``@fi /drafts``.",
-    )
-    mode.add_argument(
-        "--new",
-        action="store_true",
-        help="Run the interactive interview to set up a new quest. "
-             "Asks topic / title / output_kinds / paper_format / "
-             "research approach / study_depth / clarify slots / "
-             "review panel / knowledge / provider / model. Writes the "
-             "resulting `outputs/_drafts/<id>.yaml` and (unless "
-             "--draft-only is set) starts the quest immediately. "
-             "Mirrors the VSCode `@fi /new` flow for headless use.",
-    )
-    mode.add_argument(
         "--update",
         type=str,
         default=None,
         metavar="QUEST_ID",
-        help="Mid-quest re-entry. Pass the quest_id of an existing "
-             "quest under --output-root. The interview opens "
-             "pre-filled with the quest's current YAML; only "
-             "research-shaping fields are editable (no topic / "
-             "title / provider). Affected LangGraph stages are "
-             "invalidated based on what changed, then the quest "
-             "resumes via the existing --resume path. Mirrors "
-             "`@fi /update` in the VSCode extension, which runs it in "
-             "the chat and asks instead whether to approve the "
-             "settings in config.yaml as they are.",
+        help="Approve the settings in a quest's config.yaml as they are now, after you changed one that decides how "
+             "strictly the quest is checked (a quest stopped for a changed setting says so), then resume it.",
     )
     p.add_argument(
         "--summarize-kind",
@@ -1098,20 +1043,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "See --summarize-model for the conventions.",
     )
     p.add_argument(
-        "--portfolio-provider",
-        type=str,
-        default="vscode_extension",
-        help="Provider for --portfolio. Same conventions as "
-             "--digest-provider.",
-    )
-    p.add_argument(
-        "--portfolio-model",
-        type=str,
-        default="",
-        help="Override the per-provider default model for --portfolio. "
-             "See --summarize-model for the conventions.",
-    )
-    p.add_argument(
         "--critique-provider",
         type=str,
         default="vscode_extension",
@@ -1128,58 +1059,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "See --summarize-model for the conventions.",
     )
     p.add_argument(
-        "--proposal-provider",
-        type=str,
-        default="vscode_extension",
-        help="Provider for --proposal. Same conventions as the other "
-             "PM-command providers — vscode_extension when launched "
-             "from chat, headless CLI providers otherwise.",
-    )
-    p.add_argument(
-        "--proposal-model",
-        type=str,
-        default="",
-        help="Override the per-provider default model for --proposal. "
-             "See --summarize-model for the conventions.",
-    )
-    p.add_argument(
-        "--proposal-ensemble",
-        type=str,
-        default="",
-        metavar="M1,M2,M3",
-        help="Multi-model ensemble for --proposal. Comma-separated "
-             "list of model identifiers. Each model independently "
-             "drafts a proposal; a moderator picks the best (default) "
-             "or merges (with --proposal-ensemble-merge synthesize). "
-             "Cost: N+1 LLM calls. Worth it because the proposal "
-             "frames every downstream quest decision. Example: "
-             "--proposal-ensemble gpt-5.5,claude-opus-4-7,gemini-2.5-pro",
-    )
-    p.add_argument(
-        "--proposal-ensemble-merge",
-        type=str,
-        choices=("tournament", "synthesize"),
-        default="tournament",
-        help="How to combine the ensemble candidates. tournament "
-             "(default): moderator picks the single best plan, "
-             "preserving the winner's voice. synthesize: moderator "
-             "merges all N into one coherent plan that flags any "
-             "disagreement between candidates.",
-    )
-    p.add_argument(
-        "--proposal-ensemble-moderator",
-        type=str,
-        default="",
-        help="Model to perform the merge step. Defaults to the first "
-             "model in --proposal-ensemble.",
-    )
-    p.add_argument(
         "--critique-ensemble",
         type=str,
         default="",
         metavar="M1,M2,M3",
         help="Multi-model ensemble for --critique. Same shape as "
-             "--proposal-ensemble but default merge is synthesize — "
+             "--digest-ensemble: default merge is synthesize — "
              "adversarial critique benefits from preserving every "
              "critic's perspective, not picking one winner.",
     )
@@ -1202,10 +1087,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     # Ensemble flags for the other LLM-using single-shot tools share
     # the same {--<tool>-ensemble, --<tool>-ensemble-merge,
-    # --<tool>-ensemble-moderator} shape as proposal / critique above.
+    # --<tool>-ensemble-moderator} shape as critique above.
     # Defaults intentionally differ per tool:
     #   * digest: synthesize (WeekDiff narrative preserves disagreement).
-    #   * portfolio: tournament (one canonical thesis about clusters).
     #   * summarize: tournament (the produced summary is the artifact).
     #   * analyze: tournament (engine-level node_ensemble is built per-node
     #     so the CLI flag picks a single merge that gets applied to the
@@ -1215,16 +1099,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ``ProviderConfig._check_node_ensemble_node_specific_constraints``
     # because its downstream parser expects JSON. So the
     # ``--analyze-ensemble-merge`` flag MUST exclude ``synthesize``;
-    # only ``tournament`` is admissible. The other 3 tools take both.
+    # only ``tournament`` is admissible. The other 2 tools take both.
     _MERGE_CHOICES = {
         "digest":    ("tournament", "synthesize"),
-        "portfolio": ("tournament", "synthesize"),
         "summarize": ("tournament", "synthesize"),
         "analyze":   ("tournament",),
     }
     for _tool, _merge_default in (
         ("digest", "synthesize"),
-        ("portfolio", "tournament"),
         ("summarize", "tournament"),
         ("analyze", "tournament"),
     ):
@@ -1253,15 +1135,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                  f"to the first model in --{_tool}-ensemble.",
         )
     p.add_argument(
-        "--analyze-topic",
-        type=str,
+        "--commission",
+        type=Path,
         default=None,
-        help="Required companion to --analyze: a one-sentence "
-             "description of what the analysis should produce "
-             "(\"Compare ridership trends across regions\", "
-             "\"Find common failure modes in these logs\"). The "
-             "engine's analyze + write nodes read this verbatim as "
-             "the quest topic.",
+        metavar="FILE",
+        help="With --analyze: the commission of the study (`fi new` writes one to fill in). Its question is what the "
+             "analysis answers; the data stays the folder given to --analyze.",
     )
     p.add_argument(
         "--skills-provider",
@@ -1340,9 +1219,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--interactive",
         action="store_true",
-        help="Talk the topic over first: "
-             "pause at the clarify node and read answers from stdin. "
-             "Single-quest mode only — fleet runs are headless.",
+        help="Answer the review pause in the terminal (accept / reject / refine) instead of by `--resume`. "
+             "Single-quest mode only — fleet runs are headless. (It no longer asks setup questions: the "
+             "commission says what the study is.)",
     )
     p.add_argument(
         "--auto-accept-on-pass",
@@ -1354,16 +1233,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "<quest_root>/.fi/human_review_answer.json then "
              "--resume <quest_id>). Intended for --fleet so the "
              "production runner doesn't block on every clean quest.",
-    )
-    p.add_argument(
-        "--draft-only",
-        action="store_true",
-        help="With --new: write the generated `outputs/_drafts/<id>.yaml` "
-             "and exit, instead of immediately launching the quest. "
-             "Useful when you want to hand-edit the YAML before "
-             "starting (e.g. set knowledge.local_papers, swap "
-             "provider.model, tune cost knobs). Run "
-             "`python launch.py --config <path>` afterward to start.",
     )
     p.add_argument(
         "--resume",
@@ -1509,8 +1378,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
              "Windows). Every FI run that is not a child of the extension "
              "routes LLM calls through `vscode.lm.*` this way: --serve / "
-             "--tools, and a `--update` you run in a terminal yourself (the "
-             "line `@fi /update` shows carries this flag). Auto-resolved per OS / user via "
+             "--tools, and a `--update` you run in a terminal yourself. "
+             "Auto-resolved per OS / user via "
              "`core.bridge_path.persistent_bridge_path()` under --serve "
              "only — pass it yourself in any other mode. Pass empty "
              "string to disable.",
@@ -1620,13 +1489,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.watch and (args.resume or args.rerun):
         p.error("--watch already resumes the quest when its job finishes; "
                 "drop --resume / --rerun.")
-    if args.analyze and not args.analyze_topic:
-        p.error(
-            "--analyze requires --analyze-topic to describe what the "
-            "analysis should produce (one sentence is fine).",
-        )
-    if args.analyze_topic and not args.analyze:
-        p.error("--analyze-topic only makes sense with --analyze.")
+    if args.analyze and not args.commission:
+        p.error("--analyze requires --commission <file>: the commission of the study (`fi new` writes one to fill "
+                "in).")
+    if args.commission and not args.analyze:
+        p.error("--commission goes with --analyze; a quest started with --config names its commission in the config "
+                "(`commission: <file>`).")
     return args
 
 
@@ -1693,16 +1561,13 @@ def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
                              ``claude_cli`` / ``openai`` / etc. on
                              purpose; the bridge being available shouldn't
                              silently re-route their quest through Copilot.
-                             (``answers_to_yaml`` always emits
-                             ``provider.name`` so the "unset" case doesn't
-                             arise from the interview path; hand-written
-                             YAMLs that omit ``provider:`` land on the
+                             (YAMLs that omit ``provider:`` land on the
                              ``ProviderConfig`` default of ``codex`` and
                              are also respected here.)
 
     Previously this function unconditionally clobbered ``provider.name``
     to ``vscode_extension``, which broke ``--serve`` users who picked
-    a non-Copilot provider in the interview but happened to have the
+    a non-Copilot provider but happened to have the
     extension running (so the auto-resolved socket fired the
     override). Surfaced on the OPC quest that pinned ``claude_cli`` in
     YAML and ended up hitting the VSCode bridge with a Claude model id
@@ -1801,169 +1666,6 @@ def _set_vscode_bridge_extras(
     provider.extra = extras
 
 
-def _pick_clarify_callback(
-    cfg: Config, engine: Engine, interactive: bool,
-) -> object:
-    """Select the right clarify-callback for this run.
-
-    * Terminal `--interactive`: collect answers from stdin via
-      ``_cli_clarify_callback``.
-    * `provider.name == "vscode_extension"`: route the questions
-      through the same bridge the LLM calls use, so the FI VSCode
-      extension can present them as modals and post answers back.
-    * Started or resumed by the web server (``FI_WEB_ANSWERS=1``): the
-      quest page shows the questions and writes the answers to disk
-      (``_web_page_clarify_callback``).
-    * Otherwise: no callback. If the YAML has
-      ``engine.clarify_mode = "interactive"`` and we return None, the
-      engine raises a clear RuntimeError at the clarify pause —
-      that's the surface we want users to hit, not a silent hang.
-    """
-    if interactive:
-        return _cli_clarify_callback
-    if cfg.provider.name == "vscode_extension":
-        # IMPORTANT: route the clarify call through the SAME bridge
-        # the LLMClient already uses. The extension-side TCP server
-        # only tracks one active socket (every new connection
-        # overwrites it), so two clients on the same port would have
-        # their responses cross-routed. Reading `engine._client._bridge`
-        # works because by the time clarify_callback fires, the
-        # clarify NODE has already made one LLM call (to generate the
-        # questions), which lazy-initialized the bridge.
-        # Defensive parse — hand-edited YAMLs can leave bridge_port as
-        # a non-numeric string. Treat that as "no callback wired"
-        # rather than crashing the run.
-        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
-        try:
-            port = int(extra.get("bridge_port", 0))
-        except (TypeError, ValueError):
-            port = 0
-        if port <= 0:
-            # No bridge to ask through: a quest the web server started still asks on its quest page.
-            return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s) if _web_can_answer() else None
-
-        async def callback(questions: dict[str, object]) -> dict[str, object]:
-            assert engine._client is not None, (
-                "_pick_clarify_callback was called before Engine.run() "
-                "created the LLMClient"
-            )
-            bridge = engine._client._bridge
-            if bridge is None:
-                # Defensive: shouldn't happen (clarify-node LLM call
-                # creates the bridge first), but if the engine ever
-                # routes around the LLMClient we'd hit this. Build a
-                # fresh client — it'll still go to the same port.
-                from core.vscode_bridge import VSCodeBridgeClient
-                bridge = VSCodeBridgeClient(host="127.0.0.1", port=port)
-                await bridge.connect()
-                engine._client._bridge = bridge
-            return await bridge.clarify(dict(questions))
-
-        return callback
-    if _web_can_answer():
-        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s)
-    return None
-
-
-def _pick_scope_callback(cfg: Config, engine: Engine, interactive: bool, clarify: object) -> object:
-    """Where the pick of the study is asked. The terminal and the VS Code bridge answer it themselves (the clarify
-    callback is the one that asks); a quest the web server started asks on its quest page in its own files, never in
-    the setup answer's. Nobody to ask: no callback."""
-    if interactive:
-        return clarify
-    if cfg.provider.name == "vscode_extension":
-        extra = cfg.provider.extra if isinstance(cfg.provider.extra, dict) else {}
-        try:
-            port = int(extra.get("bridge_port", 0))
-        except (TypeError, ValueError):
-            port = 0
-        if port > 0:
-            return clarify
-    if _web_can_answer():
-        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s, name="scope")
-    return None
-
-
-# Set by the web server (web/quest_launcher.py) for a quest it starts or resumes as its own process: the person can
-# answer the setup questions on the quest page, so the run asks there instead of answering for itself.
-WEB_ANSWERS_ENV = "FI_WEB_ANSWERS"
-
-
-def _web_can_answer() -> bool:
-    return os.environ.get(WEB_ANSWERS_ENV) == "1"
-
-
-def _write_json_atomic(path: Path, data: object) -> None:
-    """Written whole (a reader never sees half a file); if Windows refuses the replace because the web page has the
-    file open, written in place instead."""
-    text = json.dumps(data, indent=2) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
-        path.write_text(text, encoding="utf-8")
-
-
-def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0,
-                               name: str = "clarify"):  # noqa: ANN202
-    """The setup questions for a quest the web server runs as its own process: written to
-    ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
-    ``.fi/clarify_answer.json``. While it waits, ``.fi/clarify_waiting.json`` holds this process's id, so the page
-    knows the answers reach a running quest (even after the server restarted) and does not start a second run. The
-    engine bounds the wait with ``pauses.timeout_s`` and then does what ``pauses.clarify`` says, as for a quest the
-    web server runs in-process. ``name`` sets the file stems: ``"scope"`` carries the pick of the study in
-    ``scope_questions.json`` / ``scope_answer.json`` / ``scope_waiting.json``, apart from the setup questions."""
-    answer_path = fi_dir / f"{name}_answer.json"
-    questions_path = fi_dir / f"{name}_questions.json"
-    waiting_path = fi_dir / f"{name}_waiting.json"
-
-    def staged() -> dict[str, object] | None:
-        try:
-            data = json.loads(answer_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None  # not there yet, or the page is still writing it
-        return data if isinstance(data, dict) else None
-
-    async def callback(questions: dict[str, object]) -> dict[str, object]:
-        answers = staged()  # a resume after the answers were given takes them without asking again
-        if answers is not None:
-            return answers
-        fi_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            # Only a hint for the page; ``until`` lets it ignore a marker a killed run left behind.
-            _write_json_atomic(waiting_path, {
-                "pid": os.getpid(), "until": time.time() + timeout_s + 60 if timeout_s > 0 else None})
-        except OSError:
-            pass
-        try:
-            _write_json_atomic(questions_path, questions)
-            log.info("[%s] waiting for your answers to the %s on the quest page", name,
-                     "study choice" if name == "scope" else "setup questions")
-            while True:
-                await asyncio.sleep(1.0)
-                answers = staged()
-                if answers is not None:
-                    return answers
-        except BaseException:
-            # The run stopped waiting (the time allowed ran out, or it was stopped): the page must not go on showing
-            # a question nobody waits on. A run killed outright leaves it for a resume, which asks it again.
-            if staged() is None:
-                try:
-                    questions_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
-        finally:
-            try:
-                waiting_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    return callback
-
-
 def _pick_human_feedback_callback(
     cfg: Config, engine: Engine, interactive: bool, who: str = "",
 ) -> object:
@@ -2019,80 +1721,6 @@ def _pick_human_feedback_callback(
 
         return callback
     return None
-
-
-def _cli_pick_card(entry: dict[str, object]) -> object:
-    """One line from the person: a card number (asked once more when out of range), ``e <n>`` to edit card n's
-    question in one more line (empty keeps it), or a sentence. Returns the number, the edited card or the sentence."""
-    cards = [c for c in entry["cards"] if isinstance(c, dict)]  # type: ignore[union-attr]
-    print()
-    print(entry.get("question", ""))
-
-    def ask(prompt: str) -> str:
-        try:
-            return input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            return ""
-
-    for attempt in range(2):
-        text = ask(f"  study (1-{len(cards)}, e <n> to edit one, or write your own): ")
-        if text[:1] in ("e", "E") and text[1:].strip().isdigit() and 1 <= int(text[1:]) <= len(cards):
-            card = dict(cards[int(text[1:]) - 1])
-            new = ask("    new question (Enter keeps it): ")
-            if new:
-                card["question"] = new
-            return card
-        if text.isdigit():
-            if 1 <= int(text) <= len(cards):
-                return int(text)
-            print(f"    Pick a number from 1 to {len(cards)}.")
-            continue
-        return text
-    return ""
-
-
-async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, object]:
-    """Terminal-based clarify-question collector. Prints each question
-    with its agent-suggested default, reads one line of stdin per slot,
-    accepts the default on blank input. Used by `launch.py --interactive`."""
-    print()
-    print("=" * 72)
-    print("Pre-flight clarification — agent has 5 questions to sharpen the run.")
-    print("Press Enter to accept the default in parentheses.")
-    print("=" * 72)
-    answers: dict[str, object] = {}
-    for key, value in questions.items():
-        if not isinstance(value, dict):
-            continue
-        if isinstance(value.get("cards"), list) and value["cards"]:
-            answers[key] = _cli_pick_card(value)
-            continue
-        question = value.get("question", key)
-        default = value.get("default", "")
-        # Pretty-print the default — lists get joined.
-        default_str = (
-            ", ".join(str(x) for x in default) if isinstance(default, list)
-            else str(default)
-        )
-        print()
-        print(f"  [{key}] {question}")
-        try:
-            user_input = input(f"    answer ({default_str}): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            user_input = ""
-        # Preserve list-typed defaults by parsing comma-separated input.
-        if isinstance(default, list):
-            answers[key] = (
-                [s.strip() for s in user_input.split(",") if s.strip()]
-                if user_input else default
-            )
-        else:
-            answers[key] = user_input or default
-    print()
-    print("Thanks — proceeding with the autonomous loop.")
-    print("=" * 72)
-    print()
-    return answers
 
 
 async def _cli_human_feedback_callback(
@@ -2551,7 +2179,7 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     from core import commission as _commission
 
     try:  # the wait can be hours: the commission and the quest's copies are checked again before it goes on
-        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id)
+        _commission.door(cfg.commission, Path(cfg.output.output_dir) / quest_id, topic=cfg.topic)
     except _commission.CommissionRefused as e:
         print(f"[FI] {e}", file=sys.stderr)
         engine._log.warning("[watch] %s", e)
@@ -2599,10 +2227,9 @@ async def run_one(
     reopen: bool = False,
     from_step: str | None = None,
     approved_by: str | None = None,
-    headless: bool = False,
     ask_byline: bool = False,
 ) -> dict[str, object]:
-    # ``ask_byline``: a single quest run from a terminal (--config, --new) may ask the paper byline once before the
+    # ``ask_byline``: a single quest run from a terminal (--config) may ask the paper byline once before the
     # paper (_ask_byline_once); a fleet, the web server, --emit and --watch never do.
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -2652,16 +2279,6 @@ async def run_one(
             print(f"[FI] the quest's config.yaml now matches {source_yaml_path} (the one it resumed with); "
                   f"the earlier one is kept as {kept.name}")
     _record_quest(Path(engine.quest_root), cfg, started=resume_quest_id is None)
-    # Pick the right clarify handler:
-    #   --interactive          → terminal Q&A
-    #   provider=vscode_extension → route through the bridge so the
-    #                            extension shows VSCode modals
-    #   started by the web server → the quest page shows the questions
-    #   otherwise              → None; clarify_mode=interactive crashes
-    #                            (the engine catches this and produces
-    #                            a clear RuntimeError).
-    callback = None if headless else _pick_clarify_callback(cfg, engine, interactive)
-    scope_callback = None if headless else _pick_scope_callback(cfg, engine, interactive, callback)
     # Wire the human-feedback gate callback when the gate is on. CLI
     # ``--interactive`` gets terminal prompts; ``vscode_extension``
     # provider gets a bridge round-trip. Headless runs (no flag, not
@@ -2674,7 +2291,7 @@ async def run_one(
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive, approved_by or "")
     try:
         art: QuestArtifacts = await _maybe_profiled(
-            engine, profile=profile, clarify_callback=callback, scope_callback=scope_callback,
+            engine, profile=profile,
             human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
             approved_by=approved_by,
         )
@@ -2833,33 +2450,19 @@ def _log_paper_render(cfg: Config, art: QuestArtifacts) -> None:
         print(f"[FI] could not write the paper line to run.log: {exc!r}", file=sys.stderr)
 
 
-# `_VALID_PAPER_FORMATS` is derived from `core.config.PaperFormat` in `_import_runtime` (so adding a new template
-# stays a one-place change, and importing launch for the quick doctor runs no `core` import outside the bootstrap's
-# guard: the doctor loads core.config later, through core.interview, inside main()'s guarded import).
-
-
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
-    """Honor the `paper_venue` clarify slot: if the user's YAML left
-    `output.paper_format` at its default (`"article"`, read off the config
-    model) AND clarify picked a different template, apply the venue choice. We DON'T override an
-    explicit YAML setting (the user's hand-written value wins) and
-    we silently ignore unknown venue strings to avoid pydantic
-    rejecting them on a Config validator."""
-    venue = (
-        (art.raw_state or {}).get("clarify_answers", {}).get("paper_venue", "")
-    )
-    if not isinstance(venue, str) or venue not in _VALID_PAPER_FORMATS:
+    """A study an earlier FI began may carry a `paper_venue` it was asked at the start: when the config left
+    `output.paper_format` at its default and that venue is another template, the final render uses the venue. A format
+    written in the config wins, and an unknown venue is ignored. A new study carries none (nothing asks it)."""
+    from core.config import paper_format_with_old_venue
+
+    answers = (art.raw_state or {}).get("clarify_answers")
+    if not (isinstance(answers, dict) and answers.get("paper_venue")):
+        return  # a new study carries none: the config is not read at all
+    venue = paper_format_with_old_venue(cfg.output.paper_format, answers)
+    if venue == cfg.output.paper_format:
         return
-    default = type(cfg.output).model_fields["paper_format"].default
-    if cfg.output.paper_format != default:
-        # User set an explicit format in YAML; honor that.
-        return
-    if venue == default:
-        return  # nothing to do
-    print(
-        f"[FI] paper_venue from clarify -> overriding paper_format: "
-        f"{default} -> {venue}",
-    )
+    print(f"[FI] paper_venue from the earlier setup -> overriding paper_format: {cfg.output.paper_format} -> {venue}")
     cfg.output.paper_format = venue  # type: ignore[assignment]
 
 
@@ -3365,8 +2968,6 @@ async def _maybe_profiled(
     engine: Engine,
     *,
     profile: bool,
-    clarify_callback: object = None,
-    scope_callback: object = None,
     human_feedback_callback: object = None,
     reopen: bool = False,
     from_step: str | None = None,
@@ -3374,8 +2975,6 @@ async def _maybe_profiled(
 ) -> QuestArtifacts:
     if not profile:
         return await engine.run(
-            clarify_callback=clarify_callback,
-            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3386,8 +2985,6 @@ async def _maybe_profiled(
     except ImportError:
         print("[FI] --profile requested but viztracer is not installed; skipping")
         return await engine.run(
-            clarify_callback=clarify_callback,
-            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3397,8 +2994,6 @@ async def _maybe_profiled(
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
     with VizTracer(output_file=str(trace_path)):
         art = await engine.run(
-            clarify_callback=clarify_callback,
-            scope_callback=scope_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
@@ -3514,7 +3109,7 @@ async def run_fleet(
                 _status_line(engine.quest_id, "start")
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
-                    source_yaml_path=yaml_path, headless=True,
+                    source_yaml_path=yaml_path,
                 )
                 state["running"] -= 1
                 state["done"] += 1
@@ -3547,19 +3142,30 @@ async def run_fleet(
 
 
 def _commission_refusal(args: argparse.Namespace) -> str | None:
-    """Why the commission a new quest's YAML (or a fleet's) names cannot be used; None when it can or none is named.
-    Anything else wrong with a YAML is said where it is loaded."""
+    """Why a new quest's YAML (or a fleet's) cannot start: it names no commission, or one that cannot be used; None
+    when it can. The skill commands that read a config start no study. Anything else wrong with a YAML is said where
+    it is loaded."""
     import yaml
     from core import commission as _commission
 
-    for path in list(args.fleet or []) or ([args.config] if args.config and not (args.resume or args.watch) else []):
+    if any(getattr(args, m, None) for m in _SKILL_MODES_READING_CONFIG):
+        return None
+    resumed = args.resume or args.watch or args.rerun  # a quest's own commission is checked with its folder, later
+    for path in list(args.fleet or []) or ([args.config] if args.config and not resumed else []):
         try:
             raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
             continue
         try:
-            if isinstance(raw, dict) and raw.get("commission"):
-                _commission.door(_commission.locate(raw["commission"], Path(path).resolve().parent), None)
+            named = raw.get("commission") if isinstance(raw, dict) else None
+            _commission.door(_commission.locate(named, Path(path).resolve().parent) if named else None, None,
+                             topic=raw.get("topic") if isinstance(raw, dict) else None,
+                             asked=raw.get("engine") if isinstance(raw, dict) else None)
+        except _commission.CommissionRefused as e:
+            return str(e)
+    if args.analyze and args.commission:
+        try:
+            _commission.door(args.commission.resolve(), None)
         except _commission.CommissionRefused as e:
             return str(e)
     return None
@@ -3594,6 +3200,9 @@ async def main_async(args: argparse.Namespace) -> int:
     if args.teach_from and args.resume and not getattr(args, "teach_skill", "") and not _list_steps:
         from core import rerun_from as _rerun_from
 
+        if _gone := _rerun_from.gone(args.teach_from):
+            print(f"[FI] {_gone}", file=sys.stderr)
+            return 2
         _from_step = _rerun_from.resolve(args.teach_from)
         if _from_step is None:
             print(f"[FI] --from {args.teach_from!r} is not a step this quest can be rerun from; choose one of: "
@@ -3607,12 +3216,11 @@ async def main_async(args: argparse.Namespace) -> int:
             return 2
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
-    # Skipped for the install-tectonic / list-drafts modes that
+    # Skipped for the install-tectonic mode that
     # never touch Axon, plus when --no-axon-sidecar is passed.
     _axon_inert_modes = bool(
         getattr(args, "install_tectonic", False)
         or getattr(args, "install_tectonic_from", None) is not None
-        or getattr(args, "list_drafts", False)
         or getattr(args, "export_models", None) is not None
         or getattr(args, "doctor", False)
         or getattr(args, "install_marp", False)
@@ -3691,9 +3299,6 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.export_models is not None:
             return _export_models(args.export_models)
-
-        if args.list_drafts:
-            return _list_drafts(args.output_root)
 
         if args.approve_amendment:
             return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
@@ -3784,20 +3389,7 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.scan_skill:
             return _scan_skill(args.scan_skill, args.json_out, folders=folders)
 
-        if args.new:
-            return await _run_new(
-                output_root=args.output_root,
-                draft_only=args.draft_only,
-                vscode_bridge_port=args.vscode_bridge_port,
-                vscode_bridge_socket=args.vscode_bridge_socket,
-                interactive=args.interactive,
-                supervisor=supervisor,
-            )
-
         if args.update:
-            # Phase 3 — see core/interview_update.py for the
-            # invalidation-matrix wiring. The launch-side dispatch
-            # is implemented in _run_update below.
             located = _locate_quest(args.update, args.output_root)
             if located is None:
                 return 1
@@ -3811,8 +3403,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     located = located.resolve()
                     os.chdir(started_in)
             return await _run_update(
-                quest_id=located.name,
-                output_root=located.parent,
+                quest_root=located,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 interactive=args.interactive,
@@ -3834,20 +3425,6 @@ async def main_async(args: argparse.Namespace) -> int:
                 ensemble_moderator=args.digest_ensemble_moderator,
             )
 
-        if args.portfolio:
-            return await _run_portfolio(
-                output_root=args.output_root,
-                provider_name=args.portfolio_provider,
-                provider_model=args.portfolio_model,
-                axon_config_path=args.axon_config,
-                vscode_bridge_port=args.vscode_bridge_port,
-                vscode_bridge_socket=args.vscode_bridge_socket,
-                supervisor=supervisor,
-                ensemble_models=args.portfolio_ensemble,
-                ensemble_merge=args.portfolio_ensemble_merge,
-                ensemble_moderator=args.portfolio_ensemble_moderator,
-            )
-
         if args.critique:
             located = _locate_quest(args.critique, args.output_root)
             if located is None:
@@ -3867,25 +3444,10 @@ async def main_async(args: argparse.Namespace) -> int:
                 ensemble_moderator=args.critique_ensemble_moderator,
             )
 
-        if args.proposal:
-            return await _run_proposal(
-                topic=args.proposal,
-                output_root=args.output_root,
-                provider_name=args.proposal_provider,
-                provider_model=args.proposal_model,
-                axon_config_path=args.axon_config,
-                vscode_bridge_port=args.vscode_bridge_port,
-                vscode_bridge_socket=args.vscode_bridge_socket,
-                supervisor=supervisor,
-                ensemble_models=args.proposal_ensemble,
-                ensemble_merge=args.proposal_ensemble_merge,
-                ensemble_moderator=args.proposal_ensemble_moderator,
-            )
-
         if args.analyze:
             return await _run_analyze(
                 data_path=args.analyze.resolve(),
-                topic=args.analyze_topic,
+                commission=args.commission.resolve(),
                 output_root=args.output_root,
                 provider_name=args.analyze_provider,
                 provider_model=args.analyze_model,
@@ -3989,7 +3551,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     # Before any model call, and before run_one replaces a resumed quest's own config.yaml.
                     # The quest's full id: a shortened one was looked up above.
                     found_id = args.resume or args.watch
-                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None)
+                    _commission.door(cfg.commission, Path(cfg.output.output_dir) / found_id if found_id else None,
+                                     topic=cfg.topic, asked=cfg.modes_asked())
                 except _commission.CommissionRefused as e:
                     print(f"[FI] {e}", file=sys.stderr)
                     return 2
@@ -4052,7 +3615,7 @@ async def main_async(args: argparse.Namespace) -> int:
         try:
             configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
             for _path, c in configs:
-                _commission.door(c.commission, None)  # every quest's commission before any starts
+                _commission.door(c.commission, None, topic=c.topic, asked=c.modes_asked())  # every quest's commission before any starts
         except _commission.CommissionRefused as e:
             print(f"[FI] {e}", file=sys.stderr)
             return 2
@@ -4237,80 +3800,10 @@ async def _run_digest(
     return 0
 
 
-async def _run_portfolio(
-    *,
-    output_root: Path,
-    provider_name: str,
-    provider_model: str = "",
-    axon_config_path: Path | None,
-    vscode_bridge_port: int,
-    vscode_bridge_socket: str = "",
-    supervisor: ProxySupervisor,
-    ensemble_models: str = "",
-    ensemble_merge: str = "tournament",
-    ensemble_moderator: str = "",
-) -> int:
-    """Top-level wiring for ``python launch.py --portfolio``.
-
-    Same provider + Axon plumbing as ``_run_digest``; dispatches to
-    :func:`core.portfolio.generate_portfolio`. Returns 0 on success,
-    1 on any failure that prevented writing the portfolio file.
-    """
-    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
-    from core.portfolio import generate_portfolio
-
-    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
-    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
-
-    knowledge = None
-    try:
-        from core.knowledge import Knowledge
-        knowledge = Knowledge(KnowledgeConfig(
-            enabled=True,
-            axon_config=axon_config_path if axon_config_path else None,
-            seed_source_catalog=False,
-        ))
-    except Exception as e:  # pragma: no cover
-        print(
-            f"[FI] --portfolio: Axon unavailable ({e!r}); portfolio will "
-            f"still be written but not ingested.",
-            file=sys.stderr,
-        )
-
-    ensemble = _parse_ensemble_flag(
-        ensemble_models, ensemble_merge, ensemble_moderator,
-    )
-    if ensemble is not None:
-        print(
-            f"[FI] portfolio synthesis (provider={provider.name}; "
-            f"ensemble={ensemble.models!r}, merge={ensemble.merge})",
-        )
-    else:
-        print(f"[FI] portfolio synthesis (provider={provider.name})")
-    try:
-        art = await generate_portfolio(
-            output_root, provider=provider,
-            supervisor=supervisor, knowledge=knowledge,
-            ensemble=ensemble,
-        )
-    except Exception as e:
-        print(f"[FI] --portfolio failed: {e!r}", file=sys.stderr)
-        return 1
-
-    print(f"[FI] portfolio -> {art.portfolio_path}")
-    print(
-        f"[FI] {art.completed_count + art.in_progress_count} quests; "
-        f"{art.completed_count} completed, "
-        f"{art.in_progress_count} in-progress; "
-        f"ingested_to_axon={art.ingested_to_axon}",
-    )
-    return 0
-
-
 def _parse_ensemble_flag(
     models_csv: str, merge: str, moderator: str,
 ) -> "NodeEnsembleConfig | None":  # type: ignore[name-defined]
-    """Convert ``--{proposal,critique}-ensemble M1,M2,M3`` flag triple
+    """Convert ``--critique-ensemble M1,M2,M3`` flag triple
     into a NodeEnsembleConfig, or None when the flag was omitted.
 
     Empty / whitespace-only strings → None (no ensemble; default
@@ -4403,7 +3896,7 @@ async def _run_critique(
 async def _run_analyze(
     *,
     data_path: Path,
-    topic: str,
+    commission: Path,
     output_root: Path,
     provider_name: str,
     provider_model: str = "",
@@ -4416,22 +3909,29 @@ async def _run_analyze(
     ensemble_moderator: str = "",
 ) -> int:
     """Top-level wiring for ``python launch.py --analyze <data_path>
-    --analyze-topic "..."``.
+    --commission <file>``.
 
     Builds a no-simulation Config, stages the user's data into the
     quest's ``data/`` directory, then runs the engine through
-    ``run_one``. The engine's no-simulation path (auto_collect_data
-    passthrough → wait_for_data passthrough since data exists →
+    ``run_one``. The engine's no-simulation path (wait_for_data
+    passthrough since data exists →
     data_load → analyze → write → review) handles the rest.
 
-    Unlike the single-shot tools (digest / portfolio / summarize)
+    Unlike the single-shot tools (digest / summarize)
     that wrap a single LLM call, ``--analyze`` runs a multi-node
     engine quest. The CLI ``--analyze-ensemble`` flag therefore
     populates ``cfg.provider.node_ensemble`` for the ``analyze`` and
     ``cross_check`` nodes — the engine's per-node fan-out logic does
     the rest, same as a quest run from the YAML.
     """
+    from core import commission as _commission
     from core.analyze_cli import prepare_analyze_quest
+
+    try:  # before the quest folder is made or a file copied
+        _commission.door(commission, None, asked={"analyze_local_first": True})  # the data is the person's: so must be `method`
+    except _commission.CommissionRefused as e:
+        print(f"[FI] {e}", file=sys.stderr)
+        return 2
 
     # Force vscode_extension as the provider when EITHER bridge
     # transport was supplied — the port is the chat-spawn path, the
@@ -4445,7 +3945,7 @@ async def _run_analyze(
 
     try:
         cfg, quest_id, files_staged = prepare_analyze_quest(
-            data_path=data_path, topic=topic, output_root=output_root,
+            data_path=data_path, commission=commission, output_root=output_root,
             provider_name=provider_name,
         )
     except ValueError as e:
@@ -4508,625 +4008,6 @@ async def _run_analyze(
     return 0
 
 
-async def _run_new(
-    *,
-    output_root: Path,
-    draft_only: bool,
-    vscode_bridge_port: int,
-    vscode_bridge_socket: str = "",
-    interactive: bool,
-    supervisor: ProxySupervisor,
-) -> int:
-    """``python launch.py --new`` — interactive interview frontend.
-
-    Walks the user through the question set defined in
-    :mod:`core.interview`, calls the preflight clarify LLM once (with
-    a visible spinner) for topic-tuned defaults, writes the resulting
-    YAML to ``outputs/_drafts/<stamp>-<title>.yaml``, then (unless
-    ``--draft-only``) immediately starts the quest via the existing
-    ``--config`` path.
-
-    Returns 0 on a completed interview, 0 on quest success, 1 on any
-    user-cancellation or quest failure. Stdin EOF + Ctrl-C count as
-    cancellation, not failure — the quest just doesn't start.
-    """
-    # Only the symbols _run_new actually uses. _cli_prompt_for
-    # imports its own (smart_defaults + model_choices_for).
-    from core.interview import (
-        BYLINE_FIELDS, InterviewAnswers, answers_to_yaml,
-        derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
-        preflight_clarify, question_applies, questions_for_tier, resolve_review_panel, slugify,
-    )
-
-    # Choice labels include em-dashes / arrows / Unicode math. Windows
-    # consoles default to cp1252 which can't encode them; force stdout
-    # + stderr to UTF-8 so the prompts render and don't crash with
-    # ``UnicodeEncodeError: 'charmap' codec can't encode character``.
-    # No-op on POSIX (already UTF-8).
-    #
-    # ``sys.stdin`` also gets reconfigured to UTF-8 so users can TYPE
-    # non-ASCII topics — e.g. Traditional Chinese — at the interactive
-    # interview prompt. Without this, Windows console reads through the
-    # legacy code page (cp950 on zh-TW, cp936 on zh-CN, cp932 on ja-JP,
-    # ...) and ``input()`` either errors or mangles the bytes before
-    # Python sees them. ``errors="replace"`` keeps a partial-decode
-    # answer over a hard crash.
-    _force_utf8_streams()
-
-    print("=" * 72)
-    print("Frontier Insight — set up a new research quest")
-    print("Press Ctrl-C at any prompt to cancel.")
-    print("=" * 72)
-    print()
-
-    partial: dict[str, object] = {}
-    frontend = "cli"
-
-    tier1 = questions_for_tier(1, frontend)
-    tier2_qs = questions_for_tier(2, frontend)
-
-    # The paper byline is not asked here: it comes from the profile (core/profile.py), is folded on the review screen,
-    # and is asked once before the first paper is written when it is still empty (_ask_byline_once).
-    from core import profile as _profile
-    from core.interview import FIRST_STEPS
-
-    saved_profile = _profile.load()
-    if saved_profile is not None:
-        partial.update(saved_profile)
-
-    def research_like() -> bool:
-        return str(partial.get("result_use") or "research") != "explore"
-
-    def model_problem(qid: str) -> str:
-        """Why the model answers as they stand would not do (research needs the quest's model named and one reviewer
-        on another model; the quest would otherwise stop at its first node to ask), or ""."""
-        if qid == "provider_model" and research_like() and not str(partial.get("provider_model") or "").strip():
-            return "research needs the quest's model named, so one reviewer can use a different one"
-        if qid == "second_reviewer_model" and research_like():
-            second = partial.get("second_reviewer_model")
-            if not str(second or "").strip():
-                return "research needs a different model for one reviewer, or 'I only have one model'"
-            if second == partial.get("provider_model"):
-                return "that is the model the quest runs on; pick another, or 'I only have one model'"
-        return ""
-
-    def ask_checked(q):  # type: ignore[no-untyped-def]
-        """Ask ``q`` until the answer does (``model_problem``); None when the person cancels."""
-        answer = _cli_prompt_for(q, partial, {})
-        while answer is not None:
-            held = partial.get(q.id)
-            partial[q.id] = answer
-            problem = model_problem(q.id)
-            if held is None:
-                partial.pop(q.id, None)
-            else:
-                partial[q.id] = held
-            if not problem:
-                return answer
-            print(f"    ({problem})")
-            answer = _cli_prompt_for(q, partial, {})
-        return None
-
-    # ---- Stage 1: three steps -- the research question, what the result is for, the model ----
-    step_of = {qid: (n, title) for n, (_sid, title, qids) in enumerate(FIRST_STEPS, 1) for qid in qids}
-    shown_step = 0
-    try:
-        for q in tier1:
-            if not question_applies(q, partial):  # the second reviewer's model: research or a decision only
-                continue
-            n, title = step_of.get(q.id, (0, ""))
-            if n and n != shown_step:
-                shown_step = n
-                print()
-                print(f"── Step {n} of {len(FIRST_STEPS)}: {title} ──")
-            # Research or a decision: the quest's model named, and one reviewer on another (``model_problem``).
-            answer = ask_checked(q)
-            if answer is None:
-                print()
-                print("— interview cancelled.")
-                return 1
-            partial[q.id] = answer
-    except (KeyboardInterrupt, EOFError):
-        print()
-        print("— interview cancelled (Ctrl-C / EOF).")
-        return 1
-
-    # ---- Stage 2: preflight LLM + derive tier-2 + tier-3 ----
-    derived = derive_tier2(partial)
-    advanced = derive_tier3({**partial, **derived})  # the retrieval sizes follow the derived study depth
-    print()
-    print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
-    try:
-        preflight_cache = await preflight_clarify(
-            topic=str(partial.get("topic", "")),
-            paper_format=str(derived.get("paper_format") or "article"),
-            provider_name=str(partial.get("provider") or "openai"),
-            provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
-        )
-        print("✓ done")
-    except Exception as e:
-        print(f"⚠ preflight failed ({e}); proceeding with empty advanced defaults.")
-        preflight_cache = {}
-    print()
-
-    # Overlay preflight-suggested values onto tier-3 placeholders so
-    # the user sees the LLM's suggestions in the review screen.
-    for k in ("comparative_baseline", "success_metric", "budget"):
-        if preflight_cache.get(k):
-            advanced[k] = preflight_cache[k]
-
-    # ---- Stage 3: review-and-edit loop: four plain cards, the rest under Advanced ----
-    show_advanced = False
-    edited: set[str] = set()
-    try:
-        while True:
-            values = {**partial, **derived, **advanced}
-            rows = _build_review_rows(values, show_advanced=show_advanced)
-            _print_review(rows, show_advanced=show_advanced, values=values)
-            choice = input(
-                "\nEdit which? [number to edit, "
-                + ("'h' to hide" if show_advanced else "'a' to show advanced")
-                + ", Enter to launch] > "
-            ).strip().lower()
-            if choice == "":
-                break
-            if choice == "a" and not show_advanced:
-                show_advanced = True
-                continue
-            if choice == "h" and show_advanced:
-                show_advanced = False
-                continue
-            if not choice.isdigit():
-                print(f"  ⚠ unrecognized input {choice!r}; press Enter or pick a number.")
-                continue
-            idx = int(choice) - 1
-            if idx < 0 or idx >= len(rows):
-                print(f"  ⚠ number out of range; pick 1-{len(rows)}.")
-                continue
-            row = rows[idx]
-            if row["id"] == "byline":
-                # The folded "Paper byline (optional)" row: its four fields, each optional.
-                for bq in (q for q in tier2_qs if q.id in BYLINE_FIELDS):
-                    typed = _cli_prompt_for(bq, {**partial, **derived}, {})
-                    if typed is None:
-                        break
-                    derived[bq.id] = " ".join(str(typed).split())
-                    edited.add(bq.id)
-                continue
-            new_val = _cli_prompt_for(row["question"], {**partial, **derived, **advanced}, preflight_cache)
-            if new_val is None:
-                continue  # user aborted single-field edit; stay in review
-            if row["id"] == "page_limit":
-                try:
-                    parse_page_limit_answer(new_val)
-                except ValueError as e:
-                    print(f"    ({e}; the page limit is unchanged)")
-                    continue
-            if row["id"] == "provider_fixed_temperature":
-                # Validated here, not just at YAML-emission time: without this, a typo survives
-                # the review screen silently and answers_to_yaml's own parse (unhandled here)
-                # raises ValueError well after the interview is otherwise done, taking the whole
-                # session down with it instead of just this one field's edit.
-                try:
-                    parse_fixed_temperature_answer(new_val)
-                except ValueError as e:
-                    print(f"    ({e}; the fixed temperature is unchanged)")
-                    continue
-            if row["id"] == "review_panel":
-                # Shown as it will run: the research profile's required reviewers are added now, not after launch.
-                resolved = resolve_review_panel(list(new_val), str(partial.get("result_use") or "research"))  # type: ignore[arg-type]
-                if resolved != list(new_val):  # type: ignore[arg-type]
-                    print(f"    (research needs {', '.join(r for r in resolved if r not in new_val)} on the panel; added)")  # type: ignore[operator]
-                new_val = resolved
-            if row["id"] == "ensemble_models":
-                from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
-                if len(parse_ensemble_models(new_val)) < ENSEMBLE_MIN_MODELS:
-                    print(
-                        f"    ⚠ fewer than {ENSEMBLE_MIN_MODELS} models named — no ensemble will be "
-                        "configured (FI does not pick models for you)."
-                    )
-            if row["tier"] == 1:  # an answer of the first screen: what follows from it is worked out again
-                before = dict(partial)
-                partial[row["id"]] = new_val
-                redo: set[str] = set()
-                if row["id"] == "provider" and new_val != row["value"]:
-                    # Another provider: its models, and (research or a decision) a reviewer on another one of them.
-                    partial.pop("provider_model", None)
-                    partial.pop("second_reviewer_model", None)
-                    redo = {"provider_model", "second_reviewer_model"}
-                # The checks of the first screen hold here too (a model named for research, one reviewer on another,
-                # asked when exploring became research): asked until they do; a cancel puts the answers back.
-                cancelled = False
-                for mid in ("provider_model", "second_reviewer_model"):
-                    mq = next(q for q in tier1 if q.id == mid)
-                    if not question_applies(mq, partial) or (mid not in redo and not model_problem(mid)):
-                        continue
-                    print(f"    ({model_problem(mid) or 'the provider changed, so its models are asked again'})")
-                    picked = ask_checked(mq)
-                    if picked is None:
-                        cancelled = True
-                        break
-                    partial[mid] = picked
-                if cancelled:
-                    partial.clear()
-                    partial.update(before)
-                    print("    (cancelled; the earlier answers are kept)")
-                    continue
-                fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
-                derived.update({k: v for k, v in fresh.items() if k not in edited})
-                fresh3 = derive_tier3({**partial, **derived})
-                advanced.update({k: v for k, v in fresh3.items()
-                                 if k not in edited and k not in ("comparative_baseline", "success_metric", "budget")})
-                if row["id"] == "result_use":
-                    derived["review_panel"] = resolve_review_panel(
-                        list(derived.get("review_panel") or []), str(new_val or "research"))  # type: ignore[arg-type]
-            elif row["tier"] == 2:
-                derived[row["id"]] = new_val
-                edited.add(row["id"])
-                # What follows from it (study depth and retrieval size from the paper format, ...) is worked out
-                # again, except what was set by hand.
-                fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
-                derived.update({k: v for k, v in fresh.items() if k not in edited})
-                fresh3 = derive_tier3({**partial, **derived})
-                advanced.update({k: v for k, v in fresh3.items()
-                                 if k not in edited and k not in ("comparative_baseline", "success_metric", "budget")})
-                if row["id"] == "paper_format" and new_val != row["value"]:
-                    # The suggested baseline, metric and budget were for the old format: asked again for this one.
-                    print("⏳ The paper format changed; asking for topic-tuned suggestions again...")
-                    try:
-                        preflight_cache = await preflight_clarify(
-                            topic=str(partial.get("topic", "")),
-                            paper_format=str(derived.get("paper_format") or "article"),
-                            provider_name=str(partial.get("provider") or "openai"),
-                            provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
-                        )
-                    except Exception as e:  # noqa: BLE001 -- the old suggestions are cleared, not kept
-                        print(f"⚠ preflight failed ({e}); the suggested baseline, metric and budget are left blank.")
-                        preflight_cache = {}
-                    for k in ("comparative_baseline", "success_metric", "budget"):
-                        if k not in edited:
-                            advanced[k] = preflight_cache.get(k) or ""
-            else:
-                advanced[row["id"]] = new_val
-                edited.add(row["id"])
-    except (KeyboardInterrupt, EOFError):
-        print()
-        print("— interview cancelled at review screen (Ctrl-C / EOF).")
-        return 1
-
-    # ---- Build final answers ----
-    _survey_mode = bool(derived.get("survey_mode", partial.get("survey_mode", False)))
-    answers = InterviewAnswers(
-        topic=str(partial["topic"]),
-        title=str(derived["title"]),
-        output_kinds=list(derived["output_kinds"]),  # type: ignore[arg-type]
-        paper_format=str(derived["paper_format"]),
-        # survey_mode implies no_simulation (no experiment, no dataset) — OR
-        # them so the answers object is never internally inconsistent.
-        no_simulation=bool(derived["no_simulation"]) or _survey_mode,
-        survey_mode=_survey_mode,
-        study_depth=str(derived["study_depth"]),
-        comparative_baseline=str(advanced.get("comparative_baseline") or ""),
-        success_metric=str(advanced.get("success_metric") or ""),
-        budget=str(advanced.get("budget") or ""),
-        clarify_mode=str(derived["clarify_mode"]),
-        review_panel=list(derived["review_panel"]),  # type: ignore[arg-type]
-        knowledge_enabled=bool(derived["knowledge_enabled"]),
-        provider=str(partial.get("provider", "openai")),
-        provider_model=str(partial.get("provider_model")) if partial.get("provider_model") else None,
-        provider_base_url=str(advanced.get("provider_base_url") or ""),
-        provider_api_key_env=str(advanced.get("provider_api_key_env") or ""),
-        provider_fixed_temperature=str(advanced.get("provider_fixed_temperature") or ""),
-        audience=str(derived.get("audience", "external")),
-        knowledge_top_k=int(derived.get("knowledge_top_k", 8) or 8),
-        knowledge_external_top_k=int(advanced.get("knowledge_external_top_k", 20) or 20),
-        web_research=bool(derived.get("web_research", True)),
-        supply_papers=bool(advanced.get("supply_papers", True)),
-        pause_for_plan=bool(advanced.get("pause_for_plan", False)),
-        # Explore first, then confirm once: the smart default follows the result use (on for research); a missing
-        # answer writes nothing and the profile decides.
-        phased=advanced["phased"] if isinstance(advanced.get("phased"), bool) else None,
-        result_use=str(partial.get("result_use") or "research"),
-        second_reviewer_model=str(partial.get("second_reviewer_model") or ""),
-        # Advanced (tier 3): off unless the person opened Advanced and named the models.
-        ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
-        ensemble_models=str(advanced.get("ensemble_models") or ""),
-        max_iterations=int(advanced.get("max_iterations", 2) or 2),
-        author=" ".join(str(derived.get("author") or "").split()),
-        affiliation=" ".join(str(derived.get("affiliation") or "").split()),
-        contact_email=" ".join(str(derived.get("contact_email") or "").split()),
-        url=" ".join(str(derived.get("url") or "").split()),
-        poster_size=str(advanced.get("poster_size") or "a1_portrait"),
-        reasoning_effort=str(advanced.get("reasoning_effort") or "default"),
-        # Checked when it was typed on the review screen; blank is no set limit.
-        page_limit=parse_page_limit_answer(
-            advanced.get("page_limit"),
-            on_error=lambda message: print(f"⚠ {message}; no page limit set."),
-        ),
-    )
-
-    yaml_text = answers_to_yaml(answers, frontend="cli")
-    drafts_dir = output_root / "_drafts"
-    drafts_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d-%H%M")
-    yaml_path = drafts_dir / f"{stamp}-{slugify(answers.title)}.yaml"
-    yaml_path.write_text(yaml_text, encoding="utf-8")
-
-    # The byline, once the quest's config is written: kept for later quests when it was typed or changed here. A blank
-    # one is not kept while none was ever given: it is then asked once before the first paper (_ask_byline_once).
-    line = {k: getattr(answers, k) for k in _profile.FIELDS}
-    if saved_profile != line and (saved_profile is not None or any(line.values())):
-        try:
-            _profile.save(line)
-            print(f"  (your author line is kept in {_profile.path()} for the next quests)")
-        except OSError as e:
-            print(f"  ⚠ the author line could not be kept for the next quests ({e})")
-
-    print()
-    print("=" * 72)
-    print(f"YAML written: {yaml_path}")
-    print("=" * 72)
-
-    if draft_only:
-        print()
-        print("--draft-only: not launching the quest. Run:")
-        print(f"  python launch.py --config {yaml_path}")
-        return 0
-
-    # Before anything is spent: the provider and model the person chose, checked at no cost (signed in, the service
-    # answering, the model there). On a problem the quest is not started; the answers are kept in the YAML above.
-    if answers.provider != "vscode_extension":  # VS Code checks its own Chat-picker model
-        from core.provider_readiness import one_line, preflight
-
-        print()
-        print(f"Checking {answers.provider} before launching (nothing is paid for) ...", flush=True)
-        ready = await preflight(
-            answers.provider, model=answers.provider_model, base_url=answers.provider_base_url,
-            api_key_env=answers.provider_api_key_env,
-        )
-        print(f"  {one_line(ready)}")
-        if ready.blocked:
-            print()
-            print("The quest was not started. Your answers are kept in the YAML above; once that is fixed, run:")
-            print(f"  {_command_name()} --config {yaml_path}")
-            return 1
-
-    # Launch the quest using the existing --config code path
-    # (``run_one``). The interview already pinned clarify_overrides
-    # in the YAML, so the engine skips its own clarify LLM call.
-    print()
-    print("Launching quest...")
-    cfg = Config.from_yaml(yaml_path)
-    _apply_vscode_bridge_override(cfg, vscode_bridge_port)
-    try:
-        await run_one(
-            cfg,
-            supervisor=supervisor,
-            profile=False,
-            interactive=interactive,
-            source_yaml_path=yaml_path.resolve(),
-            ask_byline=True,
-        )
-        return 0
-    except Exception as e:
-        if not getattr(e, "_fi_failure_shown", False):  # already said in plain words by run_one
-            print(f"[FI] quest failed: {e!r}", file=sys.stderr)
-        return 1
-
-
-def _build_review_rows(values: dict[str, object], *, show_advanced: bool, frontend: str = "cli") -> list[dict[str, object]]:
-    """The review screen's numbered rows, card by card (``core.interview.REVIEW_CARDS``): each card's shown rows, then,
-    when ``show_advanced``, each card's advanced rows. The four byline fields are one folded row, "Paper byline
-    (optional)" (id ``byline``). Each row carries its Question so the edit handler re-prompts that exact slot."""
-    from core.interview import BYLINE_FIELDS, QUESTIONS, REVIEW_CARDS, byline_text, question_applies
-
-    by_id = {q.id: q for q in QUESTIONS if frontend in q.frontends}
-    from core import profile as _profile
-
-    # Asked before the first paper only while no byline was ever kept (else it says how to change it here).
-    byline_frontend = "cli" if _profile.load() is None else "serve"
-    rows: list[dict[str, object]] = []
-    for part in ("shown", "advanced") if show_advanced else ("shown",):
-        for card in REVIEW_CARDS:
-            for qid in card[part]:
-                if qid in BYLINE_FIELDS:
-                    if qid == BYLINE_FIELDS[0]:
-                        rows.append({"id": "byline", "card": card["id"], "advanced": part == "advanced", "tier": 2,
-                                     "label": "Paper byline (optional)",
-                                     "value": byline_text(values, byline_frontend),
-                                     "question": None})
-                    continue
-                q = by_id.get(qid)
-                if q is None or not question_applies(q, values):
-                    continue
-                rows.append({"id": qid, "card": card["id"], "advanced": part == "advanced", "tier": q.tier,
-                             "label": q.label, "value": values.get(qid), "question": q})
-    return rows
-
-
-def _model_ready_line(values: dict[str, object]) -> str:
-    """Card 2's readiness line: how far the chosen provider is set up on this computer (local only, at once;
-    core/provider_readiness.py). The full check runs again before launch."""
-    provider = str(values.get("provider") or "")
-    if not provider:
-        return "no provider chosen"
-    try:
-        from core.provider_readiness import check_local, one_line
-
-        return one_line(check_local(provider, model=str(values.get("provider_model") or "") or None,
-                                    base_url=str(values.get("provider_base_url") or ""),
-                                    api_key_env=str(values.get("provider_api_key_env") or "")))
-    except Exception as e:  # noqa: BLE001 -- a line on a screen; the launch check is what counts
-        return f"could not check it here ({e.__class__.__name__}); it is checked again before launch"
-
-
-def _print_review(rows: list[dict[str, object]], *, show_advanced: bool, values: dict[str, object] | None = None) -> None:
-    """The review screen: four plain cards (how strictly it is checked and what it costs; the model and whether it
-    is ready; data, sources and pauses; what you get), numbered rows to edit, and an "Advanced" part, folded unless
-    the person typed 'a'. Internal names (paper_md, methodologist, ...) are shown in plain words."""
-    from core.interview import REVIEW_CARDS, checks_sentence, cost_note, plain_value
-
-    values = values or {}
-    print()
-    print("─── Review before launch ──────────────────────────────")
-    titles = {c["id"]: c["title"] for c in REVIEW_CARDS}
-    shown_card = None
-    in_advanced = False
-    for i, r in enumerate(rows, 1):
-        if r["advanced"] and not in_advanced:
-            in_advanced = True
-            shown_card = None
-            print()
-            print("  ══ Advanced ══")
-        if r["card"] != shown_card:
-            shown_card = r["card"]
-            print()
-            print(f"  [{titles[str(r['card'])]}]" if not in_advanced else f"  ── {titles[str(r['card'])]} ──")
-            if not in_advanced and r["card"] == "checks":
-                print(f"      {checks_sentence(values)}")
-                print(f"      Cost: {cost_note(values)}")
-            if not in_advanced and r["card"] == "models":
-                print(f"      Ready? {_model_ready_line(values)}")
-        val_str = str(r["value"]) if r["id"] == "byline" else plain_value(str(r["id"]), r["value"])
-        print(f"  {i:>2}. {r['label']:<34} {val_str}")
-    if not show_advanced:
-        print()
-        print("      (type 'a' to show advanced fields)")
-
-
-def _cli_prompt_for(
-    q,  # type: ignore[no-untyped-def]
-    partial: dict[str, object],
-    preflight: dict[str, str],
-) -> object | None:
-    """Render one interview question on stdout and read the answer
-    from stdin. Returns the parsed answer (already coerced to the
-    question's value type), or None when the user cancels.
-
-    For ``single``-kind questions we print a numbered choice list and
-    accept either the number or a unique prefix of the label. The
-    default (if any) is shown in parentheses and accepted on blank
-    input. Smart defaults are recomputed each call so cascades work
-    (paper_format flowing into no_simulation, etc).
-    """
-    from core.interview import (
-        build_smart_defaults, model_choices_for, second_reviewer_choices,
-    )
-
-    # Recompute smart defaults given everything answered so far.
-    smart = build_smart_defaults(partial)
-    default = smart.get(q.id, q.default)
-
-    # Preflight overrides for the three topic-tuned slots — they live
-    # in preflight, not the smart_defaults table.
-    if q.id in ("comparative_baseline", "success_metric", "budget"):
-        if preflight.get(q.id):
-            default = preflight[q.id]
-
-    # An answer the caller already holds for this question wins: the quest's current value on --update, the value
-    # the review screen shows when a row is edited. Without this a blank answer on --update took FI's own default, so
-    # every setting the person had changed (a revise budget of 5, say) went quietly back to it.
-    # A held value that is not one of a closed question's choices (a model from before the provider changed) is not
-    # offered; None (a page limit answered "none") is a value like any other.
-    # Only a question whose choices are single values is closed: a list-valued one (output bundles, reviewer panels)
-    # holds any list, a custom one included, and it must survive a blank answer.
-    scalar_choices = bool(q.choices) and all(not isinstance(c.value, (list, dict)) for c in q.choices)
-    if q.id in partial and (
-        not scalar_choices or q.allow_other or any(c.value == partial[q.id] for c in q.choices)
-    ):
-        default = partial[q.id]
-
-    # Provider-model is a derived question — choices depend on the
-    # already-picked provider. Build the choice list at render time.
-    if q.id == "provider_model":
-        provider = partial.get("provider")
-        choices = model_choices_for(str(provider)) if provider else ()
-    elif q.id == "second_reviewer_model":
-        # The same provider's models except the one the quest runs on, then "I only have one model".
-        choices = second_reviewer_choices(str(partial.get("provider") or ""), partial.get("provider_model"))  # type: ignore[arg-type]
-    else:
-        choices = q.choices
-
-    print()
-    print(f"  [{q.label}] {q.prompt}")
-    if q.placeholder:
-        print(f"      example: {q.placeholder}")
-
-    if q.kind == "text":
-        default_str = "" if default in (None, "") else str(default)
-        prompt_str = f"    answer ({default_str}): " if default_str else "    answer: "
-        try:
-            raw = input(prompt_str).strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        return raw or default_str or ""
-
-    # single-select (or single-with-allow_other for provider_model)
-    if not choices:
-        # Fall back to free text — happens when allow_other and no
-        # curated list (e.g. unknown provider).
-        try:
-            raw = input("    answer: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        return raw
-
-    # Render the choice list.
-    if q.id == "provider":
-        # What is on this computer for each, in the words the Settings page and `fi --doctor` use
-        # (core/provider_readiness.py). Local only, so the list shows at once; the chosen one is checked fully
-        # (signed in, the service answering, the model there) before the quest is launched.
-        from core.provider_readiness import check_local, label as _state_label
-    for i, c in enumerate(choices, start=1):
-        # A label that already says "(default)" (e.g. "Research (default)") is not marked twice.
-        marker = " (default)" if c.value == default and "(default" not in c.label else ""
-        print(f"    {i}. {c.label}{marker}")
-        if c.description:
-            print(f"        {c.description}")
-        if q.id == "provider":
-            r = check_local(str(c.value))
-            print(f"        {_state_label(r.state)} \u2014 {r.sentence}")
-    if q.allow_other:
-        print(f"    {len(choices) + 1}. Other (type your own)")
-    if default is not None and not any(c.value == default for c in choices):
-        # A value none of the listed choices is (a custom list, a model typed in): say it is the one Enter keeps.
-        shown = ", ".join(str(v) for v in default) if isinstance(default, list) else str(default)
-        print(f"    (now: {shown}; press Enter to keep it)")
-
-    while True:
-        try:
-            raw = input(f"    select 1-{len(choices) + (1 if q.allow_other else 0)} (or label prefix): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
-        if not raw and default is not None:
-            return default
-        if raw.isdigit():
-            idx = int(raw)
-            if 1 <= idx <= len(choices):
-                return choices[idx - 1].value
-            if q.allow_other and idx == len(choices) + 1:
-                try:
-                    custom = input("    type the value: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    return None
-                if not custom:
-                    # An empty value is not an answer: asked again rather than cancelling the whole interview.
-                    print("    (nothing typed; pick a number, or choose Other again and type a name)")
-                    continue
-                return custom
-            print(f"    (not a valid choice — pick 1 to {len(choices) + (1 if q.allow_other else 0)})")
-            continue
-        # Match by unique label prefix (case-insensitive).
-        lower = raw.lower()
-        matches = [c for c in choices if c.label.lower().startswith(lower)]
-        if len(matches) == 1:
-            return matches[0].value
-        if len(matches) > 1:
-            print(f"    (ambiguous — matches {[c.label for c in matches]})")
-            continue
-        print(f"    (no match for '{raw}' — pick a number or a unique prefix)")
-
-
 def _refresh_quest_config(source: Path, dest: Path) -> Path | None:
     """Make the quest's ``config.yaml`` (``dest``) a copy of the config it was resumed with (``source``) when the two
     differ, keeping each earlier one beside it as ``config.yaml.before-resume-<time>``. Returns that backup when the
@@ -5152,111 +4033,38 @@ def _refresh_quest_config(source: Path, dest: Path) -> Path | None:
 
 async def _run_update(
     *,
-    quest_id: str,
-    output_root: Path,
+    quest_root: Path,
     vscode_bridge_port: int,
     vscode_bridge_socket: str = "",
     interactive: bool,
     supervisor: ProxySupervisor,
 ) -> int:
-    """``python launch.py --update <quest_id>`` — mid-quest re-entry.
+    """``python launch.py --update <quest_id>``: approve the settings in the quest's ``config.yaml`` as they are now
+    (core/plan_settings.py), then resume it. Nothing is asked; the lines it approves are printed first."""
+    from core import commission as _commission
+    from core import plan_settings as _plan_settings
 
-    Loads the existing quest's ``config.yaml``, runs the interview
-    pre-filled with current values (and limited to the editable
-    field subset), computes a diff, invalidates affected LangGraph
-    stages, writes the updated YAML, then resumes the quest via the
-    existing ``--resume`` path. Implementation in
-    :mod:`core.interview_update`.
-
-    The VS Code chat's ``@fi /update`` runs this in the chat, after the person chose to approve the settings in
-    ``config.yaml`` as they are, and says so with ``FI_UPDATE_APPROVE_AS_IS=1``: then no question is asked and those
-    settings are approved. Anything else asks the questions; with no terminal to answer in (a pipe, a script) that
-    cancels the update at the first one and approves nothing.
-    """
-    from core.interview_update import run_update_flow
-    ask = os.environ.get("FI_UPDATE_APPROVE_AS_IS") != "1"
-    return await run_update_flow(
-        ask=ask,
-        quest_id=quest_id,
-        output_root=output_root,
-        vscode_bridge_port=vscode_bridge_port,
-        vscode_bridge_socket=vscode_bridge_socket,
-        interactive=interactive,
-        supervisor=supervisor,
-        run_one=run_one,
-        apply_vscode_bridge_override=_apply_vscode_bridge_override,
-        apply_vscode_bridge_socket_override=_apply_vscode_bridge_socket_override,
-    )
-
-
-async def _run_proposal(
-    *,
-    topic: str,
-    output_root: Path,
-    provider_name: str,
-    axon_config_path: Path | None,
-    vscode_bridge_port: int,
-    vscode_bridge_socket: str = "",
-    supervisor: ProxySupervisor,
-    ensemble_models: str = "",
-    ensemble_merge: str = "tournament",
-    ensemble_moderator: str = "",
-    provider_model: str = "",
-) -> int:
-    """Top-level wiring for ``python launch.py --proposal "<topic>"``.
-
-    Returns 0 on success, 1 on validation or LLM failure.
-    """
-    from core.config import ProviderConfig as _ProviderConfig, KnowledgeConfig
-    from core.proposal import generate_proposal
-
-    provider = _ProviderConfig(name=provider_name, model=provider_model or "")  # type: ignore[arg-type]
-    _set_vscode_bridge_extras(provider, vscode_bridge_port, vscode_bridge_socket)
-
-    knowledge = None
-    try:
-        from core.knowledge import Knowledge
-        knowledge = Knowledge(KnowledgeConfig(
-            enabled=True,
-            axon_config=axon_config_path if axon_config_path else None,
-            seed_source_catalog=False,
-        ))
-    except Exception as e:  # pragma: no cover
-        print(
-            f"[FI] --proposal: Axon unavailable ({e!r}); proposal will still "
-            f"be written but not ingested.",
-            file=sys.stderr,
-        )
-
-    # Build optional ensemble config from CLI flags.
-    ensemble = _parse_ensemble_flag(
-        ensemble_models, ensemble_merge, ensemble_moderator,
-    )
-    if ensemble is not None:
-        print(f"[FI] proposal (provider={provider.name}; "
-              f"ensemble: {len(ensemble.models)} models, merge={ensemble.merge})")
-    else:
-        print(f"[FI] proposal (provider={provider.name})")
-    try:
-        art = await generate_proposal(
-            topic, output_root, provider=provider,
-            supervisor=supervisor, knowledge=knowledge,
-            ensemble=ensemble,
-        )
-    except ValueError as e:
-        print(f"[FI] --proposal: {e}", file=sys.stderr)
+    yaml_path = quest_root / "config.yaml"
+    if not yaml_path.is_file():
+        print(f"[FI] --update: quest {quest_root.name} has no config.yaml ({yaml_path}).", file=sys.stderr)
         return 1
-    except Exception as e:
-        print(f"[FI] --proposal failed: {e!r}", file=sys.stderr)
+    try:
+        cfg = Config.from_yaml(yaml_path)
+        _commission.door(cfg.commission, quest_root, topic=cfg.topic)
+    except _commission.CommissionRefused as e:
+        print(f"[FI] {e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 -- a config that does not load is said in its own words
+        print(f"[FI] --update: {yaml_path} cannot be read ({e}).", file=sys.stderr)
         return 1
-
-    print(f"[FI] proposal -> {art.proposal_path}")
-    print(f"[FI] companion YAML -> {art.yaml_path}")
-    print(f"[FI] ingested_to_axon={art.ingested_to_axon}")
-    print(
-        f"[FI] To run the quest: python launch.py --config "
-        f"{art.yaml_path}",
-    )
+    # The quest resumes in its own outputs folder, whatever a relative output_dir in its YAML means from here.
+    cfg.output.output_dir = quest_root.parent
+    print(f"[FI] update: approving the settings in {yaml_path} as they are now, then resuming {quest_root.name}")
+    _plan_settings.approve(quest_root, cfg, say=lambda line: print(f"[FI] update: {line}" if line.strip() else ""))
+    _apply_vscode_bridge_override(cfg, vscode_bridge_port)
+    _apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
+    await run_one(cfg, supervisor=supervisor, profile=False, interactive=interactive,
+                  resume_quest_id=quest_root.name, source_yaml_path=yaml_path.resolve())
     return 0
 
 
@@ -5340,8 +4148,9 @@ def _export_models(dest: Path) -> int:
 _DEMO_HELP = """\
 usage: fi demo
 
-The first thing to run. It writes a small example quest, fi-demo.yaml, into the folder you are in (never over a
-file that is there: the next one is fi-demo-2.yaml), checks at no cost what it can about the model it names (a key
+The first thing to run. It writes a small example study into the folder you are in: fi-demo-commission.yaml (the
+study FI is asked to run) and fi-demo.yaml (the config that names it), never over a file that is there (the next
+pair is fi-demo-2.yaml and fi-demo-2-commission.yaml). It checks at no cost what it can about the model it names (a key
 the service accepts, a CLI signed in, a local model downloaded; no model is called), and then asks before running it
 for real. Without a terminal to ask in, it prints the command that runs it and stops; when the model is not ready it
 says how to fix that and exits 1.
@@ -5362,6 +4171,63 @@ def _command_name() -> str:
     except OSError:
         here = False
     return "python launch.py" if here else f'python "{script.resolve()}"'
+
+
+_NEW_HELP = """\
+usage: fi new
+
+Writes a commission to fill in, commission.yaml (the study FI is asked to run: the question, what it covers, the time
+allowed, the values already known with the source that states each, and what counts as supported), and study.yaml,
+the config that names it and the model that runs it. Never over a file that is there: the next pair is
+commission-2.yaml and study-2.yaml. Then: fill in the commission, `fi check commission.yaml`, `fi --config study.yaml`.
+"""
+
+_CHECK_HELP = """\
+usage: fi check FILE
+
+Checks a commission (or a config that names one) by the rules FI runs before a study starts: every key is there, each
+known value is stated in its passage, and each passage is in the full text it names. One sentence per problem; exit
+2 when there is one, 0 when the commission can be used. No model is called.
+"""
+
+
+def _new(argv: list[str]) -> int:
+    """``fi new``: a commission to fill in and the config that names it, in the folder FI runs in."""
+    from core import commission as _commission
+    from core import demo as _demo_mod
+
+    if any(a in ("-h", "--help") for a in argv):
+        print(_NEW_HELP)
+        return 0
+    if argv:
+        print(f"fi new takes no arguments (got {' '.join(argv)}).\n")
+        print(_NEW_HELP)
+        return 2
+    provider = (_demo_mod.set_up_providers() or ["openai"])[0]
+    try:
+        commission, config = _commission.write_new(Path.cwd(), provider)
+    except OSError as exc:
+        print(f"Could not write the commission into {Path.cwd()} ({exc}). Run `fi new` from a folder you can write to.")
+        return 1
+    name = _command_name()
+    print(f"  Commission : {commission}  (fill in every key: the study FI is asked to run)")
+    print(f"  Config     : {config}  (the model, {provider}, and where the results go)")
+    print(f"Then check it:  {name} check {commission.name}")
+    print(f"and start it:   {name} --config {config.name}")
+    return 0
+
+
+def _check(argv: list[str]) -> int:
+    """``fi check FILE``: the rules a commission must meet before a study starts, one plain sentence each."""
+    from core import commission as _commission
+
+    if any(a in ("-h", "--help") for a in argv) or len(argv) != 1:
+        print(_CHECK_HELP)
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
+    usable, lines = _commission.check(Path(argv[0]))
+    for line in lines:
+        print(line)
+    return 0 if usable else 2
 
 
 def _demo(argv: list[str]) -> int | list[str]:
@@ -5412,7 +4278,7 @@ def _demo(argv: list[str]) -> int | list[str]:
         return 1
     run_cmd = f"{_command_name()} --config {path.name}"
     print()
-    print(f"  Example quest : {path}")
+    print(f"  Example study : {path} (its commission: {_demo_mod.commission_path(path).name})")
     print("                  three numerical integrators on a damped oscillator; needs no data; an exploration")
     print("                  (the cheapest kind of quest, its paper marked preliminary)")
     print(f"  Model         : {provider}{(' / ' + model) if model else ''}")
@@ -5642,16 +4508,16 @@ def _doctor(deep: bool = False) -> int:
         )
 
     # ---- model providers -------------------------------------------------
-    # The same sentences as the web Settings page and the interview (core/provider_readiness.py). Quick: what is on
+    # The same sentences as the web Settings page (core/provider_readiness.py). Quick: what is on
     # this computer (a command on PATH, a key set). Deep: also signed in, the service answering, the model listed.
     from core import provider_readiness as _pr
-    from core.interview import PROVIDER_CHOICES
+    from core.provider_choices import PROVIDER_CHOICES
 
     print("\nModel providers" + ("" if deep else " (installed or key set; sign-in and the service are checked by --deep, and "
-                                     "when you launch from `fi demo`, `fi --new` or the web form)"))
+                                     "when you launch from `fi demo`)"))
     print("-" * 72, flush=True)
     names = [str(c.value) for c in PROVIDER_CHOICES]
-    if "gemini" not in names:  # an API key fi demo uses, not in the interview's list
+    if "gemini" not in names:  # an API key fi demo uses, not in the provider list
         names.append("gemini")
     if deep:
         import asyncio as _asyncio
@@ -6418,7 +5284,7 @@ async def _why_skills(
     prompt = _load_prompts()["select_skills"].substitute(
         topic=topic,
         clarify_block="(not run — this is a preview)",
-        chosen_idea="{}",
+        study="(none)",
         catalogue_block=catalogue.render(),
     )
     sup = ProxySupervisor()
@@ -7406,50 +6272,6 @@ def _restore_skill(name: str) -> int:
     return 1
 
 
-def _list_drafts(output_root: Path) -> int:
-    """Top-level handler for ``python launch.py --list-drafts``.
-
-    Prints a table of proposal YAMLs in ``outputs/_drafts/`` so the
-    user can pick one to feed into ``--config`` without remembering
-    paths. Mirrors the Web `/api/drafts` + /interview drafts picker
-    and the VSCode `@fi /drafts` chat command.
-    """
-    drafts_dir = output_root / "_drafts"
-    if not drafts_dir.is_dir():
-        print(f"[FI] no drafts directory at {drafts_dir}", file=sys.stderr)
-        print("    Run `--proposal \"<topic>\"` to create one.")
-        return 0
-    files = sorted(
-        drafts_dir.glob("*.yaml"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
-    if not files:
-        print(f"[FI] no proposal drafts in {drafts_dir}")
-        print("    Run `--proposal \"<topic>\"` to create one.")
-        return 0
-    print(f"[FI] {len(files)} proposal draft(s) in {drafts_dir}:\n")
-    import yaml as _yaml
-    for p in files[:40]:
-        try:
-            doc = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        except Exception:
-            doc = {}
-        title = (doc.get("title") or "").strip() or "(no title)"
-        topic = (doc.get("topic") or "").strip().replace("\n", " ")
-        topic_short = topic[:80] + ("…" if len(topic) > 80 else "")
-        mtime = time.strftime(
-            "%Y-%m-%d %H:%M",
-            time.localtime(p.stat().st_mtime),
-        )
-        print(f"  {mtime}  {title}")
-        if topic_short:
-            print(f"              {topic_short}")
-        print(f"              python launch.py --config {p}")
-        print()
-    return 0
-
-
 def _load_dotenvs() -> None:
     """The ``.env`` in the folder FI runs in, then the one in FI's own folder (next to this file), when they differ.
 
@@ -7499,7 +6321,7 @@ def _load_dotenv(path: str = ".env") -> None:
 
 def _force_utf8_streams() -> None:
     """Reconfigure stdout/stderr/stdin to UTF-8 so non-ASCII output (the
-    `--help` text has arrows/em-dashes; draft titles and `--list-drafts`
+    `--help` text has arrows/em-dashes; draft titles
     can be Traditional Chinese) doesn't crash on a Windows cp1252 console
     with ``UnicodeEncodeError: 'charmap' codec can't encode character``.
     No-op on POSIX (already UTF-8). Must run BEFORE argparse prints help
@@ -7537,7 +6359,7 @@ def _quiet_network_logs() -> None:
 def main() -> int:
     # UTF-8 the console FIRST: argparse prints --help (arrows/em-dashes)
     # and exits inside parse_args(), before any other code runs, so a
-    # cp1252 Windows console would crash on --help / --list-drafts unless
+    # cp1252 Windows console would crash on --help unless
     # the streams are reconfigured up here.
     _force_utf8_streams()
     _quiet_network_logs()
@@ -7550,6 +6372,9 @@ def main() -> int:
     if not argv:
         # Bare `fi`: three plain next steps in a terminal, the short help (exit 2) elsewhere -- never the flag wall.
         argv = _start_menu()
+    if argv[:1] in (["new"], ["check"]):
+        # `fi new` writes a commission to fill in and the config that names it; `fi check FILE` checks a commission.
+        return _new(argv[1:]) if argv[0] == "new" else _check(argv[1:])
     if argv[:1] == ["demo"]:
         # `fi demo` (core/demo.py): writes the example quest and checks the model; a yes runs it as `--config`.
         went_on = _demo(argv[1:])
@@ -7561,7 +6386,8 @@ def main() -> int:
         if args.doctor and not args.deep:
             # The quick doctor runs here, without the engine imported and without the event loop.
             try:
-                import core.interview  # noqa: F401 -- what the doctor reads; a missing dependency bootstraps
+                import core.config  # noqa: F401 -- what the doctor reads; a missing dependency bootstraps
+                import core.provider_choices  # noqa: F401
                 import generation._pandoc  # noqa: F401
             except ImportError as missing:
                 _bootstrap_or_reraise(missing)

@@ -62,18 +62,6 @@ interface LmRequest {
     ask_thinking?: boolean;
 }
 
-interface ClarifyRequest {
-    type: "clarify_request";
-    id: number;
-    questions: Record<string, { question: string; default: unknown; cards?: StudyCard[] }>;
-}
-
-/** One study the topic could mean; the card the person picks (or edits) is sent back whole. */
-interface StudyCard {
-    question: string;
-    [field: string]: unknown;
-}
-
 interface HumanReviewRequest {
     type: "human_review_request";
     id: number;
@@ -149,7 +137,7 @@ export function beforeAcceptMarkdown(block: BeforeAccept | undefined): string {
     return md + "\n";
 }
 
-type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest;
+type IncomingMessage = LmRequest | HumanReviewRequest;
 
 export interface BridgeOptions {
     progress: vscode.ChatResponseStream;
@@ -236,7 +224,7 @@ export class Bridge {
         }
         // Stream Python stderr (where FI's logging goes) into the chat
         // pane. Filter to user-meaningful node-tagged lines (e.g.
-        // "[ideate] topic=…") and reformat them so the chat doesn't
+        // "[literature] query=…") and reformat them so the chat doesn't
         // look like raw CLI output. A small de-dupe guard catches the
         // occasional double-print from upstream lib loggers.
         child.stderr.setEncoding("utf-8");
@@ -245,7 +233,7 @@ export class Bridge {
         // Must track every node tag emitted by core/engine.py:_build_graph,
         // else the chat silently skips whole phases (evidence_gate, claim_check,
         // the no-simulation data path, web-derived figures).
-        const NODE_PATTERN = /\[(clarify|ideate|literature|plan|design|design_self_critique|implement_outline|implement|execute|execute_reflect|improve|analyze|cross_check|evidence_gate|write|claim_check|review|human_feedback|auto_collect_data|wait_for_data|data_load|web_plots|web_figures)\]\s*(.*)$/;
+        const NODE_PATTERN = /\[(clarify|literature|plan|design|design_self_critique|implement_outline|implement|execute|execute_reflect|improve|analyze|cross_check|evidence_gate|write|claim_check|review|human_feedback|wait_for_data|data_load|web_plots|web_figures)\]\s*(.*)$/;
         child.stderr.on("data", (chunk: string) => {
             pending += chunk;
             const lines = pending.split(/\r?\n/);
@@ -303,141 +291,9 @@ export class Bridge {
     private async handleMessage(msg: IncomingMessage): Promise<void> {
         if (msg.type === "lm_request") {
             await this.handleLmRequest(msg);
-        } else if (msg.type === "clarify_request") {
-            await this.handleClarifyRequest(msg);
         } else if (msg.type === "human_review_request") {
             await this.handleHumanReviewRequest(msg);
         }
-    }
-
-    /**
-     * Render the engine's pre-flight clarify questions as a sequence
-     * of `showInputBox` modals. The user can press Esc on any modal
-     * to cancel; we then send `clarify_cancelled` back and the Python
-     * side raises BridgeError (which the engine surfaces as a quest
-     * failure rather than hanging).
-     */
-    private async handleClarifyRequest(req: ClarifyRequest): Promise<void> {
-        this.opts.progress.markdown(
-            "\n🟡 **Pre-flight clarification** — the agent has questions to sharpen the run.\n\n",
-        );
-        const answers: Record<string, unknown> = {};
-        const keys = Object.keys(req.questions);
-        for (const key of keys) {
-            const entry = req.questions[key];
-            if (Array.isArray(entry.cards) && entry.cards.length) {
-                const study = await this.pickStudy(entry.cards, entry.question || key);
-                if (study === undefined) {
-                    this.send({ type: "clarify_cancelled", id: req.id });
-                    this.opts.progress.markdown(
-                        "\n— study choice cancelled by user; quest will fail.\n",
-                    );
-                    return;
-                }
-                answers[key] = study;
-                this.opts.progress.markdown(
-                    `  **Study:** ${escapeMd(typeof study === "object" ? String(study.question) : String(study))}\n\n`,
-                );
-                continue;
-            }
-            const defaultIsList = Array.isArray(entry.default);
-            const defaultStr = defaultIsList
-                ? (entry.default as unknown[]).join(", ")
-                : String(entry.default ?? "");
-            const value = await vscode.window.showInputBox({
-                title: `Clarify (${key})`,
-                prompt: entry.question || key,
-                value: defaultStr,
-                ignoreFocusOut: true,
-            });
-            if (value === undefined) {
-                // User pressed Esc.
-                this.send({
-                    type: "clarify_cancelled",
-                    id: req.id,
-                });
-                this.opts.progress.markdown(
-                    "\n— clarify cancelled by user; quest will fail.\n",
-                );
-                return;
-            }
-            // Re-encode list-typed defaults from the comma-separated
-            // string the modal returns.
-            if (defaultIsList) {
-                answers[key] = value
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter((s) => s.length > 0);
-            } else {
-                answers[key] = value;
-            }
-            this.opts.progress.markdown(
-                `  **${key}:** ${typeof answers[key] === "string" ? answers[key] : JSON.stringify(answers[key])}\n\n`,
-            );
-        }
-        this.send({
-            type: "clarify_response",
-            id: req.id,
-            answers,
-        });
-        this.opts.progress.markdown("\n— clarify answers submitted; resuming…\n\n");
-    }
-
-    /**
-     * Offer the study cards as a pick list: one item per card, "Edit a card…" (pick a card, then change its
-     * question) and "Write my own…". Returns the card number, the edited card or a sentence; undefined on Esc.
-     */
-    private async pickStudy(
-        cards: StudyCard[],
-        prompt: string,
-    ): Promise<number | StudyCard | string | undefined> {
-        const firstLine = prompt.split("\n")[0];
-        const items = cards.map((c, i) => ({
-            label: `${i + 1}. ${c.question}`,
-            action: "pick" as const,
-            index: i,
-        }));
-        const choices = [
-            ...items,
-            { label: "Edit a card…", action: "edit" as const, index: -1 },
-            { label: "Write my own…", action: "own" as const, index: -1 },
-        ];
-        const chosen = await vscode.window.showQuickPick(choices, {
-            title: "Pick the study to run",
-            placeHolder: firstLine,
-            ignoreFocusOut: true,
-        });
-        if (!chosen) {
-            return undefined;
-        }
-        if (chosen.action === "pick") {
-            return chosen.index + 1;
-        }
-        if (chosen.action === "own") {
-            const text = await vscode.window.showInputBox({
-                title: "Write my own study",
-                prompt: "The study you want, in a sentence",
-                ignoreFocusOut: true,
-            });
-            return text === undefined || !text.trim() ? undefined : text.trim();
-        }
-        const which = await vscode.window.showQuickPick(items, {
-            title: "Edit which study?",
-            ignoreFocusOut: true,
-        });
-        if (!which) {
-            return undefined;
-        }
-        const card = cards[which.index];
-        const text = await vscode.window.showInputBox({
-            title: "Edit the study's question",
-            value: card.question,
-            ignoreFocusOut: true,
-        });
-        if (text === undefined) {
-            return undefined;
-        }
-        return { ...card, question: text.trim() || card.question };
     }
 
     /**
@@ -1019,7 +875,7 @@ export class Bridge {
         const family = this.familyFromHint(hint);
         if (!family) {
             // No hint → use the model the user picked in the Chat
-            // picker. This is the case for every interview-generated
+            // picker. This is the case for every
             // quest that didn't set `provider.node_models`.
             if (this.opts.defaultModel) {
                 return this.opts.defaultModel;

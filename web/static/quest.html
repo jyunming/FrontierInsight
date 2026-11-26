@@ -48,7 +48,6 @@
         <option value="">Go on from where it stopped</option>
       </select>
       <button id="resume-btn" onclick="resumeQuest()" class="hidden cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume</button>
-      <a id="update-link" href="#" class="bg-surface-mid cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Update settings</a>
       <a id="download-link" href="#" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors">Download .zip</a>
       <button id="cancel-btn" onclick="cancelQuest()" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Cancel</button>
       <button id="trash-btn" onclick="trashQuest()" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Trash</button>
@@ -131,7 +130,7 @@
   </div>
 
   <!-- Unified "Action needed" banner — shown whenever the quest paused for
-       you (any of clarify / papers / supply / data / review). Sourced from the
+       you (any of papers / supply / data / review). Sourced from the
        single NEXT_STEP.md every pause writes. -->
   <div id="next-step-banner" class="hidden fi-banner fi-banner-warning">
     <div class="flex flex-col gap-3 w-full">
@@ -303,16 +302,6 @@
         </button>
       </div>
     </div>
-    <!-- Clarify panel -->
-    <div id="clarify-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
-      <div class="fi-banner fi-banner-info"><b>Paused for clarification.</b> Fill in the answers below to resume.</div>
-      <form id="clarify-form" class="fi-form" onsubmit="return submitClarify(event)"></form>
-    </div>
-    <!-- Study panel: the studies the topic could mean, to pick one -->
-    <div id="scope-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
-      <div class="fi-banner fi-banner-info"><b>Pick the study to run.</b> Choose one, change its question, or write your own.</div>
-      <form id="scope-form" class="fi-form" onsubmit="return submitScope(event)"></form>
-    </div>
     <!-- Human-review panel -->
     <div id="human-review-section" class="hidden col-span-1 md:col-span-12 bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
       <div class="fi-banner fi-banner-warning"><b>Paused for human review.</b> Confirm the verdict, reject, or refine with feedback to resume.</div>
@@ -424,7 +413,6 @@
       document.getElementById('quest-id').after(tag);
     }
   }
-  document.getElementById('update-link').href = `/update/${encodeURIComponent(questId)}`;
   document.getElementById('download-link').href = `/api/quests/${encodeURIComponent(questId)}/download`;
 
   if ('Notification' in window && Notification.permission === 'default') {
@@ -511,20 +499,14 @@
     renderTitle(data);
     const badge = document.getElementById('status-badge');
     const baseCls = 'flex items-center gap-2 cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase';
-    if (data.alive && data.pending_clarify) {
-      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning glow-pulse"></span><span class="text-status-warning">Waiting for your answers</span>';
-      badge.className = baseCls + ' bg-surface-mid';
-    } else if (data.alive) {
+    if (data.alive) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span><span class="text-status-success">Running</span>';
-      badge.className = baseCls + ' bg-surface-mid';
-    } else if (data.pending_clarify) {
-      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (clarify)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_human_review) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'known-answer check', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', clarify: 'setup', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'known-answer check', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
@@ -585,11 +567,11 @@
       startLogStream();
     }
     // Resume / Re-run shows for any non-running quest with a saved config that
-    // ISN'T at an ANSWER pause (clarify / review resume via their own submit
+    // ISN'T at an ANSWER pause (review resumes via its own submit
     // panels). That covers supply pauses (drop files → Resume), crashed /
     // incomplete quests, AND finished quests — so a setting changed via Update
     // can be re-run. Never without config.yaml.
-    const answerPause = data.pending_clarify || !!data.pending_scope || !!data.pending_human_review;
+    const answerPause = !!data.pending_human_review;
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
     // Redoing a step is open at an ANSWER pause too (a paper waiting for review can be written again): the menu shows,
@@ -612,15 +594,6 @@
     // step is chosen at an answer pause (showResumeButton).
     questFinishedForRerun = data.summary && !data.pending_action && !data.pending_human_review;
     showResumeButton(resumable);
-    // Config-less quests can't Update or Resume — disable + explain.
-    const updateLink = document.getElementById('update-link');
-    if (!data.has_config) {
-      updateLink.classList.add('opacity-40', 'pointer-events-none');
-      updateLink.title = 'No saved config.yaml — this quest can\'t be updated or resumed (it was started before FI saved configs).';
-    } else {
-      updateLink.classList.remove('opacity-40', 'pointer-events-none');
-      updateLink.title = '';
-    }
     // Add-files panel: available for any quest that isn't actively running and
     // has a saved config (so a later resume/refine can pick the files up) —
     // includes completed quests, not just paused ones.
@@ -628,18 +601,6 @@
     const showAdd = data.has_config && !data.alive;
     addSec.classList.toggle('hidden', !showAdd);
     addSec.classList.toggle('flex', showAdd);
-    if (data.pending_clarify) {
-      loadClarifyPanel();
-    } else {
-      const sec = document.getElementById('clarify-section');
-      sec.classList.add('hidden'); sec.classList.remove('flex');
-    }
-    if (data.pending_scope) {
-      loadScopePanel();
-    } else {
-      const sec = document.getElementById('scope-section');
-      sec.classList.add('hidden'); sec.classList.remove('flex');
-    }
     if (data.pending_human_review) {
       renderHumanReviewPanel(data.pending_human_review);
     } else {
@@ -685,8 +646,7 @@
 
   // The ways on that a "why it stopped" card names (core/oracle_card.py; the banner's text above is the same card), as
   // buttons: Resume runs it; a change to a check puts the card's own words in the Plan box (read them, press Rewrite
-  // the plan, then Resume); going on with a setting changed opens Update settings. An action the page has no button
-  // for is still in the card's text, with its command.
+  // the plan, then Resume). An action the page has no button for is still in the card's text, with its command.
   function renderCardActions(card) {
     const box = document.getElementById('next-step-card-actions');
     if (!box) return;
@@ -697,7 +657,6 @@
       // "Let FI try again" resumes where the quest stopped, never from a step left chosen in the Redo menu.
       if (a.id === 'resume') run = () => { const sel = document.getElementById('rerun-from'); if (sel) sel.value = ''; resumeQuest(); };
       else if ((a.id === 'revise_check' || a.id === 'accept_proposal') && a.prefill) run = () => fillPlanRequest(a.prefill);
-      else if (a.id === 'amend' && a.web === 'Update settings') run = () => document.getElementById('update-link').click();
       if (!run) continue;
       const btn = document.createElement('button');
       btn.className = (a.id === 'resume' ? 'cyber-border-active' : 'cyber-border') + ' text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors';
@@ -910,14 +869,10 @@
     } catch (e) { statusEl.textContent = 'Upload failed.'; }
   }
 
-  // ANSWER pause: reveal + scroll to whichever form is pending (clarify/review).
+  // ANSWER pause: reveal + scroll to the review form when it is pending.
   function jumpToAnswerForm() {
-    const target = !document.getElementById('clarify-section').classList.contains('hidden')
-      ? 'clarify-section'
-      : !document.getElementById('scope-section').classList.contains('hidden')
-      ? 'scope-section'
-      : (!document.getElementById('human-review-section').classList.contains('hidden')
-          ? 'human-review-section' : null);
+    const target = !document.getElementById('human-review-section').classList.contains('hidden')
+      ? 'human-review-section' : null;
     if (target) document.getElementById(target).scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
@@ -1580,151 +1535,6 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       if (wasNearBottom) logEl.scrollTop = logEl.scrollHeight;
     };
     source.onerror = () => { source.close(); };
-  }
-
-  async function loadClarifyPanel() {
-    const sec = document.getElementById('clarify-section');
-    sec.classList.remove('hidden'); sec.classList.add('flex');
-    const form = document.getElementById('clarify-form');
-    if (form.dataset.loaded === '1') return;
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data.pending) return;
-    const qs = data.questions || {};
-    form.innerHTML = '';
-    for (const [key, val] of Object.entries(qs)) {
-      const fs = document.createElement('fieldset');
-      const legend = document.createElement('legend'); legend.textContent = key; fs.appendChild(legend);
-      const prompt = document.createElement('div'); prompt.className = 'prompt'; prompt.textContent = val.question || key; fs.appendChild(prompt);
-      const input = document.createElement('input'); input.type = 'text'; input.name = key;
-      input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
-      input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
-      fs.appendChild(input);
-      // Suggested answers (the title question's candidate titles) become buttons that fill the box; typing your own still works.
-      if (Array.isArray(val.suggestions) && val.suggestions.length) {
-        const row = document.createElement('div'); row.className = 'clarify-suggestions flex flex-wrap gap-2 mt-2';
-        for (const s of val.suggestions) {
-          const b = document.createElement('button'); b.type = 'button'; b.textContent = String(s);
-          b.className = 'text-left px-3 py-1 rounded border border-white/20 font-label-sm text-label-sm';
-          b.onclick = () => { input.value = String(s); };
-          row.appendChild(b);
-        }
-        fs.appendChild(row);
-      }
-      form.appendChild(fs);
-    }
-    const submit = document.createElement('div');
-    submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Resume with these answers</button>';
-    form.appendChild(submit);
-    form.dataset.loaded = '1';
-  }
-  async function loadScopePanel() {
-    const sec = document.getElementById('scope-section');
-    sec.classList.remove('hidden'); sec.classList.add('flex');
-    const form = document.getElementById('scope-form');
-    if (form.dataset.loaded === '1') return;
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/scope`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data.pending) return;
-    const cards = ((data.questions || {}).study || {}).cards || [];
-    form.innerHTML = '';
-    const line = (label, text) => {
-      if (!text || (Array.isArray(text) && !text.length)) return null;
-      const d = document.createElement('div'); d.className = 'text-sm opacity-80';
-      d.textContent = label + ': ' + (Array.isArray(text) ? text.join('; ') : text); return d;
-    };
-    cards.forEach((card, i) => {
-      const fs = document.createElement('fieldset');
-      const label = document.createElement('label'); label.className = 'flex items-start gap-2';
-      const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'study'; radio.value = String(i + 1);
-      if (i === 0) radio.checked = true;
-      const box = document.createElement('div');
-      const title = document.createElement('div'); title.className = 'font-bold'; title.textContent = (i + 1) + '. ' + (card.question || '');
-      box.appendChild(title);
-      for (const d of [
-        line('Kind', card.study_type === 'find_best_design' ? 'find the best design' : 'measure and compare'),
-        line('Reports', card.main_results), line('Varies', card.compared_settings),
-        line('Run time', card.run_time),
-      ]) if (d) box.appendChild(d);
-      for (const lit of (card.literature || [])) {
-        const d = document.createElement('div'); d.className = 'text-sm opacity-80';
-        d.textContent = 'Literature: ' + (lit.says || '') + ' [' + (lit.source || '') + ']'; box.appendChild(d);
-      }
-      label.appendChild(radio); label.appendChild(box); fs.appendChild(label);
-      const edit = document.createElement('input'); edit.type = 'text'; edit.dataset.edit = String(i + 1);
-      edit.placeholder = "Change this study's question (optional)"; edit.className = 'mt-2 w-full';
-      fs.appendChild(edit);
-      form.appendChild(fs);
-    });
-    const own = document.createElement('fieldset');
-    const ownLabel = document.createElement('label'); ownLabel.className = 'flex items-start gap-2';
-    const ownRadio = document.createElement('input'); ownRadio.type = 'radio'; ownRadio.name = 'study'; ownRadio.value = 'own';
-    const ownText = document.createElement('span'); ownText.textContent = 'Write my own';
-    ownLabel.appendChild(ownRadio); ownLabel.appendChild(ownText); own.appendChild(ownLabel);
-    const ownBox = document.createElement('input'); ownBox.type = 'text'; ownBox.dataset.own = '1';
-    ownBox.placeholder = 'The study you want, in a sentence'; ownBox.className = 'mt-2 w-full';
-    ownBox.oninput = () => { ownRadio.checked = true; };
-    own.appendChild(ownBox); form.appendChild(own);
-    const submit = document.createElement('div');
-    submit.innerHTML = '<button type="submit" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-6 py-3 rounded font-label-sm text-label-sm uppercase">Run this study</button>';
-    form.appendChild(submit);
-    form.dataset.cards = JSON.stringify(cards);
-    form.dataset.loaded = '1';
-  }
-  async function submitScope(ev) {
-    ev.preventDefault();
-    const form = document.getElementById('scope-form');
-    const cards = JSON.parse(form.dataset.cards || '[]');
-    const picked = form.querySelector('input[name="study"]:checked');
-    let study;
-    if (!picked) { alert('Pick a study first.'); return false; }
-    if (picked.value === 'own') {
-      study = form.querySelector('input[data-own]').value.trim();
-      if (!study) { alert('Write the study you want, or pick one of the cards.'); return false; }
-    } else {
-      const n = parseInt(picked.value, 10);
-      const edited = (form.querySelector(`input[data-edit="${n}"]`).value || '').trim();
-      study = edited ? Object.assign({}, cards[n - 1], { question: edited }) : n;
-    }
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/scope`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers: { study } }) });
-    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
-    form.dataset.loaded = '0';
-    const payload = await res.json().catch(() => ({}));
-    // A run that is not waiting for it (it stopped, or the server restarted) goes on from where it stopped.
-    if (payload && !payload.run_waiting) {
-      try {
-        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
-        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
-      } catch (_) {}
-    }
-    refresh();
-    return false;
-  }
-  async function submitClarify(ev) {
-    ev.preventDefault();
-    const form = document.getElementById('clarify-form');
-    const answers = {};
-    for (const inp of form.querySelectorAll('input[name]')) {
-      const val = inp.value;
-      answers[inp.name] = inp.dataset.islist === '1' ? val.split(',').map(s => s.trim()).filter(Boolean) : val;
-    }
-    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/clarify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers }) });
-    if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
-    form.dataset.loaded = '0';
-    const payload = await res.json().catch(() => ({}));
-    // Subprocess / CLI quest (no in-process future): the answers were staged on
-    // disk — kick off the --resume so the quest continues without a separate click. A run still waiting for them
-    // (started from this page) reads the answers itself.
-    if (payload && payload.in_process_resolved === false && !payload.run_waiting) {
-      try {
-        await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
-        if (!pollHandle) pollHandle = setInterval(refresh, 3000);
-      } catch (_) {}
-    }
-    refresh();
-    return false;
   }
 
   // A verdict no reviewer gave (review_status other than "ok") is said so, with each panelist that did not review.

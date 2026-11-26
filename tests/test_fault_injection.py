@@ -66,7 +66,7 @@ def _rj(payload: str) -> str:
 def _engine(tmp_path: Path, *, replicates: int, script: str) -> Engine:
     cfg = Config(
         topic="red team", title="rt", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off", execute_replicates=replicates, pilot_run=False),
+        engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=replicates, pilot_run=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )

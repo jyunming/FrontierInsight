@@ -227,8 +227,7 @@ async def test_a_study_handed_back_at_the_plan_never_reaches_the_design(tmp_path
     async def design(self: Any, state: Any) -> dict[str, Any]:
         raise AssertionError("the design step ran")
 
-    for name in ("_node_clarify_then_phased", "_node_ideate", "_node_pause_after_literature", "_node_scope",
-                 "_node_select_skills"):
+    for name in ("_node_clarify_then_phased", "_node_pause_after_literature", "_node_select_skills"):
         monkeypatch.setattr(Engine, name, nothing)
     monkeypatch.setattr(Engine, "_node_design", design)
     path = _commission(tmp_path / "order", 0.75, 0.01)
@@ -312,8 +311,7 @@ async def test_a_quest_handed_back_at_the_plan_ends_as_a_return_not_a_failure(tm
     async def design(self: Any, state: Any) -> dict[str, Any]:
         raise AssertionError("the design step ran")
 
-    for name in ("_node_clarify_then_phased", "_node_ideate", "_node_pause_after_literature", "_node_scope",
-                 "_node_select_skills"):
+    for name in ("_node_clarify_then_phased", "_node_pause_after_literature", "_node_select_skills"):
         monkeypatch.setattr(Engine, name, nothing)
     monkeypatch.setattr(Engine, "_node_design", design)
     path = _commission(tmp_path / "order", 0.75, 0.01)
@@ -367,6 +365,14 @@ def test_a_value_typed_in_as_text_counts_as_typed_in() -> None:
         script, why = known_values.program(_program(("formula", expression, "0")), 0.25, 0.01, given="")
         assert script == "" and "types in a number close to the value withheld" in why
     assert known_values.program(_program(("formula", 'float("1") / 4', "0")), 0.25, 0.01, given="")[0]
+
+
+def test_a_value_assembled_from_pieces_of_text_counts_as_typed_in() -> None:
+    for expression in ('float("0." + "25")', 'float("0" + "." + "25")', 'float(f"0.25")', 'float("0.2" "5")',
+                       'float(("0." + "25") * 1)'):
+        script, why = known_values.program(_program(("formula", expression, "0")), 0.25, 0.01, given="")
+        assert script == "" and "types in a number close to the value withheld" in why, expression
+    assert known_values.program(_program(("formula", 'float("1" + "0") / 40', "0")), 0.25, 0.01, given="")[0]
 
 
 def test_a_negative_value_keeps_its_sign_when_its_passage_writes_more_digits() -> None:
@@ -522,3 +528,15 @@ def test_the_note_on_a_plan_with_no_check_still_names_a_published_benchmark() ->
     from core import oracle_check
 
     assert "a published benchmark value" in oracle_check.problems([], None, 0)[0]
+
+
+def test_only_the_whole_text_expression_is_read_and_constant_f_strings_and_deep_chains_are_handled() -> None:
+    def program(expression: str) -> tuple[str, str]:
+        return known_values.program(_program(("formula", expression, "0")), 0.25, 0.00001, given="")
+
+    assert program('float("0." + "25" + "7")')[0], "0.257 is not the value withheld: its inner piece is not read alone"
+    for typed in ('float(f"{0.2}{5}")', "float(f\"{'0.'!s}{'25'!s}\")"):
+        assert program(typed)[0] == "", typed
+    long = " + ".join(['"a"'] * 1500)  # past the depth cap: not folded, and nothing is raised
+    assert program(f"len({long})")[0]
+    assert program('len((("ab" * 20) * 20) * 20 * 20)')[0]  # text past the length cap is not folded either

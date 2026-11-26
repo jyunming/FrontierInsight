@@ -53,14 +53,13 @@ TopicType = Literal[
 SourcePolicy = Literal[
     "academic",     # peer-reviewed / arXiv literature
     "web_current",  # recent web sources are mandatory (markets, current events)
-    "user_data",    # analyses supplied/collected data — the user's drop, or
-                    # what the no-sim auto-collector gathered — not a simulation
+    "user_data",    # analyses the data the person supplied, not a simulation
     "mixed",        # academic + web both legitimate
 ]
 
 # The two outcomes of the design fork in ``_build_graph``:
 #   "simulation"     → design → implement → execute → execute_reflect → analyze
-#   "no_simulation"  → design → auto_collect_data → wait_for_data → data_load
+#   "no_simulation"  → design → wait_for_data → data_load
 RoutePath = Literal["simulation", "no_simulation"]
 
 # Per-topic-type contract: the graph path the type expects + the source
@@ -113,9 +112,9 @@ class ResearchProtocol(BaseModel):
     baseline: str = ""
     # What number, moving which way, is the headline result ("" = unset).
     success_metric: str = ""
-    # True for no-simulation studies, which run on supplied/collected data
+    # True for no-simulation studies, which run on the person's own data
     # rather than a simulation and so MAY pause for the user to drop files
-    # (only if the auto-collector gathered nothing). Not a hard guarantee
+    # (when data/ has none yet). Not a hard guarantee
     # the quest will block — a signal that user data may be needed.
     requires_user_input: bool = False
     # How many independent runs back a quantitative claim (1 = single-shot).
@@ -222,8 +221,10 @@ def derive_protocol(state: dict[str, Any], config: Any) -> ResearchProtocol:
     if not isinstance(answers, dict):
         answers = {}
     no_simulation = bool(state.get("no_simulation_resolved"))
-    topic_type = _derive_topic_type(
-        str(answers.get("topic_shape") or ""), no_simulation)
+    # The commission's ``method`` is what sets the study's kind: a literature review is a ``survey``. An older checkpoint's
+    # clarify ``topic_shape`` is read only when no mode says so.
+    shape = "survey" if state.get("survey_mode_resolved") else str(answers.get("topic_shape") or "")
+    topic_type = _derive_topic_type(shape, no_simulation)
     # Deterministic upgrade: a markets / current-events question (detected
     # from the topic text) needs recent web sources. The clarify
     # ``topic_shape`` vocabulary can't express this, so without it the

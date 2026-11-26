@@ -19,6 +19,7 @@ from core import provider_readiness as pr
 from core.config import Config, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 from launch import parse_args
+from tests import commissioned
 from core.provider import (
     LLMClient, missing_step_api_keys, node_provider_for, step_provider_config, step_provider_lines,
 )
@@ -131,7 +132,7 @@ async def test_the_launch_refuses_a_missing_step_key_like_a_missing_main_key(
     monkeypatch.delenv("STEP_TEST_KEY", raising=False)
     monkeypatch.setenv("MAIN_TEST_KEY", "k")
     cfg = tmp_path / "c.yaml"
-    cfg.write_text("topic: a topic\nprovider:\n  name: openai\n  model: m\n  api_key_env: MAIN_TEST_KEY\n"
+    cfg.write_text(commissioned.line(tmp_path) + "provider:\n  name: openai\n  model: m\n  api_key_env: MAIN_TEST_KEY\n"
                    "  node_providers:\n    implement: {name: openai, model: kimi-k3, api_key_env: STEP_TEST_KEY}\n"
                    "output:\n  output_dir: " + json.dumps(str(tmp_path / "o")) + "\n", encoding="utf-8")
     assert await launch.main_async(parse_args(["--config", str(cfg), "--no-axon-sidecar"])) == 2
@@ -357,7 +358,7 @@ async def test_the_launch_stops_when_a_steps_server_does_not_answer(
 
     monkeypatch.setattr(pr, "preflight", preflight)
     cfg = tmp_path / "c.yaml"
-    cfg.write_text("topic: a topic\nprovider:\n  name: openai\n  model: m\n  api_key_env: MAIN_TEST_KEY\n"
+    cfg.write_text(commissioned.line(tmp_path) + "provider:\n  name: openai\n  model: m\n  api_key_env: MAIN_TEST_KEY\n"
                    "  node_providers:\n    implement: {name: openai, model: kimi-k3, base_url: " + STEP_URL
                    + ", api_key_env: STEP_TEST_KEY}\noutput:\n  output_dir: " + json.dumps(str(tmp_path / "o")) + "\n",
                    encoding="utf-8")
@@ -367,17 +368,3 @@ async def test_the_launch_stops_when_a_steps_server_does_not_answer(
     assert seen == [("openai", STEP_URL)]   # the step's own address, not the main provider's
 
 
-def test_an_interview_update_keeps_the_steps_providers(tmp_path: Path) -> None:
-    """The web form, the CLI interview and the VS Code form do not write ``node_providers`` (a config-file setting);
-    an update through any of them keeps what the file holds."""
-    import yaml
-
-    from core.interview import answers_to_yaml
-    from core.interview_update import rewrite_yaml_with_new_answers
-    from tests.test_interview_update import _sample
-
-    raw = yaml.safe_load(answers_to_yaml(_sample(), frontend="cli"))
-    raw["provider"]["node_providers"] = {"implement": dict(KIMI)}
-    out = yaml.safe_load(rewrite_yaml_with_new_answers(raw, _sample(paper_format="neurips")))
-    assert out["provider"]["node_providers"] == {"implement": dict(KIMI)}
-    assert Config.model_validate(out).provider.node_providers["implement"].model == "kimi-k3"

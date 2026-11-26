@@ -70,9 +70,19 @@ SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
 NON_SCIENTIFIC_PAPER_FORMATS: frozenset[str] = frozenset({
     "essay", "report", "policy_brief", "whitepaper",
 })
+
+
+def paper_format_with_old_venue(configured: str, clarify_answers: Any) -> str:
+    """The paper format a quest writes, renders and page-checks in. A format written in the config (any but the default
+    one) wins; otherwise the ``paper_venue`` that a study an earlier FI began was asked at its start (normalised: trimmed,
+    lower case, a known format only); otherwise the configured one. A new study carries no venue (nothing asks it).
+    The one rule the write persona, the page check and the final render all use."""
+    if configured != DEFAULT_PAPER_FORMAT:
+        return configured
+    venue = str(clarify_answers.get("paper_venue") or "").strip().lower() if isinstance(clarify_answers, dict) else ""
+    return venue if venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS else configured
 # The paper template a quest gets when nobody chose one: FI's plain one-column
-# article. A config left at this value also means "no template chosen yet", so
-# the clarify step's ``paper_venue`` pick may replace it.
+# article.
 DEFAULT_PAPER_FORMAT: PaperFormat = "article"
 OutputKind = Literal["paper_md", "paper_pdf", "slides", "poster", "speech"]
 # How paper.pdf is rendered. ``latex`` (default) = the venue LaTeX template
@@ -267,7 +277,7 @@ class ProviderConfig(BaseModel):
     # (``implement``, ``execute_reflect``) routinely outrun the 300 s
     # default on complex topics under Sonnet 4.6 extended thinking;
     # bumping them here avoids tenacity retries that all hit the same
-    # wall. Cheap nodes (``clarify``, ``ideate``) keep the default —
+    # wall. Cheap nodes (``literature_query``) keep the default —
     # tightening their budget catches real hangs faster.
     #
     # Maps engine-node name → seconds. Lookup misses fall back to
@@ -354,8 +364,7 @@ class ProviderConfig(BaseModel):
     #   - HTTP direct (openai/codex/gemini/ollama/vllm):
     #     same — overrides the request body's `model`.
     #
-    # Useful for picking a cheap model for low-value nodes (clarify,
-    # cross_check) and a strong one for the demanding ones (write,
+    # Useful for picking a cheap model for low-value nodes (cross_check) and a strong one for the demanding ones (write,
     # review). On `copilot_cli` and its proxy siblings, all three
     # models share one OAuth and one premium-request budget.
     #
@@ -411,7 +420,7 @@ class ProviderConfig(BaseModel):
         return dict(v)
 
     # Multi-model ensemble per node. Maps an engine node name (one of
-    # ``ideate`` / ``analyze`` / ``cross_check``) to a configuration
+    # ``analyze`` / ``cross_check``) to a configuration
     # that fires N parallel chat calls (one per model in ``models``)
     # and merges the responses via ``merge`` strategy.
     #
@@ -420,10 +429,6 @@ class ProviderConfig(BaseModel):
     #
     # Example:
     #     node_ensemble:
-    #       ideate:
-    #         models: [gpt-5.5, claude-opus-4-7, gemini-2.5-pro]
-    #         merge: tournament
-    #         moderator: claude-opus-4-7
     #       analyze:
     #         models: [gpt-5.5, claude-opus-4-7]
     #         merge: synthesize
@@ -508,6 +513,13 @@ class ProviderConfig(BaseModel):
         """
         if not self.node_ensemble:
             return self
+        if "ideate" in self.node_ensemble:  # the step is gone: said once, like a retired key
+            logging.getLogger("frontier_insight.config").info(
+                "config: provider.node_ensemble.ideate no longer does anything (FI makes no research ideas); the entry "
+                "can be removed.")
+            self.node_ensemble = {k: v for k, v in self.node_ensemble.items() if k != "ideate"} or None
+            if not self.node_ensemble:
+                return self
         for node, cfg in self.node_ensemble.items():
             if node == "analyze" and cfg.merge == "synthesize":
                 raise ValueError(
@@ -591,7 +603,6 @@ class NodeEnsembleConfig(BaseModel):
     moderator: str | None = None
 
 
-ClarifyMode = Literal["off", "auto", "interactive"]
 HumanFeedbackGate = Literal["off", "after_review"]
 # Pause-drop-anytime points. The engine pauses with an interrupt at the
 # selected stage(s); the user drops files into ``<quest_root>/inputs/papers/``
@@ -608,30 +619,36 @@ PauseForUserInput = Literal[
 # Every place the quest can stop and wait for a human is one of two
 # interactions — ANSWER (the quest asks; you reply) or SUPPLY (the quest
 # needs files; you drop them in) — and all of them are configured under one
-# coherent ``pauses:`` section. The legacy flags (engine.clarify_mode,
-# engine.human_feedback_gate, engine.pause_for_user_input,
+# coherent ``pauses:`` section. The legacy flags (engine.human_feedback_gate, engine.pause_for_user_input,
 # engine.auto_accept_on_pass, engine.human_feedback_timeout_s,
 # knowledge.pause_for_user_papers) still parse and are merged into ``pauses``
 # by Config's root validator, so existing YAML keeps working.
-ClarifyPause = Literal["off", "auto", "ask"]       # was clarify_mode (interactive→ask)
 ReviewPause = Literal["off", "ask"]                # was human_feedback_gate (after_review→ask)
 PlanPause = Literal["off", "ask"]                  # stop once plan.md is written, to read and edit it
-ScopePause = Literal["off", "ask"]                 # before the plan, pick the study to run from a few FI offers
 SupplyPause = Literal[                              # was pause_for_user_input
     "never", "after_literature", "before_build", "before_review", "both", "all",
 ]
 # Legacy value → canonical value, applied field-by-field in PausesConfig.
-_CLARIFY_ALIASES = {"interactive": "ask"}
 _REVIEW_ALIASES = {"after_review": "ask"}
 _SUPPLY_ALIASES = {"after_design": "before_build", "after_paper": "before_review"}
 
 # Legacy flag location (section, old key) → canonical ``pauses`` field. Read by
 # Config's root validator so old YAML keeps working without touching read sites.
 # Keys a config may still set although the setting is gone: accepted, no effect, said once in the log.
-_RETIRED_KEYS = frozenset({"engine.attempt_memory"})
+_RETIRED_KEYS = frozenset({"engine.attempt_memory", "knowledge.novelty_check", "engine.ideate_reflect",
+                           "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope",
+                           # The searches of a study that had no commission are gone (a commission gives the sources and
+                           # a data study analyses the person's own files).
+                           "engine.auto_collect_data", "engine.auto_collect_top_k", "engine.dataset_adapters",
+                           "engine.dataset_adapter_top_k", "knowledge.relevance_guard", "knowledge.relevance_min_score",
+                           "knowledge.relevance_min_keep", "knowledge.requery_on_low_relevance", "knowledge.requery_max",
+                           "knowledge.literature_screen", "knowledge.foundational_works",
+                           # FI no longer searches by topic, so it has no list of paywalled papers to stop for.
+                           "pauses.papers", "knowledge.pause_for_user_papers",
+                           # The setup questions are gone: the commission says the question, the scope and the ``method``.
+                           "pauses.clarify", "engine.clarify_mode", "engine.clarify_overrides"})
 
 _LEGACY_PAUSE_FLAGS = (
-    ("engine", "clarify_mode", "clarify"),
     ("engine", "human_feedback_gate", "review"),
     ("engine", "pause_for_user_input", "supply"),
     ("engine", "auto_accept_on_pass", "auto_accept_on_pass"),
@@ -644,16 +661,8 @@ class PausesConfig(BaseModel):
     """When (and how) the quest stops to involve a human. See the README
     section *When the quest needs you* for the full model."""
 
-    # ANSWER — pre-flight clarifying questions before the research starts.
-    #   "off"  skip · "auto" agent self-answers · "ask" pause for the human.
-    # Left unset, the quest talks the topic over with you first when someone can answer (the terminal
-    # ``--interactive``, the web page, VS Code) and lets the agent answer for itself when nobody can (a
-    # headless run or a fleet). Set it to ``off`` to skip the discussion.
-    clarify: ClarifyPause | None = None
-    # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
-    # so the user can download it and drop the PDF into inputs/papers/.
-    # On by default: a relevant paywalled paper the open-access cascade could
-    # not fetch is listed in needs/WANTED_PAPERS.md and the quest waits for it.
+    # Retired: FI no longer searches the literature by topic, so it has no paywalled papers to stop for. Kept so
+    # an older config still loads (it logs that the line no longer does anything).
     papers: bool = True
     # SUPPLY — fixed drop-in checkpoint(s) for papers/data.
     #   "never" · "after_literature" (the literature is done and saved; the
@@ -668,9 +677,6 @@ class PausesConfig(BaseModel):
     # file. ``plan.md`` is written whatever this is set to; ``"off"`` (default) only means the quest does
     # not wait for you, so unattended and fleet runs are not held up.
     plan: PlanPause = "off"
-    # ANSWER — before the plan, pick the study to run from a few FI offers (or write your own); ``off`` skips it.
-    # With nobody to answer, the offers are recorded and the plan is written from the topic alone.
-    scope: ScopePause = "ask"
     # ANSWER — pause after the review verdict for accept / reject / refine.
     #   "ask" (default) pauses · "off" lets the review-loop drive unattended.
     review: ReviewPause = "ask"
@@ -681,16 +687,6 @@ class PausesConfig(BaseModel):
     # VSCode pick) before falling back to the headless pause-exit path. 0 =
     # wait forever.
     timeout_s: float = Field(default=1800.0, ge=0)
-
-    @field_validator("clarify", mode="before")
-    @classmethod
-    def _norm_clarify(cls, v: Any) -> Any:
-        # YAML 1.1 "Norway problem": an unquoted `off` parses as the boolean
-        # False before we see it — coerce it back so hand-edited `pauses:`
-        # blocks don't need to remember the quotes.
-        if v is False:
-            return "off"
-        return _CLARIFY_ALIASES.get(v, v)
 
     @field_validator("review", mode="before")
     @classmethod
@@ -707,12 +703,7 @@ class PausesConfig(BaseModel):
     @field_validator("plan", mode="before")
     @classmethod
     def _norm_plan(cls, v: Any) -> Any:
-        # The unquoted-`off` Norway problem again, as for ``review`` and ``clarify``.
-        return "off" if v is False else v
-
-    @field_validator("scope", mode="before")
-    @classmethod
-    def _norm_scope(cls, v: Any) -> Any:
+        # The unquoted-`off` Norway problem again, as for ``review``.
         return "off" if v is False else v
 
 
@@ -778,18 +769,6 @@ class EngineConfig(BaseModel):
     # CLI ``--interactive`` gate, whose blocking ``input()`` implies a human
     # is present.
     human_feedback_timeout_s: float = Field(default=1800.0, ge=0)
-    # Pre-flight clarification (`clarify` node before `ideate`).
-    #
-    #   "off"         — skip the node entirely. Default for tests and fleet.
-    #   "auto"        — agent generates the questionnaire AND auto-answers
-    #                   it from the topic alone (no human loop). Useful
-    #                   when you want stronger framing than the bare topic
-    #                   gives, without an interactive pause.
-    #   "interactive" — agent generates the questionnaire; the engine
-    #                   raises a LangGraph `interrupt()` so a CLI prompt
-    #                   (`launch.py --interactive`) or the web UI's
-    #                   clarify panel can collect answers from the user.
-    clarify_mode: ClarifyMode = "off"
     # Execute-repair loop (`execute_reflect` node between
     # `execute` and `analyze`). When the experiment script returns
     # rc!=0 or no RESULT_JSON, the reflect node generates a patched
@@ -828,15 +807,12 @@ class EngineConfig(BaseModel):
     # and write). When True (default), one LLM pass weighs the assembled
     # evidence — source count, cross-check supporting/conflicting balance,
     # whether the run produced real measurements — against the research
-    # question and returns a verdict: ``sufficient`` (write), ``broaden``
-    # (re-enter the literature loop once more, budget permitting), or
+    # question and returns a verdict: ``sufficient`` (write) or
     # ``insufficient`` (write anyway, but the assessment is handed to the
     # writer so the paper frames thin evidence honestly instead of
     # over-claiming). Fails OPEN: any parse error, or the flag off, routes
-    # straight to write. The broaden loop is bounded by
-    # ``evidence_gate_max_broaden`` so it can't spin.
+    # straight to write.
     evidence_gate: bool = True
-    evidence_gate_max_broaden: int = Field(default=1, ge=0)
     # Cross-paper check after analyze. When a finding lands,
     # we run a literature search keyed on the finding text (not just
     # the original topic) and classify hits as supporting / conflicting
@@ -992,27 +968,10 @@ class EngineConfig(BaseModel):
     # loop the user through the same drop screen twice.
     pause_for_user_input: PauseForUserInput = "never"
     # Also enables the `next_step` re-route emitted by analyze:
-    # `publish` (default) / `re_experiment` / `broaden_lit`. Both
-    # non-default values route back to `design` (via cross_check first)
-    # and consume from `max_iterations` like the review-loop `revise`.
+    # `publish` (default) / `re_experiment`. `re_experiment` routes back to
+    # `design` (via cross_check first) and consumes from `max_iterations`
+    # like the review-loop `revise`.
     enable_analyze_reroute: bool = True
-    # Extra LLM call after `ideate` to self-critique the
-    # chosen idea. May swap `chosen_idea` to a different entry from
-    # the brainstormed list. Cheap (one extra LLM call per quest).
-    ideate_reflect: bool = True
-    # Pairwise tournament across the brainstormed ideas.
-    # When True, REPLACES the single ``ideate_reflect`` critique call
-    # with ``C(N, 2)`` parallel pairwise comparisons (3 calls for the
-    # default 3 ideas) and picks the idea with the most wins (ties: more
-    # decisive wins, then the original order). The idea comes from
-    # Google Co-Scientist's pairwise ranking, but this is win counting,
-    # not Elo, and the comparisons come from one model family, so they
-    # are not independent judgements. Whether it picks better ideas than
-    # the single critique has not been measured. Costs 2 extra LLM calls
-    # vs. the single critique. Off by default to keep the cost floor at
-    # 7-18 calls.
-    # When True, ``ideate_reflect`` is ignored (tournament wins).
-    ideate_tournament: bool = False
     # Multi-persona reviewer panel on the `review` node.
     # When empty (default), the review node behaves as before: one LLM
     # call producing one verdict. When non-empty, each entry runs in
@@ -1029,8 +988,10 @@ class EngineConfig(BaseModel):
     review_panel: list[str] = Field(default_factory=list)
     # When True, the engine treats the topic as one that needs
     # real-world data the user will collect themselves — not one the
-    # LLM should simulate via a Python experiment. The flow becomes:
-    # clarify → ideate → literature → design → wait_for_data, at which
+    # LLM should simulate via a Python experiment. A commissioned study says it with the commission's
+    # ``method: analyze_data`` (which sets this); a config that sets it without that is refused (core/commission.py).
+    # The flow becomes:
+    # clarify → literature → design → wait_for_data, at which
     # point the engine writes ``<quest_root>/data/README.md``
     # explaining what to drop into the dir and exits cleanly (rc=0).
     # The user collects data, drops it into ``<quest_root>/data/``,
@@ -1039,74 +1000,26 @@ class EngineConfig(BaseModel):
     # ``core/summarizer.py`` patterns), synthesizes a result_json,
     # and hands off to analyze → cross_check → write → review.
     #
-    # When unset (default False), the clarify node may STILL set the
-    # in-state ``no_simulation_resolved`` flag from its
-    # ``empirical_vs_theoretical`` answer — auto-detection from
-    # clarify is the second entry point. YAML flag wins when set.
     no_simulation: bool = False
     # Survey mode — a descriptive literature / history synthesis with NO
     # experiment AND NO dataset (e.g. "the evolution/history of X", an
     # overview or retrospective). A stronger form of ``no_simulation``: the
     # engine skips BOTH the experiment (implement/execute) AND the
-    # data-collection path (auto_collect_data/wait_for_data/data_load/
+    # data path (wait_for_data/data_load/
     # web_plots), routing ``design → web_figures → analyze`` so the paper
     # synthesises the cited literature directly (illustrative license-clean
-    # images are still embedded). Setting this implies ``no_simulation``.
-    # When unset (default False), the clarify node may STILL turn it on when
-    # the clarify agent classifies ``topic_shape == 'survey'`` — auto-detection
-    # from clarify is the second entry point. YAML flag wins when set.
-    # See ``Engine._resolve_survey_from_clarify``.
+    # images are still embedded). Setting this implies ``no_simulation``. A commissioned study says it with the
+    # commission's ``method: review_literature`` (which sets this).
     survey_mode: bool = False
     # Local-data-first mode for the ``--analyze`` workflow: the user has
-    # already supplied the data, so the framing/retrieval nodes (ideate,
-    # literature, design) are made PASSTHROUGHS — no ideation, no external
+    # already supplied the data, so the retrieval nodes (literature,
+    # design) are made PASSTHROUGHS — no external
     # retrieval, no experiment design — and the quest goes straight from
     # clarify to loading + analysing the local data. Implies no_simulation.
     # Off for normal quests. (Set by ``analyze_cli.build_analyze_config``;
     # also disable retrieval at the knowledge layer — ``web_search: false``
     # — so nothing reaches out to the web/academic sources.)
     analyze_local_first: bool = False
-    # When the engine enters no-simulation mode, an
-    # ``auto_collect_data`` node runs BEFORE ``wait_for_data`` and
-    # tries to pull relevant docs from the Knowledge layer (Axon).
-    # Successful hits land under ``<quest_root>/data/auto_collected/``
-    # as one ``.md`` file per doc (content + a YAML metadata header).
-    # ``wait_for_data`` then sees those files via its existing rglob
-    # walk and proceeds without pausing — so a no-simulation quest
-    # that COULD be answered from Axon never blocks for user input.
-    #
-    # When False, the auto_collect_data node is a passthrough — the
-    # engine pauses for user-supplied data exactly like before. Also
-    # passes through if ``knowledge.enabled`` is False (no Axon to
-    # query) — no need to set this False just to silence the node.
-    #
-    # The fallback to the manual pause is preserved: if Axon returns
-    # zero hits, ``wait_for_data`` still writes the README and pauses
-    # for the user just like the no-Axon case.
-    auto_collect_data: bool = True
-    # Top-K passed to ``Knowledge.asearch`` from the auto_collect_data
-    # node. 5 is a deliberate ceiling — the data_load LLM call has a
-    # finite content budget, and N=5 with one ~1k-token file each
-    # comfortably fits a 16k-context prompt. Bump only when running on
-    # a long-context model AND when the topic genuinely benefits from
-    # more breadth (most don't — the top 5 from a good retriever
-    # cover the space already). ``ge=1`` because passing top_k=0 to
-    # Axon would request "zero hits" — a useless config that should
-    # be a YAML error not silent passthrough.
-    auto_collect_top_k: int = Field(default=5, ge=1)
-    # Structured dataset adapters that run alongside the
-    # Axon retrieval in the auto_collect_data node. Each name in the
-    # list is looked up in ``core.datasets.ADAPTER_REGISTRY``;
-    # unrecognized names are logged as a WARNING and skipped. Empty
-    # list (default) means "Axon only" — Axon-only auto-collect.
-    # Available names: ``"worldbank"``.
-    #
-    # Adapters write into ``<quest_root>/data/auto_collected/<source>/``
-    # subdirectories so the manifest renders them grouped by origin
-    # (and the user can spot which dataset contributed what to the
-    # paper at a glance). Each adapter is best-effort — errors fall
-    # through silently to the safety net (``wait_for_data`` pause).
-    dataset_adapters: list[str] = Field(default_factory=list)
     # Simulation skills the quest may call instead of re-deriving the
     # physics. Each name is resolved against ``<FI_SKILLS_DIR>/<name>/`` and the
     # ``fi.skills`` entry-point group; a name that resolves to a skill
@@ -1149,12 +1062,6 @@ class EngineConfig(BaseModel):
     # trees, the per-OS application folders, and the project folder and its
     # parents). False turns that search off. See core/skills/registry.py.
     skills_scan_known_dirs: bool = True
-    # Per-adapter top_k. The Axon top_k stays at ``auto_collect_top_k``
-    # above; this separate knob is for the dataset adapters because
-    # they tend to hit external APIs and a smaller default is the
-    # right cost trade-off. 3 indicators × a few countries each =
-    # enough comparative baseline for most no-simulation quests.
-    dataset_adapter_top_k: int = Field(default=3, ge=1)
     # In no-simulation mode, derive figures from the web/Axon content the
     # collector gathered: a small data-extraction + matplotlib step turns
     # quoted numbers (e.g. a revenue-by-year table scraped from sources)
@@ -1170,21 +1077,6 @@ class EngineConfig(BaseModel):
     # stuck codex_cli call once wedged a run for hours when the
     # provider-level timeout didn't fire).
     web_plots_timeout_s: float = Field(default=360.0, gt=0)
-    # User-pinned answers to the clarify slots, supplied by the
-    # interview frontends (`launch.py --new`, the VSCode `@fi /new`
-    # extension, the `--serve` web UI) or hand-written into YAML. When
-    # present, the clarify node merges these into ``clarify_answers``
-    # AFTER it computes its own auto-answers, so user pins always win.
-    # When every clarify slot is pinned AND ``clarify_mode == "auto"``,
-    # the clarify LLM call is skipped entirely (cost saving). When the
-    # mode is ``interactive`` the LLM still fires so the human can
-    # see the agent's questions, but pinned slots come pre-answered.
-    # Keys are the clarify slot names — ``comparative_baseline`` /
-    # ``empirical_vs_theoretical`` / ``simulatability`` /
-    # ``success_metric`` / ``budget`` / ``output_kinds`` /
-    # ``study_depth`` / ``paper_venue``. Values are whatever shape the
-    # downstream prompts expect (strings, lists for output_kinds).
-    clarify_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionConfig(BaseModel):
@@ -1437,82 +1329,7 @@ class KnowledgeConfig(BaseModel):
     # a no-op (snippet only) when Playwright/Chromium isn't installed, so
     # it's safe to leave on. Only fires on a blocked/empty direct fetch.
     headless_fetch: bool = True
-    # Relevance guard. After retrieval/auto-collect, score the gathered
-    # docs against the topic; if they are clearly off-topic or empty
-    # (e.g. an academic-only collector returning physics preprints for a
-    # finance question), pause for user-supplied sources / escalate rather
-    # than letting analyze+write produce an honest-but-useless "pipeline
-    # failure" paper on garbage. Off → legacy behaviour (proceed anyway).
-    relevance_guard: bool = True
-    # Deterministic relevance floor applied to freshly-retrieved literature in
-    # the literature node — a cheap complement to the LLM ``relevance_guard``,
-    # which runs ONLY on the auto_collect path (so survey / simulation quests,
-    # which skip auto_collect, otherwise carry off-topic sources into
-    # analyze/write). Each retrieved doc is scored by embedding cosine (the
-    # all-MiniLM model shared with passage ranking) against the TOPIC; docs
-    # below ``relevance_min_score`` are dropped. Fail-open: no filtering when
-    # embeddings are unavailable (FI_OFFLINE / no model). 0.0 disables. The
-    # 0.20 default sits in the empirically-measured gap between on-topic
-    # (~0.4+) and off-topic (<0.1) docs for a humanities/history topic.
-    relevance_min_score: float = Field(default=0.20, ge=0.0, le=1.0)
-    # Never-starve retention: always keep at least this many top-scoring docs
-    # even when all fall below ``relevance_min_score``, so a wholly-borderline
-    # corpus is not emptied (the evidence_gate can then broaden instead).
-    relevance_min_keep: int = Field(default=3, ge=0)
-    # Re-search with different keywords when a retrieval comes back
-    # wholly off-topic. When NO doc clears ``relevance_min_score`` on its own
-    # merits, the first query was probably worded badly -- so ask the model
-    # for alternative phrasings and search again, rather than handing the
-    # writer the ``relevance_min_keep`` least-bad hits and proceeding as if
-    # they were evidence. Each retry costs one small LLM call plus a
-    # retrieval, so it is bounded and only fires on the wholly-missed case
-    # (not on "few but good" results).
-    #
-    # Skipped entirely when embeddings are unavailable: without scores there
-    # is no signal that the query was bad, and retrying blind would just
-    # multiply cost on exactly the air-gapped machines that can least
-    # afford it.
-    requery_on_low_relevance: bool = True
-    requery_max: int = Field(default=2, ge=0, le=5)
-    # LLM literature screen. After the relevance floor, one batched call
-    # grades every retrieved source 0-3 on "could the paper cite this for a
-    # claim?". Scholarly records need a 2 to stay; web pages are dropped only
-    # at 0, because they supply quotable text rather than citations. Keeps at
-    # least ``relevance_min_keep`` sources (highest grades first) and fails
-    # open: a failed or unreadable call keeps everything, and a source the
-    # model did not grade is kept. The embedding floor alone cannot tell a
-    # table of contents or an unrelated paper that shares the search terms
-    # from a real on-topic source; this can. Off → floor only.
-    literature_screen: bool = True
-    # Novelty note. After the literature step, one call says whether the retrieved sources already answer the
-    # study's question and what the study adds. It is only disclosed: the plan prompt gets one line, the writer's
-    # introduction gets the framing, and FI keeps the answer in .fi/literature_novelty.json. It never stops the quest
-    # or changes the design. Every quoted sentence is checked against the source's text. Off -> no call, no note.
-    novelty_check: bool = True
-    # Foundational works. A search engine matches every word of a query, so
-    # the original method papers and textbooks a topic rests on rarely come
-    # back: a damped-oscillator integrator quest found none of Verlet (1967),
-    # Hairer, Lubich & Wanner, or Butcher. One call asks the model for up to
-    # eight, each is looked up by title in OpenAlex and dropped when not found,
-    # and the works at least two retrieved papers cite are added (books too,
-    # whatever the quest's work scope). All of them go through the literature
-    # screen, labelled foundational, and the writer is asked to cite the ones
-    # that bear on the paper. Costs one LLM call and up to ten OpenAlex
-    # requests per literature pass. Off → no extra candidates.
-    foundational_works: bool = True
-    # Pause-for-user-papers gate. FI downloads only papers that are free to
-    # read. A paper behind a paywall is never fetched by FI: when the
-    # literature comes back with abstract-only papers, the node writes a
-    # ``needs/WANTED_PAPERS.md`` list (with a link each) and, when this is on,
-    # pauses so a person can download them and drop the files into
-    # ``inputs/papers/``. On ``fi --resume`` the files are read in, giving
-    # the writer real full text instead of abstracts. With this off
-    # (``pauses.papers: false``, an unattended run) the run goes on with the
-    # abstracts and logs how many papers were left for a person.
-    #
-    # Default ``True``, matching ``pauses.papers``: this legacy flag is merged
-    # into it, and the programmatic merge copies the attribute through, so
-    # the two defaults must agree.
+    # Retired (see ``pauses.papers``): kept so an older config still loads.
     pause_for_user_papers: bool = True
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
@@ -1537,7 +1354,7 @@ class KnowledgeConfig(BaseModel):
     external_fallback: list[str] | str = Field(
         default_factory=lambda: ["openalex", "arxiv", "crossref"]
     )
-    # How the literature node picks which external sources to query:
+    # How an external search (the cross-check of the results) picks which sources to query:
     #   "auto"   — agent asks the LLM to choose sources from the
     #              catalog (built-in + Axon-ingested supplements) given
     #              the current topic. Falls back to `external_fallback`
@@ -1819,10 +1636,31 @@ _RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
 
 # What a commission (core/commission.py) turns off where the config is silent: the work it already did.
 _COMMISSION_DEFAULTS: dict[str, dict[str, Any]] = {
-    "pauses": {"clarify": "off", "scope": "off", "papers": False},
-    "knowledge": {"novelty_check": False, "foundational_works": False, "requery_on_low_relevance": False},
-    "engine": {"evidence_gate_max_broaden": 0, "enable_analyze_reroute": False},
+    "pauses": {"papers": False},
+    "engine": {"enable_analyze_reroute": False},
 }
+
+
+class StepConfig(BaseModel):
+    """One step of a commissioned study run on its own, in its own quest folder (core/rerun_from.py ``ALONE``): ``design``
+    writes plan.md from the commission; ``compute`` takes the design a finished ``design`` step left in the folder
+    ``after`` (and a script in its code/, if there is one) and runs it. It stops where the step ends."""
+
+    model_config = {"extra": "forbid"}
+    name: Literal["design", "compute"]
+    after: Path | None = None
+
+    @field_validator("after", mode="before")
+    @classmethod
+    def _expand_after(cls, v: Any) -> Any:
+        return Path(str(v)).expanduser() if v not in (None, "") else None
+
+    @model_validator(mode="after")
+    def _after_for_compute(self) -> "StepConfig":
+        if (self.name == "compute") != (self.after is not None):
+            raise ValueError("`step.after` names the folder of the finished design step: `compute` needs it, "
+                             "`design` takes none")
+        return self
 
 
 def _set_in(block: Any, key: str) -> Any:
@@ -1834,6 +1672,9 @@ def _set_in(block: Any, key: str) -> Any:
 
 class Config(BaseModel):
     _commission_note: str = PrivateAttr(default="")  # the settings a commission overrode (_apply_commission)
+    # What the config's own ``engine`` section said about the two modes, before the commission's ``method`` set them
+    # (empty when it has no commission); ``commission.door`` refuses a mode the commission does not give.
+    _modes_asked: dict[str, bool] = PrivateAttr(default_factory=dict)
     topic: str
     title: str | None = None
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -1852,13 +1693,24 @@ class Config(BaseModel):
     # config is silent, exploring first and confirming once on data or seeds exploration never saw (``engine.phased``,
     # ``_RESEARCH_DEFAULTS``); that one a config may turn off. ``default``: nothing changes.
     rigor_profile: Literal["default", "research"] = "default"
-    # What the result is for, as the interview asked it (explore / research / decision). Kept because it bounds the
+    # What the result is for (explore / research / decision). Kept because it bounds the
     # evidence: an exploration's result is preliminary, never publication-ready. A config that does not say (one
     # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
     # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
     # A commission file (core/commission.py) the study starts from instead of a topic; relative to this config's folder.
     commission: Path | None = None
+    # Run only one step of the commissioned study (``StepConfig``); none: the whole study, as always.
+    step: StepConfig | None = None
+
+    @model_validator(mode="after")
+    def _step_needs_commission(self) -> "Config":
+        if self.step is not None and self.commission is None:
+            raise ValueError("`step` runs one step of a commissioned study, so the config must name its `commission`")
+        if self.step is not None and not self.engine.audit_trace:
+            raise ValueError("`step` keeps what each step was given and made in the quest's trace, so "
+                             "`engine.audit_trace` must stay on")
+        return self
 
     @property
     def effective_result_use(self) -> str:
@@ -1960,9 +1812,10 @@ class Config(BaseModel):
     @model_validator(mode="wrap")
     @classmethod
     def _apply_commission(cls, data: Any, handler: Any) -> Any:
-        """A commission's question as the topic, ``_COMMISSION_DEFAULTS`` whatever the config says (a setting it
-        overrides is named in ``_commission_note``, which the log and the quest's run.log carry), and its hours as the
-        cap of the execution time limit."""
+        """A commission's question as the topic, its ``title`` as the title (a ``title`` in the config wins), its ``method``
+        as the two run modes (``engine.no_simulation`` / ``engine.survey_mode``), ``_COMMISSION_DEFAULTS`` whatever the
+        config says (a setting it overrides is named in ``_commission_note``, which the log and the quest's run.log
+        carry), and its hours as the cap of the execution time limit."""
         if not isinstance(data, dict) or not data.get("commission"):
             return handler(data)
         from core import commission as _commission
@@ -1971,19 +1824,26 @@ class Config(BaseModel):
         found = _commission.read(data["commission"])  # its keys are checked at the door (core/commission.py)
         if not str(data.get("topic") or "").strip() and isinstance(found.get("question"), str):
             data["topic"] = found["question"].strip()
+        if not str(data.get("title") or "").strip() and isinstance(found.get("title"), str) and found["title"].strip():
+            data["title"] = found["title"].strip()
         hours = (found.get("limits") or {}).get("hours") if isinstance(found.get("limits"), dict) else None
-        cap = max(1, int(float(hours) * 3600)) if isinstance(hours, (int, float)) and hours > 0 else None
+        cap = max(1, int(float(hours) * 3600)) if _commission.hours_ok(hours) else None
         given = _set_in(data.get("execution"), "timeout_s")
         forced = {s: dict(v) for s, v in _COMMISSION_DEFAULTS.items()}
         # Runs before _merge_legacy_pauses (defined after it): an explicit pauses.<field> wins over a legacy flag.
         ignored = [f"{section}.{old}" for section, old, new in _LEGACY_PAUSE_FLAGS if new in forced["pauses"]
                    and _set_in(data.get(section), old) not in (None, forced["pauses"][new])]
+        engine_given = {k: _set_in(data.get("engine"), k) is True for k in ("no_simulation", "survey_mode", "analyze_local_first")}
+        modes = _commission.modes(found)  # None: no ``method``, so the config's own two keys stand (``door`` refuses them)
+        if modes is not None:
+            forced["engine"].update(no_simulation=modes[0], survey_mode=modes[1])
         for section, values in forced.items():
             block = data.get(section)
             ignored += [f"{section}.{k}" for k, v in values.items() if _set_in(block, k) not in (None, v)]
             data[section] = (block.model_copy(update=values) if isinstance(block, BaseModel)
                              else {**dict(block or {}), **values})
         config = handler(data)
+        config._modes_asked = engine_given
         # The cap on the value as validated, so every form the field accepts ("7200", 7200.0) is capped.
         if cap is not None and (given is None or config.execution.timeout_s > cap):
             ignored += ["execution.timeout_s"] if given is not None else []
@@ -1993,6 +1853,13 @@ class Config(BaseModel):
                                        f"so these settings of the config are not used: {', '.join(ignored)}.")
             logging.getLogger("frontier_insight.config").warning("%s", config._commission_note)
         return config
+
+    def modes_asked(self) -> dict[str, bool]:
+        """The config's own ``engine.no_simulation`` / ``engine.survey_mode`` as it was written, for ``commission.door``:
+        what the YAML said (a commission's ``method`` may have replaced it since), else what the engine section holds."""
+        return dict(self._modes_asked) or {"no_simulation": self.engine.no_simulation,
+                                          "survey_mode": self.engine.survey_mode,
+                                          "analyze_local_first": self.engine.analyze_local_first}
 
     @classmethod
     def _audit_unknown_keys(cls, data: dict[str, Any]) -> None:
@@ -2004,7 +1871,7 @@ class Config(BaseModel):
         user believes they enabled. This checks the top level and the six known
         sub-sections one level deep. It deliberately does NOT recurse into
         free-form dict fields (``node_models``, ``node_cli_timeout_s``,
-        ``node_http_timeout_s``, ``node_ensemble``, ``clarify_overrides``,
+        ``node_http_timeout_s``, ``node_ensemble``,
         ``extra``, …) whose keys are arbitrary."""
         unknown: list[str] = []
         for k in data:
@@ -2050,6 +1917,10 @@ class Config(BaseModel):
 
                 data = {**data, "commission": str(_commission.locate(data["commission"], Path(path).resolve().parent))}
                 _commission.validate(Path(data["commission"]), sources=False)
+            if isinstance(data.get("step"), dict) and data["step"].get("after"):
+                after = Path(str(data["step"]["after"])).expanduser()  # like the commission: read against this folder
+                data = {**data, "step": {**data["step"], "after": str(
+                    after if after.is_absolute() else Path(path).resolve().parent / after)}}
         return cls.model_validate(data)
 
 

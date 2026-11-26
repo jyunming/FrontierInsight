@@ -1,6 +1,6 @@
 """Two faults from the first real self-benchmark recording (a Haiku quest on the claude CLI).
 
-1. Its ``ideate`` call was recorded as answered by ``claude-fable-5-1``. The CLI really did switch: Claude Code answers
+1. One of its calls was recorded as answered by ``claude-fable-5-1``. The CLI really did switch: Claude Code answers
    with another model when the asked-for one declines a request (its ``model_refusal_fallback``), and the reported cost
    ($0.68 for 7,170 output tokens) is about twelve times Haiku's price. FI now reads the model of the message that
    carries the answer (not the ``modelUsage`` entry that wrote the most), says every switch in run.log, and asks the
@@ -183,7 +183,7 @@ async def test_a_switched_answer_is_asked_again_on_the_chosen_model_and_its_answ
     attempts: list[dict] = []
     token = CALL_ATTEMPTS.set(attempts)
     try:
-        text = await client._chat_cli([{"role": "user", "content": "ideas please"}], node="ideate")
+        text = await client._chat_cli([{"role": "user", "content": "ideas please"}], node="plan")
     finally:
         CALL_ATTEMPTS.reset(token)
     assert text == '{"ideas": ["haiku"]}', "the chosen model's answer is the one kept"
@@ -194,7 +194,7 @@ async def test_a_switched_answer_is_asked_again_on_the_chosen_model_and_its_answ
     assert paid["model"] == FABLE and paid["error"] == "answered_by_other_model"
     assert paid["usage"]["completion_tokens"] == 7170 and paid["usage"]["cost_usd_reported"] == pytest.approx(0.6843)
     said = "\n".join(lines.lines)
-    assert f"[model] ideate: haiku declined this request, so the claude tool answered with {FABLE} instead" in said
+    assert f"[model] plan: haiku declined this request, so the claude tool answered with {FABLE} instead" in said
     assert "haiku answered when asked again; its answer is kept" in said
 
 
@@ -205,15 +205,15 @@ async def test_when_the_chosen_model_declines_again_the_other_answer_is_kept_and
     attempts: list[dict] = []
     token = CALL_ATTEMPTS.set(attempts)
     try:
-        first = await client._chat_cli([{"role": "user", "content": "ideas please"}], node="ideate")
-        second = await client._chat_cli([{"role": "user", "content": "more ideas"}], node="ideate_reflect")
+        first = await client._chat_cli([{"role": "user", "content": "ideas please"}], node="plan")
+        second = await client._chat_cli([{"role": "user", "content": "more ideas"}], node="design")
     finally:
         CALL_ATTEMPTS.reset(token)
     assert first == second == '{"ideas": ["fable"]}', "a refusal is never handed on as an answer"
     assert LAST_CALL.get()["model"] == FABLE and LAST_CALL.get()["switched_from"] == HAIKU
     assert [a["error"] for a in attempts] == ["refused", "refused"], "each declined second try is recorded"
     said = "\n".join(lines.lines)
-    for node in ("ideate", "ideate_reflect"):  # every time, not only on the first call
+    for node in ("plan", "design"):  # every time, not only on the first call
         assert f"[model] {node}: haiku could not answer (it declined again); the {FABLE} answer is kept" in said
         assert f"this call cost {FABLE}'s price, not haiku's" in said
 
@@ -239,7 +239,7 @@ def test_the_cli_s_short_name_and_its_full_id_are_not_called_two_models(tmp_path
     for model, served, warned in (("haiku", HAIKU, False), ("opus[1m]", "claude-opus-4-7", False), ("haiku", FABLE, True)):
         cfg = Config(
             topic="t", title="t", provider=ProviderConfig(name="claude_cli", model=model),
-            engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+            engine=EngineConfig(max_iterations=1, review_loop=False),
             execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
             output=OutputConfig(output_dir=tmp_path / model.replace("[", "_").replace("]", "_") / served),
         )
@@ -287,7 +287,7 @@ async def test_a_plain_refusal_stops_for_a_person_with_its_cost_and_is_not_retri
     monkeypatch.setattr("core.provider._run_cli", fake_run_cli)
     client = LLMClient(resolve_endpoint(ProviderConfig(name="claude_cli", model="haiku")))
     with pytest.raises(ModelAnswerFiltered) as caught:
-        await client._chat_cli([{"role": "user", "content": "q"}], node="ideate")
+        await client._chat_cli([{"role": "user", "content": "q"}], node="plan")
     assert len(calls) == 1, "the same model declines again: not retried"
     assert caught.value.finish_reason == "refusal" and caught.value.usage["completion_tokens"] == 7170
     assert "switched" not in caught.value.usage and "refused" not in caught.value.usage
@@ -314,7 +314,7 @@ RAMBLING = "Let me think about this design carefully. " * 1600
 def _engine(tmp_path: Path, replies: list[str], *, research: bool = False) -> tuple[Engine, AsyncMock]:
     cfg = Config(
         topic="integrators", title="integrators", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
     )

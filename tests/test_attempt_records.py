@@ -145,7 +145,7 @@ def test_records_append_and_a_torn_line_is_skipped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+async def test_a_quest_records_its_design_runs_and_end(smoke_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         return _fake_response_for(messages[-1]["content"])
 
@@ -155,9 +155,7 @@ async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Confi
     assert artifacts.paper_md is not None
     ledger = ar.read(engine.fi_dir, ar.LEDGER)
     kinds = [r["kind"] for r in ledger]
-    assert "ideas" in kinds and "design" in kinds, kinds
-    ideas = next(r for r in ledger if r["kind"] == "ideas")
-    assert ideas["candidates"] and ideas["chosen"] and ideas["rule"] in ("ensemble", "tournament", "reflection", "model")
+    assert "design" in kinds and "ideas" not in kinds, kinds
     design = next(r for r in ledger if r["kind"] == "design")
     assert design["revision"] == 0 and design["parent"] is None, "numbered as DESIGN_HISTORY.json numbers it"
     attempts = ar.read(engine.fi_dir, ar.ATTEMPTS)
@@ -232,7 +230,7 @@ async def test_a_quest_that_fails_is_recorded_as_a_process_error(tmp_path: Path,
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     engine = Engine(Config.model_validate({
         "topic": "t", "provider": {"name": "openai", "model": "m"}, "knowledge": {"enabled": False},
-        "engine": {"clarify_mode": "off"}, "output": {"output_dir": str(tmp_path / "out")},
+        "engine": {}, "output": {"output_dir": str(tmp_path / "out")},
     }))
     with pytest.raises(Exception):
         await engine.run()

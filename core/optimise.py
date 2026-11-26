@@ -417,14 +417,6 @@ def _save(quest_root: Path, key: str, ledger_text: str, best_text: str, stderr: 
     return text
 
 
-def _load_record(quest_root: Path) -> dict[str, Any] | None:
-    try:
-        record = json.loads((Path(quest_root) / RECORD).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return record if isinstance(record, dict) else None
-
-
 def _record_files(record: dict[str, Any], record_text: str) -> dict[str, str]:
     """FI's files as a saved record holds them (the paths are FI's own, never read from the record)."""
     ledger, best = (record.get("ledger") or {}).get("text"), (record.get("best") or {}).get("text")

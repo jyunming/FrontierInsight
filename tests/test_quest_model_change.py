@@ -1,5 +1,5 @@
 """Changing the model of a quest that already ran (core/plan_settings.py MODEL_SETTINGS, Engine._take_model_change,
-core/interview_update.py).
+plan_settings.approve).
 
 Reported: a VS Code quest ran on gpt-5.6-luna (its config.yaml's ``provider.model``); the person set claude-opus-5
 there, and resuming stopped with "settings changed, approve with --update", as if a different model changed what the
@@ -62,11 +62,11 @@ def _skip_setup(eng: Engine) -> None:
 def _made_calls(eng: Engine, model: str = "gpt-5.6-luna") -> None:
     """The quest made calls on ``model`` before (cost.jsonl is append-only, so they stay)."""
     eng.fi_dir.mkdir(parents=True, exist_ok=True)
-    (eng.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "ideate", "model": model}) + "\n", encoding="utf-8")
+    (eng.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "plan", "model": model}) + "\n", encoding="utf-8")
 
 
 def _started(tmp_path: Path, model: str = "gpt-5.6-luna", **kw: Any) -> Engine:
-    """A quest the interview wrote, started once on ``model`` (its settings recorded)."""
+    """A quest whose config an earlier FI's interview wrote, started once on ``model`` (its settings recorded)."""
     cfg = _cfg(tmp_path, model, **kw)
     eng = Engine(cfg)
     _write_config(eng.quest_root, model, kw.get("node_models"))
@@ -242,27 +242,6 @@ async def test_putting_an_edit_back_after_a_default_moved_does_not_stop(tmp_path
     assert not (back.quest_root / "NEXT_STEP.md").exists()
 
 
-def test_update_asks_unless_the_chat_says_it_was_approved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--update with no terminal must not approve anything on its own (a pipe, a script, an agent's shell): only the
-    VS Code chat, after the person chose "approve as it is", skips the questions."""
-    import launch
-
-    seen: dict[str, Any] = {}
-
-    async def fake_flow(**kw: Any) -> int:
-        seen.update(kw)
-        return 0
-
-    monkeypatch.setattr("core.interview_update.run_update_flow", fake_flow)
-    monkeypatch.delenv("FI_UPDATE_APPROVE_AS_IS", raising=False)
-    kw = dict(quest_id="q", output_root=Path("."), vscode_bridge_port=0, interactive=False, supervisor=None)
-    asyncio.run(launch._run_update(**kw))
-    assert seen["ask"] is True
-    monkeypatch.setenv("FI_UPDATE_APPROVE_AS_IS", "1")
-    asyncio.run(launch._run_update(**kw))
-    assert seen["ask"] is False
-
-
 def test_the_paper_is_told_nothing_when_the_model_never_changed() -> None:
     assert plan_settings.model_disclosure([{"kind": "quest_started"}]) == ""
 
@@ -279,62 +258,15 @@ def test_single_steps_still_on_the_old_model_are_named(tmp_path: Path) -> None:
 def test_update_leaves_the_model_change_for_the_quest_to_record(tmp_path: Path) -> None:
     """--update approves the other settings; the model change is left for the quest's start to take and record, so
     the trace and the paper still learn that the model changed."""
-    from core.interview_update import approve_settings
 
     root = tmp_path / "q"
     _write_config(root, "gpt-5.6-luna")
     plan_settings.record(root / ".fi", _cfg(tmp_path, "gpt-5.6-luna"), root)
     said: list[str] = []
-    approved = approve_settings(root, _cfg(tmp_path, "claude-opus-5", oracle_check="warn"), say=said.append)
+    approved = plan_settings.approve(root, _cfg(tmp_path, "claude-opus-5", oracle_check="warn"), say=said.append)
     assert approved and all("provider.model" not in ln for ln in approved)
     assert any("the model changes from gpt-5.6-luna to claude-opus-5" in ln for ln in said)
     assert plan_settings.model_changes(root / ".fi", _cfg(tmp_path, "claude-opus-5"))
-
-
-def test_update_from_the_chat_asks_nothing_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                        capsys: pytest.CaptureFixture[str]) -> None:
-    """The VS Code chat's /update runs --update in the chat after the person chose to approve config.yaml as it is
-    (``ask=False``): nothing is asked, those settings are approved, and the quest resumes."""
-    from core.interview import InterviewAnswers, answers_to_yaml
-    from core.interview_update import run_update_flow
-
-    output_root = tmp_path / "outputs"
-    root = output_root / "q-chat"
-    root.mkdir(parents=True)
-    yaml_text = answers_to_yaml(InterviewAnswers(
-        topic="energy drift", title="Energy drift", output_kinds=["paper_md"], paper_format="generic",
-        no_simulation=False, provider="vscode_extension", provider_model="gpt-5.6-luna", knowledge_enabled=False,
-        study_depth="journal-length", comparative_baseline="", success_metric="", budget="",
-        clarify_mode="auto", review_panel=[],
-    ), frontend="cli")
-    (root / "config.yaml").write_text(yaml_text, encoding="utf-8")
-    plan_settings.record(root / ".fi", Config.from_yaml(root / "config.yaml"), root)
-    (root / "config.yaml").write_text(yaml_text.replace('"gpt-5.6-luna"', '"claude-opus-5"'), encoding="utf-8")
-
-    def no_prompt(*_a: Any) -> Any:
-        raise AssertionError("no question may be asked without a terminal")
-
-    monkeypatch.setattr("launch._cli_prompt_for", no_prompt)
-    seen: dict[str, Any] = {}
-
-    async def fake_run_one(cfg: Config, **kw: Any) -> int:
-        seen["model"] = cfg.provider.model
-        seen["port"] = cfg.provider.extra.get("bridge_port")
-        seen.update(kw)
-        return 0
-
-    from launch import _apply_vscode_bridge_override
-
-    before = (root / "config.yaml").read_text(encoding="utf-8")
-    rc = asyncio.run(run_update_flow(
-        quest_id="q-chat", output_root=output_root, vscode_bridge_port=4321, interactive=False, supervisor=None,
-        run_one=fake_run_one, apply_vscode_bridge_override=_apply_vscode_bridge_override, ask=False,
-    ))
-    assert rc == 0
-    assert seen["model"] == "claude-opus-5" and seen["port"] == 4321 and seen["resume_quest_id"] == "q-chat"
-    assert (root / "config.yaml").read_text(encoding="utf-8") == before, "nothing asked, so nothing rewritten"
-    out = capsys.readouterr().out
-    assert "[FI] update: " in out and "the model changes from gpt-5.6-luna to claude-opus-5" in out
 
 
 def test_resuming_with_another_config_brings_the_quest_copy_up_to_date(tmp_path: Path) -> None:
@@ -383,7 +315,7 @@ async def test_after_a_resume_with_a_new_model_cost_jsonl_names_it(tmp_path: Pat
         bridge = {"bridge_port": port}
         first = _started(tmp_path, "gpt-5.6-luna", name="vscode_extension", extra=bridge)
         # Calls made before the change: cost.jsonl keeps them (it is append-only).
-        (first.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "ideate", "model": "gpt-5.6-luna"}) + "\n",
+        (first.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "plan", "model": "gpt-5.6-luna"}) + "\n",
                                                   encoding="utf-8")
         _write_config(first.quest_root, "claude-opus-5")
         eng = Engine(_cfg(tmp_path, "claude-opus-5", name="vscode_extension", extra=bridge),
@@ -393,7 +325,7 @@ async def test_after_a_resume_with_a_new_model_cost_jsonl_names_it(tmp_path: Pat
 
         async def connect_and_call() -> None:
             await real_connect()
-            await eng._chat("hello", node="ideate")
+            await eng._chat("hello", node="plan")
             raise _Stop
 
         eng._connect_llm = connect_and_call  # type: ignore[method-assign]

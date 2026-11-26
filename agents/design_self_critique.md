@@ -77,8 +77,8 @@ An objection that names a problem but needs no change to the design (the claim i
 ## Topic
 $topic
 
-## Chosen direction
-$chosen_idea
+## The study
+$study
 
 ## Pre-flight clarifications
 $clarify_block

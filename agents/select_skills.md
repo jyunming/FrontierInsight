@@ -78,9 +78,9 @@ $topic
 
 $clarify_block
 
-## Chosen idea
+## The study
 
-$chosen_idea
+$study
 
 ## Catalogue
 

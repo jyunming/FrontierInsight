@@ -988,7 +988,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # codex `turn/start` rejects input over 1,048,576 chars with
         # ``input_too_large``. Sit ~150K under to leave room for codex's
         # own system prompt + tools schema. Hit by analyze/write on quests
-        # whose literature + result_json grow large (e.g. after a broaden).
+        # whose literature + result_json grow large.
         max_input_chars=900_000,
         # `-c key=value` sets a config value for this call only (config.toml
         # itself is not read, see --ignore-user-config above, so this is the
@@ -3030,7 +3030,7 @@ async def _run_cli(
                 "[provider] %s%s prompt was %d chars, over the %d-char input cap; "
                 "trimmed middle context to fit. The model may miss some "
                 "literature/result detail — consider a leaner knowledge footprint "
-                "(top_k / literature_excerpt_chars) or evidence_gate_max_broaden: 0.",
+                "(top_k / literature_excerpt_chars).",
                 spec.argv[0], f" [{node}]" if node else "", orig_len,
                 spec.max_input_chars,
             )
@@ -4092,8 +4092,8 @@ def resolve_endpoint(
             raise RuntimeError(
                 "vscode_extension provider requires either "
                 "extra['bridge_socket'] (--vscode-bridge-socket; what "
-                "--serve / --tools and the extension's `@fi /update` / "
-                "`@fi /generate` terminals use) or extra['bridge_port'] "
+                "--serve / --tools and the extension's `@fi /generate` "
+                "terminal use) or extra['bridge_port'] "
                 "(--vscode-bridge-port; what the VSCode chat-spawn "
                 "path uses). Are you launching FI from outside the "
                 "extension's reach? Use copilot_cli for headless "
@@ -4572,7 +4572,7 @@ class LLMClient:
         all the model variants share one CLI and one premium-request
         budget). Falls back to ``self.endpoint.model`` when omitted.
 
-        ``node`` is the FI engine node name (``"ideate"``, ``"implement"``,
+        ``node`` is the FI engine node name (``"plan"``, ``"implement"``,
         …); only used by the vscode_bridge transport so the extension
         can tag chat-panel progress messages with the right node name.
         Other transports ignore it for routing but DO attach it to any
@@ -5365,7 +5365,7 @@ class LLMClient:
         ``node`` is the FI engine node name; when set, looks up
         ``node_cli_timeout_s[node]`` for the per-call wall-clock budget
         so reasoning-heavy nodes (implement, execute_reflect) can get
-        longer ceilings than fast ones (clarify, ideate).
+        longer ceilings than fast ones (clarify, literature_query).
 
         Model escalation on retry (opt-in): when the user has set
         ``provider.node_model_fallbacks``, retry attempt 2+ looks up
@@ -5531,7 +5531,7 @@ class LLMClient:
         inactivity_timeout_s: float, node: str,
     ) -> tuple[str, Any, dict[str, Any], dict[str, Any] | None]:
         """The claude CLI answered with another model than the one asked for (``switched``: it does so on its own when
-        the asked-for model declines a request, and that model can cost far more: a Haiku quest's ``ideate`` call was
+        the asked-for model declines a request, and that model can cost far more: a Haiku quest's call was
         answered by a Fable model at about twelve times Haiku's price). A quest pays for the model the person chose, so
         this is never accepted silently: it is said in run.log every time, and the asked-for model is asked once more
         with the CLI's switching turned off (``CLAUDE_NO_REFUSAL_FALLBACK_ENV``). One direct call, not another round

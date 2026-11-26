@@ -22,11 +22,6 @@ TODO_NAME = "todo.json"
 
 # Per pause kind: (what there is to decide, the recommendation, the alternatives).
 _ADVICE: dict[str, tuple[str, str, list[str]]] = {
-    "clarify": (
-        "Is the research setup right?",
-        "Check each suggested answer and accept the ones that are right.",
-        ["Change any answer before going on."],
-    ),
     "papers": (
         "Do you want to add the papers FI could not download?",
         "Download the listed papers (most relevant first) into inputs/papers/, then go on.",
@@ -429,7 +424,7 @@ def waiting(quest_root: Path) -> list[Item]:
     if retracted:
         named = "; ".join(t[:80] for t in retracted[:3]) + (f"; and {len(retracted) - 3} more" if len(retracted) > 3
                                                             else "")
-        out.append(Item("retracted", f"{len(retracted)} source(s) the literature search found have been retracted "
+        out.append(Item("retracted", f"{len(retracted)} source(s) the study read have been retracted "
                                      f"({named}). The paper must not cite them.",
                         recommended="Make sure the paper does not cite them; the claim check marks any sentence that "
                                     "does as unsupported (.fi/literature_queries.json lists the retraction notices)."))

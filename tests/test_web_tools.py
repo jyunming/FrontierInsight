@@ -1,6 +1,5 @@
-"""Tests for the /tools/* routes — the 8 CLI tools exposed in the
-web UI (proposal / critique / digest / portfolio / summarize /
-analyze / fleet / ingest).
+"""Tests for the /tools/* routes — the 6 CLI tools exposed in the
+web UI (critique / digest / summarize / analyze / fleet / ingest).
 
 Each route is tested with a mocked subprocess so the suite runs in
 <1 s and doesn't actually spawn Python."""
@@ -40,8 +39,7 @@ def test_tools_schema_endpoint_returns_all_tools(tmp_path: Path) -> None:
     payload = res.json()
     tools = payload["tools"]
     names = {t["name"] for t in tools}
-    expected = {"proposal", "critique", "digest", "portfolio",
-                "summarize", "analyze", "fleet", "ingest"}
+    expected = {"critique", "digest", "summarize", "analyze", "fleet", "ingest"}
     assert names == expected
 
 
@@ -50,11 +48,7 @@ def test_tool_specs_each_have_cli_flag_and_fields() -> None:
     inputs must declare fields."""
     for spec in TOOL_SPECS:
         assert spec.cli_flag.startswith("--"), spec.name
-        # portfolio is the only zero-input tool.
-        if spec.name == "portfolio":
-            assert spec.fields == ()
-        else:
-            assert len(spec.fields) >= 1, spec.name
+        assert len(spec.fields) >= 1, spec.name
 
 
 # ---------------------------------------------------------------------------
@@ -63,10 +57,10 @@ def test_tool_specs_each_have_cli_flag_and_fields() -> None:
 
 
 def test_tool_page_renders_with_injected_name(tmp_path: Path) -> None:
-    res = _client(tmp_path).get("/tools/proposal")
+    res = _client(tmp_path).get("/tools/critique")
     assert res.status_code == 200
     assert "__fi_tool_name" in res.text
-    assert "proposal" in res.text
+    assert "critique" in res.text
 
 
 def test_tool_page_unknown_404(tmp_path: Path) -> None:
@@ -79,18 +73,6 @@ def test_tool_page_unknown_404(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_argv_proposal_requires_topic(tmp_path: Path) -> None:
-    spec = TOOLS_BY_NAME["proposal"]
-    with pytest.raises(ValueError, match="topic"):
-        _build_argv(spec, {}, [], tmp_path)
-
-
-def test_build_argv_proposal_happy_path(tmp_path: Path) -> None:
-    spec = TOOLS_BY_NAME["proposal"]
-    argv = _build_argv(spec, {"topic": "  hello world  "}, [], tmp_path)
-    assert argv == ["--proposal", "hello world"]
-
-
 def test_build_argv_digest_default_window(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["digest"]
     argv = _build_argv(spec, {}, [], tmp_path)
@@ -101,12 +83,6 @@ def test_build_argv_digest_custom_window(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["digest"]
     argv = _build_argv(spec, {"days": "14"}, [], tmp_path)
     assert argv == ["--digest", "--days", "14"]
-
-
-def test_build_argv_portfolio_no_inputs(tmp_path: Path) -> None:
-    spec = TOOLS_BY_NAME["portfolio"]
-    argv = _build_argv(spec, {}, [], tmp_path)
-    assert argv == ["--portfolio"]
 
 
 def test_build_argv_critique_requires_quest_id(tmp_path: Path) -> None:
@@ -124,21 +100,21 @@ def test_build_argv_critique_happy_path(tmp_path: Path) -> None:
 def test_build_argv_analyze_needs_path_or_uploads(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
     with pytest.raises(ValueError, match="path"):
-        _build_argv(spec, {"topic": "test"}, [], tmp_path)
+        _build_argv(spec, {"commission": "c.yaml"}, [], tmp_path)
 
 
-def test_build_argv_analyze_needs_topic(tmp_path: Path) -> None:
+def test_build_argv_analyze_needs_a_commission(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
-    with pytest.raises(ValueError, match="topic"):
+    with pytest.raises(ValueError, match="commission"):
         _build_argv(spec, {"path": "/data"}, [], tmp_path)
 
 
 def test_build_argv_analyze_happy_path(tmp_path: Path) -> None:
     spec = TOOLS_BY_NAME["analyze"]
     argv = _build_argv(
-        spec, {"path": "/data/x", "topic": "Compare"}, [], tmp_path,
+        spec, {"path": "/data/x", "commission": "c.yaml"}, [], tmp_path,
     )
-    assert argv == ["--analyze", "/data/x", "--analyze-topic", "Compare"]
+    assert argv == ["--analyze", "/data/x", "--commission", "c.yaml"]
 
 
 def test_build_argv_summarize_uses_upload_folder_when_provided(tmp_path: Path) -> None:
@@ -202,22 +178,32 @@ def mock_subprocess(monkeypatch: pytest.MonkeyPatch):
     return captured
 
 
-def test_post_proposal_spawns_subprocess(
+def test_post_critique_spawns_subprocess(
     tmp_path: Path, mock_subprocess: list[list[str]],
 ) -> None:
     client = _client(tmp_path)
     res = client.post(
-        "/api/tools/proposal",
-        json={"topic": "Compare RK4 vs Verlet"},
+        "/api/tools/critique",
+        json={"quest_id": "1234-x-abc"},
     )
     assert res.status_code == 200, res.text
     body = res.json()
-    assert body["tool"] == "proposal"
-    assert body["job_id"].startswith("proposal-")
+    assert body["tool"] == "critique"
+    assert body["job_id"].startswith("critique-")
     assert mock_subprocess  # subprocess.Popen was called
     argv = mock_subprocess[0]
-    assert "--proposal" in argv
-    assert "Compare RK4 vs Verlet" in argv
+    assert "--critique" in argv
+    assert "1234-x-abc" in argv
+
+
+def test_the_topic_making_tools_are_gone(tmp_path: Path, mock_subprocess: list[list[str]]) -> None:
+    client = _client(tmp_path)
+    for name in ("proposal", "portfolio"):
+        assert name not in TOOLS_BY_NAME
+        assert client.post(f"/api/tools/{name}", json={"topic": "t"}).status_code == 404
+        assert client.get(f"/tools/{name}").status_code == 404
+    assert client.get("/api/drafts").status_code == 404
+    assert not mock_subprocess
 
 
 def test_post_digest_with_custom_days(
@@ -231,15 +217,6 @@ def test_post_digest_with_custom_days(
     assert "14" in argv
 
 
-def test_post_portfolio_no_inputs_required(
-    tmp_path: Path, mock_subprocess: list[list[str]],
-) -> None:
-    client = _client(tmp_path)
-    res = client.post("/api/tools/portfolio", json={})
-    assert res.status_code == 200
-    assert mock_subprocess[0].count("--portfolio") == 1
-
-
 def test_post_unknown_tool_returns_404(
     tmp_path: Path, mock_subprocess: list[list[str]],
 ) -> None:
@@ -251,11 +228,11 @@ def test_post_unknown_tool_returns_404(
 def test_post_missing_required_field_returns_400(
     tmp_path: Path, mock_subprocess: list[list[str]],
 ) -> None:
-    """Proposal needs a topic; empty body must 400 with a clear message."""
+    """Critique needs a quest id; empty body must 400 with a clear message."""
     client = _client(tmp_path)
-    res = client.post("/api/tools/proposal", json={})
+    res = client.post("/api/tools/critique", json={})
     assert res.status_code == 400
-    assert "topic" in res.text
+    assert "quest_id" in res.text
 
 
 def test_post_503_when_launcher_full(
@@ -270,7 +247,7 @@ def test_post_503_when_launcher_full(
     monkeypatch.setattr(
         client.app.state.launcher, "launch_command", always_full,
     )
-    res = client.post("/api/tools/portfolio", json={})
+    res = client.post("/api/tools/digest", json={})
     assert res.status_code == 503
     assert res.headers.get("Retry-After") == "30"
 
@@ -297,14 +274,14 @@ def test_post_same_second_double_submit_yields_distinct_job_ids(
     )
 
     client = _client(tmp_path)
-    res1 = client.post("/api/tools/portfolio", json={})
-    res2 = client.post("/api/tools/portfolio", json={})
+    res1 = client.post("/api/tools/digest", json={})
+    res2 = client.post("/api/tools/digest", json={})
     assert res1.status_code == 200
     assert res2.status_code == 200
     jid1 = res1.json()["job_id"]
     jid2 = res2.json()["job_id"]
-    assert jid1 == "portfolio-1700000000-aabbcc"
-    assert jid2 == "portfolio-1700000000-ddeeff"
+    assert jid1 == "digest-1700000000-aabbcc"
+    assert jid2 == "digest-1700000000-ddeeff"
     assert jid1 != jid2
     # Suffix must satisfy web.server._QUEST_ID_RE so status_for()
     # lookups still resolve the new id format. Import the same regex
@@ -401,8 +378,8 @@ def test_post_tool_with_vscode_extension_requires_bridge(
     bridge error."""
     client = _client(tmp_path)  # no bridge_port
     res = client.post(
-        "/api/tools/proposal",
-        json={"topic": "x", "provider": "vscode_extension"},
+        "/api/tools/critique",
+        json={"quest_id": "1234-x-abc", "provider": "vscode_extension"},
     )
     assert res.status_code == 400
     assert "vscode_extension" in res.text
@@ -418,15 +395,15 @@ def test_post_tool_with_vscode_extension_and_bridge_succeeds(
     app = make_app(output_root, vscode_bridge_port=37001)
     client = TestClient(app)
     res = client.post(
-        "/api/tools/proposal",
-        json={"topic": "test topic", "provider": "vscode_extension"},
+        "/api/tools/critique",
+        json={"quest_id": "1234-x-abc", "provider": "vscode_extension"},
     )
     assert res.status_code == 200, res.text
     argv = mock_subprocess[0]
     # The per-tool --<tool>-provider flag must carry vscode_extension
     # through to the subprocess, otherwise launch.py would fall back
     # to its own default.
-    assert "--proposal-provider" in argv
+    assert "--critique-provider" in argv
     assert "vscode_extension" in argv
 
 
@@ -435,42 +412,41 @@ def test_post_tool_with_vscode_extension_and_bridge_succeeds(
 # ---------------------------------------------------------------------------
 
 
-def test_build_argv_proposal_off_profile_emits_no_ensemble(tmp_path: Path) -> None:
+def test_build_argv_critique_off_profile_emits_no_ensemble(tmp_path: Path) -> None:
     """'off' is the documented default — the spawned subprocess
     should run the cheap single-call path with zero ensemble flags."""
-    spec = TOOLS_BY_NAME["proposal"]
+    spec = TOOLS_BY_NAME["critique"]
     argv = _build_argv(
         spec,
-        {"topic": "t", "provider": "openai", "ensemble_profile": "off"},
+        {"quest_id": "abc", "provider": "openai", "ensemble_profile": "off"},
         [], tmp_path,
     )
-    assert "--proposal-ensemble" not in argv
+    assert "--critique-ensemble" not in argv
 
 
-def test_build_argv_proposal_full_profile_uses_the_models_the_user_named(tmp_path: Path) -> None:
+def test_build_argv_digest_full_profile_uses_the_models_the_user_named(tmp_path: Path) -> None:
     """Picking 'full' fans out over the models the user named, as the
-    --proposal-ensemble CSV the CLI expects."""
-    spec = TOOLS_BY_NAME["proposal"]
+    --digest-ensemble CSV the CLI expects."""
+    spec = TOOLS_BY_NAME["digest"]
     argv = _build_argv(
         spec,
-        {"topic": "t", "provider": "openai", "ensemble_profile": "full",
+        {"days": 7, "provider": "openai", "ensemble_profile": "full",
          "ensemble_models": "typed-a, typed-b, typed-c"},
         [], tmp_path,
     )
-    assert "--proposal-ensemble" in argv
-    idx = argv.index("--proposal-ensemble")
+    assert "--digest-ensemble" in argv
+    idx = argv.index("--digest-ensemble")
     csv = argv[idx + 1]
     # The models are what the user typed, in their order: FI picks none.
     assert csv == "typed-a,typed-b,typed-c"
-    # Proposal-side merge defaults to tournament (the launch.py CLI
-    # default for --proposal-ensemble-merge) — must be in the tail.
-    assert "--proposal-ensemble-merge" in argv
-    assert "tournament" in argv
+    # The digest's merge defaults to synthesize (the launch.py CLI
+    # default for --digest-ensemble-merge) — must be in the tail.
+    assert "--digest-ensemble-merge" in argv
+    assert "synthesize" in argv
 
 
 def test_build_argv_critique_full_profile_uses_named_models_with_synthesize(tmp_path: Path) -> None:
-    """Critique's documented merge default is `synthesize` (different
-    from proposal's `tournament`). The web mapping must preserve that
+    """Critique's documented merge default is `synthesize`. The web mapping must preserve that
     parity so behaviour doesn't drift between CLI and serve users."""
     spec = TOOLS_BY_NAME["critique"]
     argv = _build_argv(
@@ -488,36 +464,34 @@ def test_build_argv_never_invents_models_when_none_are_named(tmp_path: Path) -> 
     """FI used to fan out over three models it had chosen per provider. With
     fewer than two named there is nothing to fan out over: no flag, not a
     guessed trio."""
-    spec = TOOLS_BY_NAME["proposal"]
+    spec = TOOLS_BY_NAME["critique"]
     for named in (None, "", "only-one"):
-        payload = {"topic": "t", "provider": "openai", "ensemble_profile": "full"}
+        payload = {"quest_id": "abc", "provider": "openai", "ensemble_profile": "full"}
         if named is not None:
             payload["ensemble_models"] = named
         argv = _build_argv(spec, payload, [], tmp_path)
-        assert "--proposal-ensemble" not in argv, named
+        assert "--critique-ensemble" not in argv, named
 
 
 def test_build_argv_unknown_profile_treated_as_off(tmp_path: Path) -> None:
     """An unknown profile name must NOT silently fan out — fall back
     to the single-call path (same as 'off')."""
-    spec = TOOLS_BY_NAME["proposal"]
+    spec = TOOLS_BY_NAME["critique"]
     argv = _build_argv(
         spec,
-        {"topic": "t", "provider": "openai", "ensemble_profile": "bogus"},
+        {"quest_id": "abc", "provider": "openai", "ensemble_profile": "bogus"},
         [], tmp_path,
     )
-    assert "--proposal-ensemble" not in argv
+    assert "--critique-ensemble" not in argv
 
 
 def test_build_argv_ensemble_wired_for_every_llm_tool(tmp_path: Path) -> None:
-    """All 6 LLM tools (proposal/critique/digest/portfolio/summarize/
+    """All 4 LLM tools (critique/digest/summarize/
     analyze) now accept --<tool>-ensemble via the picker. Fleet and
     ingest are non-LLM and intentionally skip the picker entirely."""
     expected_merge_per_tool = {
-        "proposal":  "tournament",
         "critique":  "synthesize",
         "digest":    "synthesize",
-        "portfolio": "tournament",
         "summarize": "tournament",
         "analyze":   "tournament",
     }
@@ -528,7 +502,7 @@ def test_build_argv_ensemble_wired_for_every_llm_tool(tmp_path: Path) -> None:
             "ensemble_models": "typed-a, typed-b",
             # Tool-specific required fields
             "days": 7, "folder": str(tmp_path), "path": str(tmp_path),
-            "topic": "t", "quest_id": "abc", "kind": "auto",
+            "commission": "c.yaml", "quest_id": "abc", "kind": "auto",
         }
         argv = _build_argv(spec, payload, [], tmp_path)
         assert f"--{name}-ensemble" in argv, name

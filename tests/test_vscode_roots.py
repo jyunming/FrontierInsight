@@ -92,7 +92,12 @@ def test_no_command_runs_from_fis_own_folder_by_accident() -> None:
         assert "cwd: repoPath" not in src and "cwd: repo," not in src, name
         assert "rootsFromConfig" not in src, f"{name} still reads the settings without finding FI"
     ext = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
-    assert len(re.findall(r"await rootsForCommand\(", ext)) >= 12
+    # Every command that finds launch.py resolves FI's folder and the study's folder first: counted from the commands
+    # that exist, so removing or adding a command does not move a number here.
+    finders = [f for f in re.split(r"\n(?:export )?async function ", ext)[1:] if 'path.join(repoPath, "launch.py")' in f]
+    assert len(finders) >= 5, "the commands that find launch.py were not recognised"
+    for f in finders:
+        assert "await rootsForCommand(" in f, f.split("(")[0]
     assert 'path.join(repoPath, "launch.py")' in ext, "launch.py is still found in FI's folder"
     assert "workspaceFolders?.[0]" not in ext, "a command still ignores which folder the study is in"
     assert '"frontierInsight.workingDir"' in (EXT / "package.json").read_text(encoding="utf-8")
@@ -316,8 +321,8 @@ first.listen(shared, async () => {
     assert got["bound"] == got["got"]
     assert got["alive"], "closing the second window's bridge broke the first window's"
     ext = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
-    # The one line meant for a terminal (the `--update` line /update shows for answering the questions one by one)
-    # carries this window's address; no chat command runs in a terminal any more.
-    assert ext.count("bridgeSocket: thisWindowsBridge(),") == 1
+    # No chat command runs in a terminal (the last one that did, `/update`, is gone), so no line hands a terminal
+    # this window's address.
+    assert "thisWindowsBridge" not in ext
     bridge = (EXT / "src" / "persistent-bridge.ts").read_text(encoding="utf-8")
     assert "persistentBridgePath(String(process.pid))" in bridge

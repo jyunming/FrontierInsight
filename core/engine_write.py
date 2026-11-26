@@ -10,6 +10,7 @@ from . import commission as _commission
 from .engine_base import (  # noqa: F401
     _ANY_HEADING_RE, _REFERENCES_HEADING_LINE_RE,
     Any, Callable, DEFAULT_PAPER_FORMAT, NON_SCIENTIFIC_PAPER_FORMATS, PRELIMINARY_NOTE, Path, QuestState,
+    paper_format_with_old_venue,
     SCIENTIFIC_PAPER_FORMATS, _CITATION_SOURCE_CHARS, _CLAIM_EVIDENCE_CHARS, _CLAIM_FAULTS_TAKEN_OUT,
     _CODE_REEXECUTES, _ModelAnswerProblem, _NO_SIM_WRITE_NOTE, _PAGE_LIMIT_HIT, _PAPER_PROMPT_CHARS, _REFINE_POINT_RE,
     _REFINE_WHY_RE, _SKILLS_IN_CODE, _SKILL_MOUNTS_FILE, _SOURCE_LIST_HEADING_RE, _SURVEY_WRITE_NOTE, _TEXT_ONLY_HITS,
@@ -19,10 +20,10 @@ from .engine_base import (  # noqa: F401
     _code_project, _code_review, _cs, _disclosure, _discover_skill_names, _equation_tests, _experiment_deps,
     _extension_values, _figure_facts, _figure_label_findings, _figure_list_for_prompt, _figure_plan, _figures_drawn,
     _finalize_paper_sources, _finalize_with_numbering, _format_clarify, _format_cross_check, _format_evidence_note,
-    _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, _foundational_sources,
-    _foundational_write_block, _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
+    _format_lit_excerpt, _format_lit_from_state, _format_review_for_writer, 
+    _frozen, _further_reading_block, _grounding_after_trim, _has_full_text, _hit_name,
     _improve, _is_not_a_paper, _item_content, _labelled_sources, _literature_key, _mark_preliminary, _metric_spec,
-    _novelty, _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
+    _objection_key, _one_line, _optim, _optimise, _optimise_refine, _page_limit_note, _paper_basis,
     _paper_facts, _paper_figure_count, _paper_for_prompt, _paper_scope, _paper_sections, _paper_values,
     _claim_numbers_shown, _parse_json_lenient, _passage_names_claim, _passage_stands, _phased, _place_figures, _places_as_placeholders, _figure_numbers, _keep_figure_numbers,
     _number_figures_by_place,
@@ -32,7 +33,7 @@ from .engine_base import (  # noqa: F401
     _resolve_selected_skills, _results_by_setting, _retractions, _review_items, _review_sends_the_experiment_back,
     _run_facts, _same_statement, _second_impl, _skeleton, _skill_mount_plan, _source_text, _split_figure_readings,
     _split_run, _stop_power, _strip_outer_fence, _take_out_unpointed, _take_refine_points, _take_refine_why,
-    _topic_req, _trial_table, _trim_further_reading, _uncited_foundational_works, _unsupported_still_in,
+    _topic_req, _trial_table, _trim_further_reading, _unsupported_still_in,
     _web_labels_cited, _words_to_cut, asyncio, build_further_reading, build_references, goal_coverage, json, os,
     paper_patch, paper_trim, pip_failure_summary, re, resolve_page_limit, shutil, web_pages_listed,
 )
@@ -104,8 +105,7 @@ class WriteStageMixin:
 
         With ``scope_block`` (the earlier draft, read-only, and the sections to write) the reply is those sections
         only, not a paper: the caller puts them back into the draft (core/paper_scope.py)."""
-        # When the evidence gate judged the evidence thin (insufficient,
-        # or "broaden" with the broaden budget exhausted), hand the writer
+        # When the evidence gate judged the evidence thin (insufficient), hand the writer
         # an explicit note so the paper frames its limits honestly instead
         # of over-claiming. Suppressed for survey topics (see the helper).
         evidence_note = _format_evidence_note(
@@ -243,18 +243,13 @@ class WriteStageMixin:
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             # Write node is the ONE place audience filtering applies:
             # this is the literature block that flows into the paper's
-            # References. ideate/design/cross_check still see the full
+            # References. design/cross_check still see the full
             # pull because those nodes are about choosing what to do,
             # not what to publish.
             literature_block=_format_lit_from_state(
                 state, audience=self.config.output.audience,
                 mark_thin=True, **self._lit_kwargs(state),
             ),
-            # Empty when the prior-work block holds no foundational work.
-            foundational_block=_foundational_write_block(
-                state.get("literature") or [], self.config.output.audience,
-            ),
-            novelty_block=_novelty.write_block(state.get("literature_novelty")),
             figure_list=_figure_list_for_prompt(state, root=self.quest_root),
             clarify_block=_format_clarify(state),
             cross_check_block=_format_cross_check(state),
@@ -813,18 +808,6 @@ class WriteStageMixin:
             self._log.warning(
                 "[write] removed citations of sources the prior-work block does not have: %s",
                 ", ".join(f"[{n}]" for n in dropped),
-            )
-        # What the foundational works came to: how many were in the prior-work
-        # block and which of them the draft cites, so a paper that leaves the
-        # field's original papers out can be found in the run log.
-        foundational = _foundational_sources(literature, self.config.output.audience)
-        if foundational:
-            left_out = _uncited_foundational_works(literature, markdown, self.config.output.audience)
-            self._log.info(
-                "[write] foundational works in the prior-work block: %d; the draft cites %d; "
-                "not cited: %s",
-                len(foundational), len(foundational) - len(left_out),
-                "; ".join(str(meta.get("title") or "") for _label, meta in left_out) or "-",
             )
         # The figures are FI's: every figure of the run goes in under the number the writer was given, with the caption
         # FI writes from its record of what the figure draws, and every image the draft wrote itself is taken out. No
@@ -2049,7 +2032,7 @@ class WriteStageMixin:
         prompt = self._prompts["select_skills"].substitute(
             topic=state["topic"],
             clarify_block=_format_clarify(state),
-            chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
+            study=self._study_given(state),  # type: ignore[attr-defined]
             catalogue_block=catalogue.render(),
         )
 
@@ -2947,8 +2930,7 @@ class WriteStageMixin:
 
         The render is ``PaperGenerator._compile_pdf``, so the template, the
         pandoc flags and the page-limit layout are the final paper's, in the
-        venue the final render uses (the clarify ``paper_venue`` when the
-        config keeps ``generic``). It runs in ``.fi/page_check/`` with the
+        venue the final render uses. It runs in ``.fi/page_check/`` with the
         quest's figures copied beside the source; nothing is written to the
         quest folder itself. Returns ``None``, with one warning per quest, when
         the pages cannot be counted: the paper renders through HTML
@@ -2964,11 +2946,7 @@ class WriteStageMixin:
             return self._page_check_skipped(
                 "paper_style is briefing, which renders through HTML, not the LaTeX templates"
             )
-        fmt = output.paper_format
-        answers = state.get("clarify_answers")
-        venue = answers.get("paper_venue") if isinstance(answers, dict) else None
-        if fmt == DEFAULT_PAPER_FORMAT and venue in SCIENTIFIC_PAPER_FORMATS | NON_SCIENTIFIC_PAPER_FORMATS:
-            fmt = venue
+        fmt = paper_format_with_old_venue(output.paper_format, state.get("clarify_answers"))
         config = self.config.model_copy(update={"output": output.model_copy(update={
             "html_pdf_fallback": False, "paper_style": "latex", "paper_format": fmt,
         })})

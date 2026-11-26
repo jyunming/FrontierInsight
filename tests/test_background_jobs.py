@@ -20,6 +20,7 @@ from core.config import (
     ProviderConfig,
 )
 from core.engine import Engine
+from tests import commissioned
 from tests.test_engine_smoke import _classify, _fake_response_for
 
 # A phrase only the protocol contains: the topic itself says "background job".
@@ -52,9 +53,11 @@ def cluster(tmp_path: Path, monkeypatch) -> Path:
     return d
 
 
-def _config(tmp_path: Path, *, jobs: bool = True, replicates: int = 1, pilot: bool = False) -> Config:
+def _config(tmp_path: Path, *, jobs: bool = True, replicates: int = 1, pilot: bool = False,
+            commission: Path | None = None) -> Config:
     return Config(
-        topic="background job probe", title="background-job",
+        commission=commission,
+        topic="" if commission else "background job probe", title="background-job",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
             max_iterations=1, review_loop=False, auto_accept_on_pass=True,
@@ -138,16 +141,21 @@ async def test_watch_re_checks_on_a_timer_and_the_quest_then_completes(
     assert jw.read_pending(first.fi_dir) is not None
 
     async def finish_soon() -> None:
-        await asyncio.sleep(1.6)
+        # Done once two checks have seen it running: counted, not timed, since one check (the job's own status script)
+        # can take most of a second on a busy machine.
+        while sum(ln.startswith("[watch]") for ln in lines) < 2:
+            await asyncio.sleep(0.05)
         (cluster / "done").write_text("1")
 
     lines: list[str] = []
     watcher = Engine(cfg, resume_quest_id=first.quest_id)
     finisher = asyncio.create_task(finish_soon())
-    outcome = await jw.watch(
-        watcher.poll_job, fi_dir=watcher.fi_dir, every_s=1, max_wait_s=60, out=lines.append,
-    )
-    await finisher
+    try:
+        outcome = await jw.watch(
+            watcher.poll_job, fi_dir=watcher.fi_dir, every_s=1, max_wait_s=60, out=lines.append,
+        )
+    finally:  # a watch that ended early (a failure, the time limit) shows its own assertion, not a hang
+        finisher.cancel()
 
     assert outcome == jw.DONE
     checks = [ln for ln in lines if ln.startswith("[watch]")]
@@ -207,11 +215,11 @@ async def test_cli_watch_prints_and_logs_every_check_then_resumes_the_quest(
     import launch
 
     monkeypatch.setattr(jw, "MIN_POLL_S", 0)
-    cfg = _config(tmp_path)
+    cfg = _config(tmp_path, commission=commissioned.write(tmp_path / "order"))  # --watch resumes only a commissioned study
     first = Engine(cfg)
     await first.run()
     yaml_path = tmp_path / "quest.yaml"
-    yaml_path.write_text("topic: x", encoding="utf-8")
+    yaml_path.write_text(commissioned.line(tmp_path / "order"), encoding="utf-8")
 
     resumed: list[str] = []
 

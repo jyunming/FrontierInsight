@@ -31,7 +31,7 @@ NOTES = [{"iteration": 1, "text": "The Holm p-value in the discussion is not com
 def _engine(tmp_path: Path) -> Engine:
     return Engine(Config(
         topic="t", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(clarify_mode="off", review_loop=True, max_iterations=2,
+        engine=EngineConfig(review_loop=True, max_iterations=2,
                             human_feedback_gate="after_review"),  # type: ignore[arg-type]
         execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),

@@ -1,0 +1,28 @@
+# The one study every format_validation/*.yaml runs (a commission), so the papers differ only in their paper_format.
+# `fi check examples/format_validation/commission.yaml` checks it.
+
+question: >-
+  Can a Random Forest classifier trained on simple intensity and contrast features find the defective spots in
+  synthetic noisy images with ROC-AUC above 0.9 on held-out data, and which features matter most?
+
+scope: >-
+  A lightweight Python Monte Carlo generator of 32x32 image patches with a bright spot each (Poisson noise and Gaussian
+  blur; a spot is defective when its contrast falls below a set threshold), a Random Forest on intensity and contrast
+  features, the ROC-AUC on held-out synthetic data, and the feature importances. Synthetic data only.
+
+limits:
+  hours: 1
+  model_calls: 80
+
+known_values: []
+no_known_values: true
+
+success:
+  - condition: The classifier's ROC-AUC on held-out synthetic data is above 0.9.
+    verify: The held-out ROC-AUC with its spread over seeds.
+failure:
+  - condition: The held-out ROC-AUC is 0.9 or below.
+    verify: The same ROC-AUC and spread.
+
+doubts:
+  - The synthetic patches may not carry every source of a defect that real images have.

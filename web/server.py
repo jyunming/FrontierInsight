@@ -10,8 +10,6 @@ Endpoints
   figures, paper preview).
 * ``GET  /api/quests/{id}/log``           — log tail (most recent N lines).
 * ``GET  /api/quests/{id}/log/stream``    — SSE log tail (live).
-* ``GET  /api/quests/{id}/clarify``       — pending questions, if any.
-* ``POST /api/quests/{id}/clarify``       — submit answers; resumes graph.
 * ``POST /api/quests/start``              — start a new quest from a posted
   YAML body and run it inside this server process, followed by the same
   output pass as the CLI (paper.pdf, slides, poster, talk per
@@ -21,8 +19,8 @@ Endpoints
 The server is intentionally state-light: each quest's state lives on
 disk (``<quest_root>/.fi/{run.log, state.sqlite}`` + the
 ``frontier_insight_summary.json`` index). The server reads those for
-status; for ``clarify`` resume it routes the answers into the live
-``Engine.run()`` task via an in-process registry of clarify futures.
+status; for the review pause it routes the decision into the live
+``Engine.run()`` task via an in-process registry of futures.
 """
 
 from __future__ import annotations
@@ -34,6 +32,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -62,10 +61,10 @@ from generation._visual_check import report_summary
 
 class _QuestRegistry:
     """In-process registry of live quest tasks and their pending
-    clarify futures. Each quest run gets one entry from start until
-    its task either finishes or errors. The clarify panel POSTs
-    answers; the registry resolves the matching future so the
-    Engine's clarify callback returns and the graph proceeds.
+    review futures. Each quest run gets one entry from start until
+    its task either finishes or errors. The review panel POSTs
+    the decision; the registry resolves the matching future so the
+    Engine's human-feedback callback returns and the graph proceeds.
 
     Also tracks the in-memory `Engine` reference so the
     detail endpoint can surface the most-recent `review_panel`
@@ -76,13 +75,10 @@ class _QuestRegistry:
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._clarify_questions: dict[str, dict[str, Any]] = {}
-        self._clarify_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._configs: dict[str, Config] = {}
         self._final_states: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, list[dict[str, str]]] = {}
-        # Mirror of the clarify-future plumbing for the human-review
-        # gate. When the in-process engine pauses at the human_feedback
+        # When the in-process engine pauses at the human_feedback
         # node, the registered future is what the POST endpoint
         # resolves with the user's decision so the engine resumes.
         self._human_review_snapshots: dict[str, dict[str, Any]] = {}
@@ -107,35 +103,6 @@ class _QuestRegistry:
 
     def errors(self, quest_id: str) -> list[dict[str, str]] | None:
         return self._errors.get(quest_id)
-
-    def register_clarify(
-        self, quest_id: str, questions: dict[str, Any],
-    ) -> asyncio.Future[dict[str, Any]]:
-        # Production callers always invoke this from within an async
-        # handler, where `get_running_loop()` is the correct call
-        # (`get_event_loop()` is deprecated in 3.12+ for non-running
-        # fetches). Tests that call this synchronously fall through
-        # to `new_event_loop()` so the registry still works without
-        # asyncio.run() ceremony around every test fixture.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._clarify_questions[quest_id] = questions
-        self._clarify_futures[quest_id] = fut
-        return fut
-
-    def pending_clarify(self, quest_id: str) -> dict[str, Any] | None:
-        return self._clarify_questions.get(quest_id)
-
-    def resolve_clarify(self, quest_id: str, answers: dict[str, Any]) -> bool:
-        fut = self._clarify_futures.pop(quest_id, None)
-        self._clarify_questions.pop(quest_id, None)
-        if fut is None or fut.done():
-            return False
-        fut.set_result(answers)
-        return True
 
     def register_human_review(
         self, quest_id: str, snapshot: dict[str, Any],
@@ -302,23 +269,6 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
-def _clarify_run_waiting(quest_root: Path, name: str = "clarify") -> bool:
-    """Whether a quest started from the web page as its own process is running and waiting for its setup answers
-    (``.fi/clarify_waiting.json``, written by ``launch.py`` ``_web_page_clarify_callback``). Read from the quest
-    folder rather than the launcher's memory, so it still holds after the server restarted."""
-    from core.axon_sidecar import _pid_is_running
-
-    try:
-        marker = json.loads((quest_root / ".fi" / f"{name}_waiting.json").read_text(encoding="utf-8"))
-        pid = int(marker["pid"])
-        until = marker.get("until")
-        if until is not None and time.time() > float(until):
-            return False  # left behind by a run that was killed while it waited
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
-        return False
-    return _pid_is_running(pid)
-
-
 def _quest_pending(quest_root: Path) -> str | None:
     """The pause a quest is waiting on (its kind), or ``None`` when it isn't
     paused.
@@ -328,7 +278,7 @@ def _quest_pending(quest_root: Path) -> str | None:
     finished". These markers are the real signal, and the dashboard + the quest
     page both read this one helper so they always agree. Reliable for new
     quests (``NEXT_STEP.md`` / ``.fi/pause.json``, both deleted on completion)
-    and older ones (the on-disk review / clarify snapshots with no answer)."""
+    and older ones (the on-disk review snapshot with no answer)."""
     fi = quest_root / ".fi"
     pause_json = fi / "pause.json"
     if pause_json.is_file():
@@ -342,12 +292,6 @@ def _quest_pending(quest_root: Path) -> str | None:
     if ((fi / "human_review.json").is_file()
             and not (fi / "human_review_answer.json").is_file()):
         return "review"
-    if ((fi / "clarify_questions.json").is_file()
-            and not (fi / "clarify_answer.json").is_file()):
-        return "clarify"
-    if ((fi / "scope_questions.json").is_file()
-            and not (fi / "scope_answer.json").is_file()):
-        return "scope"
     return None
 
 
@@ -671,14 +615,14 @@ _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
 # `(unknown)` during the affected node's run, even though it's logging
 # normally — `_current_node_from_log` filters on this set.
 _KNOWN_NODES = frozenset({
-    "clarify", "ideate", "literature", "plan", "design", "design_self_critique",
+    "clarify", "literature", "plan", "design", "design_self_critique",
     "implement_outline", "implement", "execute", "execute_reflect", "improve",
     "analyze", "cross_check", "evidence_gate", "write", "claim_check",
     "review", "human_feedback", "select_skills", "pause_after_literature",
     # No-simulation routing: triggered when ``simulatability == "no"``.
     # web_plots/web_figures derive figures from collected web + literature
     # data on the no-simulation path.
-    "auto_collect_data", "wait_for_data", "data_load",
+    "wait_for_data", "data_load",
     "web_plots", "web_figures",
 })
 
@@ -692,7 +636,7 @@ _KNOWN_NODES = frozenset({
 # "[select_skills]"); "after_literature" -> `_node_pause_after_literature` (same mismatch); "stats"
 # -> `_node_analyze`; "numeric_oracle"/"stat_claims"/"figure_check"/"goal_coverage"/
 # "number_provenance"/"page_limit" -> `_node_review` (the reference-value/claim/figure/topic/page-limit checks
-# it runs before accepting or sending back; "number_provenance" is kept for older run logs); "auto_collect" -> `_node_auto_collect_data`. Left out
+# it runs before accepting or sending back; "number_provenance" is kept for older run logs). Left out
 # on purpose: "evidence" (written by `run()` after the graph settles, not from inside any one
 # node), "cost" (an ``_ensemble_chat`` line any ensembled node can log), "audit" (the audit-trace
 # wrapper around every node) — none names a single node truthfully.
@@ -710,7 +654,6 @@ _NODE_TAG_ALIASES: dict[str, str] = {
     "goal_coverage": "review",
     "number_provenance": "review",
     "page_limit": "review",
-    "auto_collect": "auto_collect_data",
 }
 
 
@@ -744,7 +687,7 @@ def _current_node_from_log(
 
 # Match the engine's ISO-with-comma-millis timestamp that ``_quest_logger``
 # in ``core/engine.py`` produces. Example log line:
-#     2026-05-20 11:11:52,388 [INFO] [ideate] topic=...
+#     2026-05-20 11:11:52,388 [INFO] [literature] query=...
 # Two capture groups: ISO date+time (whole seconds) and sub-second
 # digits (millis or micros). The sub-second part is normalised to
 # microseconds when parsing so timestamps don't lose precision.
@@ -933,7 +876,7 @@ def make_app(
     here when ``POST /api/quests/start`` is called.
 
     ``max_concurrent`` bounds the number of in-flight quests spawned
-    via the web UI interview. ``vscode_bridge_port`` / ``vscode_bridge_socket``
+    from the web UI. ``vscode_bridge_port`` / ``vscode_bridge_socket``
     are forwarded to each child quest so LLM calls keep routing
     through the same bridge the dashboard inherits from its parent.
     The socket path is the preferred transport (per-user IPC, no port
@@ -977,14 +920,51 @@ def make_app(
     if static_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-    # Interview routes — /interview (new quest), /update/<id> (mid-quest
-    # re-entry), JSON schema endpoint, and POST handlers. Backed by
-    # core.interview as the single source of truth.
-    from web.interview_routes import register_interview_routes
-    register_interview_routes(app, output_root)
+    @app.get("/api/provider-choices")
+    async def get_provider_choices() -> JSONResponse:
+        """The providers, models and multi-model profiles the Tools page picks from (core/provider_choices.py), with
+        ``vscode_extension`` first when this dashboard was started from a VS Code terminal and the bridge answers."""
+        from core import provider_choices as _provider_choices
 
-    # Tools routes — /tools/<name> (form pages for proposal, critique,
-    # digest, portfolio, summarize, analyze, fleet, ingest), backed
+        schema = _provider_choices.schema()
+        bridge_port = int(getattr(app.state, "vscode_bridge_port", 0) or 0)
+        bridge_socket = getattr(app.state, "vscode_bridge_socket", "") or ""
+        # Probe both transports — IPC socket path (default for
+        # --serve outside a chat-spawn) and TCP port (chat-spawned
+        # path). Either one open → vscode_extension surfaces.
+        from web._bridge_probe import is_bridge_listening, is_socket_listening
+        import asyncio as _asyncio
+        tcp_ok, sock_ok = await _asyncio.gather(
+            is_bridge_listening(bridge_port),
+            is_socket_listening(bridge_socket),
+        )
+        bridge_live = bool(tcp_ok or sock_ok)
+        schema["vscode_bridge_available"] = bridge_live
+        if bridge_live:
+            providers = list(schema.get("providers", []))
+            if not any(p.get("value") == "vscode_extension" for p in providers):
+                providers.insert(0, {
+                    "value": "vscode_extension",
+                    "label": "vscode_extension — sanctioned Copilot Chat bridge",
+                    "description": (
+                        "Routes every LLM call through vscode.lm on your "
+                        "authenticated Copilot session. Available because "
+                        "this dashboard was launched from a VSCode terminal."
+                    ),
+                })
+            schema["providers"] = providers
+            # No model list for vscode_extension. It used to be three models FI
+            # had picked (gpt-5, claude-opus-4-7, gemini-2.5-pro), which put
+            # them in front of the user as if they were the choices. Empty means
+            # the model picked in the VSCode Chat picker is used, and a model id
+            # can be typed to name another.
+            provider_models = dict(schema.get("provider_models", {}))
+            provider_models.setdefault("vscode_extension", [])
+            schema["provider_models"] = provider_models
+        return JSONResponse(schema)
+
+    # Tools routes — /tools/<name> (form pages for critique,
+    # digest, summarize, analyze, fleet, ingest), backed
     # by web/tools_routes.py:TOOL_SPECS as the source of truth.
     from web.tools_routes import register_tools_routes
     register_tools_routes(app, output_root)
@@ -1031,7 +1011,7 @@ def make_app(
         """Live job-tracking page. Shows running + recent tool / system /
         quest subprocess jobs the launcher knows about, with a live
         log-tail view. Hit by the tools form after submit so the user can
-        watch their proposal/critique/etc. actually run."""
+        watch their critique/digest/etc. actually run."""
         page = static_dir / "jobs.html"
         if not page.exists():
             return HTMLResponse(
@@ -1171,7 +1151,7 @@ def make_app(
         """Walk outputs/ and feed each quest's paper.md back into
         Axon as ``kind=fi_quest_paper``. Useful when the user ran
         many quests with ``knowledge.enabled: false`` (the default
-        for the interview-generated YAML) and now wants the corpus
+        of older FI-written YAMLs) and now wants the corpus
         retroactively populated. Returns per-quest success/failure
         so the UI can show what landed."""
         try:
@@ -1221,19 +1201,19 @@ def make_app(
 
     @app.get("/api/providers/availability")
     async def provider_availability(provider: str = "", model: str = "") -> JSONResponse:
-        """How far each provider is ready on this host, for the Settings page and the interview's provider picker:
+        """How far each provider is ready on this host, for the Settings page and the Tools page's provider picker:
         a state (not installed, installed, signed in, ... model available), a plain sentence and how to fix it
-        (core/provider_readiness.py, the same words as `fi --doctor` and the CLI interview). The CLIs' own sign-in
+        (core/provider_readiness.py, the same words as `fi --doctor`). The CLIs' own sign-in
         status commands run (each with a short time limit, all at once) and a local Ollama server is asked for its
         models; no request leaves this computer for an API-key provider, whose state is "key present". ``available``
         is kept for older pages: true when nothing found stops a launch. ``?provider=`` (and ``&model=``) checks one."""
-        from core.interview import PROVIDER_CHOICES
+        from core.provider_choices import PROVIDER_CHOICES
         from core.provider_readiness import check_all
 
         choices = [c for c in PROVIDER_CHOICES if not provider or c.value == provider]
         if provider and not choices:
             # A provider the picker offers without being in the CLI list (vscode_extension from a VS Code terminal).
-            from core.interview import Choice
+            from core.provider_choices import Choice
             choices = [Choice(provider, provider, "")]
         states = await check_all([str(c.value) for c in choices], model=model or None, sign_in=True,
                                  call_service=False, timeout_s=5.0)
@@ -1315,9 +1295,9 @@ def make_app(
     @app.post("/api/quests/{quest_id}/resume")
     async def resume_quest(quest_id: str, rerun: bool = False, from_step: str = Query("", alias="from")) -> JSONResponse:
         """Spawn ``python launch.py --config <quest_root>/config.yaml
-        --resume <id>`` as a subprocess via the launcher. Different
-        from ``--update``: no interview; just continue from the last
-        checkpoint with the existing YAML unchanged.
+        --resume <id>`` as a subprocess via the launcher. It
+        continues from the last checkpoint with the existing YAML
+        unchanged.
 
         ``rerun=true`` uses ``--rerun`` instead: for a FINISHED quest it
         re-opens it (re-enters at design, applies saved refine feedback) and
@@ -1330,9 +1310,6 @@ def make_app(
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         quest_id = quest_root.name  # the full id, also when a shortened one was given
-        if _clarify_run_waiting(quest_root):
-            # It is running, waiting for its setup answers on the quest page: a second run would share its files.
-            raise HTTPException(409, "this quest is still running and waiting for your answers on its page")
         if _quest_alive(quest_id, quest_root):
             # A second run of one quest overwrites the first one's files (a quest started from a terminal included).
             raise HTTPException(409, f"Quest {quest_id} is still running; resume it once it has stopped or finished.")
@@ -1352,6 +1329,8 @@ def make_app(
             )
         from web.quest_launcher import QuestLauncherFull
         from core import rerun_from as _rerun_from
+        if from_step and (gone := _rerun_from.gone(from_step)):
+            raise HTTPException(400, gone)
         step = _rerun_from.resolve(from_step) if from_step else None
         if from_step and step is None:
             raise HTTPException(400, f"{from_step!r} is not a step a quest can be rerun from; choose one of: "
@@ -1375,8 +1354,6 @@ def make_app(
                 argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else []),
                            "--output", str(quest_root.parent)],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
-                # A resumed quest that has not had its setup questions yet asks them on the quest page.
-                extra_env={"FI_WEB_ANSWERS": "1"},
                 cwd=cwd,
             )
         except QuestLauncherFull as e:
@@ -1796,7 +1773,7 @@ def make_app(
     @app.get("/api/quests/{quest_id}/next-step")
     async def next_step(quest_id: str) -> JSONResponse:
         """The unified *Action needed* descriptor for a paused quest. Every
-        pause (clarify / papers / supply / data / review) writes one
+        pause (papers / supply / data / review) writes one
         ``NEXT_STEP.md`` at the quest root saying why it stopped and what to
         do; a finished quest deletes it. So its presence == "waiting for you",
         and its content is the single thing the banner needs to render."""
@@ -1831,8 +1808,7 @@ def make_app(
                 interaction = "answer"
             elif "SUPPLY" in markdown:
                 interaction = "supply"
-            elif (registry.pending_clarify(quest_id) is not None
-                  or registry.pending_human_review(quest_id) is not None):
+            elif registry.pending_human_review(quest_id) is not None:
                 interaction = "answer"
             else:
                 interaction = "supply"
@@ -1986,7 +1962,7 @@ def make_app(
     @app.get("/api/jobs")
     async def list_jobs() -> JSONResponse:
         """List all subprocess jobs the launcher has spawned (tools,
-        --install-tectonic, --new/--update/--proposal quest launches),
+        --install-tectonic, --new/--update quest launches),
         merging:
           (1) the launcher's live registry (alive jobs with pid/age)
           (2) on-disk launch.log files (everything ever logged —
@@ -2110,88 +2086,6 @@ def make_app(
                 key=lambda j: j.get("age_seconds", 0) if j["alive"] else -j.get("log_mtime", 0),
                 reverse=False,
             ),
-        })
-
-    @app.get("/api/drafts")
-    async def list_drafts() -> JSONResponse:
-        """List draft quest YAMLs the proposal tool dropped in
-        ``outputs/_drafts/``. Each entry includes the parsed topic
-        + title so the /interview UI can show a one-click picker
-        for "continue this proposal as a new quest." Most-recent
-        first."""
-        drafts_dir = app.state.output_root / "_drafts"
-        if not drafts_dir.is_dir():
-            return JSONResponse({"drafts": []})
-        items: list[dict[str, Any]] = []
-        for p in sorted(
-            drafts_dir.glob("*.yaml"),
-            key=lambda f: f.stat().st_mtime,
-            reverse=True,
-        )[:40]:
-            try:
-                txt = p.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            # Parse JUST the fields the picker needs — topic + title.
-            # Doing a full YAML load here is fine; the files are tiny.
-            try:
-                import yaml as _yaml
-                doc = _yaml.safe_load(txt) or {}
-            except Exception:
-                doc = {}
-            items.append({
-                "filename": p.name,
-                "mtime": p.stat().st_mtime,
-                "size": p.stat().st_size,
-                "topic": (doc.get("topic") or "").strip()[:200],
-                "title": (doc.get("title") or "").strip()[:200],
-                "provider": (doc.get("provider") or {}).get("name") if isinstance(doc.get("provider"), dict) else None,
-                "companion_md": str(p.with_name(p.stem + "-proposal.md").name)
-                    if (drafts_dir / (p.stem + "-proposal.md")).is_file() else None,
-            })
-        return JSONResponse({"drafts": items})
-
-    @app.get("/api/drafts/{filename}")
-    async def get_draft(filename: str) -> JSONResponse:
-        """Return the parsed contents of a single draft YAML so the
-        /interview page can pre-fill its form fields when the user
-        clicks "Load draft" on a proposal output.
-
-        Also returns the companion proposal markdown (``<stem>-proposal.md``)
-        when present, so the interview page can render the full
-        background/hypothesis/plan/risks alongside the form. The YAML
-        alone only holds the *runnable* config (topic, title, provider,
-        execution params, …); the rich proposal text lives in the MD.
-        """
-        # Path-traversal guard: only allow simple filenames inside
-        # outputs/_drafts/, never path components like '..'.
-        if "/" in filename or "\\" in filename or filename.startswith(".") or not filename.endswith(".yaml"):
-            raise HTTPException(400, f"bad filename: {filename!r}")
-        draft = app.state.output_root / "_drafts" / filename
-        if not draft.is_file():
-            raise HTTPException(404, f"draft {filename!r} not found")
-        try:
-            txt = draft.read_text(encoding="utf-8", errors="replace")
-            import yaml as _yaml
-            doc = _yaml.safe_load(txt) or {}
-        except Exception as e:
-            raise HTTPException(500, f"could not parse draft: {e}")
-        # Companion proposal markdown (same stem with -proposal.md suffix)
-        # — bundled in the response so the picker only does one round
-        # trip to load both the YAML config + the readable plan.
-        proposal_md = draft.with_name(draft.stem + "-proposal.md")
-        md_text: str | None = None
-        if proposal_md.is_file():
-            try:
-                md_text = proposal_md.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                md_text = None
-        return JSONResponse({
-            "filename": filename,
-            "raw": txt,
-            "parsed": doc,
-            "proposal_md": md_text,
-            "proposal_md_filename": proposal_md.name if md_text else None,
         })
 
     @app.get("/api/jobs/{job_id}")
@@ -2465,8 +2359,7 @@ def make_app(
     async def get_quest(quest_id: str) -> JSONResponse:
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         quest_id = quest_root.name  # the full id, also when a shortened one was given
-        # Race window: a quest just submitted via
-        # POST /api/interview/submit?launch=true has had its quest_id
+        # Race window: a quest just spawned by the launcher has had its quest_id
         # minted and its subprocess spawned, but the child engine has
         # not yet created `.fi/` (LangGraph init takes a few seconds —
         # model loading, ADC, env, …). Without this fallback the user
@@ -2490,8 +2383,6 @@ def make_app(
                     "paper_preview": None,
                     "summary": None,
                     "alive": bool(launcher_status.get("alive")),
-                    "pending_clarify": False,
-                    "pending_scope": False,
                     "pending_human_review": None,
                     "review": None,
                     "review_panel": None,
@@ -2517,8 +2408,8 @@ def make_app(
         # Expose the panel reviews to the GUI when present.
         review = final_state.get("review")
         review_panel = final_state.get("review_panel")
-        # Merge launcher state so quests spawned via the
-        # web UI's POST /api/interview/submit?launch=true also report
+        # Merge launcher state so quests spawned by the
+        # web UI's launcher also report
         # ``alive: true`` while their child process is running.
         # Without this, the in-process registry's `alive(quest_id)`
         # returns False for ANY web-launched quest (those don't
@@ -2608,17 +2499,6 @@ def make_app(
                 or bool(launcher_status.get("alive"))
                 # a quest started outside this server (a terminal, another folder's page) runs too
                 or _quest_looks_running(quest_root, time.time())
-            ),
-            "pending_clarify": (
-                registry.pending_clarify(quest_id) is not None
-                or (
-                    (quest_root / ".fi" / "clarify_questions.json").is_file()
-                    and not (quest_root / ".fi" / "clarify_answer.json").is_file()
-                )
-            ),
-            "pending_scope": (
-                (quest_root / ".fi" / "scope_questions.json").is_file()
-                and not (quest_root / ".fi" / "scope_answer.json").is_file()
             ),
             "pending_human_review": pending_human_review,
             # The pause this quest is waiting on (kind), or null — the same
@@ -2714,148 +2594,6 @@ def make_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    @app.get("/api/quests/{quest_id}/clarify")
-    async def get_clarify(quest_id: str) -> JSONResponse:
-        """Pending clarify questions. Two sources, like the human-review gate:
-        the in-process registry (web launch=true), else the on-disk
-        ``.fi/clarify_questions.json`` written by EVERY quest that pauses for
-        clarify (subprocess / CLI) — so a subprocess quest can render a form
-        even with no in-process future."""
-        questions = registry.pending_clarify(quest_id)
-        if questions is not None:
-            return JSONResponse({"pending": True, "source": "in_process",
-                                 "questions": questions})
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-            quest_id = quest_root.name  # the full id, also when a shortened one was given
-        except HTTPException:
-            return JSONResponse({"pending": False, "questions": None})
-        on_disk = quest_root / ".fi" / "clarify_questions.json"
-        answered = quest_root / ".fi" / "clarify_answer.json"
-        if not on_disk.is_file() or answered.is_file():
-            return JSONResponse({"pending": False, "questions": None})
-        try:
-            questions = json.loads(on_disk.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"pending": False, "questions": None})
-        return JSONResponse({"pending": True, "source": "disk",
-                             "questions": questions})
-
-    @app.post("/api/quests/{quest_id}/clarify")
-    async def post_clarify(quest_id: str, request: Request) -> JSONResponse:
-        """Submit clarify answers. Resolves the in-process future when present,
-        and always writes ``.fi/clarify_answer.json`` so a subprocess- / CLI-
-        launched engine picks them up on its next ``--resume``."""
-        body = await request.json()
-        answers = body.get("answers")
-        if not isinstance(answers, dict):
-            raise HTTPException(400, "request body must contain {'answers': {...}}")
-        in_process_resolved = registry.resolve_clarify(quest_id, answers)
-        quest_root: Path | None = None
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-            quest_id = quest_root.name  # the full id, also when a shortened one was given
-        except HTTPException:
-            quest_root = None
-        # Only stage an on-disk answer when the quest is actually paused for
-        # clarify on disk (questions present, not yet answered) — a stray POST
-        # to a non-paused quest shouldn't drop an answer file that a later
-        # clarify pass would wrongly consume.
-        has_disk_pause = bool(
-            quest_root is not None
-            and (quest_root / ".fi" / "clarify_questions.json").is_file()
-            and not (quest_root / ".fi" / "clarify_answer.json").is_file()
-        )
-        disk_write_error: str | None = None
-        if has_disk_pause:
-            try:
-                fi = quest_root / ".fi"  # type: ignore[union-attr]
-                fi.mkdir(parents=True, exist_ok=True)
-                # Whole or not at all: a run waiting for it reads the file as soon as it appears.
-                tmp = fi / "clarify_answer.json.tmp"
-                tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
-                try:
-                    os.replace(tmp, fi / "clarify_answer.json")
-                finally:
-                    tmp.unlink(missing_ok=True)
-            except OSError as e:
-                disk_write_error = f"{type(e).__name__}: {e}"
-        if not in_process_resolved and not has_disk_pause:
-            raise HTTPException(409, f"no pending clarify for quest {quest_id}")
-        payload: dict[str, Any] = {"ok": True,
-                                   "in_process_resolved": in_process_resolved}
-        if has_disk_pause and not in_process_resolved:
-            # A quest started from the web page as its own process that is still waiting for these answers reads
-            # them itself, so the page must not start a second run.
-            payload["run_waiting"] = _clarify_run_waiting(quest_root)  # type: ignore[arg-type]
-        if disk_write_error is not None:
-            payload["disk_write_warning"] = disk_write_error
-        return JSONResponse(payload)
-
-    @app.get("/api/quests/{quest_id}/scope")
-    async def get_scope(quest_id: str) -> JSONResponse:
-        """The study cards a quest waits on (``.fi/scope_questions.json``), until ``scope_answer.json`` exists."""
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        except HTTPException:
-            return JSONResponse({"pending": False, "questions": None})
-        asked = quest_root / ".fi" / "scope_questions.json"
-        if not asked.is_file() or (quest_root / ".fi" / "scope_answer.json").is_file():
-            return JSONResponse({"pending": False, "questions": None})
-        try:
-            questions = json.loads(asked.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return JSONResponse({"pending": False, "questions": None})
-        return JSONResponse({"pending": True, "source": "disk", "questions": questions})
-
-    @app.post("/api/quests/{quest_id}/scope")
-    async def post_scope(quest_id: str, request: Request) -> JSONResponse:
-        """The pick of the study: ``{"answers": {"study": <card number | edited card | sentence>}}``, written whole
-        to ``.fi/scope_answer.json`` for the run that waits on it (or for the next resume)."""
-        body = await request.json()
-        answers = body.get("answers") if isinstance(body, dict) else None
-        if not isinstance(answers, dict):
-            raise HTTPException(400, "request body must contain {'answers': {...}}")
-        try:
-            quest_root = _resolve_quest_root(app.state.output_root, quest_id)
-        except HTTPException:
-            raise HTTPException(409, f"no pending study choice for quest {quest_id}") from None
-        fi = quest_root / ".fi"
-        if not (fi / "scope_questions.json").is_file() or (fi / "scope_answer.json").is_file():
-            raise HTTPException(409, f"no pending study choice for quest {quest_id}")
-        try:
-            asked = json.loads((fi / "scope_questions.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            asked = {}
-        entry = asked.get("study") if isinstance(asked, dict) else None
-        cards = entry.get("cards") if isinstance(entry, dict) else None
-        from core import scope_cards as _scope_cards
-
-        if _scope_cards.read_answer(answers, cards if isinstance(cards, list) else []) is None:
-            raise HTTPException(400, "pick one of the studies by its number, or write the study you want")
-        # Each request writes its own file; linking it into place fails when an answer is there already, so of two
-        # answers sent at once one is kept and the other is told so.
-        tmp = fi / f"scope_answer.{secrets.token_hex(8)}.tmp"
-        try:
-            tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
-            try:
-                try:
-                    os.link(tmp, fi / "scope_answer.json")
-                except FileExistsError:
-                    raise
-                except OSError:
-                    # A drive without links: the answer file is created only when none is there (a run reading it
-                    # half-written reads it again a second later).
-                    with open(fi / "scope_answer.json", "x", encoding="utf-8") as out:
-                        out.write(tmp.read_text(encoding="utf-8"))
-            except FileExistsError:
-                raise HTTPException(409, f"the study for quest {quest_id} was already chosen") from None
-        except OSError as e:
-            raise HTTPException(500, f"could not save the answer: {e}") from e
-        finally:
-            tmp.unlink(missing_ok=True)
-        return JSONResponse({"ok": True, "run_waiting": _clarify_run_waiting(quest_root, "scope")})
-
     @app.get("/api/quests/{quest_id}/human-review")
     async def get_human_review(quest_id: str) -> JSONResponse:
         """Return the current human-review snapshot for a quest. Two
@@ -2904,7 +2642,7 @@ def make_app(
         resolution paths:
 
         1. An in-process future (the in-memory engine path used by
-           interview submit + launch=true) is resolved when present;
+           POST /api/quests/start) is resolved when present;
            the engine resumes within the same Python process.
         2. ``<quest_root>/.fi/human_review_answer.json`` is always
            written so a subprocess- or CLI-launched engine can pick
@@ -3190,7 +2928,7 @@ def make_app(
         Gated behind a config flag because this endpoint takes
         user-supplied Python code and runs it on the server. The
         existing ``--resume`` path picks up at ``execute`` if the
-        upstream nodes (clarify / ideate / design / implement) have
+        upstream nodes (design / implement) have
         already completed.
 
         On a non-loopback bind, this endpoint is a code-execution
@@ -3222,11 +2960,8 @@ def make_app(
         # re-runs the execute node. Without this, a terminal-state
         # checkpoint (paper.md present, review.verdict set) would
         # short-circuit the graph and the user's code edit would be
-        # silently ignored. Reuses the same soft-invalidation
-        # primitive interview_update.py uses for paper_format /
-        # study_depth changes.
-        from core.interview_update import soft_invalidate_checkpoint
-        await soft_invalidate_checkpoint(
+        # silently ignored.
+        await _soft_invalidate_checkpoint(
             quest_root,
             ["exec_result", "result_json", "figures",
              "analysis", "cross_check", "paper_md",
@@ -3325,22 +3060,20 @@ def make_app(
         from core import commission as _commission
 
         try:  # a commission's files and passages, before any quest folder or model call
-            _commission.door(cfg.commission, None)
+            _commission.door(cfg.commission, None, topic=cfg.topic, asked=cfg.modes_asked())
         except _commission.CommissionRefused as e:
             raise HTTPException(400, str(e)) from e
 
         engine = Engine(cfg, supervisor=app.state.supervisor)
         quest_id = engine.quest_id
-
-        async def gui_clarify_callback(questions: dict[str, Any]) -> dict[str, Any]:
-            fut = registry.register_clarify(quest_id, questions)
-            return await fut
-
-        # The study choice is asked on the quest page in its own files (the card form needs more than text boxes).
-        from launch import _web_page_clarify_callback
-
-        gui_scope_callback = _web_page_clarify_callback(
-            engine.fi_dir, engine._log, engine.human_feedback_timeout_s, name="scope")
+        # The quest's own config.yaml, as launch.run_one keeps it, so Resume (here or `--resume <id>`) and --update find
+        # the config it ran with; the commission's path is written whole, since the text came from no folder.
+        saved = engine.quest_root / "config.yaml"
+        if not saved.exists():
+            engine.quest_root.mkdir(parents=True, exist_ok=True)
+            output = {**(cfg_dict.get("output") or {}), "output_dir": str(cfg.output.output_dir)}  # the server's root
+            saved.write_text(_yaml.safe_dump({**cfg_dict, "commission": str(cfg.commission), "output": output},
+                                             sort_keys=False), encoding="utf-8")
 
         async def gui_human_review_callback(
             snapshot: dict[str, Any],
@@ -3355,8 +3088,6 @@ def make_app(
         async def driver():
             try:
                 art = await engine.run(
-                    clarify_callback=gui_clarify_callback,
-                    scope_callback=gui_scope_callback,
                     human_feedback_callback=gui_human_review_callback,
                 )
                 # Snapshot review_panel + final review so the
@@ -3387,8 +3118,73 @@ def make_app(
     return app
 
 
+async def _soft_invalidate_checkpoint(
+    quest_root: Path, keys_to_drop: list[str],
+) -> bool:
+    """Clear ``keys_to_drop`` from the latest LangGraph checkpoint
+    in ``<quest_root>/.fi/state.sqlite``. Returns True on success,
+    False if no checkpoint exists or the update failed.
+
+    Best-effort: any exception is caught and logged via stderr; the
+    caller treats failure as "no invalidation happened" and the user
+    sees a clear hint."""
+    sqlite_path = quest_root / ".fi" / "state.sqlite"
+    if not sqlite_path.is_file():
+        return False
+    try:
+        # Lazy-import LangGraph so importing this module is cheap.
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except Exception as e:
+        print(
+            f"[FI] re-execute: LangGraph checkpointer unavailable ({e!r}); "
+            f"soft invalidation skipped. The resume still runs.",
+            file=sys.stderr,
+        )
+        return False
+
+    config = {"configurable": {"thread_id": quest_root.name}}
+    try:
+        async with AsyncSqliteSaver.from_conn_string(str(sqlite_path)) as saver:
+            current = await saver.aget_tuple(config)
+            if current is None or current.checkpoint is None:
+                return False
+            channel_values = dict(current.checkpoint.get("channel_values") or {})
+            cleared: list[str] = []
+            for key in keys_to_drop:
+                if key in channel_values:
+                    channel_values.pop(key, None)
+                    cleared.append(key)
+            if not cleared:
+                return False
+            new_checkpoint = dict(current.checkpoint)
+            new_checkpoint["channel_values"] = channel_values
+            # Bump the id so the saver writes a new row (rather than
+            # silently no-op'ing on duplicate primary key).
+            from uuid import uuid4
+            new_checkpoint["id"] = str(uuid4())
+            await saver.aput(
+                config,
+                new_checkpoint,
+                current.metadata or {},
+                {},
+            )
+            print(
+                f"[FI] re-execute: cleared {len(cleared)} state key(s) "
+                f"from latest checkpoint: {','.join(cleared)}"
+            )
+            return True
+    except Exception as e:  # pragma: no cover — defensive only.
+        print(
+            f"[FI] re-execute: soft-invalidation failed ({e!r}); the resume "
+            f"still runs. For a guaranteed re-run, "
+            f"delete {sqlite_path} before re-resuming.",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _warn_if_non_loopback(host: str) -> None:
-    """The web UI now spawns quests via ``POST /api/interview/submit?launch=true``.
+    """The web UI spawns quests (``POST /api/quests/start``, Resume).
     Quest spawn is a privileged action — anyone who can reach the
     endpoint can run arbitrary ``python launch.py --config <yaml>``
     on the server's machine. Binding to anything other than a
@@ -3402,7 +3198,7 @@ def _warn_if_non_loopback(host: str) -> None:
         import logging
         log = logging.getLogger("frontier_insight.serve")
         log.warning(
-            "--serve bound to %s (non-loopback). The /interview "
+            "--serve bound to %s (non-loopback). The quest start "
             "endpoint launches arbitrary quests on this machine; "
             "anyone reachable on the network can submit one. "
             "Bind to 127.0.0.1 unless you trust the network.",

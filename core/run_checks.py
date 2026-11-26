@@ -950,26 +950,7 @@ class RunChecksMixin:
         over = sized.get("over_topic_limit")
         if isinstance(over, dict) and over.get("note"):
             parts.append(f"{over['note']} Say this in the paper (it is among FI's facts about this run, given below).")
-        if scope := self._scope_gap_note():
-            parts.append(scope)
         return "\n\n".join(parts)
-
-    def _scope_gap_note(self) -> str:
-        """For the writer: each result or setting of the study the person chose that the frozen plan has no name for
-        (core/scope_cards.py ``gaps``, a reading by names). It is told in the limitations and never stops the quest."""
-        from . import scope_cards as _sc
-
-        record = _sc.read_record(self.quest_root)  # type: ignore[attr-defined]
-        card = record.get("chosen") if isinstance(record, dict) else None
-        protocol = _frozen.protocol_of(self.quest_root)  # type: ignore[attr-defined]
-        if not isinstance(card, dict) or not card or protocol is None:
-            return ""
-        design = {"protocol": protocol}
-        names = [r for r in _sc._strings(card.get("main_results")) if _sc.gaps({"main_results": [r]}, design)]
-        names += [s for s in _sc._strings(card.get("compared_settings"))
-                  if _sc.gaps({"compared_settings": [s]}, design)]
-        return "\n".join(f"The person chose a study that names {x}; the plan does not cover it and gives no reason. "
-                         "Say so in the limitations." for x in names)
 
     # ---- the frame of simulate.py (core/skeleton.py) ----------------------------------------------------------------------
 
@@ -1185,7 +1166,7 @@ class RunChecksMixin:
         self._log.warning("[execute] %s: sending derive.py back for it before the run", said)  # type: ignore[attr-defined]
         failed = self._code_review_failed_run(  # type: ignore[attr-defined]
             f"FI read derive.py before the run: {said}. Write `{wanted[0][1]}`, so the run can give the value the plan "
-            "asks for.", script=_analysis.DERIVE_FILE)
+            "asks for.", script=_analysis.DERIVE_FILE, check="fis_stub")
         failed["exec_result"]["failed_body"] = wanted[0][1]
         return failed
 
@@ -1618,7 +1599,7 @@ class RunChecksMixin:
             f"{said}.{wrong} The plan's grid gives each run its own value "
             f"({values}), and the study compares the results across those values, so the simulation must use the value it is "
             "given (`cell[\"<name>\"]`, the name exactly as the grid spells it) where the plan's model uses it. Do not fix "
-            "the value inside the code.", script=simulate.name)
+            "the value inside the code.", script=simulate.name, check="unread_compared_setting")
 
     # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
 
@@ -1809,7 +1790,7 @@ class RunChecksMixin:
                     "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials,
                     "limit": "topic" if by_topic else "execution.timeout_s", "topic_limit_s": topic_s, "hard_limit_s": hard_s,
                     "once_s": est.once_s, "once_axes": list(est.once_axes),
-                    "at_once": est.at_once}
+                    "at_once": est.at_once, "at_least": est.at_least}
             # The smaller run FI chose is timed again: it goes on unless it is over the limit even without the margin
             # (the margin was spent choosing it; a second timing of the same run differs by about as much).
             # More settings than FI lists: the whole grid is never built. The settings the time allowed can reach are planned,
@@ -2504,7 +2485,7 @@ class RunChecksMixin:
             print("[FI] a small trial run before the study shows the simulation does not measure what the protocol names; "
                   "sending it back to be repaired")
             return self._code_review_failed_run(  # type: ignore[attr-defined]
-                _estimate.directive(result), script=_split_run.SIMULATE_NAME)
+                _estimate.directive(result), script=_split_run.SIMULATE_NAME, check="pilot_run")
         _estimate.write_pilot_record(  # type: ignore[attr-defined]
             self.quest_root, {**base, "outcome": "stopped", "repairs": repairs, "problems": says})
         return self._stop_before_run(  # type: ignore[attr-defined]
@@ -2904,7 +2885,8 @@ class RunChecksMixin:
         message = _small.SmallRun(settings, str(record.get("load_error") or "")).directive(self._level_rule(state, self.quest_root / "code" / _split_run.SIMULATE_NAME))  # type: ignore[attr-defined]
         self._log.warning("[execute] FI's small run of the simulation failed before the code is read (%s); sending it "  # type: ignore[attr-defined]
                           "to be repaired", record.get("says"))
-        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME)  # type: ignore[attr-defined]
+        return self._code_review_failed_run(message, script=_split_run.SIMULATE_NAME,  # type: ignore[attr-defined]
+                                            check="small_run_crash")
 
     async def _small_run_checks(self, state: Any, record: dict[str, Any]) -> dict[str, Any] | None:
         """The small run against the frozen plan (core/small_run.py): the shape of each number the plan declares one per
@@ -2956,7 +2938,7 @@ class RunChecksMixin:
                        "plan:\n" + "\n".join(f"- {f.why}" for f in to_send)
                        + "\n\nRepair the code so that it gives what the plan declares, in the form the plan declares. Do "
                        "not change the plan's quantities or the values it gives each run. Keep everything else as it is.")
-            failed = self._code_review_failed_run(message, script=script)  # type: ignore[attr-defined]
+            failed = self._code_review_failed_run(message, script=script, check="small_run_plan")  # type: ignore[attr-defined]
             if script == "derive.py":
                 failed["exec_result"]["failed_body"] = to_send[0].body
             # its own counter (in .fi/small_run.json): ``execute_reflect`` spends no crash repair on it and needs none left
@@ -3282,10 +3264,12 @@ class RunChecksMixin:
             self._log.warning("[gate] the analysis does not run on the recorded results; sending it to be repaired")  # type: ignore[attr-defined]
             if self._analysis_on():
                 # FI's analysis: the function of derive.py its record names goes to the repair, never FI's experiment.py
-                failed = self._code_review_failed_run(after.says(), script="derive.py")  # type: ignore[attr-defined]
+                failed = self._code_review_failed_run(after.says(), script="derive.py",  # type: ignore[attr-defined]
+                                                      check="analysis_gate")
                 failed["exec_result"]["failed_body"] = getattr(after, "body", "")
             else:
-                failed = self._code_review_failed_run(after.says(), script="experiment.py")  # type: ignore[attr-defined]
+                failed = self._code_review_failed_run(after.says(), script="experiment.py",  # type: ignore[attr-defined]
+                                                      check="analysis_gate")
             # a repair of the analysis has its own counter and spends no crash repair (``execute_reflect`` reads the mark)
             failed["exec_result"]["gate_repair"] = True
             failed["gate_repairs"] = made + 1

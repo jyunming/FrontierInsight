@@ -19,11 +19,10 @@ import pytest
 
 from core import retractions, todo
 from core.config import (
-    Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig,
+    Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
 from core.engine import (
-    Engine, _claim_source_block, _format_lit_from_state, _format_lit_header, _query_set_digest,
-    _query_set_standing,
+    Engine, _claim_source_block, _format_lit_from_state, _format_lit_header,
 )
 from core.knowledge import RetrievedDoc
 
@@ -307,55 +306,39 @@ def test_the_claim_check_does_not_accept_a_retracted_source(tmp_path: Path) -> N
     assert any("[1] Ileal-lymphoid-nodular hyperplasia [retracted]" in p for p in prompts)
 
 
-# --- the literature node and its record -------------------------------------------------------
+# --- the literature step and its record ----------------------------------------------------------
+
 
 def _lit_engine(tmp_path: Path) -> Engine:
     eng = Engine(Config(
         topic="vaccines and autism", title="t", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False, web_search=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
-        pauses=PausesConfig(papers=False),
     ))
     eng.config.knowledge.enabled = True
-    eng.config.knowledge.source_routing = "manual"
-    eng.config.knowledge.literature_screen = False
-    eng.config.knowledge.foundational_works = False
     return eng
 
 
 @pytest.mark.asyncio
-async def test_the_literature_node_marks_records_and_logs_one_line(tmp_path: Path, monkeypatch) -> None:
-    import core.passages as pmod
-
-    monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
+async def test_the_literature_step_looks_up_the_sources_it_was_given_and_records_what_it_found(
+        tmp_path: Path, monkeypatch) -> None:
     eng = _lit_engine(tmp_path)
-
-    async def no_model(prompt, node=""):  # noqa: ANN001, ARG001
-        raise RuntimeError("no model")
-
-    retrieved = [
-        RetrievedDoc(content="The Lancet paper. " + "Abstract text. " * 20,
-                     metadata={"title": "The Lancet paper", "doi": RETRACTED_DOI, "source": "crossref"}),
-        RetrievedDoc(content="A clean paper. " + "Abstract text. " * 20,
-                     metadata={"title": "A clean paper", "doi": CLEAN_DOI, "source": "crossref"}),
-        RetrievedDoc(content="No answer. " + "Abstract text. " * 20,
-                     metadata={"title": "No answer", "doi": UNKNOWN_DOI, "source": "crossref"}),
-    ]
-
-    async def fake_search(query, **kw):  # noqa: ANN001, ARG001
-        return retrieved
-
-    async def fetch(docs):  # noqa: ANN001
-        return docs
-
+    given = eng.quest_root / "inputs" / "papers"
+    given.mkdir(parents=True)
+    (given / "lancet.md").write_text("# The Lancet paper\n\n" + "Ileal-lymphoid-nodular hyperplasia. " * 30, encoding="utf-8")
     real = retractions.check_dois
 
     async def mocked(dois, **kw):  # noqa: ANN001, ARG001
         return await real(dois, transport=_crossref([RETRACTED_ITEM, CLEAN_ITEM]))
 
     monkeypatch.setattr(retractions, "check_dois", mocked)
+
+    async def titles(entries, transport):  # noqa: ANN001, ARG001
+        return {i: (retractions.normalize_doi(RETRACTED_DOI), "") for i, _m, _c in entries}
+
+    monkeypatch.setattr(retractions, "_dois_for_own_papers", titles)
     logged: list[str] = []
     real_info = eng._log.info
 
@@ -364,27 +347,81 @@ async def test_the_literature_node_marks_records_and_logs_one_line(tmp_path: Pat
         return real_info(msg, *a, **kw)
 
     monkeypatch.setattr(eng._log, "info", info)
-    eng._chat = no_model
-    eng.knowledge.asearch = fake_search  # type: ignore[method-assign]
-    eng.knowledge.fetch_full_text = fetch  # type: ignore[method-assign]
-    patch = await eng._node_literature({"topic": "vaccines and autism", "chosen_idea": {"title": "T"},
-                                        "no_simulation_resolved": True})
-    status = {e["metadata"]["title"]: e["metadata"].get("retraction") for e in patch["literature"]}
-    assert status == {"The Lancet paper": "retracted", "A clean paper": "not_retracted", "No answer": "not_checked"}
-    lines = [m for m in logged if "for retractions" in m]
-    assert len(lines) == 1, lines
-    assert "1 retracted (The Lancet paper)" in lines[0] and "1 could not be checked" in lines[0]
+    patch = await eng._node_literature({"topic": "vaccines and autism"})
+    (entry,) = patch["literature"]
+    assert entry["metadata"]["retraction"] == "retracted"
+    assert len([m for m in logged if "for retractions" in m]) == 1
     record = json.loads((eng.fi_dir / "literature_queries.json").read_text(encoding="utf-8"))
-    (entry,) = [e for e in record["entries"] if e.get("stage") == "retractions"]
-    assert entry["outcome"] == "checked"
-    assert {r["title"]: r["status"] for r in entry["sources"]} == status
-    assert entry["digest"] == _query_set_digest(entry) and _query_set_standing(entry) == "verified"
-    # The to-do card every interface shows names it.
+    (row,) = [e for e in record["entries"] if e.get("stage") == "retractions"]
+    assert row["outcome"] == "checked" and [r["status"] for r in row["sources"]] == ["retracted"]
     items = [i for i in todo.waiting(eng.quest_root) if i.kind == "retracted"]
-    assert len(items) == 1 and "The Lancet paper" in items[0].why
-    # The list of papers to download never asks for a retracted one (the clean one shows the list is written).
-    wanted = (eng.quest_root / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
-    assert "A clean paper" in wanted and "The Lancet paper" not in wanted
+    assert len(items) == 1 and retractions.normalize_doi(RETRACTED_DOI) in items[0].why
+
+
+def _mock_lookup(monkeypatch, calls: list) -> None:
+    real = retractions.check_dois
+
+    async def mocked(dois, **kw):  # noqa: ANN001, ARG001
+        calls.append(list(dois))
+        return await real(dois, transport=_crossref([RETRACTED_ITEM, CLEAN_ITEM]))
+
+    async def titles(entries, transport):  # noqa: ANN001, ARG001
+        return {i: (retractions.normalize_doi(RETRACTED_DOI), "") for i, _m, _c in entries}
+
+    monkeypatch.setattr(retractions, "check_dois", mocked)
+    monkeypatch.setattr(retractions, "_dois_for_own_papers", titles)
+
+
+@pytest.mark.asyncio
+async def test_a_paper_added_at_the_pause_after_the_literature_is_looked_up_too(tmp_path: Path, monkeypatch) -> None:
+    eng = _lit_engine(tmp_path)
+    _mock_lookup(monkeypatch, [])
+    monkeypatch.setattr(eng, "_pause_stage_enabled", lambda stage: True)
+    monkeypatch.setattr(eng, "_maybe_pause_for_user_input", lambda state, stage: None)
+    given = eng.quest_root / "inputs" / "papers"
+    given.mkdir(parents=True)
+    (given / "lancet.md").write_text("# The Lancet paper\n\n" + "Ileal-lymphoid-nodular hyperplasia. " * 30, encoding="utf-8")
+    patch = await eng._node_pause_after_literature({"literature": [], "literature_iter": 1})
+    (entry,) = patch["literature"]
+    assert entry["metadata"]["retraction"] == "retracted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting", ["enabled", "offline"])
+async def test_no_retraction_lookup_reaches_the_network_when_retrieval_is_off_or_offline(
+        tmp_path: Path, monkeypatch, setting: str) -> None:
+    eng = _lit_engine(tmp_path)
+    calls: list = []
+    _mock_lookup(monkeypatch, calls)
+    if setting == "enabled":
+        eng.config.knowledge.enabled = False
+    else:
+        eng.config.knowledge.offline = True
+    given = eng.quest_root / "inputs" / "papers"
+    given.mkdir(parents=True)
+    (given / "lancet.md").write_text("# The Lancet paper\n\n" + "Ileal-lymphoid-nodular hyperplasia. " * 30, encoding="utf-8")
+    patch = await eng._node_literature({"topic": "vaccines and autism"})
+    (entry,) = patch["literature"]
+    assert calls == [] and "retraction" not in entry["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_papers_pinned_in_local_papers_join_the_literature_once_and_are_looked_up(
+        tmp_path: Path, monkeypatch) -> None:
+    pinned = tmp_path / "pinned.md"
+    pinned.write_text("# A pinned background paper\n\n" + "Background on the pinned topic. " * 30, encoding="utf-8")
+    eng = _lit_engine(tmp_path)
+    eng.config.knowledge.local_papers = [pinned]
+    eng.knowledge = type(eng.knowledge)(eng.config.knowledge)
+    _mock_lookup(monkeypatch, [])
+    patch = await eng._node_literature({"topic": "background"})
+    (entry,) = patch["literature"]
+    assert "pinned topic" in entry["content"] and entry["metadata"].get("retraction") == "retracted"
+    again = await eng._node_literature({"topic": "background", "literature": patch["literature"]})
+    assert len(again["literature"]) == 1, "a paper already in the literature is not added again"
+
+
+# --- the to-do card -------------------------------------------------------------------------------
 
 
 def test_the_todo_card_is_quiet_without_a_retracted_source(tmp_path: Path) -> None:
@@ -518,16 +555,6 @@ def test_a_sentence_that_cites_a_retracted_source_is_flagged_even_when_the_check
     # Nothing is added twice: a sentence a claim already marks unsupported is left alone.
     again, n = retractions.apply_to_claims(out, sources, _citing_sentences(paper), _same_statement)
     assert n == 0 and len(again) == len(out)
-
-
-def test_a_retracted_foundational_work_is_never_asked_for() -> None:
-    from core.engine import _foundational_review_block, _foundational_write_block
-
-    lit = [{"content": "A long abstract. " * 20, "metadata": {
-        "title": "Withdrawn classic", "year": 1998, "authors": ["A. B"], "source": "openalex", "venue": "V",
-        "doi": "10.1234/withdrawn", "foundational": "cited by 6 of the retrieved papers", "retraction": "retracted"}}]
-    assert _foundational_write_block(lit) == ""
-    assert _foundational_review_block(lit, "# T\n\nNothing cited.\n") == ""
 
 
 # --- after the second review ------------------------------------------------------------------

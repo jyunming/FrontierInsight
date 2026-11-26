@@ -20,7 +20,7 @@ The picture is simplified: it leaves out the literature pause, skill selection, 
             ┌──────────────▼──────────────────────────────────┐
             │ core/engine.py — async LangGraph                │
             │                                                 │
-            │  clarify → ideate → literature → design         │
+            │  clarify → literature → design                  │
             │                                       │         │
             │     simulate path ─────┬──────────────┘         │
             │     no-simulation path ┘                        │
@@ -31,15 +31,15 @@ The picture is simplified: it leaves out the literature pause, skill selection, 
             │  └─────────────────────┬───────────────┘        │
             │                        │                        │
             │  ┌─ no-simulation ─────┘                        │
-            │  │  auto_collect_data → wait_for_data           │
-            │  │    └─ data_load → web_plots → web_figures    │
+            │  │  wait_for_data → data_load → web_plots       │
+            │  │    └─ web_figures                            │
             │  └─────────────────────┬──────────────┐         │
             │                        ▼              │         │
             │                     analyze           │         │
             │                        │              │         │
             │                  cross_check ─(redesign)┘       │
             │                        │ (write)               │
-            │                  evidence_gate ─(broaden→literature)
+            │                  evidence_gate                  │
             │                        │                        │
             │            write → claim_check → review → END    │
             │                    │ (revise)  │ (ask)           │
@@ -50,7 +50,7 @@ The picture is simplified: it leaves out the literature pause, skill selection, 
                │               │                     │
    ┌───────────▼──┐  ┌─────────▼──────┐  ┌──────────▼─────────────────┐
    │ core/        │  │ core/          │  │ core/                      │
-   │ provider.py  │  │ execution.py   │  │ knowledge.py + datasets/   │
+   │ provider.py  │  │ execution.py   │  │ knowledge.py               │
    │              │  │                │  │                            │
    │ LLMClient    │  │ Venv | Docker  │  │ asearch():                 │
    │ Proxy-       │  │ Executor       │  │  local → Axon →            │
@@ -58,15 +58,6 @@ The picture is simplified: it leaves out the literature pause, skill selection, 
    │              │  │                │  │ +full-text fetch           │
    │              │  │                │  │ structured write-back      │
    │              │  │                │  │ (5 doc kinds)              │
-   │              │  │                │  │                            │
-   │              │  │                │  │ datasets/ adapters         │
-   │              │  │                │  │  ├─ worldbank.py           │
-   │              │  │                │  │  │   (country-indicator    │
-   │              │  │                │  │  │    tables, 5-year span) │
-   │              │  │                │  │  └─ wikipedia.py           │
-   │              │  │                │  │      (opensearch +         │
-   │              │  │                │  │       page summaries)      │
-   │              │  │                │  │ → auto_collected/<adapter>/│
    └───────┬──────┘  └────────────────┘  └────────────────────────────┘
            │                                          ▲
            │ OpenAI-shaped Chat Completions           │
@@ -106,22 +97,20 @@ Conditional edges visible in the graph:
 |---|---|---|
 | `execute_reflect → execute` | Script crashed (rc != 0 or no `RESULT_JSON`) | `engine.exec_reflect_max_iterations` (default 3) |
 | `cross_check → design` | `analyze.next_step == "re_experiment"`, and FI's own record agrees: the plan's precision target for a probability was missed and a run large enough for it fits the time allowed (FI's run-time estimate times the square of the width ratio). Otherwise the evidence check decides from the record, and a missed target is stated in the paper's limitations | `engine.max_iterations` (default 2) |
-| `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (the design's hypothesis is folded into the query); new docs merge into the existing list with DOI / URL / content-prefix dedup. | `engine.max_iterations` (default 2) |
 | `review → design` | only a person's refine note that the rewritten paper still does not answer | `engine.max_iterations` (default 2) |
 | `review → write` | every problem the review found is in the text (such as an unbacked claim), or the reviewer asks for a revision or objects to the design with no check of FI's behind it: the experiment and the design stand, and FI keeps the objection in its record (`.fi/review_objections.json`, printed in `QUALITY.md`; one already kept there is not counted again) | the same `engine.max_iterations` (a draft over the page limit is shortened up to a few times outside it) |
 | `review → implement` | a problem the run itself computed (a saved number, a figure's data, the experiment file): the experiment is written and run again | a small fixed number of times per quest, and `engine.max_iterations` |
 | `review → human_feedback` | `pauses.review: ask`; the person accepts, rejects or refines | a person's refine is honoured whatever `engine.max_iterations` says |
 | `human_feedback → write` | a person's refine goes to `write` first, with their notes | none |
 | `human_feedback → design` | a reopened quest with no new notes to answer | none |
-| `evidence_gate → literature` | the evidence check found the evidence too thin (a `broaden` verdict); only when retrieval is on and the run is not `--analyze` | `engine.evidence_gate_max_broaden` (default 1) |
 | `evidence_gate → design` | the experiment produced no results at all (simulate path only) | once, while an iteration is left |
 | `evidence_gate → execute` | only with `engine.phased: true` (explore, then confirm; on by default under `rigor_profile: research`): exploration ended on an accepted result, so the protocol is frozen and the frozen design runs once more on the held-back data or new seeds; in the confirm stage the gate only writes | once per quest (the edge is added to the graph only when `engine.phased` is on) |
 | `write → design` | only after a person's refine: the writer named a point that needs a new or different experiment | none (a person asked for it) |
-| `write → implement` | only after a person's refine: a point only lacks a number (`NEEDS_DATA:`); the existing script is extended and run again (with no simulation: `write → auto_collect_data`) | none (a person asked for it) |
+| `write → implement` | only after a person's refine: a point only lacks a number (`NEEDS_DATA:`); the existing script is extended and run again (with no simulation: `write → wait_for_data`) | none (a person asked for it) |
 | `write → replot_layout` | only after a person's refine: a point only asks for the figures to be arranged or drawn differently (`NEEDS_LAYOUT:`); they are redrawn from the saved numbers | none (a person asked for it) |
 | `replot_layout → write` | the redraw could not carry out a layout note, so the paper says so | once per refine; otherwise `replot_layout → claim_check` |
 | `design → web_figures` | a literature survey (no experiment and no data to collect): the quest skips the code and the data collection, draws illustrative figures and goes on to the analysis | none |
-| `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
+| `design → wait_for_data` | `state.no_simulation_resolved is True` (set by the commission's `method`, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
 ## Key contracts
 
@@ -137,18 +126,17 @@ Defined in `core/engine_base.py` and imported from `core.engine`.
 produce, LangGraph merges the patches.
 
 Core path (every quest produces these):
-`topic`, `title`, `iteration`, `ideas`, `chosen_idea`, `literature`,
+`topic`, `title`, `iteration`, `literature`,
 `design`, `code`, `deps`, `exec_result`, `figures`, `result_json`,
 `analysis`, `paper_md`, `review`.
 
 Feature-specific extras:
-- Clarify: `clarify_questions`, `clarify_answers`, `clarify_done`.
+- First node: `clarify_done`; `clarify_questions` and `clarify_answers` are kept only so a study stored by an older FI loads (nothing writes them).
 - Execute-repair loop: `exec_reflect_iter`, `exec_reflect_history`, `exec_give_up_reason`.
 - Analyze re-route + cross-paper check: `cross_check` (per-finding classification list).
-- Ideate self-reflection: `ideate_critique`.
 - Reviewer panel: `review_panel` (per-persona reviews + moderator synthesis).
-- No-simulation routing: `no_simulation_resolved` (bool, decided at clarify or YAML). When True, the engine skips `implement → execute → execute_reflect` and routes through `auto_collect_data → wait_for_data → data_load → analyze`.
-- Auto-collect bookkeeping: `auto_collected_count` (int — total files written into `data/auto_collected/` by Axon plus all enabled `engine.dataset_adapters`). Per-adapter writes land under `data/auto_collected/<adapter>/`.
+- No-simulation routing: `no_simulation_resolved` (bool, set by the commission's `method`). When True, the engine skips `implement → execute → execute_reflect` and routes through `wait_for_data → data_load → analyze`.
+- Auto-collect bookkeeping: `auto_collected_count` (int — kept so studies stored by an older FI still load; nothing writes it now).
 
 JSON-serializable so `AsyncSqliteSaver` can checkpoint after every
 node. **Field names are the contract** between the engine, the
@@ -227,25 +215,9 @@ prerequisites.
   --resume <quest_id>` or via `@fi /resume` in VSCode. The engine
   detects existing state via `graph.aget_state()` and passes `None`
   to `ainvoke` so LangGraph continues from the last completed node
-  instead of replaying from `ideate`.
+  instead of replaying from `clarify`.
 - Memory ceiling: `--memory-cap-mb` on `launch.py --fleet` defers new
   starts when RSS approaches the cap (psutil-based).
-
-## Dataset adapters
-
-The no-simulation `auto_collect_data` node calls
-`Engine._run_dataset_adapters` (`core/engine_data.py`) which
-walks the `engine.dataset_adapters` list, dispatches each name to
-the matching module under `core/datasets/` (`worldbank.py`,
-`wikipedia.py`), and writes the returned `DatasetRow`s into
-`<quest_root>/data/auto_collected/<adapter>/`. Adapters share the
-abstract `DatasetAdapter` base in `core/datasets/base.py` — a
-single `async def search(self, query: str, *, top_k: int) -> list[DatasetRow]`
-contract. Failures inside an adapter
-log a WARNING and return an empty list — the parent node sums the
-counts across adapters and keeps the quest moving. Adding a new
-adapter is a single-file change in `core/datasets/` plus an entry
-in the registry; no engine-graph edit needed.
 
 ## Why we own the loop
 

@@ -34,16 +34,12 @@
         "isSticky": true,
         "commands": [
           {
-            "name": "new",
-            "description": "Interactive setup — walks you through topic, outputs, clarify mode, reviewer panel; generates a config.yaml and runs it. Recommended for first-time users."
-          },
-          {
             "name": "map",
             "description": "Open a quest's map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button. Example: @fi /map 1790003131-my-quest"
           },
           {
             "name": "start",
-            "description": "Start a quest from an existing YAML in your workspace. Example: @fi /start fi-demo.yaml (`fi demo` in a terminal writes that small example quest)."
+            "description": "Start a study from its config in your workspace; the config names the study's commission (the question, what it covers, the time allowed, what counts as supported). Example: @fi /start fi-demo.yaml (`fi demo` in a terminal writes that small example; `fi new` writes an empty commission to fill in)."
           },
           {
             "name": "fleet",
@@ -78,20 +74,12 @@
             "description": "Weekly project-manager digest across your quests: completed, in-progress, themes, diff vs prior digest, suggested next quests. Optional integer arg = window in days (default 7). Example: @fi /digest 14"
           },
           {
-            "name": "portfolio",
-            "description": "All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at outputs/_portfolio/<YYYY-MM-DD>.md."
-          },
-          {
             "name": "critique",
             "description": "Adversarial second-pass review of a completed quest. Pass the quest_id. Reads paper.md + code + prior in-quest review, then asks a (different) model to find what the in-quest reviewer missed. Lands at outputs/<quest_id>/critique.md."
           },
           {
-            "name": "proposal",
-            "description": "Pre-quest planning doc: background, hypothesis, plan, success criteria, risks. Writes a markdown proposal + companion YAML to outputs/_drafts/. Use to scope a quest BEFORE committing compute. Example: @fi /proposal Compare RK4 vs Verlet on the Kepler problem"
-          },
-          {
             "name": "analyze",
-            "description": "Run a no-simulation quest with pre-staged data. Pass a directory path; every file under it (recursive, symlinks skipped) is copied into the new quest's data/ dir before the engine starts. Then provide a one-sentence analysis topic. Example: @fi /analyze ./my_data Compare ridership trends across regions"
+            "description": "Run a no-simulation quest with pre-staged data. Pass a directory path; every file under it (recursive, symlinks skipped) is copied into the new quest's data/ dir before the engine starts. Then give the study's commission file: its question is what the analysis answers. Example: @fi /analyze ./my_data commission.yaml"
           },
           {
             "name": "trace",
@@ -110,20 +98,12 @@
             "description": "A quest's quality report, from what it recorded: where it went wrong, who caught it, what was fixed, what to try, and what it cost. @fi /quality <quest_id>. Mirrors `python launch.py --quality` and the quest page's Quality report."
           },
           {
-            "name": "update",
-            "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes — re-opening a finished quest when needed so the invalidated stages actually re-run instead of re-emitting from the old paper."
-          },
-          {
             "name": "ingest",
             "description": "Load PDFs / Markdown / TXT into the Axon corpus as kind=fi_local_paper so future quests retrieve them as prior work. Pass space-separated paths after the command. Opens an integrated terminal running `python launch.py --ingest <paths>`."
           },
           {
             "name": "install-tectonic",
             "description": "Install the tectonic LaTeX binary (~70 MB) into tools/ so paper.pdf works without an admin install of MiKTeX. Self-bootstrapping; runs `python launch.py --install-tectonic` in a terminal."
-          },
-          {
-            "name": "drafts",
-            "description": "List proposal-draft YAMLs in outputs/_drafts/ with a one-click /start hint for each. Mirrors `python launch.py --list-drafts` and the web /interview drafts picker."
           },
           {
             "name": "axon-status",

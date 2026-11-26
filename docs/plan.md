@@ -10,9 +10,9 @@
 ## Architecture in one paragraph
 
 `launch.py` parses YAML → `Config` → constructs an `Engine` per quest →
-the Engine compiles an async `StateGraph` — `clarify → ideate →
+the Engine compiles an async `StateGraph` — `clarify →
 literature → design →` then either `implement → execute →
-execute_reflect` (simulation) or `auto_collect_data → wait_for_data →
+execute_reflect` (simulation) or `wait_for_data →
 data_load → web_plots → web_figures` (no-simulation) `→ analyze →
 cross_check → evidence_gate → write → claim_check → review →
 human_feedback` — with four feedback loops (see
@@ -32,10 +32,10 @@ For exact YAML field semantics see [`capabilities-reference.md`](capabilities-re
 for the layered design see [`architecture.md`](architecture.md).
 
 ### Engine
-- 21-node async LangGraph DAG with four feedback loops (clarify, ideate,
+- 21-node async LangGraph DAG with four feedback loops (clarify,
   literature, select_skills, design, implement_outline/implement,
   execute/execute_reflect
-  or the no-simulation chain auto_collect_data → wait_for_data → data_load
+  or the no-simulation chain wait_for_data → data_load
   → web_plots → web_figures, analyze, cross_check, evidence_gate, write,
   claim_check, review, human_feedback). `core/engine.py:_build_graph` is
   authoritative; `capabilities-reference.md` describes each node.
@@ -48,28 +48,18 @@ for the layered design see [`architecture.md`](architecture.md).
 - **Execute-repair loop** — when an agent-generated script crashes,
   the engine reads the traceback and lets the LLM patch the code,
   bounded by `engine.exec_reflect_max_iterations`.
-- **Analyze re-route** — `analyze.next_step ∈ {re_experiment,
-  broaden_lit}` sends control back to `design` (bounded by
+- **Analyze re-route** — `analyze.next_step == re_experiment` sends control back to `design` (bounded by
   `engine.max_iterations`).
 - **Review-driven rewrite** — a `review.verdict == "revise"` writes the
   paper again (its objections kept in the quality report), sharing the same `max_iterations` budget.
 - **Cross-paper check** — after `analyze`, each key finding gets a
   per-finding literature search and a supporting / conflicting /
   neutral classification surfaced into the write prompt.
-- **Ideate self-reflection** — an extra LLM call may swap the
-  picked idea before design begins.
 
-### Clarify
-- Pre-flight questionnaire (`want_to_see`, `title`,
-  `comparative_baseline`, `empirical_vs_theoretical`, `simulatability`,
-  `success_metric`, `budget`, `output_kinds`, `study_depth`,
-  `paper_venue`, `topic_shape`; `study_type` when the topic leaves it open).
-- `pauses.clarify: off | auto | ask` (old name `engine.clarify_mode`,
-  `interactive` = `ask`). `auto` lets the agent self-fill defaults; `ask`
-  pauses the graph for the user's answers (terminal, web quest page or
-  the VSCode bridge). Unset, it asks when someone can answer and is
-  `auto` otherwise.
-- Answers flow into every downstream prompt as `$clarify_block`.
+### First node
+- No question and no model call: the commission's `method` (`simulate`, `analyze_data`,
+  `review_literature`) sets the no-simulation and survey modes, and its `title` names the study.
+  The setup questionnaire and `pauses.clarify` are gone (old configs still load; the log says they do nothing).
 
 ### Provider transports
 - **HTTP direct** — `openai` / `codex` / `gemini` / `ollama` / `vllm`.
@@ -97,8 +87,8 @@ for the layered design see [`architecture.md`](architecture.md).
   catalog by ingesting `kind=fi_source_catalog` entries.
 - **Free-only full-text fetch** — only papers confirmed free to read are
   downloaded (login-wall rejection via Content-Type + `%PDF-`
-  magic-bytes check stays as a backstop). Paywalled papers are left for a
-  person via `needs/WANTED_PAPERS.md`.
+  magic-bytes check stays as a backstop). A paywalled paper is never requested; a person can drop it into
+  `inputs/papers/`.
 - **Structured ingest after accepted quests** — `fi_paper_spine`,
   `fi_quest_paper`, `fi_quest_summary`, `fi_topic_event`,
   `fi_external_ref_spine` × N.
@@ -141,8 +131,7 @@ for the layered design see [`architecture.md`](architecture.md).
 
 ### VSCode integration
 - Chat participant `@fi` registered via
-  `vscode.chat.createChatParticipant`. Commands: `/new` (interview),
-  `/start <yaml>`, `/fleet <yaml> <yaml> …`, `/resume [quest_id]`,
+  `vscode.chat.createChatParticipant`. Commands: `/start <yaml>`, `/fleet <yaml> <yaml> …`, `/resume [quest_id]`,
   `/summarize <folder> [kind]`, `/help`.
 - Every LLM call routes through `vscode.lm.selectChatModels` +
   `model.sendRequest` — the sanctioned API, no third-party proxies.
@@ -164,8 +153,7 @@ for the layered design see [`architecture.md`](architecture.md).
 
 ### Status GUI
 - FastAPI + vanilla-JS frontend launched via `launch.py --serve`.
-- Per-quest live log stream over SSE; clarify panel for interactive
-  mode; paper preview; reviewer-panel cards.
+- Per-quest live log stream over SSE; paper preview; reviewer-panel cards.
 
 ## Cross-cutting concerns
 

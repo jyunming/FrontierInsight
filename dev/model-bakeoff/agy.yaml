@@ -86,7 +86,6 @@ knowledge:
   web_search_top_k: 10
   web_fetch_pages: true
   try_fetch_full_text: true
-  relevance_guard: true
   external_top_k: 12
   literature_excerpt_chars: 4000
   passage_ranking: "auto"

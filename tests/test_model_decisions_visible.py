@@ -33,7 +33,7 @@ def _engine(tmp_path: Path, *, provider: str = "openai", model: str | None = Non
     cfg = Config(
         topic="decision trace", title="decisions",
         provider=ProviderConfig(name=provider, model=model),
-        engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
+        engine=EngineConfig(max_iterations=1, review_loop=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out", save_thinking=save_thinking),
@@ -61,32 +61,6 @@ def _run_log(eng: Engine) -> str:
 
 
 # ---- 2. every reason the model already writes becomes a model_claim ------------------------------------------------
-
-
-def test_ideate_s_chosen_idea_and_what_the_comparison_and_self_critique_said(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    _called(eng, "ideate", "ideate_tournament")
-    eng._audit_claims("ideate", {
-        "ideas": [{"title": "A"}, {"title": "B"}],
-        "chosen_idea": {"title": "B", "rationale": "B is cheaper [tournament] B tests the claim directly"},
-        "ideate_tournament": {"winner_idx": 1, "outcome": "swapped", "matches": [
-            {"a_idx": 0, "b_idx": 1, "winner": "B", "reason": "B tests the claim directly", "margin": "decisive"}]},
-    })
-    first, compared = _claims(eng)
-    assert first["topic"] == "idea_chosen" and first["claim"] == "B is cheaper"
-    assert "first pick" in first["decision"], "the first rationale was for the model's own first pick, not the winner"
-    assert first["options"] == ["A", "B"] and first["model"] == "gpt-5"
-    assert compared["topic"] == "idea_compared" and compared["claim"] == "B tests the claim directly"
-    assert compared["decision"] == "B"
-
-    eng2 = _engine(tmp_path / "2")
-    _called(eng2, "ideate", "ideate_reflect")
-    eng2._audit_claims("ideate", {
-        "ideas": [{"title": "A"}, {"title": "B"}], "chosen_idea": {"title": "B", "rationale": "refined"},
-        "ideate_critique": {"swap_to": "B", "refined_rationale": "refined"},
-    })
-    (only,) = _claims(eng2)
-    assert only["topic"] == "idea_reconsidered" and only["decision"] == "switched to B" and only["claim"] == "refined"
 
 
 def test_skill_choices_are_the_model_s_but_a_required_skill_is_not(tmp_path: Path) -> None:
@@ -166,19 +140,6 @@ def test_a_step_s_reasoning_note_does_not_count_another_step_s_calls(tmp_path: P
     assert "1 call(s)" in why.explain(root, "execute_reflect")
 
 
-def test_the_setup_answers_the_model_chose_and_why(tmp_path: Path) -> None:
-    eng = _engine(tmp_path)
-    _called(eng, "clarify")
-    eng._audit_claims("clarify", {
-        "clarify_questions": {"simulatability": {"question": "?", "default": "no", "reason": "needs survey data"},
-                              "budget": {"question": "?", "default": "minutes"}},
-        "clarify_answers": {"simulatability": "yes", "budget": "minutes"},
-    })
-    (claim,) = _claims(eng)
-    assert claim["topic"] == "setup/simulatability" and claim["decision"] == "no"
-    assert claim["answer_used"] == "yes", "a person's own answer is shown beside the model's"
-
-
 def test_the_review_s_one_line_why_is_recorded_and_not_carried_on(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     _called(eng, "review")
@@ -252,25 +213,25 @@ def _trace(root: Path, events: list[tuple[str, str, dict]]) -> None:
 def test_why_lists_each_step_s_reasons_and_the_reasoning_note(tmp_path: Path) -> None:
     root = tmp_path / "q"
     (root / ".fi").mkdir(parents=True)
-    _trace(root, [("node_started", "ideate", {}),
-                  ("model_claim", "ideate", {"topic": "idea_chosen", "claim": "B is cheaper", "decision": "B"})])
-    ar.append(root / ".fi", tc.THINKING_FILE, {"node": "ideate_reflect", "thinking": "x" * 1234, "note": tc.THINKING_NOTE})
-    _trace(root, [("node_completed", "ideate", {}), ("node_started", "select_skills", {}),
+    _trace(root, [("node_started", "plan", {}),
+                  ("model_claim", "plan", {"topic": "study_size", "claim": "B is cheaper", "decision": "B"})])
+    ar.append(root / ".fi", tc.THINKING_FILE, {"node": "plan", "thinking": "x" * 1234, "note": tc.THINKING_NOTE})
+    _trace(root, [("node_completed", "plan", {}), ("node_started", "select_skills", {}),
                   ("model_claim", "select_skills", {"topic": "skill_chosen", "claim": "mixed units", "decision": "use units"}),
                   ("node_completed", "select_skills", {})])
 
-    step = why.explain(root, "ideate")
+    step = why.explain(root, "plan")
     assert "    - B is cheaper -> B" in step
     assert "1 call(s) of this run of the step, 1,234 characters in all" in step and "x" * 50 not in step, "the text stays in the file"
     assert "not its hidden reasoning" in step
     assert "none for this run of the step" in why.explain(root, "select_skills")
 
     everything = why.explain(root, "reasons")
-    assert "ideate:" in everything and "select_skills:" in everything and "mixed units" in everything
+    assert "plan:" in everything and "select_skills:" in everything and "mixed units" in everything
     assert "not its hidden reasoning" in everything
 
     (root / ".fi" / tc.THINKING_FILE).unlink()
-    assert ".fi/thinking.jsonl does not exist" in why.explain(root, "ideate")
+    assert ".fi/thinking.jsonl does not exist" in why.explain(root, "plan")
 
 
 def test_the_launcher_and_the_extension_offer_the_reasons_view() -> None:

@@ -26,7 +26,7 @@ def _engine(tmp_path: Path, *, guard: bool = True, max_iters: int = 3) -> Engine
         topic="t", title="t",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            clarify_mode="off", review_loop=False,
+            review_loop=False,
             degenerate_run_guard=guard,
             exec_reflect_max_iterations=max_iters,
         ),

@@ -13,7 +13,7 @@ from .engine_base import (  # noqa: F401
     _JOB_SEED_PROTOCOL, _LAST_CALL, _ModelAnswerProblem, _NOT_GIVEN, _OUTSIDE_WORK_STEPS, _PIP_FREEZE_TIMEOUT_S,
     _SEARCH_PROTOCOL, _SKILL_MOUNTS_FILE, _SPLIT_PROTOCOL, _acceptance, _aggregate_panel_reviews, _attempts,
     _audit_log, _citations_unchecked, _code_layout, _code_review, _crash_kind, _design_parts_listing,
-    _extract_result_json, _format_claim_grounding, _format_clarify, _foundational_review_block, _function_steps,
+    _extract_result_json, _format_claim_grounding, _format_clarify, _function_steps,
     _grounding_after_trim, _in_run, _is_fatal_provider_error, _is_preliminary_memory, _last_error_line,
     _load_persona_prefix, _names_a_verdict, _one_line, _optim, _optimise_refine, _oracle, _outcome_of,
     _pairs, _paper_for_prompt, _paper_scope, _paper_sections, _parse_json_lenient, _phased, _plan_settings,
@@ -95,12 +95,6 @@ class ReviewStageMixin:
             design_block=json.dumps(state.get("design") or {}, indent=2) + _design_parts_listing(state.get("design")),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             claim_grounding_block=_format_claim_grounding(state),
-            # Advisory: what the reviewer may ask for,
-            # never a must-flag hit. Empty when the paper cites every foundational
-            # work it has, or has none.
-            foundational_check_block=_foundational_review_block(
-                state.get("literature") or [], paper_md, self.config.output.audience,
-            ),
             user_feedback_block=_user_feedback_review_block(state),
             # What a second model's reading of the code left open: a claim resting on it is not established.
             code_findings_block=_code_review.review_block(self.quest_root, self.quest_root / "code"),
@@ -651,13 +645,12 @@ class ReviewStageMixin:
         temperature: float | None = None,
     ) -> str:
         """Single-user-message chat. ``node`` is the engine node name
-        (e.g. ``"ideate"``, ``"review"``); when present and the YAML
+        (e.g. ``"plan"``, ``"review"``); when present and the YAML
         config sets ``provider.node_models[node]``, that model is sent
         on this call only. Otherwise the endpoint default applies.
 
         ``temperature`` defaults to per-node routing: gate/verdict/classifier
-        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check,
-        relevance_guard) run at 0 for reproducible decisions; generative nodes
+        nodes (evidence_gate, review, review_panel.*, claim_check, cross_check) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
         if self._repairs_go_to == "agent" and _writes_code(node):
             raise RepairForAgent(str(node))  # the code is the coding agent's: the check reports to it (core/agent_build.py)
@@ -1294,41 +1287,8 @@ class ReviewStageMixin:
                             usage=_served.get("usage") if isinstance(_served.get("usage"), dict) else None)
         return response
 
-    def _clear_clarify_snapshot(self) -> None:
-        """Remove the on-disk clarify question/answer files once the clarify
-        gate resolves, so the web's "questions present + no answer-file"
-        pending check stops showing a stale form. Mirrors the human-review
-        ``_consume_snapshot``. Best-effort; an unlink failure is not fatal."""
-        for name in ("clarify_questions.json", "clarify_answer.json"):
-            try:
-                (self.fi_dir / name).unlink()
-            except OSError:
-                pass
-
-    def _asked_clarify_questions(self, topic: str) -> dict[str, Any] | None:
-        """The questions already put to the person for ``topic``, when the clarify node paused on them; else None."""
-        try:
-            data = json.loads((self.fi_dir / self._CLARIFY_ASKED).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(data, dict) or data.get("topic_sha256") != hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest():
-            return None
-        questions = data.get("questions")
-        return questions if isinstance(questions, dict) and questions else None
-
-    def _keep_asked_clarify_questions(self, topic: str, questions: dict[str, Any]) -> None:
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.fi_dir / (self._CLARIFY_ASKED + ".tmp")
-            tmp.write_text(json.dumps({"topic_sha256": hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest(), "questions": questions},
-                                      indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            os.replace(tmp, self.fi_dir / self._CLARIFY_ASKED)
-        except (OSError, TypeError, ValueError) as e:
-            # Not kept: the resume asks the model again, as before.
-            self._log.debug("[clarify] could not keep the asked questions: %r", e)
-
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None, alarm: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -1351,6 +1311,11 @@ class ReviewStageMixin:
                         where = str(progress() or "") if callable(progress) else ""
                     except Exception:  # noqa: BLE001
                         where = ""
+                    try:  # a study that left the time FI first said: told once, where the person sees it
+                        if callable(alarm) and (said := str(alarm() or "")):
+                            self._progress(f"[execute] {said}")
+                    except Exception:  # noqa: BLE001
+                        pass
                     if where:
                         from .run_estimate import plain_duration
 
@@ -1515,9 +1480,9 @@ class ReviewStageMixin:
         past the pause. Same staleness class as the ``quest_failed.md`` one.
 
         Crucially this does NOT clear the *answer* files
-        (``human_review_answer.json`` / ``clarify_answer.json``): those are the
-        INPUT this resume is about to consume (the human-feedback / clarify
-        nodes read them), and dropping them here would discard the user's
+        (``human_review_answer.json``): that is the
+        INPUT this resume is about to consume (the human-feedback
+        node reads it), and dropping it here would discard the user's
         decision. It also leaves the ``paused_at_<stage>.flag`` idempotency
         markers alone, since those are state ("already paused here"), not
         display. Any node that genuinely re-pauses re-writes its own marker, so
@@ -1533,7 +1498,7 @@ class ReviewStageMixin:
             self.fi_dir / "pause.json",
             self.fi_dir / _todo.TODO_NAME,
             self.fi_dir / "human_review.json",
-            self.fi_dir / "clarify_questions.json",
+            self.fi_dir / "clarify_questions.json",  # left by an earlier FI's setup questions: nothing shows it now
         ):
             try:
                 p.unlink(missing_ok=True)
@@ -1940,14 +1905,10 @@ class ReviewStageMixin:
         headline = "the review panel needs one reviewer on a different model"
         approved = (self.fi_dir / _plan_settings.NAME).is_file()
         how = (
-            f"Choose another model for one of them, then approve it with `python launch.py --update {self.quest_id}` "
-            f"(web: the quest page's Update, VS Code: `@fi /update {self.quest_id}`): in \"Per-node model overrides\" "
-            f"enter `review_panel.{persona}:<another model your provider offers>` (in VS Code choose \"Type node:model "
-            f"pairs\" there)."
-            if approved else
             f"Choose another model for one of them and add it to the quest's config.yaml, under its `provider:` section "
             f"(add one if there is none; never a second one), inside `node_models:` if that is already there:\n"
             f"  node_models:\n    review_panel.{persona}: <another model your provider offers>"
+            + (f"\nThen approve it: `python launch.py --update {self.quest_id}`." if approved else "")
         )
         self._write_next_step(
             kind="review_models",
@@ -2555,7 +2516,7 @@ class ReviewStageMixin:
                 "abstract": (d.get("content") or "")[:1500],
             })
 
-        # Rich, indexable metadata that future quests' ideate node can
+        # Rich, indexable metadata that future quests can
         # filter / rank past work by. Keep the keys flat and JSON-safe.
         #
         # `paper_md_relpath` is the path RELATIVE TO `quest_root` (not

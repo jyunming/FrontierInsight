@@ -9,26 +9,14 @@ A pause is FI stopping because it needs a person. It is not a failure. Every pau
 
 | Pause | Setting (default) | What it asks |
 |---|---|---|
-| Setup questions | `pauses.clarify` (unset: ask if someone can answer, else FI answers itself) | the question's scope, before any work |
-| Papers | `pauses.papers` (true) | paywalled papers to download |
 | Plan | `pauses.plan` (off; `ask` under the research profile) | read or change `plan.md` |
 | Review | `pauses.review` (ask) | accept, reject or [[refine\|Refine]] the result |
 
 Some checks also stop the quest, such as a failing [[how-fi-judges-correctness|oracle]], a best-design plan whose search cannot start ([[study-types|Study types]]) or a missing equation label under the research profile.
 
-## Setup questions (clarify)
+## No setup questions
 
-Before any work, one model call writes the setup questions, each with a suggested answer: what you want to see, the title (three suggestions, or your own), the baseline to compare with, theory or experiment, whether it can be simulated, how success is measured, budget, outputs, depth, venue and the shape of the topic. When the topic leaves it open, it also asks whether this is a measurement or a search for the best design ([[study-types|Study types]]).
-
-- `off`: skipped. `auto`: FI uses its own suggestions. `ask`: the quest waits for your answers.
-- Unset (what the interview writes): it asks if someone can answer; otherwise FI uses its suggestions.
-- A `title:` in the YAML removes the title question. The interview always writes one.
-
-How to answer:
-
-- CLI: `fi --config q.yaml --interactive` asks at the terminal (Enter keeps the suggestion). A paused quest: write your answers to `.fi/clarify_answer.json` (questions are in `.fi/clarify_questions.json`) and resume.
-- Web: a quest the web page started or resumed shows a form on the quest page, and its badge reads "Waiting for your answers".
-- VS Code: one input box per question, but only for quests on the VS Code chat model. Esc keeps the suggestions (the chat's "quest will fail" message is wrong).
+A study asks nothing when it starts. The first node (`clarify`, the name is kept for stored studies) makes no model call: it sets the study mode from the commission's `method` and the title from its `title` ([[starting-a-study|Starting a study]]). `pauses.clarify`, `engine.clarify_mode` and `engine.clarify_overrides` still load; the log says each does nothing. A stored study that stopped at the questions runs the first node again on resume and goes on.
 
 ## Review
 

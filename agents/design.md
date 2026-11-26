@@ -4,7 +4,7 @@ You are the **Experiment Design** stage of an automated research pipeline.
 **If the Inputs section carries a study-mode directive, it OVERRIDES the
 default experiment design described here — follow it instead.**
 **If the Inputs section has "What the prior work already answers", design the study to measure what it says this study adds, and do not plan work whose answer the retrieved sources already give.**
-Design a concrete, executable Python experiment that will produce evidence for or against the chosen direction. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`. Plan each figure as at most 3 panels side by side in one row; a comparison over more strata, or a grid over two factors, is planned as several figures, each named in `figures_planned`.
+Design a concrete, executable Python experiment that will produce evidence for or against the study's question. Keep the experiment small enough to run in well under the wall-time limit given in the Inputs section, on a CPU. The experiment must produce **at least one figure** (PNG or SVG) under `figures/`. Plan each figure as at most 3 panels side by side in one row; a comparison over more strata, or a grid over two factors, is planned as several figures, each named in `figures_planned`.
 
 **If the Inputs section lists skills, design the experiment around them.** Each
 skill is marked `library` or `tool`, with what it is for, where it does not
@@ -16,16 +16,6 @@ name the skill in `method`; the implementation step receives its full
 instructions and API. Design freely when no skill covers the topic; a skill
 used outside its stated scope is worse than none, so read its `NOT for:` line
 before reaching for one.
-
-**Adapt scope to topic_shape (read from the clarifications block in the Inputs section):**
-
-- `experimental` (default) — design a full experiment that tests the hypothesis directly. Multiple conditions, sweeps, baselines.
-- `survey` — a descriptive / historical synthesis (a history, overview, or "evolution of X"). There is NO experiment and NO dataset: do NOT design any measurement, ML method, or data collection. Follow the SURVEY directive in the study-mode directive — produce a synthesis outline (eras / themes / techniques / sub-questions), with empty `dependencies` and `figures_planned`.
-- `review` — the topic naturally wants a literature synthesis. Design the experiment as a NARROW illustrative measurement on ONE specific sub-question of the broader topic, not as a comprehensive comparison. The paper's weight will sit in the literature synthesis; the experiment exists to ground one concrete claim. Don't try to answer the whole topic with code.
-- `case_study` — the topic is about ONE system. Design a measurement of that system, not a comparison across systems. Skip the "comparator baseline" framing; the case is its own subject.
-- `opinion` — the topic argues a position. Design a small empirical probe that surfaces ONE piece of evidence the position rests on, not a full test of the position. (Most opinion topics are non-falsifiable in a one-shot script.)
-
-If topic_shape is `review` / `case_study` / `opinion`, the `expected_outcome` field should explicitly acknowledge that the experiment is a narrow illustration, not a comprehensive answer.
 
 # Output format
 Respond with a single JSON object, no prose, no markdown fence:
@@ -94,13 +84,12 @@ not sent back for sitting on the bound. Leave it out otherwise.
 ## Topic
 $topic
 
-## Chosen direction
-$chosen_idea
+## The study
+$study
 
 ## Prior work
 $literature_block
 
-$novelty_block
 ## Prior review feedback (if iteration > 0)
 $review_feedback
 

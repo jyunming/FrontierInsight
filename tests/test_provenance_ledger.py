@@ -99,9 +99,9 @@ def _row(node: str, response: str, **over) -> dict:
 def test_one_model_record_no_longer_makes_the_quest_s_end_complete(tmp_path: Path) -> None:
     root = tmp_path
     fi = root / ".fi"
-    ar.append_model_call(fi, "q", _row("ideate", "a"))
-    models_used = {"ideate": {"response_hash": ar._text_sha("a")}}
-    counts = {"ideate": 1, "design": 2, "write": 1}  # the engine's own tally: it made these calls
+    ar.append_model_call(fi, "q", _row("plan", "a"))
+    models_used = {"plan": {"response_hash": ar._text_sha("a")}}
+    counts = {"plan": 1, "design": 2, "write": 1}  # the engine's own tally: it made these calls
     gaps, summary = ar.model_call_gaps(root, models_used, counts)
     assert any("fewer lines than the calls made" in g and "design (0 of 2)" in g and "write (0 of 1)" in g
                for g in gaps), gaps
@@ -110,7 +110,7 @@ def test_one_model_record_no_longer_makes_the_quest_s_end_complete(tmp_path: Pat
                                  kind="quest_end", prompts={}, models_used=models_used)
     assert not ctx["complete"] and ctx["model_calls"]["lines"] == 1
     # more lines than the tally (a step paused and run again) is not a gap
-    assert ar.model_call_gaps(root, models_used, {"ideate": 1})[0] == []
+    assert ar.model_call_gaps(root, models_used, {"plan": 1})[0] == []
 
 
 def test_the_call_record_s_other_gaps(tmp_path: Path) -> None:

@@ -34,7 +34,7 @@ def _engine(tmp_path: Path, *, pilot: bool, timeout_s: int = 60) -> Engine:
         topic="pilot smoke", title="pilot",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
+            max_iterations=1, review_loop=False,
             execute_replicates=1, pilot_run=pilot,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=timeout_s),

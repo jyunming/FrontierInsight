@@ -38,7 +38,7 @@ def _engine_with_gate(tmp_path: Path, gate: str) -> Engine:
         topic="t", title="t",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            clarify_mode="off", review_loop=True, max_iterations=2,
+            review_loop=True, max_iterations=2,
             human_feedback_gate=gate,  # type: ignore[arg-type]
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
@@ -291,7 +291,7 @@ def test_route_must_flag_forces_revise_even_with_review_loop_off(
         topic="t", title="t",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            clarify_mode="off", review_loop=False, max_iterations=3,
+            review_loop=False, max_iterations=3,
             # Gate off so we're testing the must-flag short-circuit
             # specifically, not the gate.
             human_feedback_gate="off",
@@ -317,7 +317,7 @@ def test_route_must_flag_respects_max_iterations(tmp_path: Path) -> None:
         topic="t", title="t",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            clarify_mode="off", review_loop=False, max_iterations=2,
+            review_loop=False, max_iterations=2,
             human_feedback_gate="off",
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),

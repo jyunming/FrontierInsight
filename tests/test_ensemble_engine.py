@@ -57,7 +57,7 @@ def _engine_with_ensemble(
     cfg = Config(
         topic="t", title="t",
         provider=ProviderConfig(name="openai", node_ensemble=ensemble),
-        engine=EngineConfig(clarify_mode="off"),
+        engine=EngineConfig(),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),
@@ -76,9 +76,9 @@ def _engine_with_ensemble(
 
 def test_ensemble_for_node_returns_config(tmp_path: Path) -> None:
     engine, _ = _engine_with_ensemble(tmp_path, {
-        "ideate": NodeEnsembleConfig(models=["m1", "m2"], merge="tournament"),
+        "design": NodeEnsembleConfig(models=["m1", "m2"], merge="tournament"),
     })
-    cfg = engine._ensemble_for_node("ideate")
+    cfg = engine._ensemble_for_node("design")
     assert cfg is not None
     assert cfg.models == ["m1", "m2"]
     assert cfg.merge == "tournament"
@@ -86,7 +86,7 @@ def test_ensemble_for_node_returns_config(tmp_path: Path) -> None:
 
 def test_ensemble_for_node_missing_returns_none(tmp_path: Path) -> None:
     engine, _ = _engine_with_ensemble(tmp_path, {
-        "ideate": NodeEnsembleConfig(models=["m1"], merge="tournament"),
+        "design": NodeEnsembleConfig(models=["m1"], merge="tournament"),
     })
     # Different node — not configured.
     assert engine._ensemble_for_node("analyze") is None
@@ -109,18 +109,18 @@ async def test_ensemble_chat_tournament_returns_winner(tmp_path: Path) -> None:
     cfg = NodeEnsembleConfig(
         models=["m1", "m2", "m3"], merge="tournament", moderator="judge",
     )
-    engine, client = _engine_with_ensemble(tmp_path, {"ideate": cfg})
+    engine, client = _engine_with_ensemble(tmp_path, {"design": cfg})
     client.script = {
         "m1": "first proposal",
         "m2": "best proposal",
         "m3": "third proposal",
         "judge": "WINNER: [B]\nm2 was most rigorous.",
     }
-    result = await engine._ensemble_chat("brainstorm", node="ideate", ensemble_cfg=cfg)
+    result = await engine._ensemble_chat("brainstorm", node="design", ensemble_cfg=cfg)
     assert result.merged == "best proposal"
     # 3 fan-out + 1 moderator = 4 chat calls.
     assert len(client.calls) == 4
-    fanout = [c for c in client.calls if c["node"].startswith("ideate.ensemble[")]
+    fanout = [c for c in client.calls if c["node"].startswith("design.ensemble[")]
     assert {c["model"] for c in fanout} == {"m1", "m2", "m3"}
 
 
@@ -183,7 +183,7 @@ async def test_ensemble_chat_moderator_default_falls_to_first_model(tmp_path: Pa
     cfg = NodeEnsembleConfig(
         models=["m1", "m2"], merge="tournament",  # moderator=None
     )
-    engine, client = _engine_with_ensemble(tmp_path, {"ideate": cfg})
+    engine, client = _engine_with_ensemble(tmp_path, {"design": cfg})
     client.script = {
         "m1": "first",
         "m2": "second",
@@ -207,7 +207,7 @@ async def test_ensemble_chat_moderator_default_falls_to_first_model(tmp_path: Pa
         return await orig_chat(messages, temperature=temperature, model=model, node=node)
     client.chat = smart_chat  # type: ignore[assignment]
 
-    result = await engine._ensemble_chat("brainstorm", node="ideate", ensemble_cfg=cfg)
+    result = await engine._ensemble_chat("brainstorm", node="design", ensemble_cfg=cfg)
     assert result.merged == "first"
 
 
@@ -221,14 +221,14 @@ async def test_ensemble_chat_writes_breadcrumbs_to_cost_jsonl(tmp_path: Path) ->
     cfg = NodeEnsembleConfig(
         models=["m1", "m2"], merge="tournament", moderator="judge",
     )
-    engine, client = _engine_with_ensemble(tmp_path, {"ideate": cfg})
+    engine, client = _engine_with_ensemble(tmp_path, {"design": cfg})
     # Point the engine at a writable fi_dir so cost.jsonl lands there.
     engine.fi_dir = tmp_path / ".fi"  # type: ignore[attr-defined]
     client.script = {
         "m1": "alpha", "m2": "beta",
         "judge": "WINNER: [A]\nA wins.",
     }
-    await engine._ensemble_chat("test", node="ideate", ensemble_cfg=cfg)
+    await engine._ensemble_chat("test", node="design", ensemble_cfg=cfg)
     cost_log = (tmp_path / ".fi" / "cost.jsonl").read_text(encoding="utf-8")
     rows = [_json.loads(line) for line in cost_log.splitlines() if line.strip()]
     # Each row that came from the breadcrumb helper carries an

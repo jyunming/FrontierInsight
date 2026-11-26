@@ -39,13 +39,13 @@ gets worse as the library grows, which is backwards.
 
 ### Where it runs
 
-Between **ideate** and **design**.
+Between **literature** and **design**.
 
 Selection sees the topic, the clarify answers, and the chosen research
 direction. The direction matters: "compare dipole vs quadrupole illumination
 for NILS" points at a skill far more precisely than the raw topic does.
 
-Cost of being wrong: ideate has already run, so a bad selection wastes that.
+Cost of being wrong: the literature step has already run, so a bad selection wastes that.
 Accepted — the matching quality is worth more.
 
 ### Mechanism

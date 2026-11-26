@@ -296,7 +296,7 @@ async def test_the_run_step_of_a_study_with_no_saved_search_asks_no_model_and_en
     from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 
     cfg = Config(topic="toy search", title="toy", provider=ProviderConfig(name="openai"),
-                 engine=EngineConfig(max_iterations=2, review_loop=False, clarify_mode="off", phased=True),
+                 engine=EngineConfig(max_iterations=2, review_loop=False, phased=True),
                  execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
                  knowledge=KnowledgeConfig(enabled=False),
                  output=OutputConfig(kinds=["paper_md"], output_dir=tmp_path / "out"))

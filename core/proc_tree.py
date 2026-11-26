@@ -200,7 +200,7 @@ class ProcessTree:
     # --- Windows ---------------------------------------------------------------
 
     def _start_windows(self, argv: list[str], popen_kwargs: dict[str, Any]) -> None:  # pragma: no cover
-        flags = popen_kwargs.pop("creationflags", 0)
+        flags = popen_kwargs.pop("creationflags", 0) | _NO_WINDOW  # never a console window of its own
         self.proc = subprocess.Popen(argv, creationflags=flags | _CREATE_SUSPENDED, **popen_kwargs)
         if not self.real:
             return  # a test's stand-in: no handle to put in a job (int() of a mock is 1, a real handle number)
@@ -358,7 +358,7 @@ class AsyncProcessTree:
     async def start(cls, *argv: Any, **kwargs: Any) -> AsyncProcessTree:
         # ``asyncio.create_subprocess_exec`` is looked up when called, so a test that patches it reaches this too.
         if os.name == "nt":  # pragma: no cover - exercised on Windows only
-            flags = kwargs.pop("creationflags", 0) or 0
+            flags = (kwargs.pop("creationflags", 0) or 0) | _NO_WINDOW  # never a console window of its own
             proc = await asyncio.create_subprocess_exec(*argv, creationflags=flags | _CREATE_SUSPENDED, **kwargs)
             if not _is_real(proc):
                 return cls(proc)

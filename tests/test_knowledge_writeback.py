@@ -34,10 +34,6 @@ print('RESULT_JSON: {"v": 1}')
 
 
 _FAKE = {
-    "Ideation": json.dumps({
-        "ideas": [{"title": "f", "summary": "x", "feasibility": "high", "novelty": "low"}],
-        "chosen": {"title": "f", "rationale": "only"},
-    }),
     "Experiment Design": json.dumps({
         "hypothesis": "h",
         "variables": {"independent": [], "dependent": [], "controls": []},

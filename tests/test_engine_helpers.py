@@ -538,10 +538,13 @@ def test_conditional_edge_targets_match_route_return_values(tmp_path: Path) -> N
 
 def test_route_after_evidence_gate_reads_node_decision(tmp_path: Path) -> None:
     """The router just echoes the route the node already computed, and
-    fails open to ``write`` when the gate was a passthrough."""
+    fails open to ``write`` when the gate was a passthrough. A checkpoint of an earlier FI whose gate chose to search the
+    literature again writes: FI no longer goes back to the literature."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
     assert engine._route_after_evidence_gate(
-        {"evidence_assessment": {"route": "broaden_lit"}}) == "broaden_lit"
+        {"evidence_assessment": {"route": "broaden_lit"}}) == "write"
+    assert engine._route_after_evidence_gate(
+        {"evidence_assessment": {"route": "redesign"}}) == "redesign"
     assert engine._route_after_evidence_gate(
         {"evidence_assessment": {"route": "write"}}) == "write"
     assert engine._route_after_evidence_gate({}) == "write"
@@ -675,34 +678,27 @@ async def test_evidence_gate_ok_does_not_pause_under_research_profile(
     assert patch["evidence_assessment"]["status"] == "ok"
 
 
-async def test_evidence_gate_broaden_is_bounded(
+async def test_an_answer_of_broaden_is_read_as_insufficient_and_the_quest_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 'broaden' verdict re-enters literature at most
-    evidence_gate_max_broaden (default 1) times, then proceeds to write
-    even though the verdict is still 'broaden' — it can't spin. One source,
-    so the model answers rather than the no-source rule."""
+    """A model that still answers the verdict an earlier prompt offered ('broaden': thin evidence, search again) is
+    judged insufficient and the route is write, with retrieval on or off: FI no longer goes back to the literature. The
+    answer is not an unreadable one (that would be status unknown, which pauses a research quest)."""
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
-    # Retrieval on: a broaden only means something when the literature step can bring sources back (the test below
-    # covers retrieval off). The engine builds no knowledge layer for a unit test, so the flag is set on the config.
-    engine.config.knowledge.enabled = True
 
     async def fake_chat(prompt, node=None):  # noqa: ANN001
-        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["more data"]}'
+        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["on-topic sources"]}'
 
     monkeypatch.setattr(engine, "_chat", fake_chat)
-    one = [{"content": "one source"}]
-    # Budget available → broaden, bump the counter.
-    p1 = await engine._node_evidence_gate(
-        {"topic": "t", "literature": one, "evidence_broaden_count": 0})
-    assert p1["evidence_assessment"]["route"] == "broaden_lit"
-    assert p1["evidence_assessment"]["decided_by"] == "model"
-    assert p1["evidence_broaden_count"] == 1
-    # Budget exhausted → write despite the same verdict; counter not bumped.
-    p2 = await engine._node_evidence_gate(
-        {"topic": "t", "literature": one, "evidence_broaden_count": 1})
-    assert p2["evidence_assessment"]["route"] == "write"
-    assert "evidence_broaden_count" not in p2
+    one = [{"content": "one source"}]  # one source, so the model answers rather than the no-source rule
+    for retrieval in (True, False):
+        engine.config.knowledge.enabled = retrieval
+        patch = await engine._node_evidence_gate({"topic": "t", "literature": one, "evidence_broaden_count": 0})
+        assessment = patch["evidence_assessment"]
+        assert assessment["route"] == "write" and assessment["status"] == "ok" and assessment["decided_by"] == "model"
+        assert assessment["verdict"] == "insufficient" and assessment["gaps"] == ["on-topic sources"]
+        assert "evidence_broaden_count" not in patch
+        assert "on-topic sources" in _format_evidence_note(assessment, is_survey=False)
 
 
 def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: Path) -> None:
@@ -720,41 +716,6 @@ def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: 
     assert engine._cannot_repair_stop() is None
     said = " ".join(p["text"] for p in engine._cannot_repair_problems())
     assert "simulate.py" in said and "experiment.py" not in said
-
-
-async def test_evidence_gate_broaden_with_retrieval_off_writes_and_keeps_the_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With retrieval off there is no literature step to broaden: a live kimi-k3 quest's model-decided broaden sent it
-    back to redesign after its results were seen, changing its hypothesis and discarding a complete first run. The route
-    is write; the verdict and gaps stay recorded, so the writer frames its limits and the evidence level names the gap."""
-    engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
-    assert engine.config.knowledge.enabled is False
-
-    async def fake_chat(prompt, node=None):  # noqa: ANN001
-        return '{"verdict": "broaden", "rationale": "thin", "gaps": ["on-topic sources"]}'
-
-    monkeypatch.setattr(engine, "_chat", fake_chat)
-    patch = await engine._node_evidence_gate({"topic": "t", "literature": [], "evidence_broaden_count": 0})
-    assessment = patch["evidence_assessment"]
-    assert assessment["route"] == "write"
-    assert assessment["verdict"] == "broaden" and assessment["gaps"] == ["on-topic sources"]
-    assert "evidence_broaden_count" not in patch
-    assert "on-topic sources" in _format_evidence_note(assessment, is_survey=False)
-
-
-async def test_analyze_local_first_skips_framing_nodes(tmp_path: Path) -> None:
-    """--analyze (analyze_local_first) makes ideate / literature / design
-    PASSTHROUGHS — no LLM call, no retrieval — so the quest goes straight
-    from clarify to loading + analysing the user's local data. Each returns
-    an empty patch BEFORE touching the LLM / knowledge layer (which would
-    otherwise need a network)."""
-    cfg = _route_config(tmp_path, review_loop=False, max_iterations=1)
-    cfg.engine.analyze_local_first = True
-    engine = Engine(cfg)
-    assert await engine._node_ideate({"topic": "analyse my data"}) == {}
-    assert await engine._node_literature({"topic": "analyse my data"}) == {}
-    assert await engine._node_design({"topic": "analyse my data"}) == {}
 
 
 async def test_evidence_gate_shows_source_titles_to_the_agent(
@@ -892,8 +853,8 @@ _ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
 @pytest.mark.parametrize(
     ("state", "mode", "asked", "verdict"),
     [
-        # A simulation with no source: broaden, without asking.
-        ({"literature": []}, "retrieval", False, "broaden"),
+        # A simulation with no source: insufficient, without asking.
+        ({"literature": []}, "retrieval", False, "insufficient"),
         # 15 sources and a supported finding: sufficient, without asking.
         ({"literature": _gate_sources(15), "cross_check": _ONE_SUPPORTED},
          "retrieval", False, "sufficient"),
@@ -902,8 +863,8 @@ _ONE_SUPPORTED = [{"finding": "f1", "supporting": [{"title": "A"}],
          "retrieval", True, "insufficient"),
         ({"literature": _gate_sources(15)}, "retrieval", True, "insufficient"),
         # The rules come from simulation quests with retrieval on. User data,
-        # a survey, --analyze (no literature step) and retrieval off (a
-        # broaden could find nothing) are always asked.
+        # a survey, --analyze (no literature step) and retrieval off (no
+        # source is normal there) are always asked.
         ({"literature": [], "no_simulation_resolved": True},
          "retrieval", True, "insufficient"),
         ({"literature": [], "clarify_answers": {"topic_shape": "survey"}},
@@ -918,7 +879,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     state: dict, mode: str, asked: bool, verdict: str,
 ) -> None:
-    """Over 68 gate calls the model always broadened a simulation with no
+    """Over 68 gate calls the model always judged thin a simulation with no
     source and always passed one with 15+ sources and a supported finding;
     between those it gave different answers to identical counts. So the two
     settled cases are decided by the counts, and everything else still asks
@@ -944,7 +905,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     assert ev["verdict"] == verdict
     assert ev["decided_by"] == ("model" if asked else "rule")
     if not asked:
-        # A rule-decided broaden still reaches the writer's evidence note.
+        # A rule-decided verdict still reaches the writer's evidence note.
         assert ev["rationale"]
     assert patch["research_protocol"]["topic_type"]
 
@@ -1060,39 +1021,6 @@ async def test_a_study_too_long_to_run_asks_the_plan_once_for_one_that_fits_then
     assert failed["evidence_assessment"]["route"] == "stuck" and "iteration" not in failed
 
 
-async def test_auto_collect_relevance_guards_reused_literature(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reused literature must pass the REAL (dict-aware) relevance guard — an
-    off-topic source must NOT count toward the no-sim gate (audit #2). The
-    guard's prompt must SEE the dict titles/excerpts to judge (the bug was it
-    used getattr on dicts, so it judged blind and fail-opened)."""
-    cfg = _route_config(tmp_path, review_loop=False, max_iterations=1)
-    cfg.engine.auto_collect_data = True
-    cfg.knowledge.relevance_guard = True
-    engine = Engine(cfg)
-    state = {"topic": "SpaceX revenue trend", "literature": [
-        {"content": "SpaceX revenue grew to $X.",
-         "metadata": {"title": "SpaceX Revenue 2024", "url": "u1"}},
-        {"content": "Banana bread recipe.",
-         "metadata": {"title": "Best Banana Bread", "url": "u2"}},
-    ]}
-
-    async def fake_chat(prompt, node=None):  # noqa: ANN001 — real filter runs
-        # The dict titles MUST reach the prompt (would be empty under getattr).
-        assert "SpaceX Revenue 2024" in prompt and "Best Banana Bread" in prompt
-        return '{"relevant_indices": [0]}'  # keep only the on-topic source
-
-    async def zero(*_a, **_k):  # axon + adapters: no network
-        return 0
-
-    monkeypatch.setattr(engine, "_chat", fake_chat)
-    monkeypatch.setattr(engine, "_axon_collect_step", zero)
-    monkeypatch.setattr(engine, "_run_dataset_adapters", zero)
-    patch = await engine._node_auto_collect_data(state)
-    assert patch["auto_collected_count"] == 1  # only the on-topic source counts
-
-
 def test_web_plots_gathers_user_data_files(tmp_path: Path) -> None:
     """web_plots' _gather_collected_text must read the user's ordinary data
     files (data/*.csv), not only literature + auto_collected — otherwise a
@@ -1160,35 +1088,34 @@ async def test_emit_artifacts_only_loads_checkpoint_without_rerun(
 
 
 def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Path) -> None:
-    """Verify topology: linear ideate->...->review and conditional review->design|END."""
+    """Verify topology: linear clarify->...->review and conditional review->design|END. FI makes no research ideas and
+    offers no study cards: neither step is in the graph."""
     from langgraph.graph import END, START
 
     engine = Engine(_route_config(tmp_path, review_loop=True, max_iterations=2))
     g = engine._build_graph()
 
     expected_nodes = {
-        "clarify", "ideate", "literature", "select_skills", "plan", "design",
+        "clarify", "literature", "select_skills", "plan", "design",
         "implement", "execute", "analyze", "write", "review",
     }
     assert expected_nodes.issubset(set(g.nodes))
+    assert not {"ideate", "scope"} & set(g.nodes)
 
     # Linear edges that must be present. `clarify` runs between
-    # START and `ideate`. The no-simulation mode turned
+    # START and `literature`. The no-simulation mode turned
     # ``design → implement`` into a conditional edge (implement vs
     # wait_for_data) — see the branches check below.
     plain_edges = set(g.edges)
     assert (START, "clarify") in plain_edges
-    assert ("clarify", "ideate") in plain_edges
-    assert ("ideate", "literature") in plain_edges
-    # `select_skills` sits between literature and design: it needs the chosen
-    # direction and the retrieved sources to match the topic against the skill
+    assert ("clarify", "literature") in plain_edges
+    # `select_skills` sits between literature and design: it needs the
+    # retrieved sources to match the topic against the skill
     # catalogue, and design needs its answer. `pause_after_literature` sits
     # between the literature and it: a passthrough unless pauses.supply asks
     # for a stop there, so a resume starts after the search, not inside it.
     assert ("literature", "pause_after_literature") in plain_edges
-    # The study cards sit between them: a person picks the study before the tools and the plan.
-    assert ("pause_after_literature", "scope") in plain_edges
-    assert ("scope", "select_skills") in plain_edges
+    assert ("pause_after_literature", "select_skills") in plain_edges
     # `plan` sits between select_skills and design: it reads the literature and writes plan.md, whose design
     # block the design step then adopts.
     assert ("select_skills", "plan") in plain_edges
@@ -1198,13 +1125,11 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # `execute → execute_reflect` replaces the old `execute → analyze`
     # edge, plus a conditional `execute_reflect → execute | analyze`.
     assert ("execute", "execute_reflect") in plain_edges
-    # no-simulation chain: auto_collect_data → wait_for_data →
-    # data_load → web_plots → web_figures → analyze. auto_collect_data is
-    # the agent-side retrieval (Axon + web) that runs BEFORE the user-data
-    # pause; web_plots derives figures from the collected sources and
-    # web_figures embeds license-clean illustrative figures before analyze
-    # consumes them.
-    assert ("auto_collect_data", "wait_for_data") in plain_edges
+    # no-simulation chain: wait_for_data (the person's own data) →
+    # data_load → web_plots → web_figures → analyze. web_plots derives figures
+    # from the loaded data and web_figures embeds license-clean illustrative
+    # figures before analyze consumes them. FI looks for no data of its own.
+    assert not any("auto_collect_data" in edge for edge in plain_edges)
     assert ("wait_for_data", "data_load") in plain_edges
     assert ("data_load", "web_plots") in plain_edges
     assert ("web_plots", "web_figures") in plain_edges
@@ -1218,7 +1143,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # quest back to the design, anything else goes on to the claim check.
     assert "write" in g.branches
     write_branch = next(iter(g.branches["write"].values()))
-    assert write_branch.ends == {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "auto_collect_data",
+    assert write_branch.ends == {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "wait_for_data",
                                  "replot": "replot_layout"}
     assert ("claim_check", "review") in plain_edges
 
@@ -1261,21 +1186,17 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     improve_branch = next(iter(g.branches["improve"].values()))
     assert improve_branch.ends == {"rerun": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
-    # Three terminal labels: ``broaden_lit`` re-enters the literature
-    # node (iterative literature loop), ``redesign`` re-enters design
-    # for ``re_experiment``, and the happy-path "write" label now lands
-    # on the evidence_gate node (which makes the real write-vs-broaden call).
+    # Two terminal labels: ``redesign`` re-enters design for ``re_experiment``, and the happy-path "write" label lands
+    # on the evidence_gate node. Nothing goes back to the literature.
     assert cross_branch.ends == {
         "write": "evidence_gate",
         "redesign": "design",
-        "broaden_lit": "literature",
     }
-    # evidence_gate routes to write (sufficient / insufficient-but-write)
-    # or back to literature for one bounded broaden pass.
+    # evidence_gate routes to write (sufficient / insufficient-but-write), or back to the design, the code or the run.
     assert "evidence_gate" in g.nodes
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
-    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings",
+    assert ev_branch.ends == {"write": "write", "redesign": "design", "stuck": "stuck_no_findings",
                               "repair_crash": "execute", "rewrite_code": "implement"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
@@ -1285,7 +1206,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # ``implement``.
     assert design_branch.ends == {
         "implement": "implement_outline",
-        "auto_collect_data": "auto_collect_data",
+        "wait_for_data": "wait_for_data",
         # survey mode: no experiment AND no dataset — straight to
         # web_figures (illustrative images) → analyze.
         "synthesize": "web_figures",
@@ -1728,10 +1649,10 @@ def test_no_sim_directive_renders_into_design_prompt() -> None:
         (Path(__file__).resolve().parent.parent
          / "agents" / "design.md").read_text(encoding="utf-8")
     )
-    kw = dict(topic="t", chosen_idea="{}", literature_block="lit",
+    kw = dict(topic="t", study="(none)", literature_block="lit",
               review_feedback="r", timeout_s="60", clarify_block="c",
               skills_block="(no simulation skills enabled)",
-              inputs_block="(none supplied)", job_block="", time_note="", novelty_block="")
+              inputs_block="(none supplied)", job_block="", time_note="")
     on = tmpl.substitute(study_mode_directive=_NO_SIM_DESIGN_DIRECTIVE, **kw)
     off = tmpl.substitute(study_mode_directive="", **kw)
     assert "NO-SIMULATION" in on
@@ -1961,331 +1882,13 @@ def test_engine_config_no_simulation_default_false() -> None:
     assert EngineConfig(no_simulation=True).no_simulation is True
 
 
-def test_resolve_no_simulation_from_clarify_yaml_wins(tmp_path: Path) -> None:
-    """When ``engine.no_simulation: true`` is set in YAML, the resolved
-    flag is True regardless of clarify_answers — even if clarify says
-    'theoretical'. The YAML is the explicit user override."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=True, clarify_mode="off"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify(
-        {"empirical_vs_theoretical": "theoretical"},
-    ) is True
-
-
-def test_resolve_no_simulation_from_clarify_empirical_answer_triggers_legacy(
-    tmp_path: Path,
-) -> None:
-    """Legacy fallback path: when no ``simulatability`` slot is
-    present (older clarify schema / quests resumed from old
-    checkpoints), an ``empirical_vs_theoretical: empirical`` still
-    triggers no_simulation. New quests should populate the
-    ``simulatability`` slot directly instead."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify(
-        {"empirical_vs_theoretical": "empirical"},
-    ) is True
-    # And other answers don't trigger it.
-    assert engine._resolve_no_simulation_from_clarify(
-        {"empirical_vs_theoretical": "theoretical"},
-    ) is False
-    assert engine._resolve_no_simulation_from_clarify(
-        {"empirical_vs_theoretical": "mixed"},
-    ) is False
-    assert engine._resolve_no_simulation_from_clarify({}) is False
-
-
-def test_resolve_no_simulation_from_clarify_simulatability_no_triggers(
-    tmp_path: Path,
-) -> None:
-    """The NEW preferred decision path: when clarify produces a
-    ``simulatability`` slot with default ``"no"``, the engine routes
-    to the no-simulation flow."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify({
-        "simulatability": {
-            "default": "no",
-            "reason": "Belgium/Taiwan cultural attitudes require survey data.",
-        }
-    }) is True
-
-
-def test_resolve_no_simulation_from_clarify_simulatability_yes_does_not_trigger(
-    tmp_path: Path,
-) -> None:
-    """``simulatability: yes`` keeps the simulation path. Same for
-    ``uncertain`` (the review prompt may add scrutiny later, but the
-    routing stays simulate-first)."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify({
-        "simulatability": {"default": "yes", "reason": "ODE simulation."},
-    }) is False
-    assert engine._resolve_no_simulation_from_clarify({
-        "simulatability": {"default": "uncertain", "reason": "marginal."},
-    }) is False
-
-
-def test_resolve_no_simulation_simulatability_str_shape(tmp_path: Path) -> None:
-    """The auto-mode clarify reducer (``{k: v["default"]}`` at the
-    Engine._clarify_node ``mode=="auto"`` branch) collapses every slot
-    to its bare default value — including ``simulatability``. The
-    resolver must accept that string-shaped answer the same way it
-    accepts the unit-test dict shape. Without this, an auto-mode
-    quest with ``simulatability=yes`` falls through to the legacy
-    ``empirical_vs_theoretical=empirical`` rule and incorrectly
-    routes to NO_SIMULATION.
-
-    Pins both str values that should route to SIMULATE plus the
-    str value that should route to NO_SIMULATION."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    # Bare-string simulatability — what auto-mode actually produces.
-    assert engine._resolve_no_simulation_from_clarify(
-        {"simulatability": "no"},
-    ) is True
-    assert engine._resolve_no_simulation_from_clarify(
-        {"simulatability": "yes"},
-    ) is False
-    assert engine._resolve_no_simulation_from_clarify(
-        {"simulatability": "uncertain"},
-    ) is False
-    # Bare-string simulatability with whitespace + uppercase — same
-    # normalization the dict path applies.
-    assert engine._resolve_no_simulation_from_clarify(
-        {"simulatability": "  NO  "},
-    ) is True
-    # And bare-string simulatability=yes still overrides the legacy
-    # empirical fallback when both are present.
-    assert engine._resolve_no_simulation_from_clarify({
-        "simulatability": "yes",
-        "empirical_vs_theoretical": "empirical",
-    }) is False
-
-
-def test_resolve_no_simulation_simulatability_beats_empirical_when_both_set(
-    tmp_path: Path,
-) -> None:
-    """When BOTH slots are present, the new ``simulatability`` slot
-    wins. The legacy ``empirical_vs_theoretical`` fallback only fires
-    when ``simulatability`` is missing.
-
-    Real-world case: a topic the LLM judged 'empirical' methodology
-    BUT also 'yes' on simulatability — e.g. an empirical-style study
-    of an algorithm's behavior that's still pure Python. Should NOT
-    route to no_simulation."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify({
-        "empirical_vs_theoretical": "empirical",
-        "simulatability": {"default": "yes", "reason": "Pure Python."},
-    }) is False, "simulatability=yes must override empirical_vs_theoretical=empirical"
-
-
-def test_resolve_no_simulation_yaml_still_wins_over_simulatability(
-    tmp_path: Path,
-) -> None:
-    """YAML's ``engine.no_simulation: true`` is the explicit user
-    override and beats any LLM judgement, including a
-    ``simulatability: yes`` from clarify."""
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=True, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    assert engine._resolve_no_simulation_from_clarify({
-        "simulatability": {"default": "yes", "reason": "looks simulatable"},
-    }) is True
-
-
-def test_resolve_no_simulation_logs_resolution_with_source_and_reason(
-    tmp_path: Path,
-) -> None:
-    """Every resolution path logs an INFO line naming the source
-    (yaml / clarify_simulatability / clarify_empirical_legacy /
-    default) and the reason (when available). This is the
-    transparency contract — a user reading run.log can see WHY
-    the engine routed the way it did."""
-    import logging as _logging
-
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-
-    captured: list[_logging.LogRecord] = []
-    sink = _logging.Handler()
-    sink.emit = captured.append  # type: ignore[assignment]
-    engine._log.addHandler(sink)
-    try:
-        engine._resolve_no_simulation_from_clarify({
-            "simulatability": {
-                "default": "no",
-                "reason": "Cultural data needs surveys.",
-            }
-        })
-    finally:
-        engine._log.removeHandler(sink)
-
-    info_lines = [r.getMessage() for r in captured if r.levelno == _logging.INFO]
-    assert any("simulatability resolved: NO_SIMULATION" in m for m in info_lines)
-    assert any("source=clarify_simulatability" in m for m in info_lines)
-    assert any("Cultural data needs surveys" in m for m in info_lines)
-
-
-def test_resolve_no_simulation_warns_on_unknown_simulatability_value(
-    tmp_path: Path,
-) -> None:
-    """When the LLM returns a simulatability.default outside the
-    documented {yes, no, uncertain} set (e.g. ``"maybe"``, a typo, or
-    free-form prose), the engine falls through to the legacy
-    empirical_vs_theoretical check. That fallthrough must be VISIBLE —
-    a WARNING with the offending value lands in run.log so the user
-    can spot the LLM drift without diffing clarify answers against
-    the engine source. Empty / missing decision strings DO NOT warn
-    (they're the legitimate "slot was omitted" case)."""
-    import logging as _logging
-
-    cfg = Config(
-        topic="t",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(no_simulation=False, clarify_mode="auto"),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-
-    captured: list[_logging.LogRecord] = []
-    sink = _logging.Handler()
-    sink.emit = captured.append  # type: ignore[assignment]
-    engine._log.addHandler(sink)
-    try:
-        # Unrecognized value — must WARN and fall through to legacy.
-        result = engine._resolve_no_simulation_from_clarify({
-            "simulatability": {"default": "maybe", "reason": "unclear"}
-        })
-    finally:
-        engine._log.removeHandler(sink)
-    assert result is False, "unknown value should NOT trigger no-simulation"
-    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
-    assert warnings, "expected a WARNING about the unrecognized value"
-    assert any("'maybe'" in m or "maybe" in m for m in warnings), (
-        "WARNING must include the offending value so the user can grep for it"
-    )
-    assert any("yes, no, uncertain" in m for m in warnings), (
-        "WARNING must name the documented allowed set"
-    )
-
-    # Empty / missing default — silent fallthrough (no WARNING).
-    captured.clear()
-    engine._log.addHandler(sink)
-    try:
-        engine._resolve_no_simulation_from_clarify({
-            "simulatability": {"default": "", "reason": ""}
-        })
-    finally:
-        engine._log.removeHandler(sink)
-    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
-    assert not warnings, (
-        f"empty/missing simulatability.default must NOT warn — the slot "
-        f"being omitted is a legitimate legacy-prompt case. Got: {warnings}"
-    )
-
-
-def test_clarify_prompt_has_simulatability_slot() -> None:
-    """``agents/clarify.md`` must request the new ``simulatability``
-    slot from the LLM. Regression guard so a future prompt rewrite
-    doesn't silently lose the routing signal."""
-    clarify_md = (Path(__file__).resolve().parent.parent
-                  / "agents" / "clarify.md").read_text(encoding="utf-8")
-    assert "\"simulatability\"" in clarify_md, (
-        "agents/clarify.md must declare a 'simulatability' slot — "
-        "it's the routing signal for no_simulation mode."
-    )
-    # The prompt must spell out the three allowed answers in the
-    # slot's declared `default` line. Substring matches against the
-    # whole file would trivially pass on prose like "yes, the topic..."
-    # — pin to the exact declaration so a future rewrite that drops
-    # any of the three options fails the guard.
-    expected_default = '"yes" or "no" or "uncertain"'
-    assert expected_default in clarify_md, (
-        f"agents/clarify.md must declare the simulatability default as "
-        f"{expected_default!r} so the LLM emits one of those tokens "
-        f"(the engine matches case-insensitively but expects one of "
-        f"the three). A looser substring guard would miss a future "
-        f"prompt rewrite that drops one of the options."
-    )
-
-
-def test_route_after_design_no_sim_flag_routes_to_auto_collect_data(
+def test_route_after_design_no_sim_flag_routes_to_wait_for_data(
     tmp_path: Path,
 ) -> None:
     """The routing function — the heart of the no-sim graph edge.
     When state carries ``no_simulation_resolved=True``, design must
-    route to ``auto_collect_data`` — the auto-collect node runs
-    BEFORE wait_for_data. Otherwise to ``implement``."""
+    route to ``wait_for_data`` (the person's own data). Otherwise to
+    ``implement``."""
     cfg = Config(
         topic="t",
         title="t",
@@ -2296,7 +1899,7 @@ def test_route_after_design_no_sim_flag_routes_to_auto_collect_data(
         output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
     engine = Engine(cfg)
-    assert engine._route_after_design({"no_simulation_resolved": True}) == "auto_collect_data"
+    assert engine._route_after_design({"no_simulation_resolved": True}) == "wait_for_data"
     assert engine._route_after_design({"no_simulation_resolved": False}) == "implement"
     assert engine._route_after_design({}) == "implement"
 
@@ -2356,7 +1959,7 @@ def test_route_after_design_no_warning_when_type_and_route_agree(
         edge = engine._route_after_design(state)
     finally:
         detach()
-    assert edge == "auto_collect_data"
+    assert edge == "wait_for_data"
     route_warnings = [r for r in records if "[route]" in r.getMessage()]
     assert not route_warnings
 
@@ -2611,493 +2214,6 @@ async def test_engine_run_invokes_preflight_before_executor_setup_and_llm_calls(
     )
 
 
-# ---- _node_auto_collect_data --------------------------------------------
-#
-# Tests for the agent-side data collection node that runs BEFORE
-# wait_for_data in no-simulation mode. Mocks ``Knowledge.asearch``
-# directly — no real Axon corpus required.
-
-
-def _make_no_sim_engine(
-    tmp_path: Path,
-    *,
-    auto_collect_data: bool = True,
-    knowledge_enabled: bool = True,
-    auto_collect_top_k: int = 5,
-) -> "Engine":
-    # ALWAYS construct Engine with KnowledgeConfig(enabled=False) so
-    # ``Knowledge.__init__`` skips its slow embedding/retriever bring-
-    # up (15+ s on this machine). Then overwrite ``engine.knowledge``
-    # with a MagicMock whose ``enabled`` matches what the test
-    # actually wants and whose ``asearch`` callers replace with the
-    # per-test return value / side-effect.
-    from unittest.mock import MagicMock, AsyncMock
-    cfg = Config(
-        topic="cross-cultural collectivism in Belgium vs Taiwan",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(
-            auto_collect_data=auto_collect_data,
-            auto_collect_top_k=auto_collect_top_k,
-        ),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),  # cheap init
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    engine = Engine(cfg)
-    mock_knowledge = MagicMock()
-    mock_knowledge.enabled = knowledge_enabled
-    # Default asearch: returns no docs. Per-test code overrides.
-    mock_knowledge.asearch = AsyncMock(return_value=[])
-    engine.knowledge = mock_knowledge  # type: ignore[assignment]
-    return engine
-
-
-def test_auto_collect_top_k_default_is_5() -> None:
-    """Default top_k is 5 — the prompt-budget rationale documented on
-    the field. Regression guard so a future bump doesn't silently
-    blow out the data_load LLM call's content budget."""
-    from core.config import EngineConfig
-    assert EngineConfig().auto_collect_top_k == 5
-    assert EngineConfig().auto_collect_data is True, (
-        "auto_collect_data must default ON — the user explicitly asked "
-        "for agent-side data collection, not user-only"
-    )
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_passthrough_when_flag_off(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``engine.auto_collect_data: false`` makes the node a logged
-    passthrough — no Axon call, no files written. The downstream
-    pause behavior is untouched."""
-    from unittest.mock import AsyncMock
-
-    engine = _make_no_sim_engine(tmp_path, auto_collect_data=False)
-    spy = AsyncMock(return_value=[])
-    engine.knowledge.asearch = spy  # type: ignore[method-assign]
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 0}
-    spy.assert_not_called()  # critical — no LLM/RAG cost on opt-out
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    assert not auto_dir.exists(), (
-        "passthrough must not create the auto_collected dir — that "
-        "would leak intent into the user's filesystem unnecessarily"
-    )
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_passthrough_when_knowledge_disabled(
-    tmp_path: Path,
-) -> None:
-    """``knowledge.enabled: false`` (no Axon to query) → passthrough.
-    Don't crash, don't try to call asearch on a disabled retriever."""
-    from unittest.mock import AsyncMock
-
-    engine = _make_no_sim_engine(tmp_path, knowledge_enabled=False)
-    spy = AsyncMock(return_value=[])
-    engine.knowledge.asearch = spy  # type: ignore[method-assign]
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 0}
-    spy.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_writes_files_on_axon_hits(
-    tmp_path: Path,
-) -> None:
-    """Happy path: Axon returns N docs → the node writes N files into
-    ``<quest_root>/data/auto_collected/`` with rank-prefixed names and
-    YAML front matter carrying provenance. wait_for_data will then
-    see those files via its rglob walk and proceed without pausing."""
-    from unittest.mock import AsyncMock
-    from core.knowledge import RetrievedDoc
-
-    docs = [
-        RetrievedDoc(
-            content="Hofstede 2010 cultural dimensions: Belgium has IDV=75.",
-            metadata={"source": "hofstede_belgium.pdf", "kind": "fi_local_paper"},
-        ),
-        RetrievedDoc(
-            content="Taiwan IDV=17 — strongly collectivist per Hofstede.",
-            metadata={"source": "hofstede_taiwan.pdf", "title": "Cultural Dims TW"},
-        ),
-        RetrievedDoc(
-            content="World Values Survey wave 7 — public-trust measures.",
-            metadata={"url": "https://wvs.example/wave7", "year": 2022},
-        ),
-    ]
-    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=3)
-    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
-
-    result = await engine._node_auto_collect_data({
-        "topic": "Belgium vs Taiwan culture",
-        "design": {"hypothesis": "IDV gap predicts trust dynamics"},
-    })
-
-    assert result == {"auto_collected_count": 3}
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    files = sorted(auto_dir.glob("*.md"))
-    assert len(files) == 3, f"expected 3 files, got {[f.name for f in files]}"
-    # Rank-prefixed, zero-padded so a 10+ doc retrieval sorts naturally.
-    assert files[0].name.startswith("001_")
-    assert files[1].name.startswith("002_")
-    assert files[2].name.startswith("003_")
-    # Front matter present + the actual content.
-    body0 = files[0].read_text(encoding="utf-8")
-    assert body0.startswith("---\n")
-    assert "auto_collected: true" in body0
-    assert "rank: 1" in body0
-    assert "Hofstede 2010" in body0
-    # Metadata-rich doc[1] gets its title + source rendered.
-    body1 = files[1].read_text(encoding="utf-8")
-    assert "title:" in body1
-    assert "Cultural Dims TW" in body1
-    # URL-based doc[2] gets the URL rendered, not a None source.
-    body2 = files[2].read_text(encoding="utf-8")
-    assert "url:" in body2
-    assert "wave7" in body2
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_front_matter_is_yaml_parseable(
-    tmp_path: Path,
-) -> None:
-    """The YAML front matter must be safely parseable by any standard
-    YAML loader — so downstream tools (or a future data_load that
-    parses provenance) can round-trip metadata values containing
-    quotes, backslashes, colons, and unicode without mangling.
-
-    Front matter must NOT use Python ``repr`` (which is not YAML-safe
-    — a value like ``"O'Brien"`` would parse back as ``"O\\'Brien"``
-    from a YAML reader)."""
-    from unittest.mock import AsyncMock
-    from core.knowledge import RetrievedDoc
-    import yaml as _yaml
-
-    docs = [
-        RetrievedDoc(
-            content="hit body",
-            metadata={
-                # Punctuation that breaks Python repr-vs-YAML round-trip:
-                "source": "O'Brien_2021.pdf",
-                "title": "Trust: A YAML-hostile string (with colons)",
-                "url": "https://example.com/path?q=value&r=2",
-                "kind": "fi_local_paper",
-            },
-        ),
-    ]
-    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=1)
-    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
-
-    await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    files = sorted(
-        (engine.quest_root / "data" / "auto_collected").glob("*.md")
-    )
-    assert len(files) == 1
-    body = files[0].read_text(encoding="utf-8")
-    # Extract the front matter block.
-    assert body.startswith("---\n")
-    _, fm_block, _ = body.split("---\n", 2)
-    parsed = _yaml.safe_load(fm_block)
-    assert isinstance(parsed, dict), f"front matter is not a YAML mapping: {fm_block!r}"
-    # Values round-trip cleanly.
-    assert parsed["source"] == "O'Brien_2021.pdf"
-    assert parsed["title"] == "Trust: A YAML-hostile string (with colons)"
-    assert parsed["url"] == "https://example.com/path?q=value&r=2"
-    assert parsed["auto_collected"] is True
-    assert parsed["rank"] == 1
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_cleans_up_dir_when_all_writes_fail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Edge case: when EVERY write raises OSError
-    (e.g. permissions or full disk after the mkdir succeeded), the
-    node must NOT leave an empty ``auto_collected/`` directory behind
-    — that would mislead the user into thinking auto-collection
-    produced output. Verify cleanup happens."""
-    from unittest.mock import AsyncMock
-    from pathlib import Path as _Path
-    from core.knowledge import RetrievedDoc
-
-    docs = [
-        RetrievedDoc(content=f"body{i}", metadata={"source": f"x{i}.pdf"})
-        for i in range(3)
-    ]
-    engine = _make_no_sim_engine(tmp_path, auto_collect_top_k=3)
-    engine.knowledge.asearch = AsyncMock(return_value=docs)  # type: ignore[method-assign]
-
-    # Force every write_text to fail. mkdir is still allowed (so we
-    # can prove the cleanup path runs).
-    original_write_text = _Path.write_text
-    def fake_write_text(self, *_a, **_kw):  # type: ignore[no-untyped-def]
-        if "auto_collected" in str(self):
-            raise OSError("simulated disk full")
-        return original_write_text(self, *_a, **_kw)
-    monkeypatch.setattr(_Path, "write_text", fake_write_text)
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 0}
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    assert not auto_dir.exists(), (
-        f"empty auto_collected/ must be cleaned up when all writes "
-        f"failed; got dir={auto_dir} children="
-        f"{list(auto_dir.iterdir()) if auto_dir.exists() else 'n/a'}"
-    )
-
-
-# ---- _run_dataset_adapters ----------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_passthrough_when_list_empty(
-    tmp_path: Path,
-) -> None:
-    """Default ``EngineConfig.dataset_adapters: []`` — no adapter
-    runs, no subdirs created. Axon-only auto-collect path is
-    preserved."""
-    from unittest.mock import AsyncMock
-    from core.knowledge import RetrievedDoc
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
-        RetrievedDoc(content="axon hit", metadata={"source": "p.pdf"}),
-    ])
-
-    await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    # Only top-level Axon files; no per-adapter subdirs.
-    children = sorted(p.name for p in auto_dir.iterdir())
-    assert children == ["001_p.md"], children
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_unknown_name_logs_warning_and_skips(
-    tmp_path: Path,
-) -> None:
-    """An unrecognized adapter name (typo in YAML) must NOT crash;
-    log a WARNING listing the known names and skip. The rest of the
-    flow proceeds normally."""
-    import logging as _logging
-    from unittest.mock import AsyncMock
-    from core.knowledge import RetrievedDoc
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.config.engine.dataset_adapters = ["typo_adapter"]  # type: ignore[misc]
-    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
-        RetrievedDoc(content="axon", metadata={"source": "x.pdf"}),
-    ])
-
-    captured: list[_logging.LogRecord] = []
-    sink = _logging.Handler()
-    sink.emit = captured.append  # type: ignore[assignment]
-    engine._log.addHandler(sink)
-    try:
-        result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-    finally:
-        engine._log.removeHandler(sink)
-
-    # Axon write still happened; adapter contributed nothing.
-    assert result == {"auto_collected_count": 1}
-    warnings = [r.getMessage() for r in captured if r.levelno == _logging.WARNING]
-    assert any("unknown dataset adapter" in m and "typo_adapter" in m for m in warnings), (
-        f"expected unknown-adapter WARNING; got: {warnings}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_invokes_registered_adapter_and_writes_subdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Happy path: a registered adapter is named in
-    ``engine.dataset_adapters`` → it's instantiated, ``search()`` is
-    awaited with the same query the Axon path used, results are
-    written to ``data/auto_collected/<adapter_name>/``, and the
-    final auto_collected_count includes both Axon + adapter writes."""
-    from unittest.mock import AsyncMock
-    from core.datasets import ADAPTER_REGISTRY
-    from core.datasets.base import DatasetAdapter, DatasetRow
-    from core.knowledge import RetrievedDoc
-
-    class FakeAdapter(DatasetAdapter):
-        name = "fake"
-        last_query: str | None = None
-
-        async def search(self, query: str, *, top_k: int) -> list[DatasetRow]:
-            FakeAdapter.last_query = query
-            return [
-                DatasetRow(
-                    content="# Mocked dataset row\n\n| col | val |\n|-----|-----|\n| x | 1 |",
-                    metadata={"source": "fake", "indicator_id": "ABC", "title": "Mock Row"},
-                ),
-                DatasetRow(
-                    content="another row",
-                    metadata={"source": "fake", "indicator_id": "XYZ"},
-                ),
-            ]
-
-    monkeypatch.setitem(ADAPTER_REGISTRY, "fake", FakeAdapter)
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.config.engine.dataset_adapters = ["fake"]  # type: ignore[misc]
-    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
-        RetrievedDoc(content="axon hit", metadata={"source": "p.pdf"}),
-    ])
-
-    result = await engine._node_auto_collect_data({
-        "topic": "Belgium vs Taiwan trust",
-        "design": {"hypothesis": "IDV gap predicts trust"},
-    })
-
-    # 1 Axon + 2 adapter rows = 3 total.
-    assert result == {"auto_collected_count": 3}
-    # Adapter wrote into a per-adapter subdir.
-    sub_dir = engine.quest_root / "data" / "auto_collected" / "fake"
-    files = sorted(sub_dir.glob("*.md"))
-    assert len(files) == 2
-    assert files[0].name == "001_abc.md"  # slugged from indicator_id
-    assert files[1].name == "002_xyz.md"
-    # Adapter saw a query built from topic + hypothesis.
-    assert FakeAdapter.last_query is not None
-    assert "Belgium" in FakeAdapter.last_query
-    assert "IDV gap" in FakeAdapter.last_query
-    # The rendered file has the adapter name folded into the YAML
-    # front matter so a downstream tool can attribute the row.
-    body = files[0].read_text(encoding="utf-8")
-    assert "adapter: fake" in body
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_exception_is_caught_and_logged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An adapter that raises during ``.search()`` MUST NOT abort the
-    no-simulation flow. Log a WARNING, skip the adapter's results,
-    continue."""
-    from unittest.mock import AsyncMock
-    from core.datasets import ADAPTER_REGISTRY
-    from core.datasets.base import DatasetAdapter
-    from core.knowledge import RetrievedDoc
-
-    class FlakyAdapter(DatasetAdapter):
-        name = "flaky"
-        async def search(self, query: str, *, top_k: int):
-            raise RuntimeError("simulated API outage")
-
-    monkeypatch.setitem(ADAPTER_REGISTRY, "flaky", FlakyAdapter)
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.config.engine.dataset_adapters = ["flaky"]  # type: ignore[misc]
-    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
-        RetrievedDoc(content="axon", metadata={"source": "p.pdf"}),
-    ])
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    # Axon write present (1); adapter contributed nothing.
-    assert result == {"auto_collected_count": 1}
-    # The subdir for the flaky adapter must NOT exist (no half-baked
-    # artifact).
-    assert not (engine.quest_root / "data" / "auto_collected" / "flaky").exists()
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_run_even_when_axon_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``knowledge.enabled=False`` must NOT skip the dataset adapter
-    step. A user who opts in to ``dataset_adapters: [worldbank]`` with
-    no Axon configured still expects the adapter to fire — the Axon
-    short-circuit must not return early before adapters can run."""
-    from core.datasets import ADAPTER_REGISTRY
-    from core.datasets.base import DatasetAdapter, DatasetRow
-
-    class AlwaysReturnsAdapter(DatasetAdapter):
-        name = "always"
-        async def search(self, query: str, *, top_k: int):
-            return [DatasetRow(
-                content="adapter still fired",
-                metadata={"source": "always", "title": "Adapter ran"},
-            )]
-
-    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
-
-    engine = _make_no_sim_engine(tmp_path, knowledge_enabled=False)
-    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
-    # Don't even need to mock asearch — Axon path short-circuits.
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 1}, (
-        "dataset adapter must run regardless of Axon's state"
-    )
-    assert (engine.quest_root / "data" / "auto_collected" / "always").exists()
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_run_even_when_axon_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same regression as above for the Axon-raises path."""
-    from unittest.mock import AsyncMock
-    from core.datasets import ADAPTER_REGISTRY
-    from core.datasets.base import DatasetAdapter, DatasetRow
-
-    class AlwaysReturnsAdapter(DatasetAdapter):
-        name = "always"
-        async def search(self, query: str, *, top_k: int):
-            return [DatasetRow(content="row", metadata={"source": "always"})]
-
-    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
-    engine.knowledge.asearch = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("axon down"),
-    )
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    # 1 adapter row, 0 from Axon.
-    assert result == {"auto_collected_count": 1}
-
-
-@pytest.mark.asyncio
-async def test_dataset_adapters_run_when_axon_returns_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Axon legitimately returned nothing; dataset adapters should
-    still run."""
-    from unittest.mock import AsyncMock
-    from core.datasets import ADAPTER_REGISTRY
-    from core.datasets.base import DatasetAdapter, DatasetRow
-
-    class AlwaysReturnsAdapter(DatasetAdapter):
-        name = "always"
-        async def search(self, query: str, *, top_k: int):
-            return [DatasetRow(content="row", metadata={"source": "always"})]
-
-    monkeypatch.setitem(ADAPTER_REGISTRY, "always", AlwaysReturnsAdapter)
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.config.engine.dataset_adapters = ["always"]  # type: ignore[misc]
-    engine.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 1}
-
-
 @pytest.mark.asyncio
 async def test_render_auto_collected_md_coerces_non_scalar_metadata(
     tmp_path: Path,
@@ -3133,142 +2249,6 @@ async def test_render_auto_collected_md_coerces_non_scalar_metadata(
     assert "culture" in parsed["tags"]
     assert isinstance(parsed["extra"], str)
     assert "nested" in parsed["extra"]
-
-
-def test_dataset_adapter_top_k_rejects_zero_and_negative() -> None:
-    """Pydantic ``ge=1`` validation on ``dataset_adapter_top_k``.
-    Same rationale as ``auto_collect_top_k``: top_k=0 is useless."""
-    from core.config import EngineConfig
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        EngineConfig(dataset_adapter_top_k=0)
-    with pytest.raises(ValidationError):
-        EngineConfig(dataset_adapter_top_k=-3)
-    assert EngineConfig(dataset_adapter_top_k=1).dataset_adapter_top_k == 1
-
-
-def test_engine_config_dataset_adapters_default_empty() -> None:
-    """Default ``dataset_adapters: []`` keeps auto-collect Axon-only.
-    Opt-in only — no surprise external API calls when a user upgrades
-    without touching YAML."""
-    from core.config import EngineConfig
-    assert EngineConfig().dataset_adapters == []
-    assert EngineConfig().dataset_adapter_top_k == 3
-
-
-def test_auto_collect_top_k_rejects_zero_and_negative() -> None:
-    """``Field(default=5, ge=1)`` on ``auto_collect_top_k``: passing
-    top_k=0 to Axon would mean "request zero hits" which is useless;
-    a typo / negative value should fail at YAML parse time, not
-    silently pass through."""
-    from core.config import EngineConfig
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        EngineConfig(auto_collect_top_k=0)
-    with pytest.raises(ValidationError):
-        EngineConfig(auto_collect_top_k=-1)
-    # Positive values work — boundary check at 1.
-    assert EngineConfig(auto_collect_top_k=1).auto_collect_top_k == 1
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_uses_topic_and_hypothesis_in_query(
-    tmp_path: Path,
-) -> None:
-    """The Axon query is built from topic + design.hypothesis — that's
-    a sharper retrieval signal than topic alone once design has run.
-    Regression guard so a refactor doesn't accidentally drop the
-    hypothesis."""
-    from unittest.mock import AsyncMock
-
-    engine = _make_no_sim_engine(tmp_path)
-    spy = AsyncMock(return_value=[])
-    engine.knowledge.asearch = spy  # type: ignore[method-assign]
-
-    await engine._node_auto_collect_data({
-        "topic": "Belgium vs Taiwan culture",
-        "design": {"hypothesis": "IDV gap predicts trust dynamics"},
-    })
-
-    spy.assert_awaited_once()
-    args, kwargs = spy.call_args
-    query = args[0]
-    assert "Belgium" in query
-    assert "IDV gap" in query, "hypothesis must be part of the Axon query"
-    assert kwargs.get("top_k") == 5
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_falls_through_on_axon_exception(
-    tmp_path: Path,
-) -> None:
-    """An exception from Axon must NOT crash the no-sim flow. Log a
-    WARNING and return a zero-count state so wait_for_data takes
-    over and pauses for user-supplied data (the safety net)."""
-    from unittest.mock import AsyncMock
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.knowledge.asearch = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("axon down")
-    )
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 0}
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    # An exception during retrieval shouldn't leave a stub dir behind.
-    assert not auto_dir.exists() or not any(auto_dir.iterdir())
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_zero_hits_falls_through(
-    tmp_path: Path,
-) -> None:
-    """Axon returned but found nothing — log INFO, return zero, let
-    wait_for_data pause for the user. Don't create the empty
-    auto_collected dir (would mislead the user into thinking the agent
-    found something)."""
-    from unittest.mock import AsyncMock
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.knowledge.asearch = AsyncMock(return_value=[])  # type: ignore[method-assign]
-
-    result = await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    assert result == {"auto_collected_count": 0}
-    auto_dir = engine.quest_root / "data" / "auto_collected"
-    assert not auto_dir.exists(), (
-        "0-hit path must not create an empty auto_collected dir — the "
-        "user would mistake it for a partial success"
-    )
-
-
-@pytest.mark.asyncio
-async def test_node_auto_collect_data_files_pass_wait_for_data_filter(
-    tmp_path: Path,
-) -> None:
-    """Integration check across γ → β boundary: files written by
-    auto_collect_data MUST be picked up by ``_list_user_data_files``
-    (used by ``wait_for_data`` to decide whether to pause). Without
-    this, auto-collect would happily write files and wait_for_data
-    would still pause because of a path-filtering mismatch."""
-    from unittest.mock import AsyncMock
-    from core.knowledge import RetrievedDoc
-    from core.engine import _list_user_data_files
-
-    engine = _make_no_sim_engine(tmp_path)
-    engine.knowledge.asearch = AsyncMock(return_value=[  # type: ignore[method-assign]
-        RetrievedDoc(content="hit", metadata={"source": "p.pdf"}),
-    ])
-
-    await engine._node_auto_collect_data({"topic": "x", "design": {}})
-
-    listed = _list_user_data_files(engine.quest_root / "data")
-    assert len(listed) == 1
-    assert listed[0].parent.name == "auto_collected"
-    assert listed[0].suffix == ".md"
 
 
 @pytest.mark.asyncio
@@ -3413,7 +2393,7 @@ async def test_engine_run_closes_logger_on_exception_path(
         topic="exception path test",
         title="exception-path-test",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(clarify_mode="off"),
+        engine=EngineConfig(),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),
@@ -3444,162 +2424,6 @@ async def test_engine_run_closes_logger_on_exception_path(
     # leak regressed.
     shutil.rmtree(engine.quest_root)
     assert not engine.quest_root.exists()
-
-
-# ---- _run_ideate_tournament ---------------------------------------------
-
-
-def _make_tournament_engine(tmp_path: Path) -> "Engine":
-    cfg = Config(
-        topic="some research topic",
-        title="t",
-        provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(ideate_tournament=True, ideate_reflect=False),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
-        knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
-    )
-    return Engine(cfg)
-
-
-def test_engine_config_ideate_tournament_default_false() -> None:
-    """Tournament must be OPT-IN — it costs 2 extra LLM calls vs.
-    the single-shot critique. Default-off keeps the cost floor at 7-18
-    calls/quest per docs/USAGE.md."""
-    from core.config import EngineConfig
-    assert EngineConfig().ideate_tournament is False
-
-
-def test_ideate_tournament_prompt_loads() -> None:
-    """The ``ideate_tournament`` prompt is added to ``_load_prompts``.
-    Regression guard so a future prompt-list edit doesn't silently
-    drop the tournament prompt and leave the feature unable to run."""
-    from core.engine import _load_prompts
-    prompts = _load_prompts()
-    assert "ideate_tournament" in prompts
-    t = prompts["ideate_tournament"]
-    # The prompt must accept the four variables the engine substitutes.
-    rendered = t.substitute(topic="x", clarify_block="y", idea_a="a", idea_b="b")
-    assert "winner" in rendered.lower()
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_picks_majority_winner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3 ideas → 3 pairwise matches. If idea 0 wins both its matches,
-    it has 2 wins; the other two have 1 win and 0 wins. Tournament
-    must pick idea 0."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [
-        {"title": "Alpha", "summary": "first"},
-        {"title": "Beta", "summary": "second"},
-        {"title": "Gamma", "summary": "third"},
-    ]
-    # Match outcomes (a_idx, b_idx) → winner letter
-    outcomes = {
-        (0, 1): "A",  # Alpha beats Beta
-        (0, 2): "A",  # Alpha beats Gamma
-        (1, 2): "B",  # Gamma beats Beta
-    }
-    call_count = {"n": 0}
-
-    async def fake_chat(self, prompt, *, node, **kw):
-        call_count["n"] += 1
-        # Extract a/b indices from the prompt text (each prompt has the
-        # full idea JSON inline, so we match on title to know which pair).
-        is_alpha_in_a = '"Alpha"' in prompt.split('# Idea B')[0]
-        is_beta_in_a = '"Beta"' in prompt.split('# Idea B')[0]
-        if is_alpha_in_a and '"Beta"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(0, 1)]
-        elif is_alpha_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(0, 2)]
-        elif is_beta_in_a and '"Gamma"' in prompt.split('# Idea B')[1]:
-            w = outcomes[(1, 2)]
-        else:
-            raise AssertionError(f"unexpected pair in prompt: {prompt[:200]}")
-        return f'{{"winner": "{w}", "reason": "tractability", "margin": "decisive"}}'
-
-    # monkeypatch.setattr is auto-scoped to this test — pytest's
-    # teardown restores Engine._chat even if an assertion raises mid-test.
-    # Patching the class attribute directly with try/finally is fragile
-    # to a setup-time exception leaking the replacement into later tests.
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[1],
-    )
-
-    assert winner["title"] == "Alpha"
-    assert record["winner_idx"] == 0
-    # Alpha wins both its matches (vs Beta, vs Gamma) → idx 0: 2 wins.
-    # Beta loses both its matches (vs Alpha, vs Gamma) → idx 1: 0 wins.
-    # Gamma loses to Alpha, beats Beta → idx 2: 1 win.
-    assert record["wins"] == [2, 0, 1]
-    assert record["outcome"] == "swapped"  # initial_chosen was Beta
-    assert call_count["n"] == 3  # C(3, 2)
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_falls_back_when_inconclusive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If every match returns malformed JSON (winner != "A" or "B"),
-    no idea accumulates wins. Tournament must fall back to
-    ``initial_chosen`` rather than crashing or picking arbitrarily."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "A", "summary": "x"}, {"title": "B", "summary": "y"}]
-    initial = ideas[1]
-
-    async def fake_chat(self, prompt, *, node, **kw):
-        return '{"winner": "TIE", "reason": "?"}'  # invalid winner
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=initial,
-    )
-
-    assert winner["title"] == "B"  # initial_chosen preserved
-    assert record["outcome"] == "inconclusive_fallback"
-    assert record["winner_idx"] is None
-
-
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_dispatches_matches_in_parallel(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """3 pairwise matches with 200ms simulated latency each. Parallel
-    dispatch → wall-clock ~200ms; serial would be 600ms. Threshold
-    set well below the serial floor so the test stays unambiguous
-    even under CI scheduling jitter / GC pauses (a tighter
-    130 ms-with-50 ms-sleeps threshold would flake on constrained
-    runners)."""
-    import asyncio as _asyncio
-    import time as _time
-
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
-
-    async def slow_chat(self, prompt, *, node, **kw):
-        await _asyncio.sleep(0.2)
-        return '{"winner": "A", "reason": "x", "margin": "decisive"}'
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", slow_chat)
-
-    start = _time.monotonic()
-    await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[0],
-    )
-    elapsed = _time.monotonic() - start
-
-    assert elapsed < 0.5, (
-        f"3 matches must dispatch concurrently; wall-clock {elapsed:.3f}s "
-        f"suggests serial execution (serial floor is ~0.6s for 3 × 200ms; "
-        f"parallel ceiling is ~0.2s + overhead)."
-    )
 
 
 # ---- non-scientific paper formats + write-persona ----------------------
@@ -3712,30 +2536,6 @@ def test_resolve_write_persona_non_scientific_returns_named_voice(
         )
 
 
-def test_resolve_write_persona_clarify_answers_win_over_yaml(
-    tmp_path: Path,
-) -> None:
-    """The clarify agent's pick (or user override in interactive
-    mode) wins over the YAML default. So a quest configured with
-    ``paper_format: generic`` whose clarify answer landed on
-    ``paper_venue: essay`` produces the essayist persona, not the
-    scientific default."""
-    engine = _make_write_persona_engine(tmp_path, paper_format="generic")
-    persona = engine._resolve_write_persona({
-        "clarify_answers": {"paper_venue": "essay"}
-    })
-    assert "essayist" in persona.lower()
-
-    # Reverse: clarify=generic + YAML=essay → clarify wins.
-    engine2 = _make_write_persona_engine(tmp_path, paper_format="essay")
-    persona2 = engine2._resolve_write_persona({
-        "clarify_answers": {"paper_venue": "generic"}
-    })
-    assert persona2 == "", (
-        "clarify answer 'generic' must override YAML 'essay' → empty persona"
-    )
-
-
 def test_resolve_write_persona_unknown_format_falls_back_to_empty(
     tmp_path: Path,
 ) -> None:
@@ -3751,36 +2551,6 @@ def test_resolve_write_persona_unknown_format_falls_back_to_empty(
     assert persona == ""
 
 
-@pytest.mark.asyncio
-async def test_run_ideate_tournament_skipped_when_fewer_than_two_ideas(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """C(N, 2) is 0 for N=1, so the tournament has nothing to do.
-    ``_node_ideate``'s guard ``len(ideas) >= 2`` keeps the helper
-    from being called in this case — but if it ever IS called with
-    fewer ideas, the helper should also handle it gracefully (no
-    LLM calls, return initial_chosen)."""
-    engine = _make_tournament_engine(tmp_path)
-    ideas = [{"title": "Solo"}]
-
-    chat_calls = 0
-    async def fake_chat(self, prompt, *, node, **kw):
-        nonlocal chat_calls
-        chat_calls += 1
-        return '{"winner": "A"}'
-
-    from core.engine import Engine as _Engine
-    monkeypatch.setattr(_Engine, "_chat", fake_chat)
-    winner, record = await engine._run_ideate_tournament(
-        {"topic": "x"}, ideas, initial_chosen=ideas[0],
-    )
-
-    # No matches to play; outcome falls through to inconclusive_fallback.
-    assert chat_calls == 0
-    assert winner["title"] == "Solo"
-    assert record["outcome"] == "inconclusive_fallback"
-
-
 # ---- _clear_stale_figures ------------------------------------------------
 
 
@@ -3788,7 +2558,7 @@ def _min_engine_for_figs(tmp_path: Path) -> Engine:
     cfg = Config(
         topic="figs", title="figs",
         provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(clarify_mode="off"),
+        engine=EngineConfig(),
         execution=ExecutionConfig(sandbox="venv"),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),

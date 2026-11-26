@@ -7,12 +7,12 @@ through ``self``. The shared names come from ``core/engine_base.py``.
 from __future__ import annotations
 
 from .engine_base import (  # noqa: F401
-    Any, BridgeError, FallbackLLMClient, LLMClient, ModelAnswerTruncated, PROXY_PROVIDERS, Path, ProviderUnusable,
+    Any, FallbackLLMClient, LLMClient, ModelAnswerTruncated, PROXY_PROVIDERS, Path, ProviderUnusable,
     QuestArtifacts, QuestState, _CLI_PROVIDERS_SET, _DRAFTED_GRID_ASKED, _DRAFTED_GRID_ASKED_AGAIN,
     _DRAFTED_PARTS_ASKED, _DRAFTED_SEARCH_ASKED, _FIGURES_PER_CALL, _FIGURE_PICK_BATCH, _FIGURE_READING_CHARS,
     _FILLED_AFTER_READ, _FILL_MARKER, _GRID_ASKED, _GRID_ASKED_AGAIN, _LEDGER_ASKED, _LEDGER_PARTS,
     _ModelAnswerProblem, _ONCE_PARTS, _PART_ASKED, _PART_HEADING, _PLAN_DIRECTIVE, _PartsRefused,
-    _PlanEditedMeanwhile, _REDESIGN_OWNED_PARTS, _REFERENCE_FORMS, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS,
+    _PlanBeyondTheBlock, _PlanEditedMeanwhile, _REDESIGN_OWNED_PARTS, _REFERENCE_FORMS, _REFUSAL_CHARS, _REFUSED_BLOCK_CHARS,
     _SCHEMA_RETRY_ASKS, _SEARCH_ASKED, _SEARCH_ASKS, _SEARCH_CALLS, _SEARCH_CALLS_PER_ASK, _SEARCH_REFUSED,
     _STUDY_TYPE_DIRECTIVE, _TOPIC_ASKED, _TOPIC_DESIGN_ASKED, _accepted, _append_design_revision,
     _append_figure_readings, _attempts, _audit_log, _audit_open, _code_delta, _code_layout, _contract,
@@ -22,7 +22,7 @@ from .engine_base import (  # noqa: F401
     _labelled_sources, _ledger, _lit_query, _mc_error, _one_line, _optim, _optimise, _optimise_search, _oracle,
     _package_block_text, _pairs, _parse_json_lenient, _pick_up_user_dropped_datasets, _plan, _plan_checks_note,
     _plan_scope, _plan_search_mark, _plan_settings, _plan_steps, _protocol, _read_a_search_block,
-    _read_json_or_none_path, _reading, _receipts, _review, _scope_cards, _script_reply, _skeleton, _source_text,
+    _read_json_or_none_path, _reading, _receipts, _review, _script_reply, _skeleton, _source_text,
     _split_run, _study_size, _todo, _top_level_json_objects, _topic_req, _trial_runner, asyncio,
     claude_cli_account_line, copy, hashlib, inspect, interrupt, json, missing_step_api_keys, model_for_node,
     node_provider_for, os, re, resolve_endpoint_async, step_provider_config, step_provider_lines,
@@ -30,6 +30,87 @@ from .engine_base import (  # noqa: F401
 from . import commission as _commission
 from . import known_values as _known_values
 from .oracle_challenge import NUMERIC_NODE, numeric_timeout
+
+
+
+NL = chr(10)
+
+
+def _held_back_in(protocol: dict[str, Any], held: dict[str, Any]) -> dict[str, Any]:
+    """``protocol`` with the controls and metric references an earlier merge left out put back, for the reader to judge again
+    (one the plan has already is not doubled; a reference is put back only on a metric that has none)."""
+    out = dict(protocol)
+    controls = out.get("controls")
+    rows = list(controls) if isinstance(controls, list) else [controls] if isinstance(controls, dict) else []
+    names = {str(c.get("name") or "").strip() for c in rows if isinstance(c, dict)}
+    rows += [c for c in held.get("controls") or [] if str(c.get("name") or "").strip() not in names]
+    if rows:
+        out["controls"] = rows
+    metrics = out.get("metrics")
+    if isinstance(metrics, list) and held.get("references"):
+        out["metrics"] = [({**m, "reference": held["references"][str(m.get("id"))]}
+                           if isinstance(m, dict) and "reference" not in m and str(m.get("id")) in held["references"] else m)
+                          for m in metrics]
+    return out
+
+
+def _leave_out_what_the_scan_lacks(protocol: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """``(protocol, notes)``: ``protocol`` without the controls and the metric references that name a setting the search's scan
+    does not have (the plan's own grid is gone when a search block is taken in), and one sentence for each. Only those two
+    kinds of entry, and only for that reason: anything else the strict reader refuses stays refused."""
+    from . import controls as _controls
+    from . import reference_values as _refs
+
+    out, notes = dict(protocol), []
+    controls = out.get("controls")
+    if isinstance(controls, (list, dict)):
+        base = {k: v for k, v in out.items() if k != "controls"}
+        rows = controls if isinstance(controls, list) else [controls]
+        kept = []
+        for index, item in enumerate(rows, start=1):
+            why = _controls.setting_fault(index, item, base)
+            if why is None:
+                kept.append(item)
+            else:
+                notes.append(_controls.left_out_note(index, item, why))
+        if len(kept) < len(rows):
+            if kept:
+                out["controls"] = kept
+            else:
+                del out["controls"]
+    metrics = out.get("metrics")
+    if isinstance(metrics, list):
+        fixed = []
+        for m in metrics:
+            why = _refs.unscanned_filter(m["reference"], out) if isinstance(m, dict) and m.get("reference") is not None else None
+            if why is None:
+                fixed.append(m)
+                continue
+            ident = str(m.get("id") or "").strip()
+            notes.append(f"the reference value of `{ident}` was left out of the plan ({why}); that quantity reads "
+                         '"no reference"')
+            fixed.append({k: v for k, v in m.items() if k != "reference"})
+        out["metrics"] = fixed
+    return out, notes
+
+
+def _left_out_between(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """The controls and metric references of ``before`` that ``after`` (the same protocol read by the design reader) lacks."""
+    kept = {str(c.get("name") or "").strip() for c in after.get("controls") or [] if isinstance(c, dict)}
+    rows = before.get("controls") if isinstance(before.get("controls"), list) else []
+    controls = [c for c in rows if isinstance(c, dict) and str(c.get("name") or "").strip() not in kept]
+    have = {str(m.get("id")) for m in after.get("metrics") or [] if isinstance(m, dict) and "reference" in m}
+    references = {str(m.get("id")): m["reference"] for m in before.get("metrics") or []
+                  if isinstance(m, dict) and "reference" in m and str(m.get("id")) not in have}
+    return {"controls": controls, "references": references}
+
+
+def _restored_between(held: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """The names (controls) and ids (references) of what was held aside that ``after`` has again."""
+    kept = {str(c.get("name") or "").strip() for c in after.get("controls") or [] if isinstance(c, dict)}
+    have = {str(m.get("id")) for m in after.get("metrics") or [] if isinstance(m, dict) and "reference" in m}
+    return ([n for n in (str(c.get("name") or "").strip() for c in held.get("controls") or []) if n in kept]
+            + [i for i in held.get("references") or {} if i in have])
 
 
 class PlanStageMixin:
@@ -122,9 +203,7 @@ class PlanStageMixin:
         # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
         await self._read_topic_before_the_prompt(state)
         seek = self._seeks_best_design(state)
-        card = state.get("scope_card")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + self._study_type_part(state, seek=seek)
-                  + (f"\n\n{_scope_cards.plan_note(card)}\n" if isinstance(card, dict) else "")
                   + _known_values.plan_block(known))
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
@@ -274,9 +353,6 @@ class PlanStageMixin:
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,
                             code_layout=self._plan_code_layout({**state, "design": normalized}),
                             confirm=self._plan_confirm_lines(state), held_back=self._audit_changes_held_back())
-        study = _scope_cards.plan_section(_scope_cards.read_record(self.quest_root))
-        if study:
-            body = body.rstrip("\n") + "\n\n" + study
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
@@ -424,11 +500,8 @@ class PlanStageMixin:
         return kept, notes
     @staticmethod
     def _study_type_asked(state: QuestState) -> str | None:
-        """The kind of study the person named (``measure`` / ``find_best_design``), or ``None``: the study card they
-        picked before the plan comes first, then their answer at the clarify step."""
-        card = state.get("scope_card")
-        if isinstance(card, dict) and card.get("study_type") in _scope_cards.STUDY_TYPES:
-            return str(card["study_type"])
+        """The kind of study the person named (``measure`` / ``find_best_design``) in their answer at the clarify step,
+        or ``None``."""
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
     def _asks_for_best_design(self, state: QuestState, *, topic: bool = True) -> str:
@@ -619,6 +692,26 @@ class PlanStageMixin:
             except (TypeError, ValueError):
                 return 0, 0
         return 0, 0
+
+    @staticmethod
+    def _design_block_mark(plan_text: str) -> str:
+        """A short hash of the design block of ``plan_text`` as written: what stays the same when only FI's own notes
+        (the sections it writes beside the block) change the plan's hash."""
+        raw = _plan.raw_design_block(plan_text)
+        return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+    def _search_refused_beyond_the_block(self, plan_text: str) -> str:
+        """The reason the plan's model's last block was refused for something other than the block (kept in the
+        search record with the design block's mark), when ``plan_text``'s design block is still the one it was refused beside
+        and the same model asks; else ``""``."""
+        try:
+            record = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if (isinstance(record, dict) and record.get("beyond_block") and record.get("model") == self._plan_model_name()
+                and record["beyond_block"] == self._design_block_mark(plan_text)):
+            return str(record.get("problem") or "refused")
+        return ""
 
     def _search_problem(self, sha: str, file: str | None = None) -> str:
         """Why the plan's model's last answer was not used, as the reader that refused it said (kept in the same record;
@@ -927,6 +1020,14 @@ class PlanStageMixin:
             gaps = await gaps
         if not gaps or not path.is_file():
             return design, plan_sha
+        if file == _SEARCH_ASKED and (said := self._search_refused_beyond_the_block(path.read_text(encoding="utf-8"))):
+            # The plan was refused beside the block for something that is not the block, and its design block is as it was:
+            # another block cannot change that, so the model is not asked again (FI's notes change the plan's hash, so the
+            # record is tied to the design block itself).
+            self._log.warning("[plan] FI does not ask the plan's model for %s again: the plan with its block in it was "
+                              "refused for something other than the block (%s), and the plan's design is unchanged",
+                              short, _one_line(said, 300))
+            return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
         last_problem = self._search_problem(plan_sha, file)  # why the last answer was not used (kept on disk)
         last_block = self._search_refused_block(plan_sha, file) if last_problem else ""  # ... and the block it refused
@@ -980,6 +1081,7 @@ class PlanStageMixin:
             self._answer_block = None  # the block of the answer, set by a keep that reads one (:meth:`_keep_only_the_search`)
             schema = False
             repeated = False
+            beyond = ""
             try:
                 await self._complete_plan_parts(ask, path, expect=text, keep=keep, note=note)
                 refused = list(getattr(self, "_answer_refused", []) or [])
@@ -1001,6 +1103,13 @@ class PlanStageMixin:
             except _ModelAnswerProblem as e:
                 outcome = "no complete answer"
                 self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
+            except _PlanBeyondTheBlock as e:
+                # The block was read; the rest of the plan with it in is what cannot be: the reason, not another ask.
+                outcome = "refused beyond the block"
+                last_problem = _one_line(re.sub(r";? ?plan\.md is unchanged\.?$", "", str(e)), _REFUSAL_CHARS)
+                beyond = self._design_block_mark(text)
+                self._log.warning("[plan] the plan step's answer to complete %s was read, but the plan with it cannot be "
+                                  "read for a reason that is not the block, so FI will not ask again: %s", short, e)
             except ValueError as e:
                 outcome = "not usable"
                 schema = True
@@ -1025,7 +1134,10 @@ class PlanStageMixin:
             self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
                                       {**(extra or {}), **({"problem": last_problem, "schema": schema,
                                                             **({"refused_block": last_block} if last_block else {})}
-                                                           if last_problem else {})})
+                                                           if last_problem else {}),
+                                       **({"beyond_block": beyond} if beyond else {})})
+            if outcome == "refused beyond the block":
+                return design, plan_sha  # the stop that follows says what is missing
             if outcome == "same refusal again":
                 # The same reason twice: the model repeats an answer the plan's rules cannot take, so another call would
                 # cost a few minutes and return the same refusal. The stop that follows says what is missing.
@@ -1313,6 +1425,7 @@ class PlanStageMixin:
         self._answer_refused = []  # what of the answer the keep did not take, with the reader's reasons
         prompt = self._prompts["plan_parts"].substitute(topic=self.config.topic, plan_md=current, request=request)
         parts = await self._ask_for_plan_parts(prompt)
+        self.__dict__.pop("_pending_held", None)
         kept = keep(current, parts)
         if kept is None:
             raise ValueError("your answer has none of the asked parts in a form that can be read; plan.md is unchanged")
@@ -1321,6 +1434,7 @@ class PlanStageMixin:
         if path.read_text(encoding="utf-8") != expect:
             raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(kept, encoding="utf-8")
+        self._commit_held(kept)
         entry = _plan.record_version(self.quest_root, kept, by=by, note=(note() if callable(note) else note)[:300])
         self._log.info("[plan] completed by the plan's model (the asked parts only): version %d", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
@@ -2817,6 +2931,13 @@ class PlanStageMixin:
             block = taken
         self._clear_search_refused()
 
+        left_out_parts: list[str] = []
+        # What an earlier merge left out is put back only while the plan is still the one that merge wrote (its design block
+        # unchanged): a person's edit, or any other change, ends the hold, so a control they removed never returns.
+        held_aside = self._held_aside(self._design_block_mark(before_text))
+        aside_now: dict[str, Any] = {"controls": [], "references": {}}
+        came_back: list[str] = []
+
         def change(design: dict[str, Any]) -> dict[str, Any]:
             # The plan's own top-level scan parts cannot stand beside the block (the reader refuses them: a search keeps
             # them inside its block), and what they compared is the block's now; they are removed with the grid.
@@ -2826,7 +2947,24 @@ class PlanStageMixin:
             if gone:
                 self._log.warning("[plan] a search keeps %s inside its own block, so FI removed what the plan wrote beside "
                                   "it", ", ".join(f"`{k}`" for k in gone))
-            out = {**design, "protocol": {**kept, "optimisation": block}}
+            now = {**kept, "optimisation": block}
+            # What the plan wrote beside the scan was judged against the plan's own grid, which is gone: an entry that names
+            # a setting the search's scan does not have (a control, a metric's reference) is read as the design reader reads
+            # it, left out alone and said in the plan, never the whole block refused for it.
+            # What an earlier merge had to leave out (a control on a setting the scan lacked then) comes back to be judged
+            # again, so a scan setting asked back of the plan's model brings back what names it.
+            now = _held_back_in(now, held_aside)
+            repaired, notes = _leave_out_what_the_scan_lacks(now)
+            if repaired is not None:
+                aside_now.update(_left_out_between(now, repaired))
+                for name in _restored_between(held_aside, repaired):
+                    came_back.append(name)
+                fresh = [n for n in notes if n not in before_text]  # a note the plan already says is not said twice
+                if fresh:
+                    left_out_parts.extend(fresh)
+                    self._log.warning("[plan] with the search's scan in place of the plan's grid: %s", "; ".join(fresh)[:600])
+                now = repaired
+            out = {**design, "protocol": now}
             out["study_type"] = "find_best_design"
             return out
 
@@ -2835,10 +2973,43 @@ class PlanStageMixin:
             return None
         parsed = _plan.parse(merged_text)
         if parsed.design is None:
-            raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
-        if left_out:
-            merged_text = _plan.add_to_section(merged_text, _PART_HEADING, ["", *[f"- {n}" for n in left_out]])
+            raise _PlanBeyondTheBlock(f"the plan with your block in it cannot be read: {parsed.error}")
+        if came_back:  # said "left out" before, in the plan: it is in again, so the sentence goes
+            merged_text = NL.join(line for line in merged_text.split(NL) if not any(
+                line.lstrip().startswith(("- the control " + repr(n) + " was left out", f"- the reference value of `{n}` was left out"))
+                for n in came_back))
+        self.__dict__["_pending_held"] = aside_now  # written beside the plan, once the plan is written (_complete_plan_parts)
+        if left_out or left_out_parts:
+            merged_text = _plan.add_to_section(merged_text, _PART_HEADING,
+                                               ["", *[f"- {n}" for n in [*left_out, *left_out_parts]]])
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
+
+    _HELD_ASIDE = "held_beside_the_scan.json"
+
+    def _held_aside(self, plan_mark: str) -> dict[str, Any]:
+        """The controls and metric references an earlier merge of a search block left out because the scan lacked a setting
+        they name (``.fi/held_beside_the_scan.json``): ``{"controls": [entries as written], "references": {id: reference}}``.
+        Empty unless the record was written for the plan whose design block has ``plan_mark``."""
+        try:
+            record = json.loads((self.fi_dir / self._HELD_ASIDE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        record = record if isinstance(record, dict) and record.get("plan_mark") == plan_mark else {}
+        return {"controls": [c for c in record.get("controls") or [] if isinstance(c, dict)],
+                "references": {str(k): v for k, v in (record.get("references") or {}).items()}}
+
+    def _commit_held(self, plan_text: str) -> None:
+        """After the plan is written: what its merge left out is kept, tied to the plan written (the record is replaced:
+        what came back is no longer held). Nothing is written when the merge did not leave this for the plan."""
+        pending = self.__dict__.pop("_pending_held", None)
+        if pending is None:
+            return
+        record = {**pending, "plan_mark": self._design_block_mark(plan_text)}
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / self._HELD_ASIDE).write_text(json.dumps(record, ensure_ascii=False, default=str), encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't keep the entries left out of the plan: %r", e)
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
         """``(requests, model, iteration)`` of the last time FI asked the design step's model to write a drafted design's
@@ -2976,16 +3147,20 @@ class PlanStageMixin:
         wanted, missing, _why = self._search_problems(state, design)
         if not (wanted and missing) or self._search_asked(plan_sha):
             return design, plan_sha  # a search that can start, or this plan was asked already (the stop says so)
-        self._log.warning("[design] the plan changed after its search was completed, and the search can no longer start "
-                          "(%s); FI asks the plan's model for it again", "; ".join(_one_line(m, 200) for m in missing[:3]))
+        try:
+            completed = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8")).get("outcome") == "kept"
+        except (OSError, ValueError, AttributeError):
+            completed = False
+        what = ("the plan changed after its search was completed, and the search can no longer start" if completed
+                else "the plan still has no search FI can run")
+        self._log.warning("[design] %s (%s); FI asks the plan's model for it again", what,
+                          "; ".join(_one_line(m, 200) for m in missing[:3]))
         return await self._ask_plan_for_the_search(state, design, plan_sha)
 
-    def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
-        """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
-        the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
-        reader's exact reason each time, and the search is still not there. Nothing is run and nobody is asked to pick
-        another model or to write any of it. ``None`` when the design is not a search, the search can start, or the quest
-        runs no experiment of its own. A search is never run as a plain sweep instead."""
+    def _search_stop_words(self, state: QuestState, design: Any) -> tuple[str, list[str], list[str], str] | None:
+        """``(text, tried, missing, said)`` for a design that is a search for the best design whose search FI could not make:
+        the plain sentence, what FI tried, the reader's own sentences of what is missing, and them joined for run.log.
+        ``None`` when the design is not a search, the search can start, or the quest runs no experiment of its own."""
         if not self._runs_code(state):
             return None
         wanted, missing, block_why = self._search_problems(state, design)
@@ -3006,11 +3181,47 @@ class PlanStageMixin:
             *[_one_line(m, 400) for m in missing[:3]],
             "did not run the plan as a plain sweep: that would answer a different question",
         ]
-        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping, nothing "
-                          "was run", said)
+        return text, tried, missing, said
+
+    def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
+        """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
+        the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
+        reader's exact reason each time, and the search is still not there. Nothing is run and nobody is asked to pick
+        another model or to write any of it. ``None`` when the design is not a search, the search can start, or the quest
+        runs no experiment of its own. A search is never run as a plain sweep instead. The compute step of a commissioned
+        study, given such a design, hands it back to the design step (``needs_earlier_step``) instead of stopping: the
+        search is that step's to write."""
+        words = self._search_stop_words(state, design)
+        if words is None:
+            return None
+        text, tried, missing, said = words
+        step = self._step()  # type: ignore[attr-defined]
+        back = step is not None and step.name == "compute"
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); %s", said,
+                          "handing it back to the design step, nothing was run" if back else "stopping, nothing was run")
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but FI could not make the search "
               f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
+        if back:
+            problem = ("the design this step was given is a search for the best design, but its plan has no search FI can "
+                       "run, so the design step must write it: " + text.split("but FI could not make a search of it: ", 1)[-1])
+            stop = self._stop_before_run(problem, "returned", tried=tried)
+            stop["exec_result"]["returned_for"] = {
+                "reason": "needs_earlier_step", "evidence": {"step": "design", "missing": missing[:6]},
+                "rest": {"step": "design"}}
+            return stop
         return self._stop_before_run(text, "no_search", tried=tried)
+
+    def _search_ready(self, state: QuestState, design: Any) -> dict[str, Any]:
+        """What the design step's check ``search_ready`` judges, as the record it leaves (``.fi/search_ready.json``): a
+        plan that is a search for the best design has the search FI can run (``ready``), lacks it (``not_ready``, with the
+        plain reason and what FI tried), or is not such a plan or runs no experiment (``not_applicable``)."""
+        words = self._search_stop_words(state, design)
+        if words is not None:
+            text, tried, _missing, _said = words
+            return {"status": "not_ready", "detail": text, "tried": tried}
+        wanted = self._runs_code(state) and self._search_problems(state, design)[0]
+        return ({"status": "ready"} if wanted else
+                {"status": "not_applicable", "detail": "the plan is not a search for the best design, or runs no experiment"})
 
     def _stop_for_unusable_search(self, runner: Any) -> QuestState | None:
         """The honest stop (no paper, no repair) for a study in its second stage whose kept search cannot be used
@@ -4169,8 +4380,8 @@ class PlanStageMixin:
             headline="settings that decide how strictly this quest is checked changed after you approved it",
             steps=[
                 "Nothing was run. Changed since the quest was approved:\n" + "\n".join(f"  - {c}" for c in changed),
-                "To keep the change, approve it: `python launch.py --update " + self.quest_id + "` (web: the quest page's "
-                "Update, VS Code: `@fi /update " + self.quest_id + "`); it shows the settings and records them.",
+                "To keep the change, approve it: `python launch.py --update " + self.quest_id + "`; it shows the "
+                "settings, records them and resumes the quest.",
                 f"To undo it, put the setting back in `{self.quest_root / 'config.yaml'}` (or resume with the config "
                 f"you started with), then `python launch.py --resume {self.quest_id}`.",
             ],
@@ -4473,6 +4684,7 @@ class PlanStageMixin:
                     "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
                     "while paused", added,
                 )
+                merged = await self._check_retractions(merged, int(state.get("literature_iter") or 0))
         read = await self._read_literature_figures(state, merged)
         if not added and not read:
             return {}
@@ -4480,70 +4692,6 @@ class PlanStageMixin:
         if read:
             self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
-
-    async def _node_scope(self, state: QuestState) -> QuestState:
-        """Before the plan, the few different studies the topic could mean, for a person to pick one
-        (:mod:`core.scope_cards`). Runs once per quest: a record in ``.fi/scope.json`` (picked or not) is read, never
-        asked again. With nobody to answer the cards are still recorded, and the plan is written from the topic alone."""
-        if (self.config.pauses.scope == "off" or self.config.engine.analyze_local_first
-                or int(state.get("iteration", 0) or 0) > 0 or _plan.plan_path(self.quest_root).is_file()):
-            return {}
-        record = _scope_cards.read_record(self.quest_root)
-        if record is not None:
-            chosen = record.get("chosen")
-            return {"scope_card": chosen} if isinstance(chosen, dict) else {}
-        sources = _labelled_sources(state.get("literature") or [])
-        ids = {f"[{label}]" for label, _m, _i in sources} | {label for label, _m, _i in sources}
-        listing = "\n".join(
-            f"[{label}] {meta.get('title') or meta.get('source') or 'untitled'} — "
-            + _one_line(_item_content(item), 300) for label, meta, item in sources) or "(none)"
-        again = ""
-        cards: list[dict[str, Any]] = []
-        removed: list[str] = []
-        for _ in range(2):
-            prompt = self._prompts["scope"].substitute(
-                topic=state.get("topic") or self.config.topic, answers=_format_clarify(state),
-                direction=json.dumps(state.get("chosen_idea") or {}, indent=2), sources=listing, again=again)
-            reply = await self._chat(prompt, node="scope")
-            cards, removed = _scope_cards.normalize(_parse_json_lenient(reply) or reply, ids)
-            if _scope_cards.distinct_enough(cards):
-                break
-            again = (f"Your last reply gave {len(cards)} different studies"
-                     + (": " + "; ".join(c["question"] for c in cards) if cards else "")
-                     + ". Two cards with the same study type and the same main results are one study. "
-                       "Write 3 or 4 studies that differ in their study type or in their main results.")
-        chosen = await self._scope_answer(cards) if cards else None
-        try:
-            _scope_cards.write_record(self.quest_root, cards, chosen, removed, widest=_scope_cards.has_widest(cards))
-        except OSError as exc:
-            self._log.warning("[scope] could not write %s (%r); the choice is kept for this run only",
-                              _scope_cards.RECORD, exc)
-        if chosen is not None:
-            self._log.info("[scope] the study to run: %s", chosen.get("question", ""))
-        else:
-            self._log.info("[scope] nobody picked the study to run; the plan is written from the topic alone")
-        return {"scope_card": chosen}
-
-    async def _scope_answer(self, cards: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """The card a person picked: an answer staged in ``.fi/scope_answer.json`` (read now), else the answer channel
-        the clarify questions use, waited for up to ``pauses.timeout_s`` (0: no limit). ``None``: nobody picked."""
-        path = self.quest_root / _scope_cards.ANSWER
-        if path.is_file():
-            try:
-                return _scope_cards.read_answer(json.loads(path.read_text(encoding="utf-8")), cards)
-            except (OSError, ValueError) as exc:
-                self._log.warning("[scope] could not read %s (%r)", _scope_cards.ANSWER, exc)
-        ask = getattr(self, "_scope_answerer", None)
-        if ask is None:
-            return None
-        try:
-            waiting = ask(_scope_cards.question(cards))
-            limit = float(self.config.pauses.timeout_s)
-            answer = await (asyncio.wait_for(waiting, timeout=limit) if limit > 0 else waiting)
-        except (asyncio.TimeoutError, BridgeError) as exc:
-            self._log.warning("[scope] no answer to the study cards (%s)", type(exc).__name__)
-            return None
-        return _scope_cards.read_answer(answer, cards)
 
     async def _read_literature_figures(self, state: QuestState, literature: list[Any]) -> int:
         """Read the values off the papers' figures (``knowledge.read_figures``), in place: the model for the step

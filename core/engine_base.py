@@ -38,11 +38,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypedDict, get_args
 
-# User-supplied async function that collects answers to clarify-node
-# questions. Receives the ``clarify_questions`` dict and must return
-# the answers dict (same keys, resolved values).
-ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
-
 # Human-feedback gate callback. Receives the review snapshot dict
 # (verdict / score / strengths / weaknesses / suggestions / paper_md_path)
 # and returns ``{"action": <accept|reject|refine>, "feedback": "..."}``.
@@ -122,7 +117,6 @@ from . import improve as _improve
 from . import in_run as _in_run
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
-from . import novelty as _novelty
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
@@ -165,7 +159,6 @@ from . import hidden_check as _hidden
 from . import refinement_check as _refine
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
-from . import scope_cards as _scope_cards
 from . import optimise as _optimise
 from . import optimise_refine as _optimise_refine
 from . import optimise_search as _optimise_search
@@ -180,6 +173,7 @@ from . import stop_power as _stop_power
 from . import stats as _stats
 from .config import (
     DEFAULT_PAPER_FORMAT,
+    paper_format_with_old_venue,
     Config,
     NON_SCIENTIFIC_PAPER_FORMATS,
     SCIENTIFIC_PAPER_FORMATS,
@@ -187,8 +181,6 @@ from .config import (
 )
 from .execution import DockerLimits, ExecutionResult, make_executor, pip_failure_summary, scrub_secrets
 from .knowledge import (
-    FOUNDATIONAL_MAX_SUGGESTED,
-    FOUNDATIONAL_SUGGESTED,
     WORK_SCOPE_PAPERS,
     WORK_SCOPE_PAPERS_AND_BOOKS,
     Knowledge,
@@ -197,8 +189,6 @@ from .knowledge import (
     _doc_dedup_keys,
     _is_bot_check_title,
     _normalize_title,
-    _titles_match,
-    foundational_work_text as _foundational_work_text,
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
@@ -244,9 +234,7 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
 # gap. `PROGRESS_LOG_NAME` is a second file with only these lines, for the web page and for `--progress <quest_id>`.
 STAGE_PROGRESS: dict[str, str] = {
     "clarify": "Checking the setup.",
-    "ideate": "Choosing the angle to take.",
     "literature": "Searching the literature.",
-    "scope": "Offering the studies this topic could mean.",
     "select_skills": "Choosing which tools to use.",
     "plan": "Writing the plan.",
     "design": "Designing the experiment.",
@@ -260,7 +248,6 @@ STAGE_PROGRESS: dict[str, str] = {
     "claim_check": "Checking every claim against the evidence.",
     "citation_check": "Checking every citation against its source.",
     "review": "Reviewing the paper.",
-    "auto_collect_data": "Looking for data.",
     "data_load": "Loading the data.",
 }
 PROGRESS_LOG_NAME = "progress.log"
@@ -280,16 +267,16 @@ _FIGURE_SUFFIXES = frozenset({".png", ".svg", ".jpg", ".jpeg", ".pdf"})
 # (names), kept in ``.fi/`` for a ``--watch`` that has no quest state.
 _SKILL_MOUNTS_FILE = "skill_mounts.json"
 
-# Default sampling temperature for generative nodes (ideate, write, analyze…).
+# Default sampling temperature for generative nodes (plan, write, analyze…).
 _DEFAULT_CHAT_TEMPERATURE = 0.2
 
 # How long the environment record waits for `pip freeze` before it records the timeout and stops it (with everything it
 # started) instead.
 _PIP_FREEZE_TIMEOUT_S = 30.0
 # Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
-# routing decision (sufficient vs broaden, accept vs revise, supported vs not),
+# routing decision (sufficient vs insufficient, accept vs revise, supported vs not),
 # where run-to-run flakiness means the same corpus can flip the route and
-# trigger wasted broaden loops or spurious revise cycles (audit: "gates are
+# trigger spurious revise cycles (audit: "gates are
 # non-deterministic"). These run at temperature 0 so the decision is
 # reproducible wherever the transport honours it (HTTP + vscode_bridge; CLI
 # transports that don't expose temperature are unaffected — no regression).
@@ -301,9 +288,6 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "citation_check",  # every citation read against the retrieved text of its source, last, on the final paper
     "oracle_review.citations",  # ... while no step of its own is set for it
     "cross_check",
-    "relevance_guard",
-    "literature_screen",
-    "literature_novelty",  # a judgement of the sources, not a draft
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
@@ -353,36 +337,25 @@ class QuestState(TypedDict, total=False):
     # Range assertions contributed by the selected skills, merged with the
     # design's own by ``_assertion_violations``.
     _skill_assertions: list[dict[str, Any]]
-    # Clarify-node state. Both dicts share the same 5 keys
-    # (`comparative_baseline`, `empirical_vs_theoretical`,
-    # `success_metric`, `budget`, `output_kinds`); `clarify_questions`
-    # carries `{question, default}` per slot, `clarify_answers` carries
-    # the resolved values (default or user-overridden).
+    # Kept so a checkpoint of an earlier FI still reads: the setup questions FI put to the person then and their
+    # answers (read by ``.get()``, empty since FI asks none). ``clarify_done`` is the first node's own mark.
     clarify_questions: dict[str, Any]
     clarify_answers: dict[str, Any]
     clarify_done: bool
-    # The study a person picked before the plan (core/scope_cards.py), or None: nobody picked one.
+    # Kept so a checkpoint of an earlier FI still reads: the study a person picked from the study cards FI offered then.
     scope_card: dict[str, Any] | None
     title_confirmed: bool
+    # Kept so a checkpoint of an earlier FI still reads: the research ideas FI made then, the one it chose (read by
+    # ``.get()``, empty since FI makes no ideas), and how it was chosen.
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
-    # Ideate self-reflection result. Optional; describes what
-    # the agent considered before locking in `chosen_idea`.
     ideate_critique: dict[str, Any]
-    # Ideate tournament result. Optional; present only when
-    # `engine.ideate_tournament: true`. Carries the match table, win
-    # counts, and outcome label ("confirmed" / "swapped" /
-    # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
-    #: Whether the retrieved sources already answer the study's question (core/novelty.py): the checked record, or absent
-    #: when the call was off, failed or gave nothing usable. Disclosed only; kept also in .fi/literature_novelty.json.
-    literature_novelty: dict[str, Any]
-    # How chosen_idea was picked: "ensemble", "tournament", "reflection" or "model" (the ideate node's own pick).
     idea_selection: str
     literature: list[dict[str, Any]]
     # Iterative-literature counter. Incremented on every entry into
-    # ``_node_literature``. First entry sets it to 1; ``broaden_lit``
-    # re-entries from ``cross_check`` bump it. Used to (a) emit a
+    # ``_node_literature``. First entry sets it to 1; a resumed pass
+    # bumps it. Used to (a) emit a
     # distinct INFO log per pass, (b) decide whether to dedup-merge
     # vs replace the literature list, and (c) optionally cap
     # additional retrievals at ``engine.max_iterations + 1``.
@@ -511,7 +484,7 @@ class QuestState(TypedDict, total=False):
     # Cross-paper check per finding. List of per-finding
     # records carrying supporting / conflicting / neutral classifications.
     cross_check: list[dict[str, Any]]
-    # Where the quest goes after cross_check ("write" / "broaden_lit" / "redesign"), decided by the node before it
+    # Where the quest goes after cross_check ("write" / "redesign"), decided by the node before it
     # spends a round; the router reads it.
     cross_check_route: str
     # The typed research contract (core.protocol.ResearchProtocol, stored
@@ -519,12 +492,11 @@ class QuestState(TypedDict, total=False):
     # success_metric, … Derived at the evidence_gate from clarify + config.
     research_protocol: dict[str, Any]
     # Evidence-sufficiency assessment from the evidence_gate node:
-    # ``{"verdict": "sufficient"|"broaden"|"insufficient", "rationale",
+    # ``{"verdict": "sufficient"|"insufficient", "rationale",
     # "gaps": [...], "n_sources", "n_supporting"}``. Read by the writer so
     # a thin-evidence paper frames its limits honestly.
     evidence_assessment: dict[str, Any]
-    # How many times the evidence_gate has sent the quest back to broaden
-    # the literature. Bounds the broaden loop (``evidence_gate_max_broaden``).
+    # Kept so a checkpoint of an earlier FI still reads: how often its evidence gate sent the quest back to the literature.
     evidence_broaden_count: int
     # How many times the evidence_gate has given a simulation with no results another try (at most once): back to design,
     # or, when the script could not run to the end, its code written again from the same design.
@@ -650,32 +622,25 @@ class QuestState(TypedDict, total=False):
     # Python; instead it pauses after `design`, asks the user to drop
     # real-world data into `<quest_root>/data/`, then resumes with
     # `data_load` synthesizing the result_json from those files.
-    # Resolved at the clarify node: True if `engine.no_simulation: true`
-    # in YAML OR the clarify answer for `empirical_vs_theoretical` is
-    # "empirical". See `_resolve_no_simulation_from_clarify`.
+    # Set by the first node (`clarify`) from the commission's `method`
+    # (`analyze_data` or `review_literature`).
     no_simulation_resolved: bool
     # survey mode — a descriptive literature / history synthesis with NO
     # experiment AND NO dataset. A stronger form of no_simulation: the
     # engine skips the experiment (implement/execute) AND the data path
-    # (auto_collect_data/wait_for_data/data_load/web_plots), routing
+    # (wait_for_data/data_load/web_plots), routing
     # design → web_figures → analyze so the paper synthesises the
-    # literature directly. Resolved at clarify: True if `engine.survey_mode:
-    # true` in YAML OR the clarify agent classified `topic_shape == 'survey'`
-    # (a history/overview/"evolution of X" topic). Survey implies
-    # no_simulation_resolved. See `_resolve_survey_from_clarify`.
+    # literature directly. Set by the first node (`clarify`) from the
+    # commission's `method: review_literature`. Survey implies
+    # no_simulation_resolved.
     survey_mode_resolved: bool
     # Populated by the wait_for_data node's interrupt-resume payload.
     # List of absolute paths the user dropped into `<quest_root>/data/`.
     # The data_load node walks them, classifies, and synthesizes a
     # result_json compatible with downstream nodes (analyze, write).
     data_files: list[str]
-    # Number of docs the auto_collect_data node successfully
-    # wrote into `<quest_root>/data/auto_collected/`. 0 means the node
-    # was a passthrough (auto-collect disabled, knowledge disabled, or
-    # Axon returned no hits), in which case wait_for_data falls back
-    # to pausing for user-supplied data. Positive values let the user
-    # see in run.log / state how much of their data load came from
-    # the agent vs from manual drops.
+    # Kept so a checkpoint of an earlier FI loads: the number of documents its data search wrote into
+    # `<quest_root>/data/auto_collected/`. Nothing sets it now (a data study analyses the person's own files).
     auto_collected_count: int
 
 
@@ -906,7 +871,6 @@ def _design_parts_listing(design: Any) -> str:
 
 def _load_prompts() -> dict[str, string.Template]:
     names = (
-        "clarify", "ideate", "ideate_reflect", "ideate_tournament", "literature_novelty",
         "design", "design_self_critique",   # second-pass methodology audit
         "design_parts_map",                 # a note with no path: which listed parts of the design it is about
         "design_parts",                     # a redesign: ONLY the parts the reason concerns, the rest carried over
@@ -932,7 +896,6 @@ def _load_prompts() -> dict[str, string.Template]:
         "known_value_program",              # a commission's known value computed from its source (core/known_values.py)
         "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
-        "scope",                # the few studies the topic could mean, for a person to pick before the plan
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
         "implement_update",                 # a revised plan: ONLY the functions of the scripts the revision touched
@@ -951,7 +914,6 @@ def _load_prompts() -> dict[str, string.Template]:
         "citation_check",       # a different model reads every citation against its source's retrieved text
         "citation_repair",      # what that reading found unsupported, fixed without a person
         "evidence_gate",        # weigh evidence sufficiency before write
-        "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
         "figures_pick",         # which of the papers' figures carry values this question can use
         "figures_read",         # read those values off the images
         "write", "review",
@@ -976,7 +938,7 @@ def _load_prompts() -> dict[str, string.Template]:
 
 
 # Per-paper excerpt size when rendering retrieved literature into the
-# write / ideate / design prompts. Was 600 chars — too short for the
+# write / design prompts. Was 600 chars — too short for the
 # model to extract specific findings or methods, so citations stayed
 # generic. 2000 chars is roughly an abstract + intro, which is enough
 # to discuss prior work by content rather than by title alone.
@@ -1279,51 +1241,6 @@ def _lit_query(state: QuestState) -> str:
     return " ".join(p for p in parts if p)[:500]
 
 
-def _screen_grades(parsed: Any, n: int) -> dict[int, int] | None:
-    """Read the literature screen's reply -- ``{"grades": [{"i": 0, "grade":
-    3}, ...]}`` or ``{"grades": {"0": 3}}`` -- into ``{index: grade}``. None
-    when the reply carries no grades at all. Entries naming an index outside
-    the ``n`` candidates, or a grade outside 0-3, are ignored."""
-    if not isinstance(parsed, dict):
-        return None
-    raw = parsed.get("grades")
-    if isinstance(raw, dict):
-        pairs = list(raw.items())
-    elif isinstance(raw, list):
-        pairs = [(e.get("i"), e.get("grade")) for e in raw if isinstance(e, dict)]
-    else:
-        return None
-    out: dict[int, int] = {}
-    for i, g in pairs:
-        try:
-            i, g = int(i), int(g)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= i < n and 0 <= g <= 3:
-            out[i] = g
-    return out
-
-
-def _merge_round_robin(result_lists: list[list]) -> list:
-    """Interleave several searches' results -- the first of each, then the
-    second of each, and so on -- keeping the first copy of a work found by
-    more than one. Each search keeps its own ranking, and no search's best
-    results end up behind another search's tail."""
-    seen: set[str] = set()
-    out: list = []
-    for rank in range(max((len(r) for r in result_lists), default=0)):
-        for results in result_lists:
-            if rank >= len(results):
-                continue
-            doc = results[rank]
-            keys = _doc_dedup_keys(doc)
-            if any(k in seen for k in keys):
-                continue
-            seen.update(keys)
-            out.append(doc)
-    return out
-
-
 def _format_lit(
     docs: list[RetrievedDoc],
     audience: str = "external",
@@ -1434,169 +1351,6 @@ def _labelled_sources(
             papers += 1
             out.append((str(papers), meta, item))
     return out
-
-
-def _foundational_outcomes(
-    suggestions: list[dict[str, Any]], new: list[RetrievedDoc],
-    found: list[RetrievedDoc], docs: list[RetrievedDoc],
-) -> tuple[list[str], list[str], list[str]]:
-    """What became of each suggested work, as :func:`_foundational_work_text`
-    lines: the ones the pass added (``new``), the ones already among the search
-    results (the lookup found them, or the search had them, so they are not new)
-    and the ones OpenAlex did not have. A suggestion is matched to a record by
-    the same title rule the lookup used, so a record counts for the suggestion
-    that found it; a record found by author and year, whose title is not the
-    suggested one, names the suggestions it answers (``suggested_works``: title,
-    year and authors, so two suggestions with one title are told apart), and
-    its line says so: ``suggested (year, author) -> the record's title, by author
-    and year``."""
-    def record_for(work: dict[str, Any], candidates: list[RetrievedDoc]) -> RetrievedDoc | None:
-        title = str(work.get("title") or "")
-        for d in candidates:
-            md = d.metadata or {}
-            if _titles_match(title, str(md.get("title") or "")):
-                return d
-            if title and _foundational_work_text(work) in (md.get("suggested_works") or []):
-                return d
-        return None
-
-    def line(work: dict[str, Any], doc: RetrievedDoc) -> str:
-        text = _foundational_work_text(work)
-        found_title = " ".join(str((doc.metadata or {}).get("title") or "").split())
-        if _titles_match(str(work.get("title") or ""), found_title):
-            return text
-        return f"{text} -> {found_title}, by author and year"
-
-    added: list[str] = []
-    already: list[str] = []
-    dropped: list[str] = []
-    for work in suggestions:
-        if (doc := record_for(work, new)) is not None:
-            added.append(line(work, doc))
-        elif (doc := record_for(work, found) or record_for(work, docs)) is not None:
-            already.append(line(work, doc))
-        else:
-            dropped.append(_foundational_work_text(work))
-    return added, already, dropped
-
-
-def _foundational_sources(
-    literature: list[Any], audience: str = "external",
-) -> list[tuple[str, dict[str, Any]]]:
-    """The foundational works in the paper's citable set, as ``(label,
-    metadata)`` in the writer's label order. The citable set is the one
-    :func:`_labelled_sources` gives the prior-work block, so a label here is that
-    block's label. A work is foundational when the literature pass marked it
-    (``metadata["foundational"]``): an original paper or standard textbook the
-    model named and OpenAlex holds, or a work several retrieved papers cite. It
-    is in this set only if the literature screen kept it."""
-    return [
-        (label, meta)
-        for label, meta, _item in _labelled_sources(literature, audience)
-        # A retracted work is not to be cited, so it is never asked for (core/retractions.py).
-        if meta.get("foundational") and not label.startswith("W") and not _retractions.is_retracted(meta)
-    ]
-
-
-def _foundational_line(
-    label: str, meta: dict[str, Any], *, numbered: bool, thin: str | None = None,
-) -> str:
-    """One foundational work as the prior-work block's header line gives it
-    (authors, year, title), with ``[label]`` when ``numbered``, and a note of
-    what kind of work it is: a book, or how many retrieved papers cite it. A
-    ``thin`` record (:func:`_thin_source`) carries the same ``[title only]`` /
-    ``[short blurb only]`` as its entry in the block."""
-    line = _format_lit_header(meta, label, thin).split("\n", 1)[0]
-    if not numbered:
-        line = re.sub(r"^\[[^\]]*\]\s*", "", line)
-    notes: list[str] = []
-    if meta.get("work_type") in ("book", "book-chapter"):
-        notes.append("book")
-    how = str(meta.get("foundational") or "")
-    if how.startswith("cited by"):
-        notes.append(how)
-    return f"- {line}" + (f" ({', '.join(notes)})" if notes else "")
-
-
-def _foundational_write_block(literature: list[Any], audience: str = "external") -> str:
-    """The write prompt's note on the foundational works in the prior-work block,
-    or "" when there are none, so a prompt without any is unchanged. It lists each
-    with the label the writer cites it by, and asks for the ones that bear on the
-    paper. The works were retrieved, kept by the literature screen and marked
-    foundational, and on stored quests the papers left 175 of 312 such works
-    uncited. The ask is only for the ones that bear on the paper, so it never
-    pushes the writer to cite a work the paper does not use."""
-    works = _foundational_sources(literature, audience)
-    if not works:
-        return ""
-    thin = {
-        label: _thin_source(meta, _item_content(item))
-        for label, meta, item in _labelled_sources(literature, audience)
-    }
-    return (
-        "\n\n### Foundational works in the prior-work block\n"
-        "The literature search marked these entries as foundational: the original papers "
-        "and standard textbooks the topic rests on, or works several of the retrieved papers "
-        "cite. Cite each one that bears on this paper's claims, where it belongs: the original "
-        "paper for a method, model or relation the paper uses, the standard textbook for the "
-        "field. A work that does not bear on the paper is not to be cited just to be cited.\n\n"
-        + "\n".join(
-            _foundational_line(label, meta, numbered=True, thin=thin.get(label)) for label, meta in works
-        )
-    )
-
-
-def _uncited_foundational_works(
-    literature: list[Any], paper_md: str, audience: str = "external",
-) -> list[tuple[str, dict[str, Any]]]:
-    """The foundational works in the citable set that the paper's text does not
-    cite. The paper's citation numbers are the labels of ``literature`` in the
-    order the write node leaves it in (:func:`_finalize_paper_sources`), the same
-    numbers :func:`cited_references` reads."""
-    cited = {str(n) for n in _citation_counts(paper_md)}
-    return [(label, meta) for label, meta in _foundational_sources(literature, audience) if label not in cited]
-
-
-def _foundational_review_block(literature: list[Any], paper_md: str, audience: str = "external") -> str:
-    """The review prompt's advisory line on foundational works the paper does not
-    cite, or "" when it cites every one (or there are none). Advisory: it is
-    handed to the reviewer as something it may ask for, and nothing here adds a
-    must-flag hit, because whether a work bears on a paper is a judgement, not a
-    set difference."""
-    if not (paper_md or "").strip():
-        return ""  # nothing was read, so nothing can be said to be left out
-    missing = _uncited_foundational_works(literature, paper_md, audience)
-    if not missing:
-        return ""
-    # The prior-work block marks a record FI holds no more than the title (or a
-    # blurb) of, and the writer is told to cite it only for what that text says.
-    # The reviewer was not told, and asked for one to back a specific claim: a
-    # rewrite then cited it, and the claim check marked the sentence unsupported.
-    thin = {
-        label: _thin_source(meta, _item_content(item))
-        for label, meta, item in _labelled_sources(literature, audience)
-    }
-    marked = any(thin.get(label) for label, _meta in missing)
-    return (
-        "\n\n## Foundational works this paper does not cite (advisory)\n"
-        "These works were retrieved, kept by the literature screen and marked as foundational "
-        "(an original paper or standard textbook the topic rests on, or a work several of the "
-        "retrieved papers cite), but the paper does not cite them:\n"
-        + "\n".join(
-            _foundational_line(label, meta, numbered=False, thin=thin.get(label)) for label, meta in missing
-        )
-        + "\nAdvisory only: if one of them bears on a claim the paper makes (the original paper "
-        "for a method or relation the paper uses, the standard textbook for the field), you may "
-        "ask for it under `suggestions`. Do not add anything to `must_flag_hits` and do not "
-        "choose `revise` because of this alone. A work that does not bear on the paper needs "
-        "no citation."
-        + (
-            " An entry marked `[title only]` or `[short blurb only]` has no text beyond that: ask "
-            "for it only to say the work exists or for what its title states, never to back a "
-            "finding, a number or a mechanism, which it cannot show."
-            if marked else ""
-        )
-    )
 
 
 def _reference_entry(label: str, meta: dict[str, Any]) -> dict[str, Any]:
@@ -1770,7 +1524,7 @@ def _citing_sentences(paper_md: str) -> dict[str, list[str]]:
 # the other 3 as claims at all.
 # A sentence is said to go beyond the title when it names this many words that its
 # cited sources' titles, authors and stored text do not. A record's words come from
-# :func:`_content_stems`, the word test the foundational-work lookup uses, so
+# :func:`_content_stems`, the word test for a title's subject, so
 # "epidemic" and "epidemics" are one word. Attribution ("Kermack and McKendrick [1]
 # introduced the SIR model") adds one or two such words to a title that names its
 # subject; a specific result adds more.
@@ -2457,6 +2211,11 @@ def _manifest_repair_budget(configured: int, analysis_only: bool) -> int:
 
 class _PartsRefused(ValueError):
     """The plan's model's answer to a request for some parts of the plan was not used (FI's reason is the message)."""
+
+
+class _PlanBeyondTheBlock(ValueError):
+    """A search block the plan's model wrote was read, but the plan with the block in it cannot be read for something
+    that is not the block (FI's reason is the message): asking the model for the block again cannot change that."""
 
 
 class _PlanEditedMeanwhile(Exception):
@@ -3814,12 +3573,11 @@ _CLARIFY_LABELS = {
 
 
 def _format_clarify(state: QuestState) -> str:
-    """Render the resolved clarify-answer slots as a small bulleted block
-    for downstream prompts. Returns an empty-marker string when clarify
-    was skipped (mode=off) so the prompt still parses cleanly."""
+    """Render the setup answers of an earlier FI's checkpoint as a small bulleted block for downstream prompts. FI asks
+    none now, so this is the empty marker on every new study (the prompt still parses cleanly)."""
     answers = state.get("clarify_answers") or {}
     if not answers:
-        return "(none — clarify mode is off)"
+        return "(none — no setup questions were asked)"
     lines: list[str] = []
     for key, label in _CLARIFY_LABELS.items():
         if key not in answers:
@@ -3831,101 +3589,6 @@ def _format_clarify(state: QuestState) -> str:
             value = ", ".join(str(v) for v in value) or "(empty)"
         lines.append(f"- **{label}**: {value}")
     return "\n".join(lines) or "(no answers recorded)"
-
-
-def _clean_title(value: Any) -> str:
-    """A title the user or agent gave, tidied: one line, no wrapping quotes, at most 120 characters."""
-    if not isinstance(value, str):
-        return ""
-    text = " ".join(value.split()).strip("\"'`“”‘’ ")
-    if text.startswith("<") and text.endswith(">"):
-        return ""
-    return text[:120].rstrip()
-
-
-def _simulatability_answer(sim: Any) -> tuple[str, str]:
-    """``(decision, reason)`` of a ``simulatability`` answer in any of its shapes: a slot dict ``{default, reason}``,
-    a bare string, or a bool (PyYAML reads an unquoted ``yes`` / ``no`` as ``True`` / ``False``, the commonest way
-    the slot is written in a YAML; ``True`` means "yes"). The decision is lower-cased and stripped, not yet parsed."""
-    reason = ""
-    if isinstance(sim, dict):
-        reason = str(sim.get("reason", "") or "").strip()
-        sim = sim.get("default", "")
-    if isinstance(sim, bool):
-        return ("yes" if sim else "no"), reason
-    if sim is None:
-        return "", reason
-    return str(sim).strip().lower(), reason
-
-
-_SIMULATABILITY_LEAD = re.compile(
-    # "No idea", "no clue", "no preference" are not a "no".
-    r"^\W*(yes|uncertain|no(?!\s+(?:idea|clue|opinion|preference|comment|answer|way\s+to\s+tell)\b))\b",
-    re.IGNORECASE,
-)
-
-
-def _leading_simulatability_word(text: str) -> str:
-    """``yes`` / ``no`` / ``uncertain`` when ``text`` starts with that word ("Yes, but more than 100 lines" is "yes";
-    "not sure" and "no idea" are none of them), else ``""``."""
-    m = _SIMULATABILITY_LEAD.match(str(text or ""))
-    return m.group(1).lower() if m else ""
-
-
-def _spell_out_title_options(questions: dict[str, Any]) -> None:
-    """Put the suggested titles into the title question's own words, so every interface (terminal, web, VS Code)
-    shows them without knowing about a separate options field; the first suggestion is the default."""
-    slot = questions.get("title")
-    if not isinstance(slot, dict):
-        return
-    options = [t for t in (_clean_title(o) for o in (slot.pop("options", None) or [])) if t][:5]
-    if options and not _clean_title(slot.get("default")):
-        slot["default"] = options[0]
-    slot["suggestions"] = options
-    if options:
-        slot["question"] = (
-            f"{slot.get('question') or 'What should this study be called?'} "
-            f"Suggestions: {' | '.join(options)} (or type your own)")
-
-
-def _default_clarify_questions(topic: str) -> dict[str, Any]:
-    """Minimal fallback when the LLM produces unparseable JSON. Keeps
-    the same 5-slot shape so downstream code doesn't branch."""
-    topic_hint = topic[:80].replace("\n", " ")
-    return {
-        "comparative_baseline": {
-            "question": f"What existing method or dataset should this study be compared against, for: {topic_hint}?",
-            "default": "(none specified — agent will pick a sensible baseline)",
-        },
-        "empirical_vs_theoretical": {
-            "question": "Does this study run code and measure something, or derive results analytically?",
-            "default": "empirical",
-        },
-        "success_metric": {
-            "question": "What number changing in what direction would count as the headline result?",
-            "default": "(none specified — agent will pick a metric)",
-        },
-        "budget": {
-            "question": "Soft cap on experiment wall-clock?",
-            "default": "a few minutes on a laptop CPU",
-        },
-        "output_kinds": {
-            "question": "Which deliverables matter for this study?",
-            "default": ["paper_md"],
-        },
-        "study_depth": {
-            "question": "How deep should this study go? (brief preprint / journal-length / comprehensive review)",
-            "default": "journal-length",
-        },
-        "paper_venue": {
-            "question": "Which paper template should we use? (article / generic / neurips / iclr / ieee_access / nature_mi)",
-            "default": DEFAULT_PAPER_FORMAT,
-        },
-        "topic_shape": {
-            "question": "What's the intellectual shape of this topic? (experimental / survey / review / case_study / opinion)",
-            "default": "experimental",
-        },
-    }
 
 
 def _format_reflect_history(history: list[dict[str, Any]]) -> str:
@@ -5583,21 +5246,20 @@ def _evidence_gate_rule(
     """The evidence gate's verdict where the counts already decide it, else
     ``None`` and the model is asked.
 
-    From 68 gate calls over 28 quests: the model answered ``broaden`` for
+    From 68 gate calls over 28 quests: the model judged the evidence thin for
     both simulation quests that had no source with text, and ``sufficient``
     for all six with at least 15 sources and a finding a source supports.
     Between those it gave different verdicts to identical counts, so the
     rest stays with the model. Every one of those quests was a simulation
     with retrieval on, so everything else is always asked: other topic
     types; ``--analyze``, where the literature step is skipped; and a quest
-    with retrieval off, where no source is the normal case and a broaden
-    would re-run the experiment for sources it cannot find.
+    with retrieval off, where no source is the normal case.
     """
     if analyze_local_first or not retrieval_on or topic_type != "simulation":
         return None
     if n_sources == 0:
         return {
-            "verdict": "broaden",
+            "verdict": "insufficient",
             "rationale": "no source with readable text was retrieved.",
             "gaps": ["sources on the research question"],
         }
@@ -5616,7 +5278,7 @@ def _format_evidence_note(
     evidence_assessment: dict[str, Any] | None, *, is_survey: bool,
 ) -> str:
     """The pre-write 'evidence note' handed to the writer when the evidence gate
-    judged the assembled evidence thin (``insufficient`` / ``broaden``), so the
+    judged the assembled evidence thin (``insufficient``; ``broaden`` in a record of an earlier FI), so the
     paper frames its limits honestly. Returns ``""`` when the gate was satisfied
     / disabled.
 
@@ -5625,8 +5287,7 @@ def _format_evidence_note(
     experiment-oriented criteria (results, cross-check support) don't apply and
     this note would just make the essay apologise for experiment-grade evidence
     it never needed. The ``_SURVEY_WRITE_NOTE`` already enforces honest,
-    source-only framing for surveys. (The broaden *routing* still ran, so a
-    survey that broadened simply gathered more sources.)"""
+    source-only framing for surveys."""
     ev = evidence_assessment or {}
     if is_survey:
         return ""
@@ -8779,7 +8440,7 @@ def mint_quest_id(seed: str) -> str:
 
 def _slugify(s: str) -> str:
     """Quest-id slug. ASCII-only by contract — the quest_id regex used
-    by digest / critique / --resume / interview_update is
+    by digest / critique / --resume is
     ``^\\d{10}-[a-z0-9-]+-[0-9a-f]{6}$``, so a non-ASCII slug would
     create a quest directory that those downstream paths can't see.
 
@@ -8791,10 +8452,6 @@ def _slugify(s: str) -> str:
        the original string so every distinct CJK topic still gets a
        distinct quest_id (instead of every CJK quest colliding on the
        constant ``"untitled"``).
-
-    For ``interview.slugify`` (used for human-readable YAML titles +
-    folder names downstream), the Unicode-letter policy is the right
-    one — that helper keeps CJK intact.
     """
     s = s.strip().lower()
     # ASCII-only character class — re.UNICODE is irrelevant here.
@@ -8899,7 +8556,7 @@ def _append_figure_readings(item: dict[str, Any]) -> int:
 
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:
     """Render an Axon retrieval hit as a Markdown file with YAML front
-    matter. Used by ``_node_auto_collect_data``.
+    matter. Used by ``_write_literature_files``.
 
     Why a proper YAML dump (not Python ``repr``): a metadata value
     containing single quotes (``"O'Brien"``), backslashes, or non-ASCII
@@ -8912,10 +8569,7 @@ def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> s
     """
     front: dict[str, Any] = {"auto_collected": True, "rank": idx}
     # Render every non-empty metadata key the caller passed — caller
-    # decides what's provenance-worthy (Axon docs use source/path/
-    # title/url/kind/year; dataset adapters add adapter/indicator_id/
-    # countries/score/etc.). Dropping unknown keys here would silently
-    # eat dataset-adapter provenance.
+    # decides what's provenance-worthy (source/path/title/url/kind/year).
     #
     # ALL values are coerced to YAML scalars (str/int/float/bool):
     # this is a front-matter renderer, not a deep-config dump. A
@@ -9089,21 +8743,6 @@ def _content_quality(content: str, meta: dict[str, Any]) -> str:
     return "full_text"
 
 
-def _search_record_has_abstract(content: str) -> bool:
-    """Whether a search record's text holds more than its title: an index's abstract (OpenAlex rebuilds it from its
-    word index) runs to hundreds of characters; a title, or a search engine's one-line snippet, does not."""
-    _title, _sep, rest = str(content or "").partition("\n")
-    return len(rest.strip()) >= 200
-
-
-def _sf_snapshot(quest_id: str) -> dict[str, Any]:
-    from core import source_failures
-    try:
-        return source_failures.snapshot(quest_id)
-    except Exception:  # noqa: BLE001 -- the report is extra; a quest never stops on it
-        return {}
-
-
 #: Failure-ledger sources that are not about the literature: web search engines and figure images.
 _NOT_LITERATURE_FAILURES = frozenset({"duckduckgo", "brave", "wikimedia_commons", "image"})
 #: The failure ledger's names for download steps, in words (a search source keeps its own name: openalex, crossref).
@@ -9118,74 +8757,6 @@ _FAILURE_WORDS = {
     "paused_skip": "skipped while arXiv asked FI to wait", "throttled_skip": "skipped, arXiv's queue was too long",
     "ocr_budget": "OCR time ran out", "fetch_crashed": "crashed", "budget_abandoned": "download time ran out",
 }
-
-
-def _literature_text_gaps(
-    entries: list[dict[str, Any]], snap: dict[str, Any], *, downloads_on: bool = True,
-) -> str:
-    """One plain line on why the kept sources lack their full text: how many are not marked free to read, how many
-    are free with no download link, how many are free but FI did not get their text, the requests that failed (by
-    source, with their hosts), and a missing key. ``""`` when every scholarly source has its full text."""
-    from core.knowledge import has_free_route, is_open_access
-
-    paywalled = free_no_link = free_failed = 0
-    openalex_used = False
-    for e in entries:
-        md = e.get("metadata") or {}
-        openalex_used = openalex_used or md.get("source") in ("openalex", "arxiv")
-        if (md.get("content_quality") or "snippet_only") == "full_text":
-            continue
-        if not _is_scholarly_record(md):
-            continue
-        if not is_open_access(md):
-            paywalled += 1
-        elif not has_free_route(md):
-            free_no_link += 1
-        else:
-            free_failed += 1
-    if not (paywalled or free_no_link or free_failed):
-        return ""
-    parts: list[str] = []
-    if paywalled:
-        parts.append(f"{paywalled} are not marked free to read (most likely behind a subscription), so FI did not "
-                     "download them and a person has to")
-    if free_no_link:
-        parts.append(f"{free_no_link} are marked free to read but the index gave no download link, only the "
-                     "publisher's DOI page, which FI does not fetch")
-    if free_failed:
-        parts.append(f"{free_failed} are free to read but FI did not get their text"
-                     + ("" if downloads_on else " (downloading is off: knowledge.try_fetch_full_text)"))
-    by_source = snap.get("by_source") or {}
-    hosts: dict[str, list[str]] = {}
-    for ex in snap.get("examples") or []:
-        host = str(ex.get("host") or "")
-        if host and host not in hosts.setdefault(str(ex.get("source")), []):
-            hosts[str(ex.get("source"))].append(host)
-    failed: list[str] = []
-    for source, kinds in by_source.items():
-        if source in _NOT_LITERATURE_FAILURES:
-            continue
-        said = ", ".join(f"{n} {_FAILURE_WORDS.get(k, 'failed')}"
-                         for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
-        at = hosts.get(source) or []
-        failed.append(f"{_FAILURE_SOURCE_WORDS.get(source, source)} {said}" + (f" at {', '.join(at[:3])}" if at else ""))
-    if failed:
-        line = "requests that failed while searching and downloading: " + "; ".join(failed)
-        if ("http_429" in (by_source.get("semantic_scholar") or {})
-                and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()):
-            line += " (no SEMANTIC_SCHOLAR_API_KEY is set; without one Semantic Scholar shares a busy public limit)"
-        parts.append(line)
-    if (openalex_used or "openalex" in by_source) and not os.environ.get("OPENALEX_API_KEY", "").strip():
-        parts.append("no OPENALEX_API_KEY is set, so OpenAlex allows only about 100 searches a day (docs/INSTALL.md)")
-    return "; ".join(parts)
-
-
-def _is_scholarly_record(md: dict[str, Any]) -> bool:
-    """A record from a scholarly index (a paper or a book), not a web page, a file the person gave, or FI's own notes
-    from earlier quests."""
-    kind = str(md.get("kind") or "")
-    return not (md.get("source") in ("local_paper", "user_supplied", "web_search")
-                or kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"))
 
 
 def _literature_entry(
@@ -9295,7 +8866,7 @@ def _append_design_revision(
         seen = "results were seen" if results_seen else "the run before it produced no results"
         if reason:
             pass
-        elif next_step in ("re_experiment", "broaden_lit"):
+        elif next_step == "re_experiment":
             reason = f"analyze.next_step={next_step} ({seen})"
         elif verdict:
             reason = f"review verdict={verdict} ({seen})"
@@ -9341,163 +8912,8 @@ def _append_design_revision(
     return history
 
 
-def _is_open_access(doc: "RetrievedDoc") -> bool:
-    """True when the source is confirmed free to download without a subscription (see
-    ``core.knowledge.is_open_access``).
-
-    This is deliberately separate from :func:`_is_abstract_only`. That predicate answers "did we end up with only
-    an abstract?", which stays true for an arXiv paper whose full-text fetch failed. What changes is what the
-    papers gate does with it: asking a person to hand-download an arXiv PDF is asking them to work around a fetch
-    failure (blocked network, proxy), not a paywall. A paper that is not confirmed free is the one a person is
-    asked to download; FI never fetches it from the publisher itself."""
-    from core.knowledge import has_free_route, is_open_access
-    # A record marked free with no free address and no id to look a free copy up by cannot be fetched: it goes
-    # to the person like any paper not confirmed free.
-    return is_open_access(doc.metadata) and has_free_route(doc.metadata)
-
-
-def _is_abstract_only(doc: "RetrievedDoc") -> bool:
-    """Heuristic: a doc is abstract-only if the retriever explicitly
-    set ``metadata.abstract_only`` to truthy OR the content is short
-    enough to be only an abstract (< 1500 chars). The explicit flag
-    wins so future retrievers can set it precisely; the length check
-    is the fallback for today's retrievers, which don't carry the flag
-    on every hit."""
-    md = doc.metadata or {}
-    if md.get("abstract_only"):
-        return True
-    # A fetch that brought back only the abstract again, or a preview, still needs the paper (the papers gate asks).
-    if md.get("content_quality") in ("abstract_only", "preview_only"):
-        return True
-    if _has_full_text(md):
-        return False
-    if md.get("source") in ("local_paper", "user_supplied"):
-        return False
-    # A page whose own metadata said it is a journal article, and that nothing confirmed free: its text was
-    # discarded, so a person is asked for the paper.
-    if md.get("scholarly_page"):
-        return True
-    # FI-internal cross-quest memory (prior papers / summaries / spines stored
-    # in Axon) is NOT a paper to download — it's already in the corpus. Never
-    # flag it: even when a spine carries a DOI/URL, the user has nothing to
-    # fetch, and it would otherwise pollute WANTED_PAPERS.md with our own
-    # artifacts instead of the external papers the user actually needs.
-    kind = str(md.get("kind") or "")
-    if kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"):
-        return False
-    # Flag only a real, RESOLVABLE paper the user can actually download: it
-    # carries a DOI / arXiv-id / PMID (so the manifest has a download link),
-    # or it's an academic-adapter hit WITH a real title (so the manifest entry
-    # is actionable). A generic web page, or a doc with neither id nor title,
-    # is content the agent uses as-is — not something to ask the user to fetch.
-    if md.get("doi") or md.get("arxiv_id") or md.get("pmid"):
-        return True
-    title = str(md.get("title") or "").strip()
-    if not title:
-        return False
-    # An academic-adapter hit (crossref / openalex / pubmed / …) is a paper.
-    if md.get("source") not in (None, "", "web_search"):
-        return True
-    # A web-search hit on a known academic publisher domain (SPIE / IEEE /
-    # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
-    from core.knowledge import _is_academic_source
-    return _is_academic_source(str(md.get("url") or ""))
-
-
-
-
-def _literature_query_prompt(topic: str, idea_title: str = "", hypothesis: str = "", *,
-                             work_scope: str = WORK_SCOPE_PAPERS) -> str:
-    """The prompt that turns a topic (and, at the literature step, the chosen direction and the hypothesis) into three
-    keyword search queries: one per facet, in the vocabulary of the kind of quest. See
-    ``Engine._derive_literature_queries``."""
-    if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
-        engines = "OpenAlex, Crossref, CORE, OpenAIRE, DOAJ"
-        angle = "a specific period, place, work, group or case within the topic"
-        frame = "the discipline or theoretical frame the topic is studied in"
-        vocabulary = (
-            "Use the words scholars of this subject write under: the names "
-            "of the works, people, periods, places, movements, genres and "
-            "concepts involved, and the discipline's own terms. Do not add "
-            "method words such as model, simulation, dataset or analysis "
-            "unless the topic itself is about them."
-        )
-    else:
-        engines = "arXiv, OpenAlex, Crossref"
-        angle = "the method, mechanism or measured quantity"
-        frame = "the broader problem or application area it belongs to"
-        vocabulary = (
-            "Use the terms researchers in this field publish under: the "
-            "standard names of the methods, the system studied and the "
-            "quantity measured."
-        )
-    return (
-        "Write THREE literature search queries for this research topic, one "
-        f"per facet below. They go to academic search engines ({engines}); "
-        "the first also goes to web search.\n\n"
-        f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
-        + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
-        + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
-        + "FACETS:\n"
-        "1. the core subject, in the field's standard terms\n"
-        f"2. {angle}\n"
-        f"3. {frame}\n\n"
-        "A search engine matches keywords, not sentences. " + vocabulary
-        + " Spell out acronyms. No full sentences, quotes, boolean "
-        "operators or wildcards. 3 to 8 words each; shorter queries match "
-        "more.\n\n"
-        'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
-    )
-
-
 #: The query sets the literature searches used, one line per derivation (``.fi/literature_queries.json``).
 _LITERATURE_QUERIES = "literature_queries.json"
-
-
-def _query_set_key(prompt: str, iteration: int, model: str = "") -> str:
-    """What a saved query set answers: the exact derivation prompt (topic, chosen direction, hypothesis, kind of
-    quest), the search pass and the model that derives them. A new pass (a broaden-the-literature re-entry) or another
-    model is a new key, so it derives afresh."""
-    return hashlib.sha256(f"{iteration}\n{model}\n{prompt}".encode("utf-8")).hexdigest()
-
-
-def _usable_queries(value: Any) -> bool:
-    """A saved query list that can be reused: a non-empty list of non-empty strings (not a string, not a hand edit)."""
-    return (isinstance(value, list) and bool(value)
-            and all(isinstance(q, str) and q.strip() for q in value))
-
-
-#: The fields of a saved query set its digest covers: what was searched, why, and which model call produced it.
-_QUERY_SET_HASHED = ("stage", "key", "iteration", "queries", "prompt_sha256", "model", "call_id", "reason",
-                     "revised_by", "source_sha256")
-
-#: Search queries a person gives the quest themselves, one per line (the first three are used), in its inputs folder.
-_PERSON_QUERIES = Path("inputs") / "search_queries.txt"
-
-
-#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor``, ``screen`` and
-#: ``retractions``)
-#: carry; covered by the digest only when present, so the digest of an entry written without them is unchanged.
-_SOURCE_VERDICT_HASHED = ("outcome", "threshold", "minimum", "sources")
-
-
-def _query_set_digest(entry: dict[str, Any]) -> str:
-    """The SHA-256 over an entry's hashed fields (:data:`_QUERY_SET_HASHED`, and for a source-judgement entry
-    :data:`_SOURCE_VERDICT_HASHED`)."""
-    hashed = {k: entry.get(k) for k in _QUERY_SET_HASHED}
-    hashed.update({k: entry[k] for k in _SOURCE_VERDICT_HASHED if k in entry})
-    return hashlib.sha256(json.dumps(hashed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-
-
-def _query_set_standing(entry: dict[str, Any]) -> str:
-    """``verified`` (its digest checks out), ``unverified`` (written before entries carried a digest) or ``edited``
-    (changed after FI wrote it). The digest has no key: it catches an accidental or uninformed edit, not a deliberate
-    one that recomputes it; the trace (each step's hash of the file) and, once the quest is closed, the seal are what
-    protect the record. Only a verified entry is ever reused."""
-    digest = entry.get("digest")
-    if not digest:
-        return "unverified"
-    return "verified" if digest == _query_set_digest(entry) else "edited"
 
 
 def _ok_calls(fi_dir: Path, node: str) -> dict[str, str | None]:
@@ -9511,74 +8927,6 @@ def _ok_call_ids(fi_dir: Path, node: str) -> set[str]:
     return set(_ok_calls(fi_dir, node))
 
 
-def _person_queries(quest_root: Path) -> tuple[list[str], str] | None:
-    """The queries a person wrote in ``inputs/search_queries.txt`` (up to three non-empty lines, ``#`` lines skipped)
-    and the file's SHA-256; ``None`` when there is no such file or it names no query."""
-    path = Path(quest_root) / _PERSON_QUERIES
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    lines = [" ".join(line.split()) for line in data.decode("utf-8", errors="replace").splitlines()]
-    queries = [q for q in lines if q and not q.startswith("#")][:3]
-    return (queries, hashlib.sha256(data).hexdigest()) if queries else None
-
-
-class _QuerySetsUnreadable(Exception):
-    """The record exists but could not be read just now (locked, access denied): it is left alone."""
-
-
-def _read_query_sets(fi_dir: Path, *, log: Any = None, strict: bool = False) -> list[dict[str, Any]]:
-    """The saved query sets. A file that is not the record (bad JSON, wrong shape) is set aside as
-    ``.bad.<time>`` (kept, never silently overwritten) and a warning says so; nothing is reused from it. A file that
-    cannot be read just now is left where it is (``strict``: raise :class:`_QuerySetsUnreadable` so nothing
-    overwrites it)."""
-    path = fi_dir / _LITERATURE_QUERIES
-    if not path.exists():
-        return []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        if log is not None:
-            log.warning("[literature] %s could not be read just now (%s); it is left as it is, and the search "
-                        "queries are derived again", path.name, e)
-        if strict:
-            raise _QuerySetsUnreadable(str(e)) from None
-        return []
-    try:
-        data = json.loads(text)
-        entries = data.get("entries") if isinstance(data, dict) else None
-        if not isinstance(entries, list):
-            raise ValueError("no list of entries")
-    except ValueError as e:
-        bad = path.with_name(f"{path.name}.bad.{time.strftime('%Y%m%dT%H%M%S')}")
-        try:
-            path.replace(bad)
-            where = f"it was kept as {bad.name}"
-        except OSError:
-            where = "it could not be moved aside"
-            if strict:
-                raise _QuerySetsUnreadable(str(e)) from None
-        if log is not None:
-            log.warning("[literature] %s could not be read (%s); %s, and the search queries are derived again",
-                        path.name, e, where)
-        return []
-    return [e for e in entries if isinstance(e, dict)]
-
-
-def _record_query_set(fi_dir: Path, entry: dict[str, Any], *, log: Any = None) -> None:
-    """Add one entry to ``.fi/literature_queries.json``, with its digest (:func:`_query_set_digest`). Entries are only
-    ever added: the ones already there are written back exactly as read (best-effort: a record never stops a search,
-    and a record that could not be read is never overwritten)."""
-    try:
-        entries = _read_query_sets(fi_dir, log=log, strict=True)
-    except _QuerySetsUnreadable:
-        return
-    entry = {k: v for k, v in entry.items() if k not in ("digest", "reused")}
-    entry["digest"] = _query_set_digest(entry)
-    _write_query_sets(fi_dir, [*entries, entry])
-
-
 def _write_query_sets(fi_dir: Path, entries: list[dict[str, Any]]) -> None:
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
@@ -9587,101 +8935,6 @@ def _write_query_sets(fi_dir: Path, entries: list[dict[str, Any]]) -> None:
         tmp.replace(fi_dir / _LITERATURE_QUERIES)
     except OSError:
         pass
-
-
-_PAPERS_ASKED = "papers_asked.json"
-_PAPERS_DECLINED = "papers_declined.json"
-
-
-def _source_ref(doc: Any) -> dict[str, str]:
-    """A retrieved source as the verdict records name it: its identity (:func:`_paper_key`) and its title."""
-    md = getattr(doc, "metadata", None) or {}
-    return {"source": _paper_key(doc), "title": " ".join(str(md.get("title") or md.get("url") or "").split())[:200]}
-
-
-def _paper_key(doc: "RetrievedDoc") -> str:
-    """A paper's identity across retrievals: its DOI, else its link, else its title."""
-    md = doc.metadata or {}
-    for k in ("doi", "url", "source_url", "title"):
-        v = str(md.get(k) or "").strip().lower()
-        if v:
-            return f"{k}:{v}"
-    return "text:" + hashlib.sha256((doc.content or "")[:500].encode("utf-8")).hexdigest()
-
-
-def _papers_to_ask(needed: list["RetrievedDoc"], fi_dir: Path) -> tuple[list["RetrievedDoc"], int]:
-    """The paywalled papers to stop and ask the person for -- those not declined before -- and how many were left out
-    because they were. The ones asked for are recorded (``.fi/papers_asked.json``) so a resume from this pause can
-    tell which papers it answered."""
-    declined = _read_key_set(fi_dir / _PAPERS_DECLINED)
-    new = [d for d in needed if _paper_key(d) not in declined]
-    if new:
-        _write_key_set(fi_dir / _PAPERS_ASKED, {_paper_key(d) for d in new})
-    return new, len(needed) - len(new)
-
-
-def _take_papers_declined(fi_dir: Path, quest_root: Path, resumed_from: str | None) -> set[str]:
-    """When this run goes on from the papers pause (``resumed_from``, the pause kind the engine read before clearing
-    the markers) and no paper was added to ``inputs/papers/``, the papers it asked for were declined: they are moved
-    to ``.fi/papers_declined.json`` and returned. Anything else (another pause, an ``--update``, a run from a step:
-    :func:`forget_papers_asked`) declines nothing."""
-    asked = _read_key_set(fi_dir / _PAPERS_ASKED)
-    if not asked or _papers_dir_has_files(quest_root) or resumed_from != "papers":
-        return set()
-    _write_key_set(fi_dir / _PAPERS_DECLINED, _read_key_set(fi_dir / _PAPERS_DECLINED) | asked)
-    try:
-        (fi_dir / _PAPERS_ASKED).unlink()
-    except OSError:
-        pass
-    return asked
-
-
-def forget_papers_asked(fi_dir: Path, *, declined: bool = True) -> None:
-    """An unanswered papers pause is not answered by changing the quest (``--update``) or running it again from a step
-    or re-opening it. ``declined``: also forget the papers the person went on without (a changed quest may ask for them
-    again); a run from a step or a re-opened quest does not search the literature again, so it keeps them."""
-    for name in ((_PAPERS_ASKED, _PAPERS_DECLINED) if declined else (_PAPERS_ASKED,)):
-        try:
-            (Path(fi_dir) / name).unlink()
-        except OSError:
-            pass
-
-
-def papers_declined_count(fi_dir: Path) -> int:
-    return len(_read_key_set(Path(fi_dir) / _PAPERS_DECLINED))
-
-
-def _read_key_set(path: Path) -> set[str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    return {str(k) for k in data} if isinstance(data, list) else set()
-
-
-def _write_key_set(path: Path, keys: set[str]) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(sorted(keys), indent=1) + "\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _papers_dir_has_files(quest_root: Path) -> bool:
-    """True iff ``<quest_root>/inputs/papers/`` already carries
-    user-dropped PDFs/MDs/TXTs (ignoring the README we write). Used
-    by the literature pause gate to avoid re-pausing on resume."""
-    papers_dir = quest_root / "inputs" / "papers"
-    if not papers_dir.is_dir():
-        return False
-    for p in papers_dir.rglob("*"):
-        if not p.is_file() or p.name.startswith("."):
-            continue
-        if p.name == "README.md" and p.parent == papers_dir:
-            continue
-        if p.suffix.lower() in (".pdf", ".md", ".txt"):
-            return True
-    return False
 
 
 _USER_DATA_SUFFIXES: frozenset[str] = frozenset({
@@ -9716,218 +8969,9 @@ def _pick_up_user_dropped_datasets(quest_root: Path) -> list[str]:
     return out
 
 
-def _paper_resolve_link(md: dict[str, Any]) -> str:
-    """A clickable link to find/download a paper: DOI resolver, arXiv abs,
-    else the source URL."""
-    if md.get("doi"):
-        return f"https://doi.org/{str(md['doi']).strip()}"
-    if md.get("arxiv_id"):
-        return f"https://arxiv.org/abs/{str(md['arxiv_id']).strip()}"
-    return str(md.get("url") or md.get("pdf_url") or "").strip()
-
-
-def _paper_display_title(md: dict[str, Any], fallback: str) -> str:
-    """A non-empty, actionable label for a wanted paper. A real title wins; a
-    title-less but resolvable hit (e.g. a DOI-only crossref record) falls back
-    to its identifier so the manifest never shows a bare ``paper-N``."""
-    title = str(md.get("title") or md.get("name") or "").strip()
-    if title:
-        return title
-    if md.get("doi"):
-        return f"DOI {str(md['doi']).strip()}"
-    if md.get("arxiv_id"):
-        return f"arXiv:{str(md['arxiv_id']).strip()}"
-    if md.get("pmid"):
-        return f"PMID {str(md['pmid']).strip()}"
-    return fallback
-
-
-def _paper_gist(content: str, md: dict[str, Any]) -> str:
-    """One-line 'what it's about' for the wanted-papers manifest — the first
-    sentence of the abstract (title stripped)."""
-    text = (content or "").strip()
-    title = str(md.get("title") or "")
-    if title and text.startswith(title):
-        text = text[len(title):].strip()
-    m = re.match(r"(.{40,240}?[.!?])(?:\s|$)", text)
-    return re.sub(r"\s+", " ", (m.group(1) if m else text[:200])).strip()
-
-
-def _rank_papers_by_relevance(
-    docs: list["RetrievedDoc"], query: str,
-) -> list["RetrievedDoc"]:
-    """Order papers most-relevant-first by lexical overlap of their
-    title+abstract with the quest question (deterministic; no model)."""
-    if not query.strip() or len(docs) <= 1:
-        return list(docs)
-    from core.passages import _lexical_scores
-    blobs = [f"{(d.metadata or {}).get('title', '')} {d.content or ''}" for d in docs]
-    scores = _lexical_scores(blobs, query)
-    return [docs[i] for i in sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)]
-
-
-def _papers_next_step(quest_id: str, paused: bool) -> str:
-    """What to do after adding papers: resume when the quest is waiting for them, otherwise say the quest
-    did not stop, so there is nothing to resume."""
-    if paused:
-        return (
-            "Then continue the quest:\n\n```\nfi --resume " + quest_id + "\n```\n\n"
-            "The literature step picks up the new files, extracts their text and merges them into the "
-            "literature list, so the design and writing steps see real full text instead of bare abstracts."
-        )
-    return (
-        "This quest did not stop for these papers, so there is nothing to resume: it went on with their "
-        "abstracts. Files placed here are read whenever this quest's literature step runs again."
-    )
-
-
-def _write_wanted_papers_md(
-    quest_root: Path, ranked: list["RetrievedDoc"], *, topic: str,
-    oa_unfetched: list["RetrievedDoc"] | None = None, paused: bool = True,
-) -> None:
-    """Write a single human-friendly, RANKED ``needs/WANTED_PAPERS.md`` —
-    most relevant first, each with a download link, what it's about, and the
-    open-access status — so the user can grab the few that matter.
-
-    ``oa_unfetched`` lists open-access sources whose full text FI failed to
-    download. They are reported separately and never counted as paywalled:
-    conflating the two produces the nonsensical request "please go download
-    this arXiv paper for me"."""
-    lines = [
-        f"# Papers to download — {topic[:120].strip()}",
-        "",
-    ]
-    if ranked:
-        lines += [
-            "The agent found these papers relevant but could only get the "
-            "abstract: they are not confirmed free to read, and FI downloads only "
-            "papers that are free. Download the ones that matter — **most relevant "
-            "first** — and drop the PDFs into `inputs/papers/`. You don't have to "
-            "get them all; even the top few sharpen the research.",
-            "",
-        ]
-    for i, doc in enumerate(ranked, 1):
-        md = doc.metadata or {}
-        title = _paper_display_title(md, f"paper-{i}")
-        lines.append(f"## {i}. {title}")
-        link = _paper_resolve_link(md)
-        if link:
-            lines.append(f"- **Get it:** {link}")
-        authors = md.get("authors") or md.get("author")
-        if authors:
-            if isinstance(authors, (list, tuple)):
-                authors = ", ".join(str(a) for a in authors[:4])
-            lines.append(f"- **Authors:** {str(authors)[:160]}")
-        gist = _paper_gist(doc.content or "", md)
-        if gist:
-            lines.append(f"- **What it's about:** {gist}")
-        lines.append(
-            "- **Status:** not confirmed free to read, so FI did not download it — "
-            "manual download needed"
-        )
-        lines.append("")
-    if oa_unfetched:
-        lines += [
-            "",
-            "---",
-            "",
-            "## Open access — FI's download failed",
-            "",
-            f"These {len(oa_unfetched)} source(s) are **free to read** (arXiv / "
-            "PMC / preprint servers), so they are NOT paywalled. FI tried to "
-            "fetch the full text and could not — usually the host is "
-            "unreachable from this machine (proxy, firewall, or TLS "
-            "interception), which is a network problem rather than something "
-            "you need to buy or request.",
-            "",
-            "The quest was **not** paused for these. Fixing the network "
-            "connection is the real fix and lets FI fetch them itself next "
-            "run. Listed here only because a browser often succeeds where the "
-            "agent's HTTP client is blocked — if you want them in this run, "
-            "download and drop them into `inputs/papers/` like the others.",
-            "",
-        ]
-        for i, doc in enumerate(oa_unfetched, 1):
-            md = doc.metadata or {}
-            title = _paper_display_title(md, f"oa-paper-{i}")
-            lines.append(f"### {i}. {title}")
-            link = _paper_resolve_link(md)
-            if link:
-                lines.append(f"- **Get it (free):** {link}")
-            gist = _paper_gist(doc.content or "", md)
-            if gist:
-                lines.append(f"- **What it's about:** {gist}")
-            lines.append("")
-    lines.append(
-        "Drop the PDFs into `inputs/papers/` (any subfolder works)."
-        + (f" Then `fi --resume {quest_root.name}`." if paused else
-           " This quest did not stop for them, so there is nothing to resume: it went on with their abstracts.")
-    )
-    try:
-        (quest_root / "needs" / "WANTED_PAPERS.md").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8",
-        )
-    except OSError:
-        pass
-
-
-def _write_paper_need_stubs(
-    quest_root: Path,
-    needed: list["RetrievedDoc"],
-    log: logging.Logger,
-    *,
-    query: str = "",
-    oa_unfetched: list["RetrievedDoc"] | None = None,
-    paused: bool = True,
-) -> None:
-    """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with the
-    metadata FI knows (title, authors, DOI, URL, source) so the user can
-    resolve the citation and download the right PDF, PLUS a single ranked,
-    human-friendly ``needs/WANTED_PAPERS.md`` (most relevant to ``query``
-    first). Also creates ``<quest_root>/inputs/papers/README.md`` with resume
-    instructions so the user knows what to do next."""
-    needs_dir = quest_root / "needs"
-    papers_dir = quest_root / "inputs" / "papers"
-    needs_dir.mkdir(parents=True, exist_ok=True)
-    papers_dir.mkdir(parents=True, exist_ok=True)
-    needed = _rank_papers_by_relevance(needed, query)
-    oa_ranked = _rank_papers_by_relevance(list(oa_unfetched or []), query)
-    _write_wanted_papers_md(
-        quest_root, needed, topic=query or quest_root.name, oa_unfetched=oa_ranked,
-        paused=paused,
-    )
-    readme = papers_dir / "README.md"
-    readme_text = _PAPERS_README.format(after=_papers_next_step(quest_root.name, paused))
-    try:
-        # Rewritten when the quest's state changed (a later run can pause where the first did not), so the
-        # next-step text never contradicts the current run.
-        if not readme.exists() or readme.read_text(encoding="utf-8") != readme_text:
-            readme.write_text(readme_text, encoding="utf-8")
-    except OSError as e:
-        log.debug("[literature] papers README write failed: %r", e)
-    for i, doc in enumerate(needed):
-        md = doc.metadata or {}
-        title = _paper_display_title(md, f"paper-{i+1}")
-        slug = _slugify(title)[:48] or f"paper-{i+1}"
-        stub_path = needs_dir / f"{slug}.json"
-        # Don't overwrite an existing stub — preserves user notes.
-        if stub_path.exists():
-            continue
-        try:
-            stub_path.write_text(
-                json.dumps({
-                    "title": md.get("title"),
-                    "authors": md.get("authors") or md.get("author"),
-                    "doi": md.get("doi"),
-                    "arxiv_id": md.get("arxiv_id"),
-                    "url": md.get("url") or md.get("pdf_url"),
-                    "source": md.get("source"),
-                    "abstract": (doc.content or "")[:600],
-                }, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            log.debug("[literature] needs stub write failed: %r", e)
+#: Folders of ``data/`` that FI itself writes (the papers it read, what an earlier FI collected, the study's results):
+#: never the person's data. One definition: the phased split of the data reads the same (core/phased.py ``COLLECTED``).
+_FI_OWN_DATA_FOLDERS: frozenset[str] = frozenset(_phased.COLLECTED)
 
 
 def _list_user_data_files(data_dir: Path) -> list[Path]:
@@ -9944,6 +8988,8 @@ def _list_user_data_files(data_dir: Path) -> list[Path]:
         if p.name == "README.md" and p.parent == data_dir:
             continue
         if p.name.startswith("."):
+            continue
+        if p.relative_to(data_dir).parts[0] in _FI_OWN_DATA_FOLDERS:
             continue
         out.append(p)
     return out
@@ -9965,10 +9011,9 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
     variables = design.get("variables", {})
     return (
         f"# Drop your data here\n\n"
-        f"This quest is running in **no-simulation mode** "
-        f"(`engine.no_simulation: true` OR clarify answered "
-        f"`empirical_vs_theoretical: empirical`). The engine has\n"
-        f"finished the planning half (clarify → ideate → literature → "
+        f"This study analyses data you give it "
+        f"(its commission says `method: analyze_data`). FI has\n"
+        f"finished the planning half (the sources and the "
         f"design) and is paused waiting for you to supply real-world "
         f"data.\n\n"
         f"## What to drop into this folder\n\n"
@@ -10007,15 +9052,6 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
         f"through `analyze → cross_check → write → review` exactly like "
         f"a simulation-driven quest would.\n"
     )
-
-
-def _json_file_is_answer(path: Path) -> bool:
-    """Whether ``path`` holds a non-empty JSON object (a staged answer that can be used)."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and bool(data)
 
 
 def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:

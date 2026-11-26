@@ -33,12 +33,6 @@ def test_negative_numeric_config_fields_fail_fast() -> None:
         ExecutionConfig(clean_check_timeout_s=0)
     with pytest.raises(ValidationError):
         KnowledgeConfig(full_text_fetch_timeout_s=-1)
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_score=1.5)   # le=1.0 → >1 rejected
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_score=-0.1)   # ge=0.0 → <0 rejected
-    with pytest.raises(ValidationError):
-        KnowledgeConfig(relevance_min_keep=-1)      # ge=0 → <0 rejected
     # Sanity: the defaults still construct.
     assert EngineConfig().max_iterations == 2
 
@@ -279,11 +273,6 @@ def test_axon_config_none_default() -> None:
     # New independent cap on external (web) search results.
     assert kc.external_top_k == 20
     assert kc.write_back_quests is True
-    # Literature relevance floor: on by default at the empirically-measured
-    # 0.20 cosine gap, retaining at least 3 top docs so a borderline corpus
-    # is never emptied.
-    assert kc.relevance_min_score == 0.20
-    assert kc.relevance_min_keep == 3
 
 
 def test_output_config_defaults_roundtrip() -> None:
@@ -373,28 +362,25 @@ def test_pauses_namespace_legacy_mapping_and_norway() -> None:
     # Legacy scattered flags fold into pauses with vocab translation.
     legacy = Config.model_validate({
         "topic": "t",
-        "engine": {"clarify_mode": "interactive", "human_feedback_gate": "after_review",
-                   "pause_for_user_input": "after_design"},
+        "engine": {"human_feedback_gate": "after_review", "pause_for_user_input": "after_design"},
         "knowledge": {"pause_for_user_papers": True},
     })
-    assert legacy.pauses.clarify == "ask"
     assert legacy.pauses.review == "ask"
     assert legacy.pauses.supply == "before_build"
     assert legacy.pauses.papers is True
 
     # Unquoted `off` arrives as boolean False from YAML; coerce to "off".
     norway = Config.model_validate({
-        "topic": "t", "pauses": {"clarify": False, "review": False},
+        "topic": "t", "pauses": {"review": False},
     })
-    assert norway.pauses.clarify == "off"
     assert norway.pauses.review == "off"
 
     # An explicit pauses.* value always wins over a legacy flag.
     conflict = Config.model_validate({
-        "topic": "t", "engine": {"clarify_mode": "auto"},
-        "pauses": {"clarify": "ask"},
+        "topic": "t", "engine": {"human_feedback_gate": "after_review"},
+        "pauses": {"review": "off"},
     })
-    assert conflict.pauses.clarify == "ask"
+    assert conflict.pauses.review == "off"
 
 
 # --- unknown-key audit: typo'd YAML keys must fail fast (not silently drop) ---
@@ -421,6 +407,63 @@ def test_a_config_that_still_sets_the_retired_attempt_memory_key_loads(tmp_path:
     assert "engine.attempt_memory no longer does anything" in caplog.text
 
 
+def test_a_config_that_still_sets_the_removed_novelty_check_loads_and_says_it_does_nothing(tmp_path: Path, caplog) -> None:
+    p = _write(tmp_path, "topic: t\nknowledge:\n  novelty_check: true\n")
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)
+    assert cfg.topic == "t" and not hasattr(cfg.knowledge, "novelty_check")
+    assert "knowledge.novelty_check no longer does anything" in caplog.text
+
+
+def test_a_config_that_still_sets_the_idea_study_card_or_broaden_keys_loads_and_says_each_does_nothing(
+        tmp_path: Path, caplog) -> None:
+    """FI makes no research ideas, offers no study cards and never goes back to the literature: a config written for an
+    earlier FI loads, and the log names each line once."""
+    p = _write(tmp_path, "topic: t\nengine:\n  ideate_reflect: false\n  ideate_tournament: true\n"
+                         "  evidence_gate_max_broaden: 2\npauses:\n  scope: ask\nprovider:\n  name: openai\n"
+                         "  node_ensemble:\n    ideate:\n      models: [m1, m2]\n      merge: tournament\n")
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)
+    assert cfg.topic == "t" and not cfg.provider.node_ensemble
+    for gone in ("engine.ideate_reflect", "engine.ideate_tournament", "engine.evidence_gate_max_broaden", "pauses.scope"):
+        section, key = gone.split(".")
+        assert not hasattr(getattr(cfg, section), key), gone
+        assert caplog.text.count(f"config: {gone} no longer does anything; the line can be removed.") == 1, gone
+    assert "provider.node_ensemble.ideate no longer does anything" in caplog.text
+
+
+def test_a_config_that_still_sets_the_searches_of_a_study_without_a_commission_loads_and_says_each_does_nothing(
+        tmp_path: Path, caplog) -> None:
+    """A commission gives the sources and a data study analyses the person's own files: the data search, its adapters and
+    the topic-only literature search are gone. A config written for an earlier FI loads, and the log names each line once."""
+    gone_keys = {
+        "engine": ["auto_collect_data", "auto_collect_top_k", "dataset_adapters", "dataset_adapter_top_k"],
+        "knowledge": ["relevance_guard", "relevance_min_score", "relevance_min_keep", "requery_on_low_relevance",
+                      "requery_max", "literature_screen", "foundational_works"],
+    }
+    values = {"auto_collect_data": "true", "auto_collect_top_k": "5", "dataset_adapters": "[worldbank, wikipedia]",
+              "dataset_adapter_top_k": "3", "relevance_guard": "true", "relevance_min_score": "0.2",
+              "relevance_min_keep": "3", "requery_on_low_relevance": "true", "requery_max": "2",
+              "literature_screen": "true", "foundational_works": "true"}
+    text = "topic: t\n" + "".join(
+        f"{section}:\n" + "".join(f"  {k}: {values[k]}\n" for k in keys) for section, keys in gone_keys.items())
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(_write(tmp_path, text))
+    assert cfg.topic == "t"
+    for section, keys in gone_keys.items():
+        for key in keys:
+            assert not hasattr(getattr(cfg, section), key), f"{section}.{key}"
+            assert caplog.text.count(f"config: {section}.{key} no longer does anything; the line can be removed.") == 1
+    # What still does something is not retired: the cross-check's search keeps using the router and the full-text fetch.
+    (tmp_path / "keep").mkdir()
+    keeps = _write(tmp_path / "keep", "topic: t\nknowledge:\n  source_routing: manual\n  try_fetch_full_text: false\n")
+    caplog.clear()
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        kept = Config.from_yaml(keeps)
+    assert kept.knowledge.source_routing == "manual" and kept.knowledge.try_fetch_full_text is False
+    assert "no longer does anything" not in caplog.text
+
+
 def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
     # Typos of real reliability knobs — the exact silent-revert footgun.
     p = _write(
@@ -436,19 +479,39 @@ def test_from_yaml_rejects_unknown_nested_key(tmp_path: Path) -> None:
 
 
 def test_from_yaml_accepts_valid_and_legacy_keys(tmp_path: Path) -> None:
-    # Real fields + a legacy pause flag (engine.clarify_mode → pauses.clarify)
+    # Real fields + a legacy pause flag (engine.human_feedback_gate → pauses.review)
     # + a free-form dict field (node_http_timeout_s values are node names).
     p = _write(
         tmp_path,
         "topic: t\ntitle: x\n"
         "provider:\n  name: openai\n  node_http_timeout_s:\n    implement: 900\n"
-        "engine:\n  max_iterations: 2\n  clarify_mode: \"off\"\n"
+        "engine:\n  max_iterations: 2\n  human_feedback_gate: after_review\n"
         "knowledge:\n  enabled: false\n  pause_for_user_papers: true\n"
         "output:\n  kinds: [paper_pdf]\n",
     )
     cfg = Config.from_yaml(p)  # must not raise
     assert cfg.provider.node_http_timeout_s["implement"] == 900
     assert cfg.pauses.papers is True  # legacy flag mapped through
+    assert cfg.pauses.review == "ask"
+
+
+def test_the_retired_setup_question_keys_load_and_the_log_says_they_do_nothing(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The setup questions are gone: a config that still sets their keys loads, each key is said once to do nothing,
+    and none of them changes the run."""
+    p = _write(
+        tmp_path,
+        "topic: t\n"
+        "engine:\n  clarify_mode: interactive\n  clarify_overrides:\n    simulatability: \"no\"\n"
+        "pauses:\n  clarify: ask\n",
+    )
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        cfg = Config.from_yaml(p)  # must not raise
+    said = sorted(r.getMessage() for r in caplog.records if "no longer does anything" in r.getMessage())
+    assert said == ["config: engine.clarify_mode no longer does anything; the line can be removed.",
+                    "config: engine.clarify_overrides no longer does anything; the line can be removed.",
+                    "config: pauses.clarify no longer does anything; the line can be removed."], said
+    assert cfg.engine.no_simulation is False and not hasattr(cfg.pauses, "clarify")
 
 
 def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:
@@ -480,3 +543,13 @@ def test_settings_at_once_is_auto_or_a_whole_number_of_at_least_one() -> None:
     for bad in (0, -2, True, "many"):
         with pytest.raises(ValidationError):
             ExecutionConfig(settings_at_once=bad)
+
+
+def test_the_two_papers_pause_keys_load_and_say_they_do_nothing(tmp_path: Path, caplog) -> None:
+    """FI no longer searches by topic, so it has no paywalled papers to stop for: an older config that still sets
+    ``pauses.papers`` or ``knowledge.pause_for_user_papers`` loads, and the log says each line does nothing."""
+    text = "topic: t\npauses:\n  papers: true\nknowledge:\n  pause_for_user_papers: true\n"
+    with caplog.at_level("INFO", logger="frontier_insight.config"):
+        Config.from_yaml(_write(tmp_path, text))
+    for key in ("pauses.papers", "knowledge.pause_for_user_papers"):
+        assert caplog.text.count(f"config: {key} no longer does anything; the line can be removed.") == 1, key

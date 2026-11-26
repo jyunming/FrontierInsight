@@ -92,7 +92,7 @@ def _engine(
         topic="replicates", title="seed-repair",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(
-            max_iterations=1, review_loop=False, clarify_mode="off",
+            max_iterations=1, review_loop=False,
             execute_replicates=replicates, pilot_run=False,
         ),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60, background_jobs=background_jobs,
