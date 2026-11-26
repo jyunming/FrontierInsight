@@ -1843,9 +1843,11 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             (self.fi_dir / "search_ready.json").write_text(json.dumps(judged, indent=1), encoding="utf-8")
         except OSError as exc:
             self._log.warning("[step] could not write the record of the search check (%r)", exc)
-        if judged.get("status") != "not_ready":
+        if judged.get("status") in ("ready", "not_applicable"):
             self._remove_own_search_stop(stuck_path)  # an earlier stop of this check, for a plan that is complete now
             return
+        if judged.get("status") != "not_ready":
+            return  # the check could not be made: an earlier stop of its own stays, none is added
         if stuck_path.is_file():
             return
         problem = str(judged["detail"])

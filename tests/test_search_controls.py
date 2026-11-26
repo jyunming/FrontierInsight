@@ -186,3 +186,18 @@ def test_the_stop_the_search_check_wrote_is_removed_when_the_search_is_ready_and
     stuck.write_text(json.dumps({"kind": "returned", "return_reason": "known_value_mismatch"}), encoding="utf-8")
     eng._judge_the_search_the_design_hands_on({"design": {}}, stuck)
     assert stuck.exists(), "a stop of any other kind is never removed"
+
+
+def test_a_search_check_that_could_not_be_made_keeps_its_own_earlier_stop(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    stuck = eng.quest_root / "needs" / "STUCK.json"
+    stuck.parent.mkdir(parents=True, exist_ok=True)
+    eng._search_ready = lambda state, design: {"status": "not_ready", "detail": "the plan lacks its search", "tried": []}  # type: ignore[method-assign]
+    eng._judge_the_search_the_design_hands_on({"design": {}}, stuck)
+
+    def broken(state: Any, design: Any) -> dict[str, Any]:
+        raise RuntimeError("unreadable plan")
+
+    eng._search_ready = broken  # type: ignore[method-assign]
+    eng._judge_the_search_the_design_hands_on({"design": {}}, stuck)
+    assert json.loads(stuck.read_text(encoding="utf-8"))["source"] == "search_ready", "not shown ready: the stop stays"
