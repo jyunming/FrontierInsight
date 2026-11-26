@@ -801,10 +801,11 @@ class AgentCoder:
 
     # -- rounds --
 
-    async def write(self, task: str) -> AgentResult:
+    async def write(self, task: str, *, same_task: str | None = None) -> AgentResult:
         """Round 1: the agent writes the code from ``task``. A write already done for this very task (a resume) is not
-        run again."""
-        task_sha = _sha(task.encode("utf-8"))
+        run again. ``same_task``: the text that decides whether it is the same task (default ``task``), so that a line
+        added to every task (the time limit of a round) does not make a quest saved before it start its rounds over."""
+        task_sha = _sha((task if same_task is None else same_task).encode("utf-8"))
         record = self.load()
         if record.get("write_done") and record.get("task_sha") == task_sha:
             last = (record.get("rounds") or [{}])[-1]

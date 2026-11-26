@@ -44,6 +44,7 @@ from . import agent_coder as _agent_coder
 from . import agent_scope as _agent_scope
 from .finding_repair import finding_block as _finding_block
 from . import frozen_protocol as _frozen
+from .split_run import ANALYSIS_NAME as _ANALYSIS_NAME
 
 #: Fix rounds of the coding agent before the run (after its first write).
 FIX_ROUNDS = 3
@@ -183,13 +184,16 @@ def one_line(finding: str, limit: int = 300) -> str:
 
 def compare_rounds(earlier: list[tuple[int, dict[str, bool | None]]], now: dict[str, bool | None]) -> dict[str, Any]:
     """This round's checks (``{check: True passed | False failed | None not judged}``) against the best earlier round
-    (``(round, checks)``; the one with the fewest failing checks, the later on a tie). ``{"best": its round or None,
+    (``(round, checks)``; among the rounds that left code when there are any, the one with the fewest failing checks,
+    the later on a tie: a round that left no script failed only :data:`CODE_WRITTEN`, so writing the code is progress
+    once, against a round with no code, and never again). ``{"best": its round or None,
     "newly_passed", "newly_failed", "still_broken"}``: a check failing there that passes now (or that the gate got
     past), one passing there that fails now, and one that passed in any earlier round and fails now."""
     out: dict[str, Any] = {"best": None, "newly_passed": [], "newly_failed": [], "still_broken": []}
     if not earlier:
         return out
-    best_n, best = min(reversed(earlier), key=lambda r: sum(1 for v in r[1].values() if v is False))
+    with_code = [r for r in earlier if r[1].get(CODE_WRITTEN) is not False] or earlier
+    best_n, best = min(reversed(with_code), key=lambda r: sum(1 for v in r[1].values() if v is False))
     out["best"] = best_n
     out["newly_passed"] = sorted(c for c, v in best.items() if v is False and (
         now.get(c) is True or (c not in now and _from_gate(c))))
@@ -306,10 +310,32 @@ def note_judgement(quest_root: Path, *, claimed: str, found: list[str], passed: 
     _save_record(quest_root, data)
 
 
+def _saved_checks(r: dict[str, Any]) -> dict[str, bool | None] | None:
+    """A judged round's checks as this code names them. A round saved before :data:`CODE_WRITTEN` existed named a missing
+    script ``run``: ``{"run": False}`` with the missing script as its finding is ``{CODE_WRITTEN: False}``, any other saved
+    round had code; ``{"run": False}`` with no finding saved cannot tell, so it is ``None`` (not compared with)."""
+    checks = dict(r["checks"])
+    if CODE_WRITTEN in checks:
+        return checks
+    if checks == {"run": False}:
+        found = r.get("found") if isinstance(r.get("found"), list) else []
+        if not found:
+            return None
+        if str(found[0]).startswith(f"There is no `{_ANALYSIS_NAME}`"):
+            return {CODE_WRITTEN: False}
+    return {**checks, CODE_WRITTEN: True}
+
+
 def judged_rounds(quest_root: Path) -> list[tuple[int, dict[str, bool | None]]]:
-    """``(round, checks)`` of every round of the record FI's checks judged before the run, in order."""
-    return [(int(r.get("n") or 0), r["checks"]) for r in _record(quest_root).get("rounds") or []
-            if isinstance(r, dict) and isinstance(r.get("checks"), dict)]
+    """``(round, checks)`` of every round of the record FI's checks judged before the run, in order (a round saved by an
+    older FI whose checks cannot be read as this code names them is left out, :func:`_saved_checks`)."""
+    out = []
+    for r in _record(quest_root).get("rounds") or []:
+        if isinstance(r, dict) and isinstance(r.get("checks"), dict):
+            checks = _saved_checks(r)
+            if checks is not None:
+                out.append((int(r.get("n") or 0), checks))
+    return out
 
 
 def _record_round(quest_root: Path, n: int) -> dict[str, Any]:
@@ -327,6 +353,15 @@ def round_limit_words(seconds: float) -> str:
     """A round's time limit as the agent is told it (``20 minutes``)."""
     minutes = float(seconds) / 60
     return f"{minutes:g} minutes" if minutes >= 1 else f"{float(seconds):g} seconds"
+
+
+def stopped_note(seconds: float) -> str:
+    """What the round after one stopped at its limit is told first: told only what the checks found ("the code was not
+    written"), a live agent started its work over."""
+    return (f"FI stopped your last round at its limit of {round_limit_words(seconds)}, before it ended, and judged what it "
+            "left in the folder. Continue from what is there instead of starting again: write the files the checks below "
+            "need first, and keep each of your own runs to a few minutes, so that they are in the folder when this round "
+            "ends.")
 
 
 def after_freeze_rounds(quest_root: Path) -> int:
@@ -383,12 +418,14 @@ class AgentBuildMixin:
 
     # -- the first write -----------------------------------------------------------------------------------------------
 
-    def _agent_task(self, state: Any, outline: dict[str, Any], extra: str = "") -> str:
+    def _agent_task(self, state: Any, outline: dict[str, Any], extra: str = "", *, round_limit: bool = True) -> str:
         """The agent's task: the design as a code writer may see it, and the names of the functions FI's equation tests
-        call (the outline's)."""
+        call (the outline's). ``round_limit=False``: without the line that states a round's time limit, the text whose
+        hash says whether a saved write is this same task (:meth:`AgentCoder.write`): a quest saved before that line
+        existed keeps its rounds, its session and its budget on resume."""
         from . import engine as _e
 
-        task = self._prompts["implement_agent"].substitute(  # type: ignore[attr-defined]
+        task = _with_round_limit(self._prompts["implement_agent"], round_limit).substitute(  # type: ignore[attr-defined]
             topic_block=self._topic_block(),  # type: ignore[attr-defined]
             design_block=self._code_design_block(state),  # type: ignore[attr-defined]
             clarify_block=_e._format_clarify(state),
@@ -423,7 +460,8 @@ class AgentBuildMixin:
                        "nothing else.\n")
         coder = await self._code_agent()
         self._skill_files_to_code(state)  # type: ignore[attr-defined]
-        result = await coder.write(self._agent_task(state, outline, extra))
+        result = await coder.write(self._agent_task(state, outline, extra),
+                                   same_task=self._agent_task(state, outline, extra, round_limit=False))
         if not extend and self._goes_beyond_protocol_by_request():  # type: ignore[attr-defined]
             # Code written again without a person's extension (a redesign, a rewrite after the evidence gate) is held to
             # the frozen protocol as a whole, as the chat writer's is: an earlier extension no longer excuses anything.
@@ -659,8 +697,10 @@ class AgentBuildMixin:
             if broke:
                 self._log.warning("[implement] the coding agent's last round broke what passed before, so it is not "  # type: ignore[attr-defined]
                                   "progress: %s", "; ".join(broke))
-            # The round before this one broke a check and had its one round to put it back.
-            after_break = bool(earlier) and bool(_record_round(self.quest_root, earlier[-1][0]).get("newly_failed"))  # type: ignore[attr-defined]
+            # The last earlier round that ended by itself broke a check, and this is its one round to put it back (a round
+            # stopped at its limit in between is not that round).
+            ended = [r for r in earlier if not round_was_capped(self.quest_root, r[0])]  # type: ignore[attr-defined]
+            after_break = bool(ended) and bool(_record_round(self.quest_root, ended[-1][0]).get("newly_failed"))  # type: ignore[attr-defined]
             progress = bool(compared["newly_passed"]) and not broke
             # A round stopped at its time limit did not end: what it left is judged and sent back, but it is not the
             # agent's finished attempt, so it gets the next round (two real rounds stopped at the limit before the script
@@ -699,11 +739,7 @@ class AgentBuildMixin:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
                              "while you keep what you fixed: a round that breaks a check that passed is not progress.")
             if capped:
-                # Told only what the checks found ("the code was not written"), a live agent started its work over.
-                found.insert(0, f"FI stopped your last round at its limit of {round_limit_words(coder.timeout_s)}, before it "
-                             "ended, and judged what it left in the folder. Continue from what is there instead of "
-                             "starting again: write the files the checks below need first, and keep each of your own runs "
-                             "to a few minutes, so that they are in the folder when this round ends.")
+                found.insert(0, stopped_note(coder.timeout_s))
             # A round FI did not keep (its code reached outside its folder) says why, first: the checks only see that no
             # code is there, and a live agent told only that wrote the same code again.
             outside = coder.last_cheats()
@@ -752,6 +788,13 @@ class AgentBuildMixin:
         scope = _agent_scope.scope_from_traceback(feedback, self.quest_root)  # type: ignore[attr-defined]
         result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log,  # type: ignore[attr-defined]
                                                     marks={"after_freeze": True} if frozen else None)
+        # A round stopped at its limit did not end: while a round is left it gets the next one, told to continue from
+        # what it left (as before the run, AgentBuildMixin._agent_build).
+        while result.timed_out and not result.cheats and not result.not_kept and coder.fixes_left() > 0:
+            self._log.info("[execute_reflect] the coding agent's round was stopped at its limit; it continues in the "  # type: ignore[attr-defined]
+                           "next round")
+            result = await _agent_scope.scoped_continue(coder, stopped_note(coder.timeout_s) + "\n\n" + feedback,  # type: ignore[attr-defined]
+                                                        scope, self._log, marks={"after_freeze": True} if frozen else None)
         if result.exhausted:
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
             if kept is not None:  # a run the results check sent back keeps its results
@@ -783,6 +826,16 @@ class AgentBuildMixin:
         step."""
         text = "\n".join([f"{asked.what} did not pass.", *(without_numbers(x) for x in lines[-6:])])
         return self._code_review_failed_run(text)  # type: ignore[attr-defined]
+
+
+def _with_round_limit(template: Any, keep: bool) -> Any:
+    """The agent's prompt template as it is (``keep``), or without its line that states a round's time limit: the text a
+    quest saved before that line existed was hashed from."""
+    from string import Template
+
+    if keep:
+        return template
+    return Template("".join(line for line in template.template.splitlines(keepends=True) if "$round_limit" not in line))
 
 
 def _agent_deps(message: str) -> list[str]:
