@@ -807,8 +807,10 @@ same PR that adds, splits or renames one.
   makes nothing newly pass; claimed vs found and passed / newly_passed / newly_failed per round in `.fi/agent_coder.json`;
   a round that changes how the code is laid out (`Engine._script_layout` in `core/engine_run.py`: one script or two, the
   function simulate.py gives) returns `LAYOUT_CHANGED` and `_node_execute_steps` sets the run up again; a check's send-back
-  before the run (`directive`) is the check `before_run` with its own text, a failed run is `run`; a stop words each
-  finding whole (`one_line`) and counts rounds as the run log does),
+  before the run (`directive`, named by `Engine._code_review_failed_run(check=...)`) is the check `before_run:<check>`
+  with its own text (`shorten_middle` keeps its opening and end), a failed run is `run`; a stop's line is short
+  (`one_line`) and counts rounds as the run log does, and every finding whole goes to `needs/STUCK.json` `findings`;
+  the round after the freeze is marked `after_freeze` when its record is first saved (`AgentCoder.continue_(marks=)`)),
   `_reflect_by_agent` (a failed run: one agent round, `AFTER_FREEZE_ROUNDS` after the freeze). Report mode is one switch:
   `Engine._repairs_go_to` makes `Engine._chat` raise `RepairForAgent` for a code-writing node (`writes_code`), caught by the
   loop or by `Engine._node_execute` (a failed run for the repair step); log lines shown to the agent lose their numbers

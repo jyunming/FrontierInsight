@@ -922,3 +922,91 @@ def test_a_finding_on_one_line_keeps_the_words_after_its_heading() -> None:
     assert ab.one_line("FI compared it with the plan:\n- `y` is one number per value") == (
         "FI compared it with the plan: - `y` is one number per value")
     assert ab.one_line("x" * 400).endswith("…") and len(ab.one_line("x" * 400)) == 300
+
+
+def _sent_back_by(eng: Engine, by_value: dict[int, tuple[str, str]]) -> Callable[..., Any]:
+    """A stand-in for the checks before the run: for ``value = <n>``, the check ``by_value[n][0]`` sends the code back with
+    the text ``by_value[n][1]`` (as ``Engine._code_review_failed_run`` with ``check``); a value not listed passes."""
+    async def gate(*_a: Any) -> tuple[Any, Any, bool]:
+        text = (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
+        value = int(text.split("value = ")[1].split()[0])
+        if value not in by_value:
+            return None, None, False
+        check, said = by_value[value]
+        failed = eng._code_review_failed_run(said, script="simulate.py")
+        failed["exec_result"]["check"] = check  # what each check's own send-back carries
+        return failed, None, False
+    return gate
+
+
+def test_a_round_that_fixes_one_check_before_the_run_and_meets_another_is_progress(tmp_path: Path,
+                                                                                  monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1), _write(2), _write(3)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    monkeypatch.setattr(eng, "_gate_pass", _sent_back_by(eng, {
+        1: ("fis_stub", "FI read derive.py before the run: `y` is computed by no function yet."),
+        2: ("small_run_plan", "FI ran the simulation on a small case:\n- `y` came back as one number per value of `h`.")}))
+    _first_write(eng, agent)
+    out = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert out == (None, None, False), "round 2 fixed the stub and met FI's small run; round 3 fixed that"
+    assert len(agent.prompts) == 3 and "came back as one number per value of `h`" in agent.prompts[2]
+    rounds = ac.AgentCoder(eng.quest_root, agent).load()["rounds"]
+    assert rounds[1]["newly_passed"] == ["before_run:fis_stub"]
+    assert ab.check_words("before_run:small_run_plan") == "FI's small run of the simulation compared with the plan"
+
+
+def test_the_same_check_before_the_run_sending_the_code_back_again_is_not_progress(tmp_path: Path,
+                                                                                  monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1), _write(2), _write(3)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    said = "FI ran the simulation on a small case:\n- `y` came back as one number per value of `h`."
+    monkeypatch.setattr(eng, "_gate_pass", _sent_back_by(eng, {1: ("small_run_plan", said), 2: ("small_run_plan", said)}))
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    assert "made no check of FI's pass that failed before" in stop["exec_result"]["cannot_repair"]
+    assert len(agent.prompts) == 2
+
+
+def test_a_long_finding_reaches_the_agent_with_its_opening_and_the_stop_record_keeps_it_whole(tmp_path: Path,
+                                                                                             monkeypatch) -> None:  # noqa: ANN001
+    agent = _Agent([_write(1), _write(1)])
+    eng = _engine(tmp_path, agent=agent)
+    _no_code_checks(monkeypatch)
+    long = ("FI ran the simulation on a small case and compared it with the plan:\n"
+            + "".join(f"- setting {i}: every trial returned the same value.\n" for i in range(300))
+            + "- `y` came back as one number per value of `h`.")
+    assert len(long) > 8000
+    monkeypatch.setattr(eng, "_gate_pass", _sent_back_by(eng, {1: ("small_run_plan", long)}))
+    _first_write(eng, agent)
+    stop, _code, _r = asyncio.run(eng._agent_build({}, "python", {}, eng.quest_root / "code" / "experiment.py"))
+    sent = agent.prompts[1]
+    assert "FI ran the simulation on a small case and compared it with the plan:" in sent, "the opening is kept"
+    assert "came back as one number per value of `h`" in sent and "characters left out" in sent
+    findings = stop["exec_result"]["cannot_repair_findings"]
+    assert findings[0].startswith("FI ran the simulation") and "per value of `h`" in findings[0]
+    out = asyncio.run(eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "cannot_repair"},
+                                                   "exec_result": stop["exec_result"], "exec_reflect_iter": 1}))
+    record = json.loads((eng.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert record["findings"] == findings and out["stuck"]["findings"] == findings
+    assert len(record["problem"]) < 1000, "the plain line stays short"
+
+
+def test_the_round_after_the_freeze_is_marked_before_the_agent_starts(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """A quest stopped while the round after the freeze ran: on resume that round counted against the rounds of fixes
+    before the run, because its mark was written only after the agent returned."""
+    seen: list[Any] = []
+
+    def during(code: Path) -> None:  # the agent's round: what the record says while it runs
+        seen.append(ac.AgentCoder(eng.quest_root, agent).load()["rounds"][-1].get("after_freeze"))
+        _write(2)(code)
+
+    agent = _Agent([_write(1), during])
+    eng = _engine(tmp_path, agent=agent)
+    _first_write(eng, agent)
+    monkeypatch.setattr(ab._frozen, "load", lambda _root: {"frozen": True})
+    failed = {"returncode": 1, "stderr_tail": "ZeroDivisionError", "stdout_tail": ""}
+    asyncio.run(eng._reflect_by_agent({"exec_reflect_history": []}, 0, 1, "1", "", failed, {}))
+    assert seen == [True], "the record says the round is the one after the freeze while it runs"
+    assert ab.fixes_before_the_run(eng.quest_root) == 0

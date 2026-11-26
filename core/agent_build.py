@@ -73,6 +73,13 @@ _SITE = {
 _CHECK_WORDS = {
     "run": "running the code",
     "before_run": "a check of the code before the run (the code was not run)",
+    "code_layout": "the check that the code folder is laid out as the quest needs (equation labels, package, tests)",
+    "fis_stub": "the check that each function of derive.py a result needs is written, not FI's stub",
+    "unread_compared_setting": "the check that the simulation reads every setting the study compares",
+    "pilot_run": "FI's trial run of the study before it starts",
+    "small_run_crash": "FI's small run of the simulation (it failed)",
+    "small_run_plan": "FI's small run of the simulation compared with the plan",
+    "analysis_gate": "the run of the analysis on the recorded results",
     "two_scripts": "the check that the simulation is in simulate.py, as the function FI calls for each setting",
     "protocol": "the check that the code runs the plan's settings, runs and results as the plan gives them",
     "typed_results": "the check that the results are computed, not typed into the code",
@@ -90,15 +97,41 @@ _CHECK_WORDS = {
 
 
 def check_words(check: str) -> str:
-    """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``),
-    in plain words."""
+    """One of FI's checks of the code (a :func:`core.code_checks.check_code` name, a refused repair's node, ``run``, a
+    check before the run ``before_run:<check>``), in plain words."""
+    if check.startswith(BEFORE_RUN + ":"):
+        return _CHECK_WORDS.get(check.split(":", 1)[1]) or _CHECK_WORDS[BEFORE_RUN]
     return _CHECK_WORDS.get(check) or _SITE.get(check) or check
 
 
 def _from_gate(check: str) -> bool:
-    """A check the gate reports by stopping at it (a refused repair's node, ``run``, ``before_run``): it is never seen to
-    pass, so a later round that gets past it counts as having fixed it."""
-    return check in ("run", "before_run", "two_scripts") or writes_code(check)
+    """A check the gate reports by stopping at it (a refused repair's node, ``run``, a check before the run that sent the
+    code back): it is never seen to pass, so a later round that gets past it counts as having fixed it."""
+    return check in ("run", "two_scripts") or check.startswith(BEFORE_RUN) or writes_code(check)
+
+
+#: The checks before the run that send the code back (``exec_result["check"]`` of ``Engine._code_review_failed_run``):
+#: ``before_run:<check>``, each its own check; ``before_run`` alone for one that does not name itself.
+BEFORE_RUN = "before_run"
+
+#: What the agent is given of one finding at most; a longer one loses its middle, never its opening sentence or its end.
+FINDING_CHARS = 8000
+
+
+def before_run_check(check: Any) -> str:
+    """The name a check before the run is judged under: ``before_run:<check>``, or ``before_run``."""
+    return f"{BEFORE_RUN}:{check}" if check else BEFORE_RUN
+
+
+def shorten_middle(text: str, limit: int) -> str:
+    """``text`` as it is when it fits ``limit``, else its opening and its end with what was left out said in the middle:
+    a finding's opening sentence names the check and its end the detail (a traceback's last frame)."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    head = limit // 3
+    tail = limit - head - 60
+    return text[:head] + f"\n[... {len(text) - head - tail} characters left out ...]\n" + text[-tail:]
 
 
 def one_line(finding: str, limit: int = 300) -> str:
@@ -499,13 +532,15 @@ class AgentBuildMixin:
             text = str(result.get("stderr_tail") or "").strip()
             if result.get("directive"):
                 # A check before the run sent the code back with what it found (FI's small run, the layout of the code
-                # folder, a stub of FI's): the code did not run, and the finding is the check's own text.
-                checks["before_run"] = False
-                found.append(text[-2000:] or "A check of the code before the run sent it back without saying why.")
+                # folder, a stub of FI's): the code did not run, and the finding is the check's own text, whole. Each
+                # check is its own (``before_run:<check>``), so a round that fixes one and meets the next is progress.
+                checks[before_run_check(result.get("check"))] = False
+                found.append(shorten_middle(text, FINDING_CHARS)
+                             or "A check of the code before the run sent it back without saying why.")
             else:
                 checks["run"] = False
                 found.append(f"Running the code failed (exit code {result.get('returncode', '?')}): "
-                             + (text[-2000:] or "it printed no error message."))
+                             + (shorten_middle(text, FINDING_CHARS) or "it printed no error message."))
         finally:
             self._log.removeHandler(lines)  # type: ignore[attr-defined]
         self._shown_findings(state, found, checks)
@@ -587,13 +622,16 @@ class AgentBuildMixin:
                 if still:
                     why += " (passed in an earlier round and fails now: " + "; ".join(still) + ")"
                 text = ("FI's checks still find faults in the coding agent's code, and " + why + ": "
-                        + "; ".join(one_line(f, 700) for f in found if f.strip())[:1500])
+                        + "; ".join(one_line(f) for f in found if f.strip()))
                 if getattr(self, "_fi_own_findings", None):
                     text += (" FI's own findings, which the agent may not change and which did not count against it: "
                              + "; ".join(self._fi_own_findings)[:800])  # type: ignore[attr-defined]
-                return self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
+                stop = self._stop_before_run(text, "cannot_repair", tried=[  # type: ignore[attr-defined]
                     "the coding agent wrote the code and fixed what FI's checks found, round by round",
-                    *[one_line(f) for f in found[:3] if f.strip()]]), None, False
+                    *[one_line(f) for f in found[:3] if f.strip()]])
+                # every finding whole, for needs/STUCK.json (the stop's line above is the short form)
+                stop["exec_result"]["cannot_repair_findings"] = [f for f in found if f.strip()]
+                return stop, None, False
             if broke:
                 found.insert(0, "Your last round broke what passed before (" + "; ".join(broke) + "). Put it back "
                              "while you keep what you fixed: a round that breaks a check that passed is not progress.")
@@ -609,7 +647,8 @@ class AgentBuildMixin:
                            "it", len(found))
             # A round that has only the run's failure to fix is limited to the code the traceback names; a round with
             # other findings (the checks before the run) is not, since FI cannot name their place.
-            only_run = [c for c, ok in checks.items() if ok is False] in (["run"], ["before_run"])
+            failing = [c for c, ok in checks.items() if ok is False]
+            only_run = len(failing) == 1 and (failing[0] == "run" or failing[0].startswith(BEFORE_RUN))
             scope = _agent_scope.scope_from_traceback("\n\n".join(found), self.quest_root) if only_run else None  # type: ignore[attr-defined]
             await _agent_scope.scoped_continue(coder, "\n\n".join(found), scope, self._log)  # type: ignore[attr-defined]
 
@@ -636,7 +675,8 @@ class AgentBuildMixin:
                     f"{str(exec_result.get('stderr_tail') or '')[-2000:]}")
         feedback = own_failure + feedback  # the failed function's own failure from FI's record (worded by its template)
         scope = _agent_scope.scope_from_traceback(feedback, self.quest_root)  # type: ignore[attr-defined]
-        result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log)  # type: ignore[attr-defined]
+        result = await _agent_scope.scoped_continue(coder, feedback, scope, self._log,  # type: ignore[attr-defined]
+                                                    marks={"after_freeze": True} if frozen else None)
         if result.exhausted:
             kept = self._result_check_gave_up(state)  # type: ignore[attr-defined]
             if kept is not None:  # a run the results check sent back keeps its results

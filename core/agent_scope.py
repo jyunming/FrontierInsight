@@ -24,6 +24,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .agent_coder import AgentCoder, AgentResult, TreeSnapshot, is_scratch, parse_failures
 
@@ -411,10 +412,11 @@ def _undo(snap: TreeSnapshot, originals: dict[str, bytes], code_dir: Path) -> li
 
 
 async def scoped_continue(coder: AgentCoder, feedback: str, scope: RepairScope | None,
-                          log: logging.Logger | None = None) -> AgentResult:
-    """:meth:`AgentCoder.continue_` for one repair round limited to ``scope`` (``None``: not limited)."""
+                          log: logging.Logger | None = None, *, marks: dict[str, Any] | None = None) -> AgentResult:
+    """:meth:`AgentCoder.continue_` for one repair round limited to ``scope`` (``None``: not limited); ``marks`` go into
+    the record of each round it makes (:meth:`AgentCoder.continue_`)."""
     if scope is None or not scope.files:
-        return await coder.continue_(feedback)
+        return await coder.continue_(feedback, marks=marks)
     code_dir = coder.code_dir
 
     def say(level: int, text: str, *args: object) -> None:
@@ -423,7 +425,7 @@ async def scoped_continue(coder: AgentCoder, feedback: str, scope: RepairScope |
 
     snap = await asyncio.to_thread(TreeSnapshot.take, code_dir)
     originals = await asyncio.to_thread(_originals, code_dir)
-    result = await coder.continue_(feedback + scope.describe())
+    result = await coder.continue_(feedback + scope.describe(), marks=marks)
     changed = [c for c in await asyncio.to_thread(snap.changed, code_dir) if not is_scratch(c)]
     bad = await asyncio.to_thread(parse_failures, code_dir, changed)
     if bad:
@@ -452,7 +454,7 @@ async def scoped_continue(coder: AgentCoder, feedback: str, scope: RepairScope |
              "nothing more to do.")
     mid = await asyncio.to_thread(TreeSnapshot.take, code_dir)
     mid_originals = await asyncio.to_thread(_originals, code_dir)
-    second = await coder.continue_(again)
+    second = await coder.continue_(again, marks=marks)
 
     async def undo_second(why: str) -> AgentResult | None:
         lost = await asyncio.to_thread(_undo, mid, mid_originals, code_dir)

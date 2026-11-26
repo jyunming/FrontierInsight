@@ -2911,13 +2911,16 @@ class CodeStageMixin:
             issue["plan_changed"] = after != sha
         _code_review.save(self.quest_root, record)
 
-    def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
-        """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
+    def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None,
+                                check: str = "") -> QuestState:
+        """A run that did not happen, for the repair path to take: the directive stands where a traceback would. ``check``
+        names the check that sent the code back (``exec_result["check"]``): in agent mode each is judged as its own
+        check (core/agent_build.py)."""
         patch: QuestState = {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": message, "directive": True,
                 "packages_note": getattr(self, "_packages_note", ""), "failed_script": script, "flat_output": "",
-                "numeric_warnings": [],
+                "numeric_warnings": [], **({"check": check} if check else {}),
             },
             "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
             "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
@@ -4203,7 +4206,7 @@ class CodeStageMixin:
                 + "Keep everything else as it is."
             )
             return self._code_review_failed_run(
-                directive, script=_split_run.SIMULATE_NAME if self._split_on(state) else "experiment.py")
+                directive, script=_split_run.SIMULATE_NAME if self._split_on(state) else "experiment.py", check="code_layout")
         self._record_cannot_repair(
             "; ".join(problems),
             ["read the code against what the plan requires of it before running it",
