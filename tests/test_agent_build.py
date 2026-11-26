@@ -1198,3 +1198,14 @@ def test_the_agents_task_states_the_time_limit_of_its_rounds(tmp_path: Path, mon
     task = agent.prompts[0]
     assert "is stopped after 20 minutes" in task and "$round_limit" not in task
     assert ab.round_limit_words(ab.ROUND_S) == "20 minutes"
+
+
+def test_after_a_round_with_no_script_a_round_that_changed_nothing_against_the_round_before_it_still_counts_as_progress() -> None:
+    """Kept as it was (decided by a replay of the stored decisions): a no-script round 1 has one failing check, so it is
+    the best earlier round of a later round with more failing checks, and the later round is progress against it. Before,
+    that held when the gate got past the run; now also when the run fails. Making a no-script round never the best
+    earlier round added two stops among 39 stored decisions, one of them before a round that then fixed two checks."""
+    no_code = {ab.CODE_WRITTEN: False}
+    code = {ab.CODE_WRITTEN: True, "run": False, "known_answers": False}
+    got = ab.compare_rounds([(1, no_code), (2, code)], dict(code))
+    assert got["best"] == 1 and got["newly_passed"] == [ab.CODE_WRITTEN]
