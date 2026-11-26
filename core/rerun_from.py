@@ -139,7 +139,7 @@ _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RU
                 ".fi/oracle_dry_run.json",
                 "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
-_PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
+_PLAN_LOOK = [".fi/held_beside_the_scan.json", ".fi/search_ready.json", ".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json",
               ".fi/topic_requirements.json", ".fi/topic_covered.json", ".fi/topic_asked.json",
               # The plan's parts asked of its model and the ledger of its simplifications belong to the plan written.
               ".fi/protocol_part_asked.json", ".fi/grid_asked.json", ".fi/grid_asked_again.json", ".fi/search_block_asked.json",
@@ -213,7 +213,8 @@ STEP_OUTPUTS: dict[str, tuple[str, ...]] = {
 }
 # Each step's checks: the record FI's own check leaves, and the engine setting that turns it off (None: no such setting).
 STEP_CHECKS: dict[str, dict[str, tuple[str, str | None]]] = {
-    "design": {"design_audit": ("needs/receipts/design_audit.json", None), "known_values": (".fi/known_values.json", None)},
+    "design": {"design_audit": ("needs/receipts/design_audit.json", None), "known_values": (".fi/known_values.json", None),
+               "search_ready": (".fi/search_ready.json", None)},
     "compute": {"code_review": (".fi/code_review.json", None), "checks_before_the_run": (".fi/gate_receipt.json", None),
                 "known_answer_checks": ("needs/ORACLE_CHECK.json", "oracle_check"),
                 "protocol_check": ("needs/PROTOCOL_CHECK.json", "protocol_check"),
@@ -281,7 +282,7 @@ def step_back_to(step: str, node: str) -> str:
 
 # The fields each check's writer always writes (a receipt in needs/receipts/ is read by core/receipts.py instead).
 _RECORD_FIELDS = {".fi/known_values.json": ("commission_sha256", "values"), ".fi/gate_receipt.json": ("full", "computation", "files"),
-                  ".fi/code_review.json": ("reviews_total",), "needs/ORACLE_CHECK.json": ("status",),
+                  ".fi/code_review.json": ("reviews_total",), ".fi/search_ready.json": ("status",), "needs/ORACLE_CHECK.json": ("status",),
                   "needs/PROTOCOL_CHECK.json": ("status",), "needs/RUN_MANIFEST_CHECK.json": ("status",)}
 
 
