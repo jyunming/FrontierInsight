@@ -515,14 +515,14 @@ async def test_an_agent_package_under_another_name_is_found_by_its_functions_and
     (engine.quest_root / fs.RECORD).unlink()
     (engine.quest_root / code_layout.RECORD).unlink()
     code = engine.quest_root / "code"
-    (code / "spring").rename(code / "oscillator")
+    (code / "spring").rename(code / "mechanics")
     (code / "helpers").mkdir()
     (code / "helpers" / "__init__.py").write_text("", encoding="utf-8")
     (code / "helpers" / "model.py").write_text("def unrelated(x):\n    return x\n", encoding="utf-8")
-    assert engine._agent_package(["count_cycles", "frequency"]) == "oscillator"
+    assert engine._agent_package(["count_cycles", "frequency"]) == "mechanics"
     assert engine._agent_package(["not_written"]) is None
     engine.config.engine.code_writer = "agent"
-    (code / "oscillator" / "model.py").write_text("def other(x):\n    return x\n", encoding="utf-8")
+    (code / "mechanics" / "model.py").write_text("def other(x):\n    return x\n", encoding="utf-8")
     before = len(client.calls)
     assert await engine._second_version_gate(STATE, None, None) is False
     assert len(client.calls) == before
