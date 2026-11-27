@@ -491,7 +491,7 @@ async def test_agent_written_code_gets_a_second_version_and_a_wrong_first_one_go
         ref.write_text(REFERENCE[name], encoding="utf-8")
     client.second = {"count_cycles": [REFERENCE["count_cycles"]]}
     client.main = {}  # FI never rewrites the agent's function
-    client.judge = [json.dumps({"verdict": "main_wrong", "reason": "it adds one to the count"})]
+    client.judge = [json.dumps({"verdict": "main_wrong", "reason": "it adds one to the count, so every cycle the description counts once is counted twice at the end of the run"})]
     with pytest.raises(RepairForAgent) as asked:
         await engine._second_version_gate(STATE, None, None)
     assert asked.value.node == SECOND_VERSION_REPAIR and "second, independently written version" in asked.value.what
@@ -499,7 +499,8 @@ async def test_agent_written_code_gets_a_second_version_and_a_wrong_first_one_go
     entry = second_impl.load(engine.quest_root)["functions"]["count_cycles"]
     assert entry["status"] == second_impl.WORKING and "pending" not in entry and "repair_pending" not in entry
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "a second, independently written version of count_cycles shows the first is wrong: it adds one" in log
+    assert ("a second, independently written version of count_cycles shows the first is wrong: it adds one to the count, "
+            "so every cycle the description counts once is counted twice at the end of the run") in log  # the whole reason
     # The agent fixes it: the next pass compares the new code with the same second version and is satisfied.
     model.write_text(wrong.replace("return int(n) + 1", "return int(n)"), encoding="utf-8")
     assert await engine._second_version_gate(STATE, None, None) is False

@@ -3233,7 +3233,7 @@ class CodeStageMixin:
                     said = problem.partition("A reader of the description says: ")[2].partition("\nRead the description")[0]
                     self._log.warning("[implement] a second, independently written version of %s shows the first is "
                                       "wrong: %s. Read the function's description again and correct it from that.",
-                                      name, _one_line(said or "the two versions return different results").rstrip("."))
+                                      name, _one_line(said or "the two versions return different results", 400).rstrip("."))
                     raise RepairForAgent(SECOND_VERSION_REPAIR)
                 return await filler.repair_function(by_name[name], problem)
 
