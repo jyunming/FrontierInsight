@@ -333,7 +333,7 @@ def test_after_the_freeze_the_agent_gets_one_round_then_the_failure_stands(tmp_p
 
 def test_the_improve_loop_does_not_run_on_the_agents_code(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    assert eng._improve_skip({}) == "the coding agent wrote this code: only the agent changes what it computes (FI's speed-up, which keeps every number the same, is the one change FI makes)"
+    assert eng._improve_skip({}) == "the coding agent wrote this code: only the agent changes what it computes (FI's speed-up, which must give the same numbers on a sample of the study's runs, is the one change FI makes)"
 
 
 def test_the_evidence_says_the_code_writer_ran_without_isolation(tmp_path: Path) -> None:

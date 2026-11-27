@@ -280,7 +280,13 @@ def test_a_file_with_both_kinds_of_line_ending_is_edited_with_the_text_the_model
     assert files["simulate.py"].count("\r\n") == 1
     edit, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER, RK4)))
     text, why = improve.check_edit(files, edit, ["simulate.py"], tried=set(), expected=[])
-    assert text is not None and "k4 = -(y + dt * k3)\n" in text and "\r" not in text, why
+    assert text is not None and "k4 = -(y + dt * k3)\n" in text, why
+    assert text.count("\r\n") == 1 and text.endswith(lines[-1].replace("\n", "\r\n")), \
+        "only the replaced text changes: the file's other line ends stay as they were"
+    # An edit given with \r\n line ends over the file's plain lines is matched the same way.
+    crlf, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER.replace("\n", "\r\n"), RK4.replace("\n", "\r\n"))))
+    again, why = improve.check_edit(files, crlf, ["simulate.py"], tried=set(), expected=[])
+    assert again == text, why
 
 
 # --- the loop, in the engine -----------------------------------------------------------------------------------------
