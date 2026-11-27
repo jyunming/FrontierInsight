@@ -615,9 +615,23 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     old = files.get(name)
     if old is None:
         return None, f"{name} does not exist"
-    if "\r\n" in old and "\r\n" not in edit.find:  # the model saw the file with plain line endings
-        edit = Edit(file=edit.file, find=edit.find.replace("\n", "\r\n"),
-                    replace=edit.replace.replace("\n", "\r\n"), why=edit.why)
+    if "\r\n" in old:
+        # The model saw the file as text, with plain line ends, and the file has \r\n ones (every line, or a few among
+        # plain ones in a coding agent's file): the edit is matched whatever each line ends with (the same text twice,
+        # with different line ends, is twice), and only the text it replaces changes; its new lines end with \r\n only
+        # when every line of the replaced text did (text within one line: every line of the file).
+        find = edit.find.replace("\r\n", "\n")
+        found = list(re.finditer("\r?\n".join(re.escape(part) for part in find.split("\n")), old))
+        if len(found) == 1:
+            span = found[0].group(0)
+            ref = span if "\n" in span else old
+            eol = "\r\n" if ref.count("\r\n") == ref.count("\n") else "\n"
+            edit = Edit(file=edit.file, find=span, replace=edit.replace.replace("\r\n", "\n").replace("\n", eol),
+                        why=edit.why)
+        else:
+            count = len(found)
+            return None, (f"the text to replace is {'not in' if count == 0 else f'{count} times in'} {name}; it must be "
+                          "there exactly once")
     count = old.count(edit.find)
     if count != 1:
         return None, (f"the text to replace is {'not in' if count == 0 else f'{count} times in'} {name}; it must be "

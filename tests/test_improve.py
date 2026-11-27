@@ -272,6 +272,34 @@ def test_a_file_with_windows_line_endings_is_edited_with_the_text_the_model_saw(
     assert (root / "code" / "simulate.py").read_bytes() == files["simulate.py"].encode("utf-8"), "bytes kept exactly"
 
 
+def test_a_file_with_both_kinds_of_line_ending_is_edited_with_the_text_the_model_saw() -> None:
+    """Old code: one \r\n line in a coding agent's file turned every line end of the edit into \r\n, so an edit over
+    the file's plain lines was refused as "not in" the file (two speed-ups of a stored study refused this way)."""
+    lines = SIM.splitlines(keepends=True)
+    files = {"simulate.py": "".join(lines[:-1]) + lines[-1].replace("\n", "\r\n")}
+    assert files["simulate.py"].count("\r\n") == 1
+    edit, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER, RK4)))
+    text, why = improve.check_edit(files, edit, ["simulate.py"], tried=set(), expected=[])
+    assert text is not None and "k4 = -(y + dt * k3)\n" in text, why
+    assert text.count("\r\n") == 1 and text.endswith(lines[-1].replace("\n", "\r\n")), \
+        "only the replaced text changes: the file's other line ends stay as they were"
+    # An edit given with \r\n line ends over the file's plain lines is matched the same way.
+    crlf, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER.replace("\n", "\r\n"), RK4.replace("\n", "\r\n"))))
+    again, why = improve.check_edit(files, crlf, ["simulate.py"], tried=set(), expected=[])
+    assert again == text, why
+    # The same text twice, once with each kind of line end, is twice: the edit is refused, not made at one of them.
+    twice = {"simulate.py": files["simulate.py"] + "\r\n" + FIRST_ORDER.replace("\n", "\r\n")}
+    refused, why = improve.check_edit(twice, edit, ["simulate.py"], tried=set(), expected=[])
+    assert refused is None and "2 times in" in why
+
+
+def test_an_edit_within_one_line_of_a_windows_file_adds_lines_with_windows_line_endings() -> None:
+    files = {"simulate.py": SIM.replace("\n", "\r\n")}
+    one = improve.Edit(file="simulate.py", find="dt * (-y)", replace="dt * (-y)\n    pass", why="w")
+    text, why = improve.check_edit(files, one, ["simulate.py"], tried=set(), expected=[])
+    assert text is not None and "dt * (-y)\r\n    pass\r\n" in text and text.count("\n") == text.count("\r\n"), why
+
+
 # --- the loop, in the engine -----------------------------------------------------------------------------------------
 
 
