@@ -465,3 +465,84 @@ async def test_the_summary_does_not_say_no_second_model_read_the_code_when_one_d
     assert code_review.open_findings(engine.quest_root, code)["unread"] == ""
     claim = " ".join(_claim_findings_parts(engine.quest_root))
     assert "no second model read the code" not in claim and claim.startswith("A SECOND MODEL'S READING")
+
+
+@pytest.mark.asyncio
+async def test_agent_written_code_gets_a_second_version_and_a_wrong_first_one_goes_back_to_the_agent(tmp_path: Path) -> None:
+    from core.agent_build import SECOND_VERSION_REPAIR, RepairForAgent
+
+    engine, client = await _written(tmp_path)
+    # What a coding agent leaves: the package with the outline's function names under the name FI's layout gives it, no
+    # layout record and no record of FI writing it function by function.
+    (engine.quest_root / fs.RECORD).unlink()
+    (engine.quest_root / code_layout.RECORD).unlink()
+    assert engine._agent_package(["count_cycles"]) == "spring"
+    engine.config.engine.code_writer = "agent"
+    model = engine.quest_root / "code" / "spring" / "model.py"
+    wrong = model.read_text(encoding="utf-8").replace("return int(n)", "return int(n) + 1")
+    model.write_text(wrong, encoding="utf-8")
+    pre = {"functions": {n: {"status": "agree", "rounds": 0, "inputs_tried": 5, "disagreements": []}
+                         for n in ("frequency", "quality", "mean_quality")},
+           "calls": 0, "code_sha": second_impl._sha(model)}
+    second_impl.save(engine.quest_root, pre)
+    for name in ("frequency", "quality", "mean_quality"):
+        ref = engine.quest_root / second_impl.DIR / f"{name}.py"
+        ref.parent.mkdir(parents=True, exist_ok=True)
+        ref.write_text(REFERENCE[name], encoding="utf-8")
+    client.second = {"count_cycles": [REFERENCE["count_cycles"]]}
+    client.main = {}  # FI never rewrites the agent's function
+    client.judge = [json.dumps({"verdict": "main_wrong", "reason": "it adds one to the count"})]
+    with pytest.raises(RepairForAgent) as asked:
+        await engine._second_version_gate(STATE, None, None)
+    assert asked.value.node == SECOND_VERSION_REPAIR and "second, independently written version" in asked.value.what
+    assert model.read_text(encoding="utf-8") == wrong, "FI does not change the agent's code"
+    entry = second_impl.load(engine.quest_root)["functions"]["count_cycles"]
+    assert entry["status"] == second_impl.WORKING and "pending" not in entry and "repair_pending" not in entry
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "a second, independently written version of count_cycles shows the first is wrong: it adds one" in log
+    # The agent fixes it: the next pass compares the new code with the same second version and is satisfied.
+    model.write_text(wrong.replace("return int(n) + 1", "return int(n)"), encoding="utf-8")
+    assert await engine._second_version_gate(STATE, None, None) is False
+    assert second_impl.load(engine.quest_root)["functions"]["count_cycles"]["status"] == "agree"
+    assert client.count("second_impl") == 1, "the second version is written once"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_package_under_another_name_is_found_by_its_functions_and_none_found_is_said(tmp_path: Path) -> None:
+    """The coding agent is not told a package name: a package it named itself is the one whose model.py defines the
+    outline's functions. When no package defines them the check is not made, and the log says why."""
+    engine, client = await _written(tmp_path)
+    (engine.quest_root / fs.RECORD).unlink()
+    (engine.quest_root / code_layout.RECORD).unlink()
+    code = engine.quest_root / "code"
+    (code / "spring").rename(code / "oscillator")
+    (code / "helpers").mkdir()
+    (code / "helpers" / "__init__.py").write_text("", encoding="utf-8")
+    (code / "helpers" / "model.py").write_text("def unrelated(x):\n    return x\n", encoding="utf-8")
+    assert engine._agent_package(["count_cycles", "frequency"]) == "oscillator"
+    assert engine._agent_package(["not_written"]) is None
+    engine.config.engine.code_writer = "agent"
+    (code / "oscillator" / "model.py").write_text("def other(x):\n    return x\n", encoding="utf-8")
+    before = len(client.calls)
+    assert await engine._second_version_gate(STATE, None, None) is False
+    assert len(client.calls) == before
+    assert "the agent's code has no package whose model.py defines" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_a_function_whose_parameters_are_passed_another_way_gets_the_code_s_own_signature() -> None:
+    from core.engine_code import _param_shape
+
+    assert _param_shape("def f(x, y=2) -> float:") == _param_shape("def f(x, y=3):")  # only defaults differ
+    assert _param_shape("def f(x):") != _param_shape("def f(x, /):")
+    assert _param_shape("def f(x):") != _param_shape("def f(*x):")
+    assert _param_shape("def f(x, y):") != _param_shape("def f(x, *, y):")
+    assert _param_shape("not a def") is None
+
+
+@pytest.mark.asyncio
+async def test_without_agent_mode_a_package_not_written_function_by_function_still_gets_no_second_version(tmp_path: Path) -> None:
+    engine, client = await _written(tmp_path)
+    (engine.quest_root / fs.RECORD).unlink()
+    before = len(client.calls)
+    assert await engine._second_version_gate(STATE, None, None) is False
+    assert len(client.calls) == before

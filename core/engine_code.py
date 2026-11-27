@@ -28,6 +28,35 @@ from .engine_base import (  # noqa: F401
     time, unseeded_rng_calls,
 )
 
+from dataclasses import replace as _dc_replace
+
+from .agent_build import SECOND_VERSION_REPAIR, RepairForAgent
+
+
+def _defined_functions(module: Path) -> dict[str, str]:
+    """``{name: signature line}`` of the functions ``module`` defines at its top level (none when it is missing or does not
+    parse); the line as ``def name(<parameters as written>) -> <annotation>:``."""
+    try:
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    return {n.name: f"def {n.name}({ast.unparse(n.args)})" + (f" -> {ast.unparse(n.returns)}" if n.returns else "") + ":"
+            for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _param_shape(signature: str) -> tuple[Any, ...] | None:
+    """How a ``def`` line's parameters are passed: the names of each kind (positional-only, positional-or-keyword, ``*``,
+    keyword-only, ``**``), in order; ``None`` when it does not parse. Defaults are left out."""
+    try:
+        node = ast.parse(signature.strip().rstrip(":") + ": pass").body[0]
+    except (SyntaxError, ValueError, IndexError):
+        return None
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    a = node.args
+    return (tuple(x.arg for x in a.posonlyargs), tuple(x.arg for x in a.args), a.vararg.arg if a.vararg else None,
+            tuple(x.arg for x in a.kwonlyargs), a.kwarg.arg if a.kwarg else None)
+
 
 class CodeStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
@@ -3150,18 +3179,40 @@ class CodeStageMixin:
         try:
             if not ex.code_function_steps or not self._runs_code(state):
                 return False
+            agent = self._agent_mode()
+            # A coding agent's quest keeps no layout record (the agent lays the code out); its package is the one FI's
+            # layout names for this quest, when the agent wrote it there.
             package = self._package_in_use(state)
             protocol = self._protocol_block(state)
-            if not package or not isinstance(protocol, dict):
+            if not isinstance(protocol, dict):
                 return False
-            record = _function_steps.load(self.quest_root)
-            if record.get("package") != package:
-                return False  # the package was not written function by function: there are no cards to write a second version from
             outline = state.get("implement_outline") or {}
             specs, _notes = _function_steps.model_functions(outline, protocol)
-            done = {n for n, e in (record.get("functions") or {}).items()
-                    if isinstance(e, dict) and e.get("status") == _function_steps.DONE}
+            if agent and not package:
+                package = self._agent_package([s.name for s in specs])
+                if not package and specs:
+                    self._log.info("[implement] no second, independently written version of the model's functions: the "
+                                   "agent's code has no package whose model.py defines %s", ", ".join(s.name for s in specs[:4]))
+            if not package:
+                return False
+            if agent:
+                # The coding agent wrote the package from the outline's cards and keeps their function names (its task
+                # names them), so the cards a second version is written from are the outline's; a card counts when its
+                # function is defined in the package's model module, where the second version is compared with it.
+                done = _defined_functions(self.quest_root / "code" / package / "model.py")
+            else:
+                record = _function_steps.load(self.quest_root)
+                if record.get("package") != package:
+                    return False  # the package was not written function by function: there are no cards to write a second version from
+                done = {n for n, e in (record.get("functions") or {}).items()
+                        if isinstance(e, dict) and e.get("status") == _function_steps.DONE}
             specs = [s for s in specs if s.name in done]
+            if agent:
+                # The agent may give a function other parameters than the outline's card (an optional one it added): then
+                # the second version is written to the signature the code has, or the two cannot be called alike. The same
+                # parameters keep the card's signature (its defaults are inputs the comparison is made on).
+                specs = [s if _param_shape(s.signature) == _param_shape(done[s.name])
+                         else _dc_replace(s, signature=done[s.name]) for s in specs]
             if not specs or not _second_impl.key_functions(specs, protocol)[0]:
                 return False  # no card or equation to check (or only random ones): nothing is asked, nothing is said
             if ex.sandbox == "venv" and not self.executor.python_path(self.quest_root).is_file():
@@ -3176,6 +3227,14 @@ class CodeStageMixin:
                 return await self._chat("\n\n".join(str(m.get("content") or "") for m in messages), node=node)
 
             async def repair_main(name: str, problem: str, _cases: list[dict[str, Any]]) -> bool:
+                if agent:
+                    # The code is the coding agent's: the judge's finding goes to it as what this check found (FI does
+                    # not rewrite its function), in the words the judge gave, through the agent loop's report path.
+                    said = problem.partition("A reader of the description says: ")[2].partition("\nRead the description")[0]
+                    self._log.warning("[implement] a second, independently written version of %s shows the first is "
+                                      "wrong: %s. Read the function's description again and correct it from that.",
+                                      name, _one_line(said or "the two versions return different results").rstrip("."))
+                    raise RepairForAgent(SECOND_VERSION_REPAIR)
                 return await filler.repair_function(by_name[name], problem)
 
             async def still_passes(name: str) -> bool:
@@ -3191,6 +3250,7 @@ class CodeStageMixin:
                 quest_root=self.quest_root, package=package, specs=specs, protocol=protocol,
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
                 chat=chat, run=self._run_apart_from_study(exec_env, comparison=True), repair_main=repair_main, still_passes=still_passes, passages=passages,
+                repair_by_writer=agent,
                 family_of=self._family_of_node, topic_block=self._topic_block(), log=self._log)
             for name, e in (result.get("functions") or {}).items():
                 if not isinstance(e, dict):
@@ -4004,6 +4064,21 @@ class CodeStageMixin:
         path.write_text(new, encoding="utf-8")
         self._log.info("[equations] rewrote the function %s alone (equation %s)", failure.get("function"), failure.get("id"))
         return True
+
+    def _agent_package(self, names: list[str]) -> str | None:
+        """The package a coding agent wrote the model's functions in: of the ``code/<name>/`` packages with a
+        ``model.py``, the one whose ``model.py`` defines most of ``names`` (the agent is not told a package name; FI's
+        layout name for the quest wins a tie). ``None`` when no package's ``model.py`` defines any of them."""
+        layout = _code_layout.package_name(str(self.config.title or self.config.topic or ""))
+        best, most = None, 0
+        for model in sorted((self.quest_root / "code").glob("*/model.py")):
+            pkg = model.parent
+            if not (pkg / "__init__.py").is_file():
+                continue
+            n = len(set(names) & set(_defined_functions(model)))
+            if n > most or (n == most and n and pkg.name == layout):
+                best, most = pkg.name, n
+        return best
 
     def _package_in_use(self, state: QuestState) -> str | None:
         """The model's package when this quest's code is laid out as a research tool and the package is there."""

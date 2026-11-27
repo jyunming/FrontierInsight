@@ -81,6 +81,9 @@ Message = dict[str, str]
 ChatFn = Callable[[str, list[Message]], Awaitable[str]]
 #: What the engine's run appends to a command's stderr when the command ran out of time.
 TIMED_OUT = "(timed out)"
+#: The record's code fingerprint after a finding went to the code's own writer: never a file's, so the next pass treats
+#: every function's earlier verdict as one about other code.
+HANDED_TO_WRITER = "handed to the code's writer"
 #: The comparison's time limit never starts below this (it was a fixed limit before it ran apart); the study's own
 #: setup trial's measured duration is added to it.
 COMPARE_BASE_S = 180
@@ -1313,9 +1316,12 @@ def _spec_block_of(spec: _fs.Spec, protocol: dict[str, Any] | None) -> str:
 
 def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[str, Any] | None, specs: list[_fs.Spec],
                  passages: str, example: dict[str, Any] | None, topic_block: str = "", rewrite: str = "",
-                 main_source: str = "", return_keys: list[str] | None = None) -> str:
+                 main_source: str = "", return_keys: list[str] | None = None, own_source: str = "") -> str:
     """The request that writes the second version. It holds the description, the signature, the passages, the signatures of
-    the functions it calls and the example INPUTS. Raises ``ValueError`` if a line of the main implementation ended up in it."""
+    the functions it calls and the example INPUTS. Raises ``ValueError`` if a line of the main implementation ended up in it.
+    ``own_source``: the second writer's own earlier version, which a rewrite shows it; a line of it that the main
+    implementation happens to share (two writers of one description both wrote ``n = int(round(T / dt))``) tells the
+    writer nothing it did not write itself, so it is not counted."""
     by_name = {s.name: s for s in specs}
     related = "\n".join(f"- {by_name[d].signature.strip()}" for d in spec.depends_on if d in by_name) or "(none)"
     literature = ("# What the literature says (passages from the source the plan cites)\n\n" + passages.strip() + "\n") if passages.strip() else ""
@@ -1330,8 +1336,9 @@ def write_prompt(spec: _fs.Spec, *, template: string.Template, protocol: dict[st
                                  signature=spec.signature.strip(), related_block=related, literature_block=literature,
                                  example_block=example_block, rewrite_block=rewrite_block)
     sig = spec.signature.strip()
+    own = {ln.strip() for ln in own_source.splitlines()}
     for line in (ln.strip() for ln in main_source.splitlines()):
-        if len(line) >= 30 and line != sig and not line.startswith(("def ", "#", '"""', "'''")) and line in prompt:
+        if len(line) >= 30 and line != sig and line not in own and not line.startswith(("def ", "#", '"""', "'''"))                 and line in prompt:
             raise ValueError("a line of the main implementation is in the second writer's request")
     return prompt
 
@@ -1456,8 +1463,11 @@ class SecondImpl:
                  passages: dict[str, str] | None = None, family_of: FamilyFn | None = None, topic_block: str = "",
                  cap: int = MAX_KEY, log: Any = None,
                  verify_package: Callable[[], Awaitable[str]] | None = None,
-                 captured: dict[str, list[dict[str, Any]]] | None = None) -> None:
+                 captured: dict[str, list[dict[str, Any]]] | None = None, repair_by_writer: bool = False) -> None:
         self.root, self.package, self.specs, self.protocol = Path(quest_root), package, list(specs), protocol
+        #: The code's own writer (a coding agent) repairs a function the judge finds wrong: ``repair_main`` hands the
+        #: finding over and does not return (it raises), FI writes nothing and sends no request of its own for it.
+        self.repair_by_writer = bool(repair_by_writer)
         self.prompts, self.chat, self.run = prompts, chat, run
         self.repair_main, self.still_passes = repair_main, still_passes
         #: ``verify_package()``: the model's other tests, run once on the package a repair left; ``""`` when none fails, else
@@ -1553,14 +1563,15 @@ class SecondImpl:
     def _spec_passages(self, spec: _fs.Spec) -> str:
         return self.passages.get(spec.equation, "")
 
-    async def _write_reference(self, spec: _fs.Spec, entry: dict[str, Any], *, rewrite: str = "", kind: str = "write") -> str:
+    async def _write_reference(self, spec: _fs.Spec, entry: dict[str, Any], *, rewrite: str = "", kind: str = "write",
+                               own_source: str = "") -> str:
         """Ask for the second version and save it; ``""`` on success, else why not (nothing is saved)."""
         main_source = _function_source(self.model_path, spec.name)
         try:
             prompt = write_prompt(spec, template=self.prompts["write"], protocol=self.protocol, specs=self.specs,
                                   passages=self._spec_passages(spec), example=example_inputs(spec, self.protocol, self.captured),
                                   topic_block=self.topic_block, rewrite=rewrite, main_source=main_source,
-                                  return_keys=self._return_keys(spec))
+                                  return_keys=self._return_keys(spec), own_source=own_source)
         except ValueError as e:
             return str(e)
         if not self._spend(entry, kind):
@@ -1758,6 +1769,20 @@ class SecondImpl:
     async def _act(self, spec: _fs.Spec, entry: dict[str, Any], adj: dict[str, Any]) -> tuple[str, str] | None:
         """Do what the judge's verdict says. ``None`` = compare again; else ``(final status, why)``."""
         verdict, reason = adj.get("verdict"), str(adj.get("reason") or "")
+        if verdict == MAIN_WRONG and self.repair_by_writer:
+            # The repair is the writer's: nothing is pending or to be undone, and the next pass compares the code the
+            # writer leaves with the same second version, from the start. Every other function is compared again too
+            # (the record's code fingerprint is cleared): the writer may change more than this one function, and the
+            # functions this pass had not reached yet were judged on the code before.
+            entry.pop("pending", None)
+            entry.pop("adjudication", None)
+            entry["status"], entry["rounds"], entry["rewrites"] = WORKING, 0, 0
+            entry["sent_to_writer"] = int(entry.get("sent_to_writer") or 0) + 1
+            self.record["code_sha"] = HANDED_TO_WRITER
+            self._save()
+            await self.repair_main(spec.name, repair_problem(reason, entry.get("disagreements") or []),
+                                   list(entry.get("disagreements") or []))
+            return UNRESOLVED, "the function's writer was told what the judge found"
         if verdict == MAIN_WRONG:
             before = self.model_path.read_text(encoding="utf-8") if self.model_path.is_file() else None
             if before is not None:  # saved before anything is written, so a run that ends in the middle can be undone
@@ -1766,6 +1791,7 @@ class SecondImpl:
             entry["repair_pending"] = True
             if not self._spend(entry, "repair_main"):
                 entry.pop("repair_pending", None)
+                self._orig_path(spec.name).unlink(missing_ok=True)
                 return UNRESOLVED, "no requests left to repair the first version"
             ok = False
             try:
@@ -1806,7 +1832,7 @@ class SecondImpl:
             old = self._ref_path(spec.name).read_text(encoding="utf-8").strip() if self._ref_path(spec.name).is_file() else ""
             note = (f"Your earlier version:\n\n```python\n{old}\n```\n\nA reader of the description judged it wrong: {reason}\n"
                     "Write the function again from the description.")
-            why = await self._write_reference(spec, entry, rewrite=note, kind="rewrite")
+            why = await self._write_reference(spec, entry, rewrite=note, kind="rewrite", own_source=old)
             if why:
                 return UNCONFIRMED, f"the second version could not be rewritten: {why}"
             adj["outcome"] = "reference rewritten"
@@ -1819,8 +1845,12 @@ class SecondImpl:
         """Check the key functions and return (and save) the record."""
         self.record = load(self.root)
         sha = _sha(self.model_path)
-        stale = bool(self.record.get("code_sha")) and self.record.get("code_sha") != sha
-        self.record["code_sha"] = sha
+        old = self.record.get("code_sha")
+        stale = bool(old) and old != sha
+        if not stale:
+            self.record["code_sha"] = sha
+        # else the earlier fingerprint stays until every function was compared again: a pass cut short leaves the
+        # record stale, so the next one compares again the functions this one did not reach.
         self.record.setdefault("calls", 0)
         selected, skipped = key_functions(self.specs, self.protocol, self.cap)
         funcs = self._funcs()
@@ -1844,6 +1874,8 @@ class SecondImpl:
             except Exception as e:  # noqa: BLE001 -- one function's trouble never stops the others
                 self.log.info("[second_impl] %s: %r", label(spec), e)
                 self._finish(spec, entry, UNCONFIRMED, f"the check failed to run ({type(e).__name__})")
+        if stale and self.record.get("code_sha") == old:
+            self.record["code_sha"] = sha
         self._save()
         return self.record
 

@@ -74,7 +74,12 @@ _SITE = {
     "implement_seed": "the check that each run uses the seed FI gives it",
     "execute_reflect": "a check of the code before the run (a result typed into the code, or a static fault)",
     "implement.finding_repair": "a fault another model found in the code and FI's test showed",
+    "second_impl.repair": "the comparison with a second, independently written version of one of the model's functions",
 }
+
+#: The request a judge's "the first version is wrong" makes in agent mode (core/engine_code.py::_second_version_gate): a
+#: repair, so refused and reported to the agent (:func:`writes_code`).
+SECOND_VERSION_REPAIR = "second_impl.repair"
 
 
 #: The check that the round left the analysis script in the folder. Its own check, not ``run``: a round that writes the
