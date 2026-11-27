@@ -713,7 +713,9 @@ class EngineConfig(BaseModel):
     review_loop: bool = True
     # Who writes the experiment's code. ``chat`` (the default) is today's way: a chat model writes the code function by
     # function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
-    # ``code/`` folder; FI's checks only judge it, and what they find goes back to the agent (core/agent_build.py).
+    # ``code/`` folder; FI's checks only judge it, and what they find goes back to the agent (core/agent_build.py). The
+    # agent is the command-line tool of the code-writing step's provider: Codex (``codex_cli``), Antigravity
+    # (``antigravity_cli``), else the Claude CLI (core/agent_runners.py).
     code_writer: Literal["chat", "agent"] = "chat"
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.

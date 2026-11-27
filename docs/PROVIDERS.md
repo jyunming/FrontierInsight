@@ -105,6 +105,15 @@ FI's calls; the `codex login` sign-in still is. Choose the model with
 `provider.reasoning_effort`. A model you can reach only through a custom
 provider defined in config.toml cannot be used through `codex_cli`.
 
+**As the coding agent** (`engine.code_writer: agent`), `codex_cli` and `antigravity_cli` are run *with* their
+tools, since writing and running the code is the agent's job: Codex in its own `workspace-write` sandbox (files
+written only in the agent's folder, web search off), agy with edits and commands accepted and web pages, MCP
+servers and files outside its folder refused, in a settings home of the quest's own (your own agy settings are not
+used, except the model you chose; its web search cannot be turned off). The step whose provider decides it is
+`implement` (`provider.node_providers.implement`, else the main provider); any other provider uses the Claude
+command-line tool. Python the agent runs is not confined by either CLI, so FI's watch on the quest folder applies
+to every agent.
+
 A model can still ask for a tool: `claude_cli` answers each such call with
 "No such tool available" and nothing runs, and `codex_cli` has no tool to call.
 A model can also *describe* running a command it never ran — in one check

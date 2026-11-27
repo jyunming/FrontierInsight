@@ -42,7 +42,9 @@ from typing import Any
 
 from . import agent_coder as _agent_coder
 from . import agent_scope as _agent_scope
+from .agent_runners import RUNNERS as _AGENT_CLIS
 from .finding_repair import finding_block as _finding_block
+from .provider import node_provider_for
 from . import frozen_protocol as _frozen
 from .split_run import ANALYSIS_NAME as _ANALYSIS_NAME
 
@@ -406,16 +408,39 @@ class AgentBuildMixin:
     def _agent_mode(self) -> bool:
         return getattr(self.config.engine, "code_writer", "chat") == "agent"  # type: ignore[attr-defined]
 
+    def _code_agent_provider(self) -> tuple[str, str]:
+        """The provider of the code-writing step (its own ``provider.node_providers`` entry, else the main provider) and
+        its reasoning level: the CLI that is the coding agent."""
+        provider = self.config.provider  # type: ignore[attr-defined]
+        step = node_provider_for(getattr(provider, "node_providers", None), "implement")
+        entry = step[1] if step is not None else provider
+        return str(getattr(entry, "name", "") or ""), str(getattr(entry, "reasoning_effort", "") or "")
+
+    def _close_code_agent(self) -> None:
+        """The run is over: the coding agent's runner tidies up. A quest that reached its end (``_quest_recorded``) also
+        loses the scratch copy of ``code/`` and the agent's session files (agy's home among them), which only a resume
+        would have used; a stopped, paused or failed run keeps them for its resume. Never in the way of the outcome."""
+        coder = getattr(self, "_agent_coder_obj", None)
+        if coder is None:
+            return
+        try:
+            coder.close(final=bool(getattr(self, "_quest_recorded", False)))
+        except Exception as exc:  # noqa: BLE001 -- tidying up never changes how the run ended
+            self._log.warning("[implement] the coding agent's scratch folder could not be removed: %s", exc)  # type: ignore[attr-defined]
+
     async def _code_agent(self) -> _agent_coder.AgentCoder:
         """The quest's coding agent (one per engine). The runner is the one a test gave (``self._agent_runner``), else the
-        Claude command-line tool on this computer (in a container only when Docker is running)."""
+        command-line tool of the code-writing step's provider when it is one that can be an agent (Codex, Antigravity),
+        else the Claude command-line tool on this computer (in a container only when Docker is running)."""
         coder = getattr(self, "_agent_coder_obj", None)
         if coder is not None:
             return coder
         runner = getattr(self, "_agent_runner", None)
         if runner is None:
+            name, effort = self._code_agent_provider()
             runner = await _agent_coder.make_runner(self.quest_root, model=self._model_for_node("implement") or "",  # type: ignore[attr-defined]
-                                                    log=self._log)  # type: ignore[attr-defined]
+                                                    log=self._log, provider=name,  # type: ignore[attr-defined]
+                                                    effort=effort if name in _AGENT_CLIS else "")
         coder = _agent_coder.AgentCoder(self.quest_root, runner, max_fixes=FIX_ROUNDS + AFTER_FREEZE_ROUNDS,  # type: ignore[attr-defined]
                                         timeout_s=ROUND_S, log=self._log)  # type: ignore[attr-defined]
         self._agent_coder_obj = coder

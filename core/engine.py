@@ -1268,6 +1268,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
             # start holds the same rows back again). Also when it was turned off: a part must never stay in place.
             if _phased.enabled(self.config) or _phased.record_path(self.quest_root).exists():
                 self._phased_restore_inputs()
+            # The coding agent's scratch copy and session files (agent mode): removed when the quest reached its end,
+            # kept for a resume otherwise. Without this nothing ever removed them.
+            self._close_code_agent()
             if _marker is not None:
                 try:
                     _marker.finish(_ended_how)
