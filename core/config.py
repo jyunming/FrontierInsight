@@ -711,12 +711,14 @@ class EngineConfig(BaseModel):
     framework: EngineFramework = "langgraph"
     max_iterations: int = Field(default=2, ge=0)
     review_loop: bool = True
-    # Who writes the experiment's code. ``chat`` (the default) is today's way: a chat model writes the code function by
-    # function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
+    # Who writes the experiment's code. ``auto`` (the default): the coding agent when the code-writing step's provider
+    # is a command-line tool that can be one and is installed (Claude, Codex, Antigravity), else the chat model; decided
+    # once per quest and kept on resume (core/agent_runners.py:resolve_code_writer). ``chat``: a chat model writes the
+    # code function by function. ``agent`` hands the whole program to one coding agent, which writes, runs and fixes it in the quest's
     # ``code/`` folder; FI's checks only judge it, and what they find goes back to the agent (core/agent_build.py). The
     # agent is the command-line tool of the code-writing step's provider: Codex (``codex_cli``), Antigravity
     # (``antigravity_cli``), else the Claude CLI (core/agent_runners.py).
-    code_writer: Literal["chat", "agent"] = "chat"
+    code_writer: Literal["auto", "chat", "agent"] = "auto"
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
     audit_trace: bool = True

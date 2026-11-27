@@ -28,6 +28,15 @@ _NETWORK_LEAKS: dict[str, list[str]] = {}
 
 
 @pytest.fixture(autouse=True)
+def _no_coding_agent_found(monkeypatch):
+    """``engine.code_writer: auto`` (the default) picks the coding agent when its command-line tool is installed: a test
+    must not depend on whether this machine has ``claude``, ``codex`` or ``agy``. None is found unless a test says so."""
+    from core import agent_runners
+
+    monkeypatch.setattr(agent_runners, "_program_on_path", lambda _program: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_network(request, monkeypatch):
     """No test reaches a real server through httpx.
 

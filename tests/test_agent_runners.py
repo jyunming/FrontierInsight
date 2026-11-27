@@ -397,3 +397,161 @@ def test_the_engine_closes_the_agent_on_every_way_a_run_ends() -> None:
 
     source = inspect.getsource(Engine.run)
     assert source.index("self._close_code_agent()") > source.rindex("finally:")
+
+
+
+def _cfg(writer: str, name: str, implement: str | None = None):
+    nodes = {"implement": SimpleNamespace(name=implement, reasoning_effort=None)} if implement else {}
+    return SimpleNamespace(engine=SimpleNamespace(code_writer=writer),
+                           provider=SimpleNamespace(name=name, reasoning_effort=None, node_providers=nodes))
+
+
+def test_auto_picks_the_agent_where_its_tool_is_installed_and_the_chat_model_elsewhere(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: the default was the chat model everywhere; the person decided 2026-11-27 that the coding agent is the
+    default wherever one can run."""
+    installed = {"codex"}
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}" if program in installed else None)
+    writer, line = ar.resolve_code_writer(_cfg("auto", "claude_cli", implement="codex_cli"), tmp_path / "q1")
+    assert writer == "agent" and "`codex`" in line
+    writer, line = ar.resolve_code_writer(_cfg("auto", "claude_cli"), tmp_path / "q2")
+    assert writer == "chat" and "`claude` command was not found" in line
+    writer, line = ar.resolve_code_writer(_cfg("auto", "openai"), tmp_path / "q3")
+    assert writer == "chat" and "no command-line coding agent" in line
+    # The person's own choice is kept as it is, whatever is installed.
+    assert ar.resolve_code_writer(_cfg("chat", "codex_cli"), tmp_path / "q4") == ("chat", "")
+    assert ar.resolve_code_writer(_cfg("agent", "openai"), tmp_path / "q5") == ("agent", "")
+
+
+def test_auto_is_decided_once_per_quest_and_an_older_quest_keeps_the_chat_model(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}")
+    quest = tmp_path / "q"
+    assert ar.resolve_code_writer(_cfg("auto", "codex_cli"), quest, keep=True)[0] == "agent"
+    assert not list((quest / ".fi").glob("*.tmp")), "the record is written whole"
+    monkeypatch.setattr(ar, "_program_on_path", lambda _program: None)
+    assert ar.resolve_code_writer(_cfg("auto", "codex_cli"), quest) == ("agent", ""), "a resume keeps its writer"
+    older = tmp_path / "older"
+    (older / ".fi").mkdir(parents=True)
+    (older / ".fi" / "state.sqlite").write_bytes(b"")
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}")
+    assert ar.resolve_code_writer(_cfg("auto", "codex_cli"), older) == ("chat", ""), \
+        "a quest begun when the chat model was the default is not switched half-way"
+
+
+def test_the_engine_starts_with_the_writer_auto_chose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.config import Config
+    from core.engine import Engine
+
+    cfg = Config.model_validate({"topic": "a made-up topic", "provider": {"name": "codex_cli", "model": "m"},
+                                 "output": {"output_dir": str(tmp_path)}})
+    assert cfg.engine.code_writer == "auto"
+    assert Engine(cfg)._agent_mode() is False, "nothing installed: the chat model"
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}")
+    eng = Engine(cfg)
+    assert eng._agent_mode() is True and eng._repairs_go_to == "agent"
+
+
+def test_a_record_that_cannot_be_read_or_saved_never_switches_the_writer_silently(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: an unreadable record was decided again (a resume could switch writer half-way), and a record that
+    could not be saved was ignored (the agent this run, maybe the chat model on the resume)."""
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}")
+    quest = tmp_path / "q"
+    (quest / ".fi").mkdir(parents=True)
+    (quest / ar.CODE_WRITER_RECORD).write_text("{not json", encoding="utf-8")
+    with pytest.raises(ar.CodeWriterRecordError, match="engine.code_writer"):
+        ar.resolve_code_writer(_cfg("auto", "codex_cli"), quest, keep=True)
+    assert ar.resolve_code_writer(_cfg("auto", "codex_cli"), quest) == ("chat", ""), "only looking: no error"
+    assert ar.resolve_code_writer(_cfg("agent", "codex_cli"), quest, keep=True) == ("agent", ""), \
+        "the person's own setting is the way out"
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / ".fi").write_text("a file where the folder should be", encoding="utf-8")
+    with pytest.raises(ar.CodeWriterRecordError, match="could not be saved"):
+        ar.resolve_code_writer(_cfg("auto", "codex_cli"), blocked, keep=True)
+    assert not (blocked / ".fi").is_dir(), "nothing decided is left behind to be read on the next start"
+
+
+def test_a_run_whose_writer_record_cannot_be_read_stops_before_anything_runs_and_ends_cleanly(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from core import run_marker
+    from core.config import Config
+    from core.engine import Engine
+
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}")
+    eng = Engine(Config.model_validate({"topic": "a made-up topic", "provider": {"name": "codex_cli", "model": "m"},
+                                        "output": {"output_dir": str(tmp_path)}}))
+    (eng.quest_root / ".fi").mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / ar.CODE_WRITER_RECORD).write_text("{not json", encoding="utf-8")
+    with pytest.raises(ar.CodeWriterRecordError, match="set engine.code_writer"):
+        asyncio.run(eng.run())
+    record = json.loads((eng.quest_root / run_marker.RECORD).read_text(encoding="utf-8"))
+    assert record.get("ended") == "failed: CodeWriterRecordError", "the run's marker records how it ended"
+    assert not (eng.quest_root / "code").exists(), "stopped before anything of the study was set up"
+    assert (eng.quest_root / ar.CODE_WRITER_RECORD).read_text(encoding="utf-8") == "{not json", "left as found"
+
+
+def test_an_engine_built_only_to_look_writes_nothing_and_a_run_records_the_writer(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: every Engine wrote the record when built, also one built only to read a quest (the web page's redo
+    menu); a quest looked at before its tool was installed was then held to the chat model."""
+    import asyncio
+
+    from core.config import Config
+    from core.engine import Engine
+
+    class _Stop(Exception):
+        pass
+
+    async def _stop(self):
+        raise _Stop
+
+    monkeypatch.setattr(Engine, "_check_records_changed_outside", _stop)
+
+    def _engine(name: str) -> Engine:
+        return Engine(Config.model_validate({"topic": "a made-up topic", "provider": {"name": name, "model": "m"},
+                                             "output": {"output_dir": str(tmp_path)}}))
+
+    def _run(eng: Engine) -> None:
+        try:
+            asyncio.run(eng.run())
+        except _Stop:
+            pass
+
+    looked = _engine("codex_cli")
+    assert not (looked.quest_root / ar.CODE_WRITER_RECORD).exists(), "building an engine writes nothing"
+    monkeypatch.setattr(ar, "_program_on_path", lambda program: f"/bin/{program}" if program == "codex" else None)
+    agent, chat = _engine("codex_cli"), _engine("openai")   # two quests in one process
+    assert agent.quest_root != chat.quest_root
+    _run(agent)
+    _run(chat)
+    read = lambda eng: json.loads((eng.quest_root / ar.CODE_WRITER_RECORD).read_text(encoding="utf-8"))["writer"]
+    assert (read(agent), agent._repairs_go_to) == ("agent", "agent")
+    assert (read(chat), chat._repairs_go_to) == ("chat", "chat")
+    # The resume of the agent's quest after its tool is gone keeps the writer it started with.
+    monkeypatch.setattr(ar, "_program_on_path", lambda _program: None)
+    again = Engine(agent.config, resume_quest_id=agent.quest_id)
+    assert again.quest_root == agent.quest_root and again._agent_mode() is True
+    _run(again)
+    assert read(again) == "agent" and again._repairs_go_to == "agent"
+
+
+async def test_a_failed_round_says_what_the_cli_printed_when_its_error_output_is_empty(
+        quest: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Old code: Codex and agy report a failure on their normal output, so the warning and the round's error read
+    "(no message)"."""
+
+    class _Fails:
+        confined = False
+
+        async def run(self, prompt, *, cwd, session_id=None, timeout_s=None):
+            return ac.RunnerOutput(exit_code=1, timed_out=False, message="the model is out of quota",
+                                   session_id="", duration_s=0.1, stderr_tail="")
+
+    with caplog.at_level(logging.WARNING):
+        res = await ac.AgentCoder(quest, _Fails(), timeout_s=60).write("task")
+    assert not res.ok and "out of quota" in res.error
+    assert "out of quota" in caplog.text and "(no message)" not in caplog.text

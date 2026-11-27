@@ -42,9 +42,9 @@ from typing import Any
 
 from . import agent_coder as _agent_coder
 from . import agent_scope as _agent_scope
+from . import agent_runners as _agent_runners
 from .agent_runners import RUNNERS as _AGENT_CLIS
 from .finding_repair import finding_block as _finding_block
-from .provider import node_provider_for
 from . import frozen_protocol as _frozen
 from .split_run import ANALYSIS_NAME as _ANALYSIS_NAME
 
@@ -406,15 +406,17 @@ class AgentBuildMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
     def _agent_mode(self) -> bool:
-        return getattr(self.config.engine, "code_writer", "chat") == "agent"  # type: ignore[attr-defined]
+        """The coding agent writes this quest's code: ``engine.code_writer`` as the engine resolved it at start
+        (:func:`core.agent_runners.resolve_code_writer`; ``auto`` decided by the code-writing step's provider)."""
+        writer = getattr(self.config.engine, "code_writer", "chat")  # type: ignore[attr-defined]
+        if writer == "auto":
+            writer = getattr(self, "_code_writer", None) or "chat"
+        return writer == "agent"
 
     def _code_agent_provider(self) -> tuple[str, str]:
         """The provider of the code-writing step (its own ``provider.node_providers`` entry, else the main provider) and
         its reasoning level: the CLI that is the coding agent."""
-        provider = self.config.provider  # type: ignore[attr-defined]
-        step = node_provider_for(getattr(provider, "node_providers", None), "implement")
-        entry = step[1] if step is not None else provider
-        return str(getattr(entry, "name", "") or ""), str(getattr(entry, "reasoning_effort", "") or "")
+        return _agent_runners.step_provider(self.config)  # type: ignore[attr-defined]
 
     def _close_code_agent(self) -> None:
         """The run is over: the coding agent's runner tidies up. A quest that reached its end (``_quest_recorded``) also

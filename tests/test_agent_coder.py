@@ -204,9 +204,21 @@ async def test_without_a_running_docker_the_copy_is_the_normal_path_and_says_so(
     assert runner.mode == "host" and ac.NO_DOCKER_LINE in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], "information, not a warning"
     ok = _fake(tmp_path, "ok", "print('27.1.1')\n")
-    docker = await ac.make_runner(tmp_path / "q", docker=ok)
+    docker = await ac.make_runner(tmp_path / "q", docker=ok, environ={ac.TOKEN_ENV: "tok"})
     assert docker.mode == "docker" and (tmp_path / "q").resolve() not in docker.home_dir.parents
     assert (await ac.make_runner(tmp_path / "q", docker=ok, use_docker=False)).mode == "host"
+
+
+async def test_a_running_docker_without_the_login_token_runs_the_agent_on_this_computer(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Old code: Docker running but no Claude login token -> the container runner, whose every round then failed
+    with "needs a Claude login token"; with the coding agent now the default this would stop most quests."""
+    ok = _fake(tmp_path, "ok", "print('27.1.1')\n")
+    with caplog.at_level(logging.INFO):
+        runner = await ac.make_runner(tmp_path / "q", docker=ok, environ={})
+    assert runner.mode == "host"
+    assert "login token" in caplog.text and ac.TOKEN_ENV in caplog.text
+    runner.process_env()   # the CLI on this computer uses its own login: nothing to raise
 
 
 # --- the no-Docker round: a copy of code/, compared and copied back --------------------------------------------------------
