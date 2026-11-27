@@ -261,6 +261,27 @@ def test_write_prompt_refuses_a_main_line_in_the_request():
                         passages="passage\n" + leak, example=None, main_source="def activation_energy(slope):\n" + leak)
 
 
+def test_a_rewrite_that_shows_the_writer_its_own_line_the_main_version_shares_is_not_refused():
+    """Both writers of one description wrote ``n_steps = int(round(total_time / time_step))``; a rewrite shows the second
+    writer its own earlier version, so that line is in the request, and it was refused as a leak of the main version. A line
+    only the main version has is still refused."""
+    spec = spec_for(protocol())
+    shared = "    n_steps = int(round(total_time / time_step))\n"
+    main = "def activation_energy(slope):\n" + shared + "    return the_secret_main_implementation_line(slope)\n"
+    own = "def activation_energy(slope):\n" + shared + "    return other_way(slope)\n"
+    note = f"Your earlier version:\n\n```python\n{own}```\n\nA reader of the description judged it wrong.\n"
+    prompt = si.write_prompt(spec, template=PROMPTS["write"], protocol=protocol(), specs=[spec], passages="", example=None,
+                             rewrite=note, main_source=main, own_source=own)
+    assert shared.strip() in prompt
+    with pytest.raises(ValueError):  # without its own version, the shared line counts as a leak as before
+        si.write_prompt(spec, template=PROMPTS["write"], protocol=protocol(), specs=[spec], passages="", example=None,
+                        rewrite=note, main_source=main)
+    with pytest.raises(ValueError):  # a line only the main version has is still refused
+        si.write_prompt(spec, template=PROMPTS["write"], protocol=protocol(), specs=[spec], passages="", example=None,
+                        rewrite=note + "    return the_secret_main_implementation_line(slope)\n", main_source=main,
+                        own_source=own)
+
+
 def test_reference_lives_in_fi_not_code(tmp_path):
     fake = Fake(write=[fenced(GOOD_REF)])
     root, _s, _rec = run_it(tmp_path, fake)
@@ -1189,3 +1210,108 @@ def test_nan_or_infinity_against_a_number_is_a_disagreement_at_any_tolerance():
     assert si.judge_rows([{"main": float("nan"), "ref": 0.5}], inputs, tol)["status"] == si.DISAGREE
     assert si.judge_rows([{"main": {"f": "nan"}, "ref": 0.5}], inputs, tol)["status"] == si.DISAGREE
     assert si.judge_rows([{"main": 0.5, "ref": {"f": "inf"}}], inputs, tol)["status"] == si.DISAGREE
+
+
+class _ToTheWriter(BaseException):
+    """What agent mode raises from ``repair_main`` (core/agent_build.py::RepairForAgent): the code's writer is told."""
+
+
+def test_a_repair_sent_to_the_code_writer_leaves_nothing_pending_and_the_next_pass_judges_its_code(tmp_path):
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong", "the sign of the slope is lost")])
+    root = make_quest(tmp_path, MUTANT_MAIN)
+    proto = protocol()
+
+    async def repair_main(name, problem, cases):
+        raise _ToTheWriter()
+
+    s = build(root, fake, [spec_for(proto)], proto, repair_main=repair_main, repair_by_writer=True)
+    with pytest.raises(_ToTheWriter):
+        asyncio.run(s.run_all())
+    rec = si.load(root)
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == si.WORKING and "pending" not in e and "repair_pending" not in e and "adjudication" not in e
+    assert e["sent_to_writer"] == 1 and rec["calls"] == 2  # the write and the judge; the repair was never a request
+    assert not any((root / si.DIR).glob("*.orig.py"))
+    assert rec["code_sha"] == si.HANDED_TO_WRITER  # every function is compared again on the writer's code
+    # The writer fixes its function; the next pass compares it with the same second version (no new write) and does
+    # not put the old version back.
+    (root / "code" / "pkg" / "model.py").write_text(GOOD_MAIN, encoding="utf-8")
+    s2 = build(root, Fake(write=[], adjudicate=[]), [spec_for(proto)], proto)
+    rec2 = asyncio.run(s2.run_all())
+    assert rec2["functions"]["activation_energy"]["status"] == "agree" and rec2["calls"] == 2
+    assert (root / "code" / "pkg" / "model.py").read_text(encoding="utf-8") == GOOD_MAIN
+
+
+def test_a_finding_goes_to_the_writer_even_when_no_request_is_left_for_a_repair_of_fi_s_own(tmp_path):
+    """The judge's request took the last one the step may make: a repair FI writes needs one more and is not made, but
+    handing the finding to the code's writer sends no request of FI's, so it still goes."""
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong", "the sign of the slope is lost")])
+    root = make_quest(tmp_path, MUTANT_MAIN)
+    proto = protocol()
+    (root / si.DIR).mkdir(parents=True, exist_ok=True)
+    (root / si.RECORD).write_text(json.dumps({"calls": si.max_calls_for(si.MAX_KEY) - 2}), encoding="utf-8")
+    told = []
+
+    async def repair_main(name, problem, cases):
+        told.append(name)
+        raise _ToTheWriter()
+
+    with pytest.raises(_ToTheWriter):
+        asyncio.run(build(root, fake, [spec_for(proto)], proto, repair_main=repair_main, repair_by_writer=True).run_all())
+    assert told == ["activation_energy"]
+
+
+def test_after_a_finding_went_to_the_writer_a_function_judged_before_is_compared_again(tmp_path):
+    """A pass that handed one function's finding to the writer stopped before the others: their verdicts are about the
+    code before, so the next pass compares them again even when the writer left the file as it was."""
+    root = make_quest(tmp_path, GOOD_MAIN)
+    proto = protocol()
+    (root / si.DIR).mkdir(parents=True, exist_ok=True)
+    (root / si.DIR / "activation_energy.py").write_text(GOOD_REF, encoding="utf-8")
+    (root / si.RECORD).write_text(json.dumps({"calls": 2, "code_sha": si.HANDED_TO_WRITER, "functions": {
+        "activation_energy": {"status": "agree", "rounds": 1, "inputs_tried": 0, "disagreements": [], "why": "judged before"}}}),
+        encoding="utf-8")
+    rec = asyncio.run(build(root, Fake(write=[], adjudicate=[]), [spec_for(proto)], proto, repair_by_writer=True).run_all())
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] == "agree" and e["why"] != "judged before" and e["inputs_tried"] > 0
+    assert rec["code_sha"] != si.HANDED_TO_WRITER and rec["calls"] == 2
+
+
+def test_a_pass_on_changed_code_cut_short_leaves_the_record_stale_for_the_next_one(tmp_path, monkeypatch):
+    """The code changed since the functions were judged; a pass that stops before reaching them keeps the old
+    fingerprint, so the next pass still compares them again (with the new one saved, it would reuse their verdicts)."""
+    root = make_quest(tmp_path, GOOD_MAIN)
+    proto = protocol()
+    (root / si.DIR).mkdir(parents=True, exist_ok=True)
+    (root / si.DIR / "activation_energy.py").write_text(GOOD_REF, encoding="utf-8")
+    (root / si.RECORD).write_text(json.dumps({"calls": 2, "code_sha": "the code before", "functions": {
+        "activation_energy": {"status": "agree", "rounds": 1, "inputs_tried": 0, "disagreements": [], "why": "judged before"}}}),
+        encoding="utf-8")
+    s = build(root, Fake(write=[], adjudicate=[]), [spec_for(proto)], proto)
+
+    async def stopped(spec, entry):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(s, "_one", stopped)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(s.run_all())
+    assert si.load(root)["code_sha"] == "the code before"
+    rec = asyncio.run(build(root, Fake(write=[], adjudicate=[]), [spec_for(proto)], proto).run_all())
+    assert rec["functions"]["activation_energy"]["why"] != "judged before" and rec["code_sha"] == si._sha(root / "code" / "pkg" / "model.py")
+
+
+def test_a_repair_of_fi_s_own_cut_short_keeps_what_a_resume_needs_to_undo_it(tmp_path):
+    """Without a writer to hand the finding to, FI repairs the function itself; a run cancelled in the middle of that
+    repair keeps the saved original and the pending mark, so a resume puts the original back."""
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong", "the sign of the slope is lost")])
+    root = make_quest(tmp_path, MUTANT_MAIN)
+    proto = protocol()
+
+    async def repair_main(name, problem, cases):
+        (root / "code" / "pkg" / "model.py").write_text(GOOD_MAIN.replace("8.314", "8.0"), encoding="utf-8")
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(build(root, fake, [spec_for(proto)], proto, repair_main=repair_main).run_all())
+    e = si.load(root)["functions"]["activation_energy"]
+    assert e.get("repair_pending") is True and list((root / si.DIR).glob("*.orig.py"))
