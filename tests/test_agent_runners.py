@@ -495,7 +495,7 @@ def test_a_run_whose_writer_record_cannot_be_read_stops_before_anything_runs_and
 
 
 def test_an_engine_built_only_to_look_writes_nothing_and_a_run_records_the_writer(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """Old code: every Engine wrote the record when built, also one built only to read a quest (the web page's redo
     menu); a quest looked at before its tool was installed was then held to the chat model."""
     import asyncio
@@ -528,8 +528,15 @@ def test_an_engine_built_only_to_look_writes_nothing_and_a_run_records_the_write
     assert agent.quest_root != chat.quest_root
     _run(agent)
     _run(chat)
+    read_line = agent._code_writer_line
     read = lambda eng: json.loads((eng.quest_root / ar.CODE_WRITER_RECORD).read_text(encoding="utf-8"))["writer"]
     assert (read(agent), agent._repairs_go_to) == ("agent", "agent")
+    assert "`codex` command-line tool" in agent._code_writer_line, "said when the code is first written, not before"
+    agent._log = logging.getLogger("t.writer")
+    with caplog.at_level(logging.INFO, logger="t.writer"):
+        agent._say_code_writer()
+        agent._say_code_writer()
+    assert [r.getMessage() for r in caplog.records].count("[implement] " + read_line) == 1
     assert (read(chat), chat._repairs_go_to) == ("chat", "chat")
     # The resume of the agent's quest after its tool is gone keeps the writer it started with.
     monkeypatch.setattr(ar, "_program_on_path", lambda _program: None)

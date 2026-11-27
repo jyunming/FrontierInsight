@@ -206,6 +206,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     # Who repairs code a check finds wrong; ``__init__`` sets it from the config. The class default is the chat model, so an
     # Engine built without ``__init__`` (as several tests do) reads it too.
     _repairs_go_to = "chat"
+    _code_writer_line = ""
     # How many quests run at the same time in this process (``launch.py --fleet``): they share the computer's cores. A quest
     # run alone, or an Engine built without ``__init__``, is a fleet of one.
     fleet = 1
@@ -413,9 +414,9 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         _run_started_at = _time.time()
         _ended_how = "finished"
         try:
-            self._code_writer, _writer_line = _agent_runners.resolve_code_writer(self.config, self.quest_root, keep=True)
-            if _writer_line:
-                self._log.info("[implement] %s", _writer_line)
+            # Said when the code is first written (a quest that writes no code says nothing about who would write it).
+            self._code_writer, self._code_writer_line = _agent_runners.resolve_code_writer(self.config, self.quest_root,
+                                                                                           keep=True)
             self._repairs_go_to = "agent" if self._code_writer == "agent" else "chat"
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
