@@ -125,7 +125,7 @@ def test_codex_command_asks_for_its_folder_sandbox_and_no_web_and_continues_by_t
     assert {"browser_use", "apps", "plugins", "multi_agent"} <= disabled
     assert not disabled & {"shell_tool", "unified_exec", "code_mode_host"}, "the agent keeps its shell"
     assert first[first.index("-m") + 1] == "gpt-x" and 'model_reasoning_effort="high"' in first
-    assert ('windows.sandbox="unelevated"' in first) == (os.name == "nt")
+    assert ('windows.sandbox="unelevated"' in first) == ar._WINDOWS
     again = runner.argv(cwd=tmp_path, session_id="thread-1", resume=True, timeout_s=60)
     assert again[:2] == ["exec", "resume"] and again[-2:] == ["thread-1", "-"]
     assert 'sandbox_mode="workspace-write"' in again and "-s" not in again and "-C" not in again
@@ -267,8 +267,7 @@ def test_codex_gets_no_windows_app_shortcut_folder_on_its_path(monkeypatch: pyte
     ran failed ("CreateProcessAsUserW failed: 5")."""
     shortcut = r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps"
     real = r"C:\Program Files\PowerShell\7"
-    monkeypatch.setattr(ar.os, "name", "nt")
-    monkeypatch.setattr(ar.os, "pathsep", ";")
+    monkeypatch.setattr(ar, "_WINDOWS", True)
     monkeypatch.setattr(ar, "scrub_secrets", lambda: {"PATH": ";".join(
         [shortcut + r"\Microsoft.PowerShell_8wekyb3d8bbwe", real, shortcut])})
     assert ar.CodexAgentRunner().process_env(Path("w"))["PATH"] == real

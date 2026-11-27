@@ -35,6 +35,7 @@ from .execution import scrub_secrets
 from .proc_tree import AsyncProcessTree
 
 _TAIL = 2000
+_WINDOWS = os.name == "nt"   # read once; a test sets this, never os.name (pathlib reads that)
 
 
 class CliAgentRunner:
@@ -185,7 +186,7 @@ class CodexAgentRunner(CliAgentRunner):
 
     def _common(self) -> list[str]:
         args = ["--json", "--ignore-user-config", "--skip-git-repo-check", "-c", "web_search=disabled"]
-        if os.name == "nt":
+        if _WINDOWS:
             # Without the person's config the Windows sandbox is not set up and the folder is read-only, silently
             # (the agent only says it cannot write): the mode that needs no administrator setup is named here.
             args += ["-c", 'windows.sandbox="unelevated"']
@@ -197,12 +198,12 @@ class CodexAgentRunner(CliAgentRunner):
 
     def process_env(self, cwd: Path) -> dict[str, str]:
         env = super().process_env(cwd)
-        if os.name == "nt":
+        if _WINDOWS:
             # Windows' app shortcuts (``...\Microsoft\WindowsApps``: the Store's pwsh.exe, python.exe) cannot start
             # inside Codex's sandbox ("CreateProcessAsUserW failed: 5 (Access is denied)"): with them on the PATH, every
             # command the agent ran failed and it wrote code it could not run. Left off, the real programs are found.
             for key in [k for k in env if k.upper() == "PATH"]:
-                env[key] = os.pathsep.join(part for part in env[key].split(os.pathsep)
+                env[key] = ";".join(part for part in env[key].split(";")
                                            if not _is_app_shortcut_dir(part))
         return env
 
