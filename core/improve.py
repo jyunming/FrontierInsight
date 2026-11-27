@@ -616,8 +616,11 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     if old is None:
         return None, f"{name} does not exist"
     if "\r\n" in old and "\r\n" not in edit.find:  # the model saw the file with plain line endings
-        edit = Edit(file=edit.file, find=edit.find.replace("\n", "\r\n"),
-                    replace=edit.replace.replace("\n", "\r\n"), why=edit.why)
+        if old.count("\r\n") == old.count("\n"):  # every line ends with \r\n: the edit is given them, the file keeps them
+            edit = Edit(file=edit.file, find=edit.find.replace("\n", "\r\n"),
+                        replace=edit.replace.replace("\n", "\r\n"), why=edit.why)
+        else:  # both kinds (a coding agent's file with a few \r\n lines): matched, and written, with plain ones
+            old = old.replace("\r\n", "\n")
     count = old.count(edit.find)
     if count != 1:
         return None, (f"the text to replace is {'not in' if count == 0 else f'{count} times in'} {name}; it must be "

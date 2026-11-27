@@ -5608,7 +5608,7 @@ class CodeStageMixin:
         if limit <= 0:
             return "engine.improve_rounds is 0"
         if self._agent_mode():
-            return "the coding agent wrote this code, and FI does not change it with a chat model"
+            return "the coding agent wrote this code: only the agent changes what it computes (FI's speed-up, which keeps every number the same, is the one change FI makes)"
         if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
             return "this quest runs no simulation"
         if _phased.enabled(self.config) and _phased.stage(self.quest_root) in (_phased.CONFIRM, _phased.CONFIRMED):

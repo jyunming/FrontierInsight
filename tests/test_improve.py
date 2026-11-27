@@ -272,6 +272,17 @@ def test_a_file_with_windows_line_endings_is_edited_with_the_text_the_model_saw(
     assert (root / "code" / "simulate.py").read_bytes() == files["simulate.py"].encode("utf-8"), "bytes kept exactly"
 
 
+def test_a_file_with_both_kinds_of_line_ending_is_edited_with_the_text_the_model_saw() -> None:
+    """Old code: one \r\n line in a coding agent's file turned every line end of the edit into \r\n, so an edit over
+    the file's plain lines was refused as "not in" the file (two speed-ups of a stored study refused this way)."""
+    lines = SIM.splitlines(keepends=True)
+    files = {"simulate.py": "".join(lines[:-1]) + lines[-1].replace("\n", "\r\n")}
+    assert files["simulate.py"].count("\r\n") == 1
+    edit, _ = improve.parse_edit(json.loads(_edit(FIRST_ORDER, RK4)))
+    text, why = improve.check_edit(files, edit, ["simulate.py"], tried=set(), expected=[])
+    assert text is not None and "k4 = -(y + dt * k3)\n" in text and "\r" not in text, why
+
+
 # --- the loop, in the engine -----------------------------------------------------------------------------------------
 
 
