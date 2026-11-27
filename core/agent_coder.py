@@ -470,6 +470,7 @@ class ClaudeCliRunner:
         tree = await AsyncProcessTree.start(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if self.mode == "host" else None, env=env, **_no_window())
+        done = False
         try:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(tree.proc.communicate(prompt.encode("utf-8")),
@@ -478,8 +479,10 @@ class ClaudeCliRunner:
                 if name:
                     await self._docker_run("kill", name, timeout_s=30.0)   # the container itself, not just the client
                 await tree.kill()
+                done = True
                 return RunnerOutput(exit_code=-1, timed_out=True, duration_s=time.monotonic() - started,
                                     stderr_tail=f"(stopped after {timeout_s:g} s)")
+            done = True
             parsed = parse_stream(stdout_b.decode("utf-8", "replace"))
             code = int(tree.proc.returncode or 0)
             if code == 0 and parsed["is_error"]:
@@ -489,7 +492,9 @@ class ClaudeCliRunner:
                                 duration_s=time.monotonic() - started,
                                 stderr_tail=stderr_b.decode("utf-8", "replace")[-_TAIL:])
         finally:
-            await tree.aclose(aborted=False)
+            # Cancelled or failed mid-call: stop the tree even when the CLI itself has exited (a helper it started can
+            # still hold the pipe the call waited on).
+            await tree.aclose(aborted=not done)
 
 
 #: The one line said when the agent runs without Docker (information, not a warning).
@@ -499,14 +504,22 @@ NO_DOCKER_LINE = ("the coding agent runs on this computer without isolation (no 
 
 
 async def make_runner(quest_root: Path | str, *, model: str = "", effort: str = "", use_docker: bool = True,
-                      docker: list[str] | None = None, log: logging.Logger | None = None,
-                      **kwargs: Any) -> ClaudeCliRunner:
-    """The runner for this machine. The normal path needs no Docker: the CLI on this computer, on a scratch copy of
-    ``code/`` (said in one plain line, :data:`NO_DOCKER_LINE`). Only when ``use_docker`` and the Docker daemon is actually
-    running: the container (its session files in a per-quest folder next to the quest folders, never inside one).
-    Docker that is missing or stopped never blocks anything."""
+                      docker: list[str] | None = None, log: logging.Logger | None = None, provider: str = "",
+                      **kwargs: Any) -> Any:
+    """The runner for this machine. ``provider`` is the provider of the quest's code-writing step: the Codex CLI
+    (``codex_cli``) and Antigravity's CLI (``antigravity_cli``) are their own agents (:mod:`core.agent_runners`, on this
+    computer, never in a container); any other keeps the Claude CLI. The Claude CLI's normal path needs no Docker: the
+    CLI on this computer, on a scratch copy of ``code/`` (said in one plain line, :data:`NO_DOCKER_LINE`). Only when
+    ``use_docker`` and the Docker daemon is actually running: the container (its session files in a per-quest folder
+    next to the quest folders, never inside one). Docker that is missing or stopped never blocks anything."""
+    from .agent_runners import RUNNERS
+
     quest_root = Path(quest_root)
     log = log or logging.getLogger(__name__)
+    if provider in RUNNERS:
+        runner = RUNNERS[provider](model=model, effort=effort, **kwargs)
+        log.info("[implement] the coding agent is the `%s` command-line tool; %s", runner.program, NO_DOCKER_LINE)
+        return runner
     if use_docker:
         state, _why = await docker_status(docker)
         if state == DOCKER_OK:
