@@ -522,7 +522,13 @@ async def make_runner(quest_root: Path | str, *, model: str = "", effort: str = 
         return runner
     if use_docker:
         state, _why = await docker_status(docker)
-        if state == DOCKER_OK:
+        source = kwargs.get("environ")
+        source = source if source is not None else os.environ
+        token_env = kwargs.get("token_env") or TOKEN_ENV
+        if state == DOCKER_OK and not str(source.get(token_env) or "").strip():
+            log.info("[implement] Docker is running, but the coding agent's container needs a Claude login token "
+                     "(`claude setup-token`, then set %s): the agent runs on this computer instead", token_env)
+        elif state == DOCKER_OK:
             home = quest_root.resolve().parent / ".agent_claude_home" / quest_root.name
             log.info("[implement] the coding agent runs in a Docker container that sees only code/")
             return ClaudeCliRunner(mode="docker", home_dir=home, model=model, effort=effort, docker=docker, **kwargs)
@@ -1049,14 +1055,17 @@ class AgentCoder:
                       "duration_s": round(out.duration_s, 1), "tampered": tampered, "cheats": cheats, "copied": copied,
                       "not_kept": not_kept, "left_out": left_out, "message": out.message[-_TAIL:], "stderr_tail": out.stderr_tail[-500:]})
         self._save(record)
+        # What the CLI said about its failure: its error output, else what it printed (a CLI that reports its error
+        # on its normal output, as Codex and agy do).
+        said = (out.stderr_tail or "").strip() or (out.message or "").strip()
         if out.timed_out:
             self._log.warning("[implement] the coding agent was stopped after %g s (the wall-clock cap)", self.timeout_s)
         elif not ran:
             self._log.warning("[implement] the coding agent ended with exit code %s: %s", out.exit_code,
-                              out.stderr_tail.strip()[-300:] or "(no message)")
+                              said[-300:] or "(no message)")
         error = ("the coding agent reached outside its copy of code/: " + "; ".join(cheats[:6])) if cheats else (
             ("nothing of the coding agent's round is kept: " + "; ".join(not_kept[:6])) if not_kept else
-            "" if ran else out.stderr_tail[-500:])
+            "" if ran else said[-500:])
         return AgentResult(ok=ok, round=n, exit_code=out.exit_code, timed_out=out.timed_out, message=out.message,
                            duration_s=out.duration_s, tampered=tampered, error=error, cheats=cheats, copied=copied,
                            left_out=left_out, not_kept=not_kept)

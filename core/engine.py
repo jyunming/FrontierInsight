@@ -157,6 +157,7 @@ from .engine_run import RunStageMixin
 from .engine_analyze import AnalyzeStageMixin
 from .engine_write import WriteStageMixin
 from .engine_review import ReviewStageMixin
+from . import agent_runners as _agent_runners
 from . import commission as _commission
 
 
@@ -205,6 +206,7 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
     # Who repairs code a check finds wrong; ``__init__`` sets it from the config. The class default is the chat model, so an
     # Engine built without ``__init__`` (as several tests do) reads it too.
     _repairs_go_to = "chat"
+    _code_writer_line = ""
     # How many quests run at the same time in this process (``launch.py --fleet``): they share the computer's cores. A quest
     # run alone, or an Engine built without ``__init__``, is a fleet of one.
     fleet = 1
@@ -296,7 +298,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         self._prompts = _load_prompts()
         # Who repairs code a check finds wrong: the chat model (``chat``), or, with ``engine.code_writer: agent``, the coding
         # agent, to which the checks report instead (core/agent_build.py).
-        self._repairs_go_to = "agent" if config.engine.code_writer == "agent" else "chat"
+        # ``auto`` (the default) is decided from the code-writing step's provider; nothing is written here (an engine
+        # may be built only to look at a quest). ``run`` records the choice, so a resume keeps it.
+        self._code_writer, _ = _agent_runners.resolve_code_writer(config, self.quest_root)
+        self._repairs_go_to = "agent" if self._code_writer == "agent" else "chat"
         self._client: LLMClient | None = None
         # Throttle bookkeeping for ``_llm_heartbeat``. Keyed by node
         # name so concurrent ensembled calls don't share one bucket.
@@ -409,6 +414,10 @@ class Engine(IdeasStageMixin, PlanStageMixin, DataStageMixin, CodeStageMixin, Im
         _run_started_at = _time.time()
         _ended_how = "finished"
         try:
+            # Said when the code is first written (a quest that writes no code says nothing about who would write it).
+            self._code_writer, self._code_writer_line = _agent_runners.resolve_code_writer(self.config, self.quest_root,
+                                                                                           keep=True)
+            self._repairs_go_to = "agent" if self._code_writer == "agent" else "chat"
             (self.quest_root / "figures").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)

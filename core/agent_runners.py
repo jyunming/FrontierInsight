@@ -341,3 +341,89 @@ class AgyAgentRunner(CliAgentRunner):
 #: The provider a quest's code-writing step uses -> the runner class of the same CLI. A provider not named here keeps
 #: the Claude CLI (the agent mode's first runner).
 RUNNERS: dict[str, type[CliAgentRunner]] = {"codex_cli": CodexAgentRunner, "antigravity_cli": AgyAgentRunner}
+
+#: The providers whose command-line tool can be the coding agent, and that tool's program.
+AGENT_PROGRAMS: dict[str, str] = {"claude_cli": "claude", "codex_cli": "codex", "antigravity_cli": "agy"}
+
+#: Where a quest keeps who writes its code, so a resumed quest keeps the writer it started with.
+CODE_WRITER_RECORD = Path(".fi") / "code_writer.json"
+
+
+def step_provider(config: Any) -> tuple[str, str]:
+    """The provider of the code-writing step (its own ``provider.node_providers.implement`` entry, else the main
+    provider) and its reasoning level."""
+    from .provider import node_provider_for
+
+    provider = config.provider
+    step = node_provider_for(getattr(provider, "node_providers", None), "implement")
+    entry = step[1] if step is not None else provider
+    return str(getattr(entry, "name", "") or ""), str(getattr(entry, "reasoning_effort", "") or "")
+
+
+def _program_on_path(program: str) -> str | None:
+    return shutil.which(program)
+
+
+class CodeWriterRecordError(RuntimeError):
+    """The quest's record of who writes its code cannot be read or saved: deciding again on a later start could switch
+    the writer of a quest half-way, so the run stops and says what to set."""
+
+
+def resolve_code_writer(config: Any, quest_root: Path, *, keep: bool = False) -> tuple[str, str]:
+    """``("agent" | "chat", the one plain line to say or "")``. ``engine.code_writer: chat`` or ``agent`` is the person's
+    choice and is kept. ``auto`` (the default): the coding agent when the code-writing step's provider is a command-line
+    tool that can be one (Claude, Codex, Antigravity) and that tool is installed, else the chat model, function by
+    function. A quest that already ran before this record existed keeps the chat model it was written with.
+
+    ``keep`` (a quest that runs, :meth:`core.engine.Engine.run`): the choice is recorded in the quest the first time, so
+    a resume keeps it; a record that exists but cannot be read, or a choice that cannot be saved, raises
+    :class:`CodeWriterRecordError` before anything runs. Without ``keep`` (an engine built only to look at a quest)
+    nothing is written and nothing raises."""
+    asked = str(getattr(config.engine, "code_writer", "chat") or "chat")
+    if asked in ("chat", "agent"):
+        return asked, ""
+    record = Path(quest_root) / CODE_WRITER_RECORD
+    if record.exists():
+        try:
+            kept = json.loads(record.read_text(encoding="utf-8")).get("writer")
+        except (OSError, ValueError, AttributeError):
+            kept = None
+        if kept in ("chat", "agent"):
+            return kept, ""
+        if not keep:
+            return "chat", ""
+        raise CodeWriterRecordError(
+            f"this quest's record of who writes its code ({record}) cannot be read; set engine.code_writer to chat "
+            "or agent in the config to say which, then run it again")
+    if (Path(quest_root) / ".fi" / "state.sqlite").exists():
+        writer, line = "chat", ""   # started before code_writer had an automatic choice: chat was the default then
+    else:
+        name, _effort = step_provider(config)
+        program = AGENT_PROGRAMS.get(name)
+        if program and _program_on_path(program):
+            writer = "agent"
+            line = (f"the code is written by the `{program}` command-line tool as a coding agent, which writes, runs and "
+                    "fixes the whole program while FI's checks judge it (engine.code_writer: chat to have the chat "
+                    "model write it function by function instead)")
+        else:
+            writer = "chat"
+            why = (f"the `{program}` command was not found" if program
+                   else f"the {name or 'main'} provider has no command-line coding agent")
+            line = (f"the code is written by the chat model, function by function ({why}; a coding agent needs the "
+                    "Claude, Codex or Antigravity command-line tool as the code-writing step's provider)")
+    if not keep:
+        return writer, line
+    tmp = record.with_name(record.name + ".tmp")
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"writer": writer}) + "\n", encoding="utf-8")
+        os.replace(tmp, record)
+    except OSError as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise CodeWriterRecordError(
+            f"who writes this quest's code could not be saved in {record} ({exc}); a resumed quest must keep the writer "
+            "it started with: make the quest folder writable, or set engine.code_writer to chat or agent") from exc
+    return writer, line

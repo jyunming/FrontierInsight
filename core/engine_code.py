@@ -157,6 +157,14 @@ class CodeStageMixin:
             self._log.info("[implement_outline] the parameters of %s are the inputs of the plan's worked example", line)
         return aligned
 
+    def _say_code_writer(self) -> None:
+        """Who writes this quest's code (``engine.code_writer``, :func:`core.agent_runners.resolve_code_writer`), in one
+        plain line, once per run, when the code is first written."""
+        line = getattr(self, "_code_writer_line", "")
+        if line:
+            self._log.info("[implement] %s", line)
+            self._code_writer_line = ""
+
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
         if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
@@ -166,6 +174,7 @@ class CodeStageMixin:
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept, "refine_extend": []}
+        self._say_code_writer()
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
         outline = {} if extend else self._outline_with_example_names(state, state.get("implement_outline") or {})

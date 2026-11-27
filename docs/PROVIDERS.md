@@ -105,7 +105,7 @@ FI's calls; the `codex login` sign-in still is. Choose the model with
 `provider.reasoning_effort`. A model you can reach only through a custom
 provider defined in config.toml cannot be used through `codex_cli`.
 
-**As the coding agent** (`engine.code_writer: agent`), `codex_cli` and `antigravity_cli` are run *with* their
+**As the coding agent** (`engine.code_writer: agent`, or `auto`, the default, when the tool is installed), `codex_cli` and `antigravity_cli` are run *with* their
 tools, since writing and running the code is the agent's job: Codex in its own `workspace-write` sandbox (files
 written only in the agent's folder, web search off), agy with edits and commands accepted and web pages, MCP
 servers and files outside its folder refused, in a settings home of the quest's own (your own agy settings are not

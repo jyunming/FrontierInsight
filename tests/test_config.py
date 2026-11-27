@@ -518,8 +518,10 @@ def test_the_clean_check_of_code_defaults_to_fifteen_minutes() -> None:
     assert ExecutionConfig().clean_check_timeout_s == 900
 
 
-def test_code_writer_defaults_to_chat() -> None:
-    assert EngineConfig().code_writer == "chat"
+def test_code_writer_defaults_to_auto() -> None:
+    # The coding agent where one can run, else the chat model (core/agent_runners.py:resolve_code_writer).
+    assert EngineConfig().code_writer == "auto"
+    assert EngineConfig(code_writer="chat").code_writer == "chat"
 
 
 def test_code_writer_accepts_agent() -> None:
