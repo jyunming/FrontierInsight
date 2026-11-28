@@ -1519,3 +1519,69 @@ def test_a_0_1_result_the_plan_does_not_declare_a_proportion_gets_the_ordinary_i
     per_trial = mc.statistic(rows, "hits", ("hits",), 0.5, 0.1, (), repeated=True)
     assert per_trial["se"] == pytest.approx((7 * 3 / (10 * 9)) ** 0.5 / 10 ** 0.5, rel=1e-6)
     assert mc.mean_verdict(mc.statistic(rows, "hits", ("hits",), 2.0, 0.1, (), repeated=True), 2.0, 0.1) == "fail"
+
+
+def test_a_known_answer_missed_by_far_on_the_few_trials_the_time_allowed_is_a_failure() -> None:
+    """Old code: a check the time left with fewer than MIN_TRIALS trials was never decided, even one missed by far, and
+    its words said three standard errors lay "neither inside nor outside" a tolerance they lay far outside."""
+    stat = {"value": 1.8, "se": 0.001, "trials": 6, "varies": True, "on": "trials"}
+    assert mc.mean_verdict(stat, 2.0, 0.01) is None, "a check is still never decided on so few while trials can run"
+    assert mc.missed_on_few(stat, 2.0, 0.01)
+    assert mc.band_se(6) == pytest.approx(5.507) and mc.band_se(2) == pytest.approx(235.801)
+    assert mc.band_se(10) == mc.BAND_SE
+    # Never a pass on so few, and a miss within the wide band is not a failure.
+    assert not mc.missed_on_few({**stat, "value": 2.0}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "value": 2.0 + 0.012}, 2.0, 0.01)
+    # A number that does not move, one trial, a 0/1 outcome, an sd(), a number over all trials, ten trials: not here.
+    assert not mc.missed_on_few({**stat, "se": 0.0, "varies": False}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "trials": 1}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "binary": True}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "sd_small": True}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "across": True}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "on": "means"}, 2.0, 0.01)
+    assert not mc.missed_on_few({**stat, "trials": 10}, 2.0, 0.01)
+    words = mc.undecided_words({"trials": 6, "se": 0.001, "varies": True, "why": "time"}, 0.01)
+    assert "fewer than the 10 a check needs to pass" in words and "neither inside nor outside" not in words
+    assert "only a miss" in words
+    same = mc.undecided_words({"trials": 4, "se": 0.0, "varies": False, "why": "time"}, 0.01)
+    assert "all gave the same number" in same
+    one = mc.undecided_words({"trials": 1, "se": None, "why": "time"}, 0.01)
+    assert "same number" not in one and "fewer than the 10" in one
+
+
+FAR_OFF = '''
+import random
+
+def run_trial(cell, trial_id, seed):
+    return {"x": 1.8 + random.Random(seed).uniform(-0.001, 0.001)}
+'''
+
+
+def test_a_check_the_trials_run_out_on_fails_when_its_few_trials_miss_by_far(tmp_path: Path) -> None:
+    """Through the trial loop: only 4 trials may run (the most for this check), all far from the expected value.
+    Old code: "not decided" (most_trials) and the study went on; now a failure, sent to repair like any other."""
+    check = {"name": "mean_x", "kind": "special_case", "expected": 2.0, "tolerance": 0.01, "case": {"n": 1},
+             "measure": "x", "reference": "derivation: a made-up value"}
+    _c, problems, judged, found = _plain(_synth(tmp_path, FAR_OFF), [check], timeout_s=60, most_trials=4)
+    (j,) = judged
+    assert j["mc"]["trials"] == 4 and j["mc"]["verdict"] == "fail", j["mc"]
+    assert j["passed_by_engine"] is False, (j, problems)
+
+
+FAR_OFF_ONE_FAILS = """
+import random
+
+def run_trial(cell, trial_id, seed):
+    if trial_id == 1:
+        raise RuntimeError("a trial that fails")
+    return {"x": 1.8 + random.Random(seed).uniform(-0.001, 0.001)}
+"""
+
+
+def test_a_few_trials_with_one_failed_are_not_decided_by_the_band_for_so_few(tmp_path: Path) -> None:
+    """The trials that survived a failed one cannot stand for the case: a miss on few trials is not decided then."""
+    check = {"name": "mean_x", "kind": "special_case", "expected": 2.0, "tolerance": 0.01, "case": {"n": 1},
+             "measure": "x", "reference": "derivation: a made-up value"}
+    _c, problems, judged, found = _plain(_synth(tmp_path, FAR_OFF_ONE_FAILS), [check], timeout_s=60, most_trials=4)
+    (j,) = judged
+    assert j["mc"]["verdict"] == "undecided" and j["mc"]["failed_trials"] == 1, j["mc"]

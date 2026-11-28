@@ -3543,6 +3543,11 @@ async def _measure_mean(executor: Any, python: Path | str, quest_root: Path, mod
             why_open = "time"
             break
         stat = _mc.statistic(rows, measure, means, expected, limit, proportions, repeated=repeated) or stat
+    if (verdict is None and why_open and not failed and not int(stat.get("dropped") or 0)
+            and _mc.missed_on_few(stat, expected, limit)):
+        # No more trials could be run, none failed, and the few there are lie outside the tolerance by more than their
+        # wide band.
+        verdict, why_open = "fail", ""
     lost = len(failed) + int(stat.get("dropped") or 0)
     verdict, why_failed = _mc.failed_share_verdict(lost, ran, verdict)
     record = _mc.record(stat, read_as="mean", verdict=verdict, why=why_failed or why_open, failed=lost, started=ran,

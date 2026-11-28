@@ -62,6 +62,18 @@ from .split_run import _STOCHASTIC_RE
 #: How many standard errors the band around a measured mean is (about 99.7% two-sided for a normal mean). Two would
 #: decide a correct simulation wrongly on one check in twenty, and a plan has several.
 BAND_SE = 3.0
+#: The band, in standard errors, for a mean of n trials when n is under :data:`MIN_TRIALS`, by n - 1 (Student's t
+#: with n - 1 degrees of freedom at the two-sided coverage of :data:`BAND_SE` normal ones, about 99.7%): with so few
+#: trials the spread itself is uncertain, so the band is wider (4 trials: about 9 standard errors).
+SMALL_N_BAND_SE = {1: 235.801, 2: 19.207, 3: 9.219, 4: 6.62, 5: 5.507, 6: 4.904, 7: 4.53, 8: 4.277}
+
+
+def band_se(trials: int) -> float:
+    """How many standard errors the band around a mean of ``trials`` trials is: :data:`BAND_SE`, wider under
+    :data:`MIN_TRIALS` trials (:data:`SMALL_N_BAND_SE`)."""
+    return SMALL_N_BAND_SE.get(int(trials) - 1, BAND_SE) if int(trials) < MIN_TRIALS else BAND_SE
+
+
 #: The first batch of trials, from which the spread is read (and on which a rule of every trial is judged).
 PILOT_TRIALS = 20
 #: How many trials a rule of every trial is judged on when no study size is given: the first batch, then more up to this
@@ -571,7 +583,8 @@ def binomial_verdict(stat: dict[str, Any], expected: float, limit: float) -> str
     return None
 
 
-def decide(centre: float, expected: float, limit: float, se: float, *, shape: str = "") -> str | None:
+def decide(centre: float, expected: float, limit: float, se: float, *, shape: str = "",
+           band_se: float = BAND_SE) -> str | None:
     """``"pass"`` when three standard errors around the measured ``centre`` lie inside the tolerance, ``"fail"`` when
     they lie outside it, ``None`` when the trials do not decide it. A bound ``max(0, X)`` expecting 0 is judged on its
     one side (``centre`` is X); ``abs(X)`` expecting 0 is a distance (``centre`` is X). The tolerance is never widened."""
@@ -581,7 +594,7 @@ def decide(centre: float, expected: float, limit: float, se: float, *, shape: st
         gap = abs(centre)
     else:
         gap = abs(centre - expected)
-    band = BAND_SE * se
+    band = band_se * se
     if gap + band <= limit:
         return "pass"
     if gap - band > limit:
@@ -598,7 +611,8 @@ def _centre(stat: dict[str, Any], expected: float) -> tuple[float | None, str]:
 
 def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | None) -> str | None:
     """:func:`decide` for a mean check's ``stat`` (a 0/1 outcome of a random simulation: :func:`binomial_verdict`);
-    ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials (moving or not)."""
+    ``None`` while it is not decided, and always with fewer than :data:`MIN_TRIALS` trials (moving or not; for a check
+    the time left with fewer, see :func:`missed_on_few`)."""
     if expected is None or limit is None:
         return None
     centre, shape = _centre(stat, float(expected))
@@ -610,6 +624,25 @@ def mean_verdict(stat: dict[str, Any], expected: float | None, limit: float | No
     if stat.get("binary"):
         return binomial_verdict(stat, float(expected), float(limit))
     return decide(float(centre), float(expected), float(limit), float(se), shape=shape)
+
+
+def missed_on_few(stat: dict[str, Any], expected: float | None, limit: float | None) -> bool:
+    """A check the time left with 2 to ``MIN_TRIALS - 1`` trials is still a failure when it is missed by far: the mean
+    of trials whose number moves lies outside the tolerance by more than the band for so few (:func:`band_se`, Student's
+    t at the coverage of :data:`BAND_SE`). Only a failure is decided this way, never a pass (so few trials cannot show
+    a rare draw is absent), and only for a mean over single trials with its plain standard error: a number that does
+    not move, a 0/1 outcome, a number worked out over all the trials together and an sd() are not."""
+    if expected is None or limit is None or stat.get("binary") or stat.get("across") or stat.get("sd_small"):
+        return False
+    se, n = stat.get("se"), int(stat.get("trials") or 0)
+    if not 2 <= n < MIN_TRIALS or not _number(se) or not float(se) > 0 or not stat.get("varies"):
+        return False
+    if stat.get("on") not in (None, "", "trials"):
+        return False
+    centre, shape = _centre(stat, float(expected))
+    if centre is None:
+        return False
+    return decide(float(centre), float(expected), float(limit), float(se), shape=shape, band_se=band_se(n)) == "fail"
 
 
 def trials_wanted(stat: dict[str, Any], expected: float, limit: float, *, most: int = MAX_TRIALS) -> int:
@@ -726,9 +759,25 @@ def undecided_words(mc: dict[str, Any] | None, limit: float | None) -> str:
             return f"the {n} trials ({when}) give no error to judge the number by, so the check was not decided"
         return (f"three standard errors (±{_oracle.fmt_digits(BAND_SE * float(se), 2)}) around the number worked out over "
                 f"all {n} trials ({when}) lie neither inside nor outside the tolerance {tolerance}")
-    band = f"±{_oracle.fmt_digits(BAND_SE * float(se), 2)}" if _number(se) else "their band"
-    return (f"three standard errors ({band}) around the mean of {n} trials ({when}) lie neither inside nor outside "
-            f"the tolerance {tolerance}")
+    if n < MIN_TRIALS:
+        if n >= 2 and _number(se) and float(se) == 0 and mc.get("varies") is False:
+            return (f"the {n} trials FI could run ({when}) all gave the same number, and a number that does not move is "
+                    f"judged only on at least {MIN_TRIALS} trials, so the check was not decided")
+        if n >= 2 and _number(se) and float(se) > 0:
+            return (f"{n} trials ({when}) are fewer than the {MIN_TRIALS} a check needs to pass; on so few only a miss "
+                    f"of the tolerance {tolerance} by more than {_band_words(n, float(se))} is decided (a failure), so "
+                    "the check was not decided")
+        return f"{n} trial(s) ({when}) are fewer than the {MIN_TRIALS} a check needs, so the check was not decided"
+    band = _band_words(n, float(se)) if _number(se) else "their band"
+    return f"{band} around the mean of {n} trials ({when}) lie neither inside nor outside the tolerance {tolerance}"
+
+
+def _band_words(n: int, se: float) -> str:
+    """The band the verdict used around a mean of ``n`` trials, in words."""
+    if n >= MIN_TRIALS:
+        return f"three standard errors (±{_oracle.fmt_digits(BAND_SE * se, 2)})"
+    return (f"the band for only {n} trials ({_oracle.fmt_digits(band_se(n), 2)} standard errors, "
+            f"±{_oracle.fmt_digits(band_se(n) * se, 2)})")
 
 
 def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, why: str, failed: int, started: int,
@@ -742,7 +791,9 @@ def record(stat: dict[str, Any] | None, *, read_as: str, verdict: str | None, wh
     out = {
         "read_as": read_as, "on": stat.get("on") or "", "trials": int(stat.get("trials") or 0),
         "dropped": int(stat.get("dropped") or 0), "started": int(started), "failed_trials": int(failed),
-        "varies": stat.get("varies"), "se": se, "band": BAND_SE * se if _number(se) else None,
+        "varies": stat.get("varies"), "se": se,
+        "band": (BAND_SE if stat.get("across") else band_se(int(stat.get("trials") or 0))) * se if _number(se)
+        else None,
         "inner": stat.get("inner"), "inner_mean": stat.get("inner_mean"), "shape": stat.get("shape") or "",
         "verdict": verdict or "undecided", "why": why if (verdict or "undecided") == "undecided" or why == "failed_trials"
         else "",
