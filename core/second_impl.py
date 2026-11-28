@@ -1179,16 +1179,22 @@ except BaseException:
 with open(@INPUTS@, encoding="utf-8") as fh:
     cases = json.load(fh)
 rows = []
-for case in cases:
+_fi_out = sys.stdout
+for i, case in enumerate(cases):
     row = {}
-    for tag, fn in (("main", main_fn), ("ref", ref_fn)):
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                row[tag] = enc(fn(**{k: dec_in(v) for k, v in case.items()}))
-        except BaseException as e:
-            row[tag + "_err"] = type(e).__name__ + ": " + str(e)[:160]
+    sys.stdout = sys.stderr  # what the functions print is not read as a result
+    try:
+        for tag, fn in (("main", main_fn), ("ref", ref_fn)):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    row[tag] = enc(fn(**{k: dec_in(v) for k, v in case.items()}))
+            except BaseException as e:
+                row[tag + "_err"] = type(e).__name__ + ": " + str(e)[:160]
+    finally:
+        sys.stdout = _fi_out
     rows.append(row)
+    print("\nSECOND_IMPL_ROW: " + json.dumps({"i": i, "row": row, "setup": SETUP_STATE[0]}), flush=True)
 done({"rows": rows, "setup": SETUP_STATE[0]})
 '''
 
@@ -1207,6 +1213,26 @@ def compare_script(*, code_dir: str, module: str, name: str, reference: str, inp
                          ("@OWN@", dict(own or {}))):
         text = text.replace(token, repr(value))
     return text
+
+
+def parse_rows(out: str) -> dict[str, Any] | None:
+    """The inputs a comparison stopped before its end had compared, from its ``SECOND_IMPL_ROW`` lines, in order:
+    ``{"rows", "setup"}``, or ``None`` when it had compared none. The rows end at the first line that is not the next
+    input's (cut short by the stop, out of order, or not the harness's own)."""
+    rows: list[dict[str, Any]] = []
+    setup = "none"
+    for line in (out or "").splitlines():
+        if not line.startswith("SECOND_IMPL_ROW: "):
+            continue
+        try:
+            data = json.loads(line[len("SECOND_IMPL_ROW: "):])
+        except ValueError:
+            break
+        if not isinstance(data, dict) or not isinstance(data.get("row"), dict) or data.get("i") != len(rows):
+            break
+        rows.append(data["row"])
+        setup = str(data.get("setup") or setup)
+    return {"rows": rows, "setup": setup} if rows else None
 
 
 def parse_output(out: str) -> dict[str, Any] | None:
@@ -1650,7 +1676,7 @@ class SecondImpl:
                                 reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
                                 own=own, study=study, setup=setup)
         out = None
-        err = ""
+        err = text = ""
         for _try in range(2):  # a harness that printed nothing is run once more: it says nothing about the function
             try:
                 rc, text, err = await self._run_script(script, named, float((setup or {}).get("duration_s") or 0.0))
@@ -1659,7 +1685,18 @@ class SecondImpl:
             out = parse_output(text)
             if out is not None or err.rstrip().endswith(TIMED_OUT):
                 break  # a run that ran out of time is not run again: the retry is for a harness that printed nothing
+        planned = len(inputs)
+        if out is None and err.rstrip().endswith(TIMED_OUT):
+            # Stopped at its time limit: the inputs it compared before then are judged (a slow function is not left
+            # without a verdict because all its inputs together did not fit), and the record says how many of how many.
+            partial = parse_rows(text)
+            out = partial
+            inputs = inputs[:len(partial["rows"])] if partial is not None else []
         entry["inputs_tried"] = len(inputs)
+        if len(inputs) < planned:
+            entry["inputs_planned"] = planned
+        else:
+            entry.pop("inputs_planned", None)
         if out is None and setup and err.rstrip().endswith(TIMED_OUT):
             return {"status": UNCONFIRMED, "why": "the comparison did not finish in time, with the study's setup trial in it",
                     "disagreements": [], "retry": True}
@@ -1682,6 +1719,10 @@ class SecondImpl:
         verdict["tolerance"] = tol.basis
         if verdict["status"] == UNCONFIRMED:
             verdict.update(why=verdict.get("why") or "the comparison could not run: both versions raised on every input", retry=False)
+        elif verdict["status"] == AGREE and len(inputs) < planned:
+            verdict.update(status=UNCONFIRMED, retry=True,
+                           why=f"the two versions agree on the {len(inputs)} of {planned} inputs compared before the time "
+                               "ran out; the rest were not compared")
         return verdict
 
     def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
