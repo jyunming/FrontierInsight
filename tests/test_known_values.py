@@ -344,9 +344,10 @@ def test_a_passage_early_in_a_long_text_is_shown_with_what_follows_it() -> None:
 async def test_a_program_that_crashes_is_followed_by_a_second_one_that_decides(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     crash = "```python\nimport json\n\nCASE = {\"outlet\": \"open\"}\n\nraise RuntimeError(\"a made-up crash 7741\")\n```"
-    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [crash, RIGHT])
-    assert "stuck" not in out and len(model.asked) == 2
-    assert "Another program computed this value" in model.asked[1] and "7741" not in model.asked[1]
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [crash, crash, RIGHT])
+    assert "stuck" not in out and len(model.asked) == 3, "written once more with its own error, then a second one"
+    assert "a made-up crash <number>" in model.asked[1], "a program that stopped is told its own error, no number"
+    assert "Another program computed this value" in model.asked[2] and "7741" not in model.asked[2]
     value = _record(eng)["values"][0]
     assert value["verdict"] == "match" and "a first program gave no value" in value["why"]
 
@@ -387,12 +388,79 @@ def test_a_negative_value_keeps_its_sign_when_its_passage_writes_more_digits() -
 async def test_a_program_that_stops_with_an_error_after_a_value_line_is_a_crash(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stops = _program(("formula", "1 / 4", "0")).replace("\n```", "\nraise SystemExit(3)\n```")
-    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [stops, RIGHT])
-    assert len(model.asked) == 2, "a second program is asked for"
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [stops, stops, RIGHT])
+    assert len(model.asked) == 3, "written once more after it stopped, then a second program is asked for"
     value = _record(eng)["values"][0]
     first = value["programs"][0]
     assert first["routes"] == [] and first["printed_before_it_stopped"][0]["value"] == 0.25
     assert "stopped with an error" in first["why"] and value["verdict"] == "match" and "stuck" not in out
+
+
+def _stops_with(error: str) -> str:
+    return _program(("formula", "1 / 4", "0")).replace("```python\n", f"```python\nraise {error}\n", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_stops_with_an_error_is_written_once_more_with_that_error(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A program calling a function the installed library no longer has stopped, and the value went unjudged though
+    its method was sound (a live commission run; old code asked a second program and never repaired the first)."""
+    gone = _stops_with('AttributeError("module \'numpy\' has no attribute \'trapz\'")')
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [gone, RIGHT])
+    assert len(model.asked) == 2 and "Another program" not in model.asked[1]
+    assert "stopped with an error before it finished" in model.asked[1] and "trapz" in model.asked[1]
+    value = _record(eng)["values"][0]
+    assert value["verdict"] == "match" and len(value["programs"]) == 1, "the repaired program decides; no second one"
+    first = value["programs"][0]
+    assert first["program"].endswith("_again.py") and first["stopped_first"]["returncode"] != 0
+    assert "trapz" in first["stopped_first"]["why"] and (eng.quest_root / ".fi" / "known_values").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("said", ['"not " + str(1 / 4)', '"share " + str(100 // 4) + "%"', '"ratio 1/4"',
+                                  '"x" + str(1 / 4)', '"share " + chr(188)'])
+async def test_the_error_a_program_stopped_with_is_told_with_no_number_in_it(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: str) -> None:
+    """A number in the error is one the program computed; written another way (25%, 1/4) the value would get past
+    the withholding (external review of the repair), so no number of the error is told."""
+    eng, model, _ = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [_stops_with(f"ValueError({said})"), RIGHT])
+    note = model.asked[1].split("stopped with an error before it finished:", 1)[1].split("Write the program", 1)[0]
+    assert "ValueError" in note and not any(ch.isdigit() or ch == chr(188) for ch in note), note
+    _hidden(model, 0.25)
+
+
+@pytest.mark.asyncio
+async def test_a_program_written_again_after_it_stopped_is_asked_for_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unusable reply to the repair request is not asked for again: one more call at most per program that stops."""
+    typed = _program(("formula", "0.25", "0"))
+    eng, model, _ = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [_stops_with('OverflowError("range")'), typed, RIGHT])
+    assert len(model.asked) == 3 and "Another program computed this value" in model.asked[2]
+    first = _record(eng)["values"][0]["programs"][0]
+    assert first["returncode"] != 0 and "the reply could not be used" in first["why"]
+
+
+@pytest.mark.asyncio
+async def test_the_record_of_a_program_that_stopped_is_kept_whole(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stops = _program(("formula", "1 / 4", "0")).replace("\n```", "\nraise SystemExit(3)\n```")
+    eng, model, _ = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [stops, RIGHT])
+    first = _record(eng)["values"][0]["programs"][0]
+    kept = first["stopped_first"]
+    assert kept["printed_before_it_stopped"][0]["value"] == 0.25 and "KNOWN_JSON" in kept["stdout_tail"]
+    assert first["verdict"] == "match" and first["program"].endswith("_again.py")
+
+
+@pytest.mark.asyncio
+async def test_a_second_program_that_stops_is_repaired_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wrong = _program(("formula", "3 / 10", "0"))
+    gone = _stops_with('OverflowError("math range error")')
+    eng, model, out = await _plan(tmp_path, monkeypatch, 0.25, 0.01, [wrong, gone, RIGHT])
+    assert len(model.asked) == 3 and "Another program computed this value" in model.asked[2]
+    assert "stopped with an error before it finished" in model.asked[2]
+    value = _record(eng)["values"][0]
+    assert [p["verdict"] for p in value["programs"]] == ["no_match", "match"]
+    assert value["programs"][1]["stopped_first"]["returncode"] != 0
 
 
 def test_a_route_counts_once_and_only_under_its_own_name() -> None:
