@@ -543,3 +543,227 @@ def test_a_rerun_input_that_is_there_but_cannot_be_read_keeps_no_answer(tmp_path
     assert rerun_check.inputs_of(root)["complete"] == "no"
     proto.unlink()
     assert rerun_check.inputs_of(root)["complete"] == "yes", "a file that is not there is a fact the key holds"
+
+
+# ---- a sample of the settings first ------------------------------------------------------------------------------------
+TEN = {"grid": {"a": list(range(1, 11))}, "runs_per_setting": 2, "metrics": [{"id": "y"}]}
+
+
+def _delivered_ten(tmp_path: Path) -> Path:
+    """A quest of ten settings whose study FI's trial runner ran, then its analysis."""
+    import os
+    import subprocess
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(EXPERIMENT, encoding="utf-8")
+    asyncio.run(trial_runner.run_trials(_executor(), sys.executable, root, "code/simulate.py", TEN["grid"], runs_per_setting=2,
+                                        base_seed=0, deterministic=False, timeout_s=120, at_once=4))
+    subprocess.run([sys.executable, "-B", "code/experiment.py"], cwd=root, check=True,
+                   env={**os.environ, "FI_TRIALS": "raw/trials.json"})
+    run_facts.record_trials(root, key="k", wall_s=5.0, trials=20, cells=10, trial_sum_s=None, at_once=4)
+    return root
+
+
+def _spy(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    asked: list[list[str]] = []
+    real = trial_runner.run_trials
+
+    async def spy(*a: Any, **k: Any) -> Any:
+        asked.append([trial_runner.cell_key(c) for c in k["cell_list"]])
+        return await real(*a, **k)
+
+    monkeypatch.setattr(trial_runner, "run_trials", spy)
+    return asked
+
+
+def test_a_change_a_sample_of_the_settings_shows_is_the_answer_without_the_whole_study(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old code: every repair ran all ten settings again. Now three, spread over the plan, run first; the change they show is
+    the answer, and the verdict says it came from a sample."""
+    from core import optimise_search
+
+    root = _delivered_ten(tmp_path)
+    assert rerun_check.sample_size(10) == 3 and rerun_check.sample_size(4) == 0
+    asked = _spy(monkeypatch)
+    before = _snapshot(root)
+    moved = _repaired(root, tmp_path, "c1", SIM.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, TEN, 120, None, at_once=4))
+    spread = [trial_runner.cell_key(c) for c in optimise_search.iter_spread_cells(TEN["grid"])][:3]
+    assert (v.status, v.mode, v.sampled) == ("changed", rerun_check.SAMPLE_MODE, 3), v
+    # the delivered code on three of them first (what moves on any run), then the repaired code on the sample
+    assert len(asked) == 2 and set(asked[0]) == set(spread) == set(asked[1]) and v.metrics == ["y"]
+    assert {k.split("/")[1] for k in v.keys if k.startswith("trials/")} <= set(spread)
+    assert any("only 3 of the settings" in n for n in v.notes)
+    assert _snapshot(root) == before  # the quest's own record of the trials is untouched
+
+
+def test_a_sample_that_shows_no_change_runs_the_whole_study(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sample says nothing of the settings it did not run: the whole study is run then. Planted: a repair that moves only a
+    setting outside the sample is still "changed" (the whole study finds it); a repair that moves nothing is "unchanged"."""
+    from core import optimise_search
+
+    root = _delivered_ten(tmp_path)
+    spread = [trial_runner.cell_key(c) for c in optimise_search.iter_spread_cells(TEN["grid"])][:3]
+    outside = next(int(k.split("=")[1]) for k in (f"a={i}" for i in range(1, 11)) if k not in spread)
+    asked = _spy(monkeypatch)
+    one = _repaired(root, tmp_path, "c1", SIM.replace("cell['a'] * 1.0", f"cell['a'] * (1.5 if cell['a'] == {outside} else 1.0)"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, one, TEN, 120, None, at_once=4))
+    assert (v.status, v.mode, v.sampled) == ("changed", "whole study", 0), v
+    assert len(asked) == 3 and set(asked[1]) == set(spread) and len(asked[2]) == 10
+    assert all(f"a={outside}" in k for k in v.keys), v.keys
+    asked.clear()
+    same = _repaired(root, tmp_path, "c0", SIM + "# repaired, numbers unchanged\n")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, TEN, 120, None, at_once=4))
+    assert (v.status, v.mode) == ("unchanged", "whole study"), v
+    assert [len(a) for a in asked] == [3, 3, 10]
+
+
+def test_the_analysis_reads_the_delivered_numbers_of_the_settings_not_sampled() -> None:
+    """The record the analysis reads after a sample: the sampled settings (and the records of the values their runs compared
+    inside them) replaced, every other setting as delivered, a record the repaired run no longer gives dropped."""
+    delivered = {"schema": "fi.trials/v1", "thresholds": {"t": 1}, "cells": [
+        {"key": "a=1", "ok": 1}, {"key": "a=1,m=5", "level": {"m": 5}, "ok": 1}, {"key": "a=2", "ok": 1},
+        {"key": "a=2,m=5", "level": {"m": 5}, "ok": 1},
+        # a record of one of two values compared inside the run (a result returned per method only)
+        {"key": "a=2,method=x", "level": {"method": "x"}, "ok": 1}, {"key": "a=3", "ok": 1}]}
+    sample = {"cells": [{"key": "a=2", "ok": 2}, {"key": "a=2,method=x", "level": {"method": "x"}, "ok": 2}]}
+    out = rerun_check.spliced(delivered, sample, {"a=2"})
+    assert out["cells"] == [{"key": "a=1", "ok": 1}, {"key": "a=1,m=5", "level": {"m": 5}, "ok": 1}, {"key": "a=2", "ok": 2},
+                            {"key": "a=2,method=x", "level": {"method": "x"}, "ok": 2}, {"key": "a=3", "ok": 1}]
+    assert out["thresholds"] == {"t": 1} and delivered["cells"][2] == {"key": "a=2", "ok": 1}
+
+
+def test_shared_processes_are_not_sampled_and_no_time_left_after_a_sample_is_no_whole_study_timeout(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI's check before sharing processes compared a whole group with some of its settings alone, not any part of a group:
+    a study whose settings shared processes is not sampled. A sample that leaves too little time for the whole study is
+    not a whole study that ran out of its time (that answer would stop every other finding's whole-study rerun)."""
+    from core import run_estimate
+
+    root = _delivered_ten(tmp_path)
+    run_facts.record_trials(root, key="k", wall_s=5.0, trials=20, cells=10, trial_sum_s=None, at_once=4, per_process=2)
+    run_estimate.write_record(root, {"fits": True, "per_process": 2, "shared_groups": [["a=1", "a=2"], ["a=5", "a=10"]],
+                                     "group_allowance_s": 60.0})
+    asked: list[dict[str, Any]] = []
+    real = trial_runner.run_trials
+
+    async def spy(*a: Any, **k: Any) -> Any:
+        asked.append(k)
+        return await real(*a, **k)
+
+    monkeypatch.setattr(trial_runner, "run_trials", spy)
+    same = _repaired(root, tmp_path, "c0", SIM + "# repaired, numbers unchanged" + chr(10))
+    real_judge = rerun_check._judge
+
+    async def slow_sample(*a: Any, **k: Any) -> Verdict:
+        v = await real_judge(*a, **k)
+        if k.get("sample"):
+            v.seconds = 115.0  # the sample took nearly all of the 120 s
+        return v
+
+    monkeypatch.setattr(rerun_check, "_judge", slow_sample)
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, TEN, 120, None, at_once=4))
+    # settings that shared a process are not sampled: the whole study runs, in its groups
+    assert len(asked) == 1 and len(asked[0]["cell_list"]) == 10 and asked[0]["per_process"] == 2
+    assert v.status == "unchanged" and v.mode == "whole study", v
+    asked.clear()
+    run_facts.record_trials(root, key="k", wall_s=5.0, trials=20, cells=10, trial_sum_s=None, at_once=4)
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, TEN, 120, None, at_once=4))
+    assert [len(a["cell_list"]) for a in asked] == [3, 3]
+    assert (v.status, v.mode, v.timed_out) == ("could_not", rerun_check.SAMPLE_MODE, False), v
+    assert "showed no change" in v.why
+
+
+TIMED = ("import time\n\ndef run_trial(cell, trial_id, seed):\n"
+         "    return {'y': cell['a'] * 1.0 + (seed % 97) / 1000.0, 't': time.perf_counter() % 1.0}\n")
+
+
+def test_a_result_that_moves_on_any_run_is_not_compared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A study that returns a timing of its own: it moves whenever the study runs, repaired or not. Old code: every repair of
+    such a study was "changed" (on the sample, so the whole study was never run). Now the delivered code is run again on three
+    settings first, and what moves there is not compared; known positive: a repair that moves ``y`` is still "changed"."""
+    import os
+    import subprocess
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(TIMED, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(EXPERIMENT, encoding="utf-8")
+    asyncio.run(trial_runner.run_trials(_executor(), sys.executable, root, "code/simulate.py", TEN["grid"], runs_per_setting=2,
+                                        base_seed=0, deterministic=False, timeout_s=120, at_once=4))
+    subprocess.run([sys.executable, "-B", "code/experiment.py"], cwd=root, check=True,
+                   env={**os.environ, "FI_TRIALS": "raw/trials.json"})
+    run_facts.record_trials(root, key="k", wall_s=5.0, trials=20, cells=10, trial_sum_s=None, at_once=4)
+    protocol = {**TEN, "metrics": [{"id": "y"}, {"id": "t"}]}
+    same = _repaired(root, tmp_path, "c0", TIMED + "# repaired, numbers unchanged" + chr(10))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, protocol, 120, None, at_once=4))
+    assert (v.status, v.mode) == ("unchanged", "whole study"), v
+    assert any("t moves when the delivered code itself runs again" in n for n in v.notes), v.notes
+    moved = _repaired(root, tmp_path, "c1", TIMED.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, protocol, 120, None, at_once=4))
+    assert (v.status, v.mode, v.metrics) == ("changed", rerun_check.SAMPLE_MODE, ["y"]), v
+    # a quantity a reader's claim is about is always compared, even one that moves on any run
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, protocol, 120, None, at_once=4,
+                                      disputed=["t"]))
+    assert v.status == "changed" and "t" in v.metrics, v
+
+
+def _delivered_with(tmp_path: Path, sim: str) -> Path:
+    import os
+    import subprocess
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(sim, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(EXPERIMENT, encoding="utf-8")
+    asyncio.run(trial_runner.run_trials(_executor(), sys.executable, root, "code/simulate.py", TEN["grid"], runs_per_setting=2,
+                                        base_seed=0, deterministic=False, timeout_s=120, at_once=4))
+    subprocess.run([sys.executable, "-B", "code/experiment.py"], cwd=root, check=True,
+                   env={**os.environ, "FI_TRIALS": "raw/trials.json"})
+    run_facts.record_trials(root, key="k", wall_s=5.0, trials=20, cells=10, trial_sum_s=None, at_once=4)
+    return root
+
+
+def test_a_result_that_moves_at_one_setting_only_is_still_compared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A result set aside as variation must move at every setting the delivered code ran again on: one that moved at one of
+    them is not known to move at the others, where a repair's move of it would be hidden."""
+    from core import optimise_search
+
+    first = trial_runner.cell_key(next(iter(optimise_search.iter_spread_cells(TEN["grid"]))))
+    one = int(first.split("=")[1])
+    sim = ("import time\n\ndef run_trial(cell, trial_id, seed):\n"
+           "    t = time.perf_counter() % 1.0 if cell['a'] == " + str(one) + " else 0.5\n"
+           "    return {'y': cell['a'] * 1.0 + (seed % 97) / 1000.0, 't': t}\n")
+    root = _delivered_with(tmp_path, sim)
+    protocol = {**TEN, "metrics": [{"id": "y"}, {"id": "t"}]}
+    same = _repaired(root, tmp_path, "c0", sim + "# repaired, numbers unchanged" + chr(10))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, protocol, 120, None, at_once=4))
+    assert v.status == "changed" and "t" in v.metrics, v  # compared, as before the probe
+    assert not any("moves when the delivered code itself runs again" in n for n in v.notes)
+
+
+def test_the_time_of_the_delivered_codes_run_is_charged_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sample stage is given the time left after the delivered code's run, and the whole study the time left after both
+    (old code took the delivered code's run off twice)."""
+    root = _delivered_ten(tmp_path)
+    given: list[float] = []
+    real_judge = rerun_check._judge
+
+    async def fake_varying(*a: Any, **k: Any) -> tuple[set[str], float]:
+        return set(), 20.0
+
+    async def spy(*a: Any, **k: Any) -> Verdict:
+        given.append(a[5])
+        v = await real_judge(*a, **k)
+        if k.get("sample"):
+            v.seconds = 10.0
+        return v
+
+    monkeypatch.setattr(rerun_check, "_varying", fake_varying)
+    monkeypatch.setattr(rerun_check, "_judge", spy)
+    same = _repaired(root, tmp_path, "c0", SIM + "# repaired, numbers unchanged" + chr(10))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, TEN, 200, None, at_once=4))
+    assert given == [180.0, 170.0], given
+    assert v.status == "unchanged", v
