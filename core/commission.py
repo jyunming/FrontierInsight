@@ -26,6 +26,9 @@ MIN_TEXT_CHARS = 200  # the floor of a paper dropped in inputs/papers/
 # experiment of FI's own; ``analyze_data`` analyses the data the person puts in data/; ``review_literature`` runs no
 # experiment and needs no data. Each maps to (no experiment, no data) flags of the run.
 METHODS = ("simulate", "analyze_data", "review_literature")
+# A known value whose source gives a limit, not the value itself (``bound``): ``at_least`` (the result is that value or
+# more) or ``at_most``. Left out, the result should equal the value within its tolerance.
+BOUNDS = ("at_least", "at_most")
 # A number as a passage may write it: a sign, thousands separators, a bare leading point, an exponent (e-3, x 10^-3)
 # on the same line (a page header "2023" over a line "e20230014" is two numbers, not 2023e20230014).
 _NUMBER = re.compile(r"(?<![\w.])([-+−]?)(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d*\.\d+|\d+)"
@@ -49,6 +52,26 @@ def hours_ok(v: Any) -> bool:
 
 def _text(v: Any) -> bool:
     return isinstance(v, str) and bool(v.strip())
+
+
+def bound_of(kv: Any) -> str:
+    """The known value's ``bound`` (one of :data:`BOUNDS`), or ``""`` for a value the result should equal."""
+    word = str(kv.get("bound") or "").strip().lower().replace(" ", "_") if isinstance(kv, dict) else ""
+    return word if word in BOUNDS else ""
+
+
+def stated(value: Any, tolerance: Any, bound: str = "") -> str:
+    """A known value in words: ``0.25 within 0.01``, or ``at least 0.25 (within 0.01)`` for a limit."""
+    if bound:
+        return f"{bound.replace('_', ' ')} {value:g} (within {tolerance:g})"
+    return f"{value:g} within {tolerance:g}"
+
+
+def _given(kv: dict[str, Any]) -> str:
+    """A commission's known value as the plan is told it: ``0.25 with tolerance 0.01``, or ``at least 0.25 (within
+    0.01)`` for a limit."""
+    bound = bound_of(kv)
+    return stated(float(kv["value"]), float(kv["tolerance"]), bound) if bound else f"{kv['value']} with tolerance {kv['tolerance']}"
 
 
 def number_value(m: re.Match[str]) -> float | None:
@@ -158,6 +181,9 @@ def form_problems(data: dict[str, Any]) -> list[str]:
                 out.append(f"the commission has no `{key}` for {who}")
             elif not _number(kv[key]) or (key == "tolerance" and kv[key] < 0):
                 out.append(f"the `{key}` of {who} is not a number" + (" of 0 or more" if key == "tolerance" else ""))
+        if "bound" in kv and not bound_of(kv):
+            out.append(f"the `bound` of {who} is {kv['bound']!r}; it is `at_least` or `at_most` when the source gives a "
+                       "limit (leave it out for a value the result should equal)")
         if not _text(kv.get("case")):
             out.append(f"{who} has no `case` (the situation it applies to: which form, which parameter values)")
         if not _text(kv.get("passage")):
@@ -445,8 +471,11 @@ def prompt_block(data: dict[str, Any], labels: dict[str, str]) -> str:
     for kv in known:
         label = labels.get(str(kv["source"]["file"]))
         where = f"[{label}]" if label else f"the supplied full text {Path(str(kv['source']['file'])).name}"
-        lines.append(f"- name {kv['name']!r}: {kv['value']} with tolerance {kv['tolerance']}, for {kv['case']}; "
-                     f"stated in {where} ({kv['source']['title']}): \"{kv['passage']}\"")
+        bound = bound_of(kv)
+        limit = (f" (a limit: FI checks that the quantity is {bound.replace('_', ' ')} this value, so give `measure` as "
+                 "the quantity itself, and a criterion on this check uses its `error`)" if bound else "")
+        lines.append(f"- name {kv['name']!r}: {_given(kv)}{limit}, for "
+                     f"{kv['case']}; stated in {where} ({kv['source']['title']}): \"{kv['passage']}\"")
     for key, head in (("success", "Counts as supported"), ("failure", "Counts as not supported")):
         lines += [f"{head}:", *(f"- {i['condition']} (checked by: {i['verify']})" for i in data.get(key) or [])]
     doubts = data.get("doubts") or []
@@ -462,8 +491,14 @@ def oracle_gaps(data: dict[str, Any], protocol: Any) -> list[str]:
     def fold(name: Any) -> str:
         return re.sub(r"\s+", " ", str(name or "")).strip().lower()
 
+    from core import known_values
+
     have = {fold(o.get("name")) for o in oracle_check.declared(protocol if isinstance(protocol, dict) else None)}
-    return [f"The commission's known value {kv['name']!r} ({kv['value']} with tolerance {kv['tolerance']}) has no check "
+    criteria = protocol.get("criteria") if isinstance(protocol, dict) else None
+    _kept, left_out = known_values.limit_criteria(criteria, data) if isinstance(criteria, list) else ([], [])
+    return [f"The criterion {name!r} sets a bar on the value of a check of a commission's limit, whose number is how "
+            "far the quantity falls beyond the limit, so FI left it out" for name in left_out] + [
+            f"The commission's known value {kv['name']!r} ({_given(kv)}) has no check "
             f"in this plan's draft: no entry of `protocol.oracles` is named {kv['name']!r}"
             + (", so FI added one from the commission (its number, tolerance and source; the plan gives it no case or "
                "measure)." if isinstance(protocol, dict) else ".")
@@ -546,6 +581,7 @@ limits:
 # - name: ""          # a short name for the value
 #   value: 0.0        # the number
 #   tolerance: 0.0    # how far a result may be from it and still agree
+#   bound: at_least   # only when the source gives a limit, not the value: at_least or at_most (else leave it out)
 #   case: ""          # the situation it applies to: which form, which parameter values
 #   passage: ""       # the sentence of the source that states the value, copied as it is written
 #   source:
