@@ -265,33 +265,43 @@ def _source_text(quest_root: Path, name: str) -> str:
         return ""
 
 
-async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any, ask: Ask, execute: Execute,
-                   second: bool) -> dict[str, Any]:
-    """One program for one value: asked (once more, with the reason, when it cannot be used), run, and judged."""
-    value, tolerance, bound = written(kv), float(kv["tolerance"]), _commission.bound_of(kv)
-    given = " ".join(withhold(kv.get(k), value) for k in ("case", "passage")) + " " + withhold(shown, value)
-    note = _SECOND if second else ""
+_ANY_NUMBER = re.compile(r"\.?\d+(?:[.,]\d+)*(?:[eE][-+]?\d+)?|[¼-¾⅐-⅞]")  # every digit run in an error line, even inside a name
+
+
+async def _written(kv: dict[str, Any], shown: str, *, template: Any, ask: Ask, second: bool, value: Any,
+                   tolerance: float, given: str, note: str, tries: int = 2) -> tuple[str, str, bool]:
+    """A usable program for one value: asked, and (with ``tries=2``) once more with the reason when the reply cannot
+    be used. Returns ``(script, why, unasked)``; ``script`` is ``""`` when none could be had."""
     script, why = "", ""
-    for _ in range(2):
+    for _ in range(tries):
         try:
             reply = await ask(prompt(template, kv, shown, again=note), second)
         except Exception as e:  # noqa: BLE001 -- a program that could not be had leaves the value unconfirmed
-            return {"verdict": "cannot_judge", "unasked": True,
-                    "why": f"the program could not be asked for ({str(e)[:160] or type(e).__name__})"}
+            return "", f"the program could not be asked for ({str(e)[:160] or type(e).__name__})", True
         script, why = program(reply, value, tolerance, given)
         if script:
-            break
+            return script, "", False
         note = (f"{_SECOND} " if second else "") + f"Your last reply could not be used: {why}. Write the program again."
-    if not script:
-        return {"verdict": "cannot_judge", "why": f"no usable program after two requests ({why})"}
+    return "", f"no usable program after {'two requests' if tries == 2 else 'one request'} ({why})", False
+
+
+async def _ran(path: Path, script: str, execute: Execute) -> dict[str, Any]:
+    """The program written to ``path`` and run: what it printed, its exit code and, when it stopped with an error,
+    the last line of that error."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(script, encoding="utf-8")
     code, out, err = await execute(path)
     routes, cannot = printed(out)
-    ran = {"program": path.name, "sha256": _commission.sha256(path), "returncode": code, "stdout_tail": out[-1500:],
-           "routes": routes}
-    if code != 0 or not routes:  # a program that stopped with an error: what it printed before is not judged
-        failed = (err or "").strip().splitlines()[-1][:200] if (err or "").strip() else f"exit code {code}"
+    failed = (err or "").strip().splitlines()[-1][:200] if (err or "").strip() else f"exit code {code}"
+    return {"program": path.name, "sha256": _commission.sha256(path), "returncode": code, "stdout_tail": out[-1500:],
+            "routes": routes, "_cannot": cannot, "_failed": failed}
+
+
+def _settled(ran: dict[str, Any], value: Any, tolerance: float, bound: str) -> dict[str, Any]:
+    """The verdict on one run program; a program that stopped with an error is not judged on what it printed before."""
+    ran = dict(ran)
+    cannot, failed, code, routes = ran.pop("_cannot"), ran.pop("_failed"), ran["returncode"], ran["routes"]
+    if code != 0 or not routes:
         why = (f"the program stopped with an error ({failed}); what it printed before is not judged" if code != 0 else
                f"the program says the text does not give what it needs: {cannot}" if cannot else
                f"the program printed no `{LINE}` value ({failed})")
@@ -299,6 +309,34 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
                 "why": why, "crashed": code != 0 or not cannot}
     verdict, why = judge(routes, value, tolerance, bound)
     return {**ran, "verdict": verdict, "why": why}
+
+
+async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any, ask: Ask, execute: Execute,
+                   second: bool) -> dict[str, Any]:
+    """One program for one value: asked (once more, with the reason, when it cannot be used), run, and judged. A
+    program that stops with an error is written once more (one request), told only the last line of that error with
+    every number in it taken out (a number the program computed is not shown to the model that writes it again): a
+    function the installed library no longer has, or an overflow, leaves the value unjudged though the method is
+    sound; the record of the program that stopped is kept whole under ``stopped_first``."""
+    value, tolerance, bound = written(kv), float(kv["tolerance"]), _commission.bound_of(kv)
+    given = " ".join(withhold(kv.get(k), value) for k in ("case", "passage")) + " " + withhold(shown, value)
+    how = dict(template=template, ask=ask, second=second, value=value, tolerance=tolerance, given=given)
+    script, why, unasked = await _written(kv, shown, note=_SECOND if second else "", **how)
+    if not script:
+        return {"verdict": "cannot_judge", "why": why, **({"unasked": True} if unasked else {})}
+    ran = await _ran(path, script, execute)
+    if ran["returncode"] == 0:
+        return _settled(ran, value, tolerance, bound)
+    stopped = _settled(ran, value, tolerance, bound)
+    error = _ANY_NUMBER.sub("<number>", ran["_failed"])
+    note = ((f"{_SECOND} " if second else "") + f"Your last program stopped with an error before it finished: {error}. "
+            "Write the program again so that it runs to the end with the installed libraries.")
+    script, why, _ = await _written(kv, shown, note=note, tries=1, **how)
+    if not script:
+        return {**stopped, "why": f"{stopped['why']}; written once more, the reply could not be used ({why})"}
+    again = _settled(await _ran(path.with_name(f"{path.stem}_again{path.suffix}"), script, execute), value, tolerance,
+                     bound)
+    return {**again, "stopped_first": stopped}
 
 
 async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[str, Any]:
