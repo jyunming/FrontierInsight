@@ -826,9 +826,14 @@ def parallel(quest_root: Path | str, protocol: Any, default: int = 1) -> int | N
 
 
 async def _analysis(executor: Any, python: Path | str, code: Path, trials: Path, out: Path, timeout_s: float,
-                    env: dict[str, str] | None) -> Any:
-    """The study's analysis (``experiment.py`` of ``code``) on the record of the trials ``trials``, in ``out``."""
+                    env: dict[str, str] | None, raw: Path | None = None) -> Any:
+    """The study's analysis (``experiment.py`` of ``code``) on the record of the trials ``trials``, in ``out``; with ``raw``,
+    the other files of that folder too (a search's record of the designs it evaluated)."""
     (out / "raw").mkdir(parents=True)
+    if raw is not None and raw.is_dir():
+        for item in raw.iterdir():
+            if item.is_file() and item.name != "trials.json":
+                shutil.copy2(item, out / "raw" / item.name)
     shutil.copy2(trials, out / "raw" / "trials.json")
     shutil.copytree(code, out / "code", ignore=_COPY_SKIP)
     env = {**(env or {}), "FI_TRIALS": "raw/trials.json", "FI_RAW_DIR": "raw", "FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}
@@ -927,6 +932,9 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         return await _run_like_main(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work, int(at_once),
                                     [] if trials_only else names, say=say, finding=finding, info=info, began=began,
                                     sample=sample)
+    if sample and searched_by_fi(base_root, protocol, copy):
+        return await _run_designs(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work,
+                                  names, say=say, finding=finding, info=info, began=began, sample=sample)
     if sample:
         return SAMPLE_MODE, None, "a sample of the settings is run only through FI's trial runner", 0.0, False
     out = copy / "output"
@@ -966,6 +974,181 @@ def _plan_progress(root: Path, seen: list[Any], elapsed_s: float) -> str:
         done_trials += got
         done_cells += got >= len(task["trials"])
     return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan), elapsed_s)
+
+
+#: The record a search for the best design keeps of the designs it evaluated (written by ``code/fi_search.py``).
+SEARCH_RECORD = "raw/optimisation_ledger.jsonl"
+
+
+def searched_by_fi(base_root: Path | str, protocol: Any, copy: Path) -> bool:
+    """Whether the delivered study is a search for the best design whose every evaluation FI's trial runner made (its record
+    of the trials, its ledger and the search's record of the designs are there, and the repaired simulation has an entry FI
+    calls), each on one cell with no values compared inside the run (FI's record of the trials holds no record per value):
+    a sample of its designs can then be evaluated alone, on the very cells the record holds."""
+    from . import trial_runner as _tr
+    from .split_run import SIMULATE_NAME
+
+    root = Path(base_root)
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("optimisation"), dict):
+        return False
+    if not all((root / rel).is_file() for rel in ("raw/trials.json", "raw/ledger.jsonl", SEARCH_RECORD)):
+        return False
+    if not _tr.entries(copy / SIMULATE_NAME) & {"run_trial", "run_cell"}:
+        return False
+    record = _json(root / "raw" / "trials.json")
+    cells = record.get("cells") if isinstance(record, dict) else None
+    return isinstance(cells, list) and bool(cells) and not any(isinstance(c, dict) and "level" in c for c in cells)
+
+
+def _design_order(base_root: Path, block: dict[str, Any], keys: list[str], n: int,
+                  cells: dict[str, dict[str, Any]]) -> list[str]:
+    """``n`` of the evaluated designs ``keys`` (in the order the search evaluated them; ``cells``: FI's record of each, by
+    key): the baseline and the best feasible design the search's own record names first (what a paper's numbers are read
+    at), each found as the recorded cell that holds its values, then designs spread over the rest."""
+    evals: list[dict[str, Any]] = []
+    direction = str((block.get("objective") or {}).get("direction") or "") if isinstance(block.get("objective"), dict) else ""
+    try:
+        lines = (base_root / SEARCH_RECORD).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") == "search" and isinstance(event.get("objective"), dict):
+            direction = str(event["objective"].get("direction") or direction)
+        elif event.get("event") == "evaluation" and isinstance(event.get("design"), dict):
+            evals.append(event)
+    known = set(keys)
+    first: list[str] = []
+
+    def add(design: dict[str, Any]) -> None:
+        for key in keys:
+            cell = (cells.get(key) or {}).get("cell")
+            if isinstance(cell, dict) and all(k in cell and cell[k] == v for k, v in design.items()):
+                if key in known and key not in first:
+                    first.append(key)
+                return
+
+    for event in evals:
+        if event.get("stage") == "baseline":
+            add(event["design"])
+    feasible = [e for e in evals if e.get("feasible") is not False and isinstance(e.get("objective"), (int, float))
+                and not isinstance(e.get("objective"), bool) and math.isfinite(e["objective"])]
+    if feasible:
+        pick = max if direction.lower().startswith("max") else min
+        add(pick(feasible, key=lambda e: e["objective"])["design"])
+    first = first[:n]
+    rest = [k for k in keys if k not in first]
+    m = n - len(first)
+    spread = [rest[(i * len(rest)) // m] for i in range(m)] if m > 0 and rest else []
+    return first + [k for k in dict.fromkeys(spread)]
+
+
+async def _run_designs(executor: Any, python: Path | str, quest_root: Path, base_root: Path, copy: Path, protocol: dict[str, Any],
+                       timeout_s: float, env: dict[str, str] | None, work: Path, names: list[str], *, say: Any, finding: str,
+                       info: dict[str, Any], began: float, sample: int) -> tuple[str, Path | None, str, float, bool]:
+    """A sample of the designs a search for the best design evaluated (:func:`searched_by_fi`), each evaluated alone through
+    FI's trial runner as the search evaluated it (the trials and the seeds FI's ledger recorded for it, as a design of the
+    search), and the analysis on the delivered record of the trials with those designs replaced (:func:`spliced`). The search
+    itself is not run: which designs it would evaluate after a repair is not known, so a sample shows a change or a repair
+    that does not run, never that the search gives the same numbers."""
+    from . import phased as _phased
+    from . import run_facts as _run_facts
+    from . import trial_runner as _tr
+    from .split_run import SIMULATE_NAME
+
+    mode = SAMPLE_MODE
+    block = protocol["optimisation"]
+    ledger = ledger_of(base_root)
+    delivered = _json(base_root / "raw" / "trials.json")
+    if ledger is None or not ledger.planned or not isinstance(delivered, dict):
+        return mode, None, "FI has no ledger of the delivered search's trials to run them again from", 0.0, False
+    cells = {c["key"]: c for c in delivered.get("cells") or []
+             if isinstance(c, dict) and isinstance(c.get("key"), str) and isinstance(c.get("cell"), dict)}
+    cut = ledger.cut_settings()
+    # a design some of whose trials the delivered run's time limit cut off is not sampled: alone it would run them all
+    order = [k for k in ledger.planned if k in cells and k not in cut and not ledger.cut.get(k)]
+    picked = _design_order(base_root, block, order, sample, cells)
+    if len(picked) < sample:
+        return mode, None, "FI could not spread a sample over the designs the delivered search evaluated", 0.0, False
+    info["sampled_keys"] = list(picked)
+    base = int(_phased.seed_env(quest_root, {"FI_REPLICATE_SEED": "0", "FI_REPLICATE_INDEX": "0"}, record=False)
+               .get("FI_REPLICATE_SEED") or 0)
+    deterministic = "run_trial" not in _tr.entries(copy / SIMULATE_NAME)
+    # One seed for trial t of every design, or one per design: the seeds FI's ledger recorded say which the search used.
+    paired = None
+    for candidate in (True, False):
+        if all(ledger.seeds.get((k, t), None if deterministic else -1)
+               == (None if deterministic else _tr.trial_seed(base, "" if candidate else k, t))
+               for k in picked for t in range(ledger.planned[k]) if (k, t) in ledger.seeds):
+            paired = candidate
+            break
+    if paired is None:
+        return mode, None, "the rerun would give the designs' trials other seeds than the delivered search gave them", 0.0, False
+    root = work / "trials"
+    root.mkdir(parents=True)
+
+    def copy_inputs() -> None:
+        shutil.copytree(copy, root / "code", ignore=_COPY_SKIP)
+        for name in ("inputs", "data"):
+            src = quest_root / name
+            if src.is_dir():
+                shutil.copytree(src, root / name, ignore=lambda folder, items, src=src: (
+                    {"results"} if Path(folder) == src and name == "data" else set()))
+
+    await asyncio.to_thread(copy_inputs)
+    thresholds = delivered.get("thresholds") if isinstance(delivered.get("thresholds"), dict) else None
+    at_once = max(1, int(_run_facts.settings_at_once(base_root) or 1))  # as many at once as the delivered run had, else one
+    groups: dict[int, list[str]] = {}
+    for key in picked:  # designs planned with as many trials run together (a search's check runs may have more)
+        groups.setdefault(int(ledger.planned[key]), []).append(key)
+    ran_cells: list[Any] = []
+    seen: list[Any] = []
+    for trials_each, keys in groups.items():
+        left = timeout_s - (time.monotonic() - began)
+        if left < 1:
+            info["timed_out"] = True
+            return mode, None, f"the repaired designs did not finish within {int(timeout_s)} s", time.monotonic() - began, False
+        task = asyncio.ensure_future(_tr.run_trials(
+            executor, python, root, f"code/{SIMULATE_NAME}", {}, runs_per_setting=1 if deterministic else trials_each,
+            base_seed=base, deterministic=deterministic, timeout_s=max(1, int(left)), env=env, thresholds=thresholds,
+            paired=paired, on_plan=seen.append, at_once=at_once, cell_list=[cells[k]["cell"] for k in keys], kind="search"))
+        run = await (_say_while(task, lambda elapsed: _plan_progress(root, seen, elapsed), say, finding)
+                     if say is not None else task)
+        ran_cells.extend(run.cells)
+    secs = time.monotonic() - began
+    loaded = sorted({c.load_error for c in ran_cells if c.load_error})
+    if loaded:
+        return mode, None, f"the repaired simulation could not be loaded ({loaded[0][:300]})", secs, True
+    late = [c.key for c in ran_cells for r in c.rows if str(r.get("reason") or "").startswith(_tr.OUT_OF_TIME)
+            and r.get("trial") not in ledger.cut.get(c.key, set())]
+    if late:
+        info["timed_out"] = True
+        return mode, None, (f"the repaired designs did not finish within {int(timeout_s)} s ({len(set(late))} design(s) "
+                            "not reached)"), secs, False
+    if ran_cells and not any(r.get("status") == "ok" for c in ran_cells for r in c.rows):
+        reason = next((str(r.get("reason")) for c in ran_cells for r in c.rows if r.get("reason")), "every trial failed")
+        return mode, None, f"the repaired code did not run to the end (no trial ran: {reason[:300]})", secs, True
+    trials = root / "raw" / "trials.json"
+    trials.parent.mkdir(parents=True, exist_ok=True)
+    summary = spliced(delivered, _tr.summary_of(ran_cells, thresholds), set(picked))
+    trials.write_text(json.dumps(summary, indent=1, allow_nan=True), encoding="utf-8")
+    left = timeout_s - (time.monotonic() - began)
+    if left < 1:
+        info["timed_out"] = True
+        return mode, None, f"the repaired designs did not finish within {int(timeout_s)} s", time.monotonic() - began, False
+    out = work / "ao"
+    ran_analysis = await _analysis(executor, python, copy, trials, out, left, env, raw=base_root / "raw")
+    if ran_analysis.returncode != 0 and not getattr(ran_analysis, "timed_out", False):
+        # the analysis read the search's own record beside the replaced designs: a number it wrote before it failed may
+        # come from that mix, so it is no evidence (the whole search runs then)
+        return mode, None, f"the analysis of the sampled designs did not end cleanly ({_error_of(ran_analysis)})", \
+            time.monotonic() - began, False
+    return _ended(ran_analysis, out, names, timeout_s, mode, time.monotonic() - began, info)
 
 
 async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, base_root: Path, copy: Path, protocol: dict[str, Any],
@@ -1140,7 +1323,7 @@ def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
 
 async def _varying(executor: Any, python: Path | str, quest_root: Path | str, protocol: Any, timeout_s: float,
                    env: dict[str, str] | None, results_root: Path | str | None, derived: str,
-                   at_once: int | None) -> tuple[set[str], float]:
+                   at_once: int | None, report: dict[str, Any] | None = None) -> tuple[set[str], float]:
     """The results that move when the delivered code itself runs again (on :data:`VARYING_SETTINGS` of the settings a sample
     runs, the first of the same spread-out order): a timing the study measures, a draw from an unseeded source. No repair
     moves them or keeps them still, so they are not compared. A result counts only when it moves at every one of those
@@ -1173,6 +1356,8 @@ async def _varying(executor: Any, python: Path | str, quest_root: Path | str, pr
                     if metric and setting in probed:
                         at.setdefault(metric, set()).add(setting)
                 names = {m for m, settings in at.items() if settings == probed}
+            if report is not None:  # a move the probe does not set aside: the code does not give its numbers again
+                report["unexplained"] = lost or any(metric_of(c["key"])[0] not in names for c in moved)
     except Exception as exc:  # noqa: BLE001 - without it every result is compared, as before
         _LOG.warning("the delivered code could not be run again to see which results vary (%r)", exc)
         names = set()
@@ -1189,7 +1374,9 @@ def _sample_of(quest_root: Path | str, copy: Path, protocol: Any, at_once: int |
     is not known to give the delivered numbers)."""
     from . import run_facts as _run_facts
 
-    if at_once is None or not isinstance(protocol, dict):
+    if not isinstance(protocol, dict):
+        return 0
+    if at_once is None and not searched_by_fi(Path(results_root or quest_root), protocol, copy):
         return 0
     if _run_facts.settings_shared(Path(results_root or quest_root)):
         return 0
@@ -1213,10 +1400,21 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
     verdict = None
     size = await asyncio.to_thread(_sample_of, quest_root, copy, protocol, at_once, results_root)
     varying: set[str] = set()
-    probe_s = 0.0
+    probe_s = unsampled_s = 0.0
     if size and timeout_s is not None:
+        probed: dict[str, Any] = {}
         varying, probe_s = await _varying(executor, python, quest_root, protocol, timeout_s, env, results_root, derived,
-                                          at_once)
+                                          at_once, report=probed)
+        if at_once is None and probed.get("unexplained", True):
+            # a search's designs evaluated alone did not give the delivered numbers (or could not be evaluated): a sample of
+            # them is no evidence, and the whole search runs as before
+            size = 0
+            timeout_s -= probe_s
+            unsampled_s = probe_s
+        if timeout_s - (0.0 if unsampled_s else probe_s) < 1:
+            # the delivered code's run took the time: nothing more is started, and no rerun of the study ran out of its time
+            return Verdict("could_not", "the delivered code's run before the sample left no time to run the repaired code",
+                           mode=SAMPLE_MODE, seconds=probe_s, source=source)
     if size and timeout_s is not None:
         # A sample of the settings first: a change it shows is the answer, and the whole study is not run. A sample that shows
         # none says nothing of the settings it did not run, so the whole study is run then, in the time left.
@@ -1241,6 +1439,7 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
                                at_once=at_once, varying=varying)
         if size and timeout_s is not None:
             verdict.seconds += tried.seconds  # the sample's time is part of the rerun's
+        verdict.seconds += unsampled_s  # a search's designs evaluated alone before the whole search
     if seen.get("files"):
         from . import code_project as _project
 

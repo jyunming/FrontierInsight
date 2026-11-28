@@ -21,6 +21,8 @@ from core import rerun_check, run_facts, trial_runner
 from core.execution import SharedInterpreterExecutor
 from core.rerun_check import Verdict
 
+NL = chr(10)
+
 
 def _record(root: Path, **run: Any) -> None:
     (root / ".fi").mkdir(parents=True, exist_ok=True)
@@ -721,6 +723,134 @@ def test_a_number_a_repair_loses_is_compared_even_of_a_result_that_moves_on_any_
     v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, repaired, protocol, 120, None, at_once=4))
     assert v.status != "unchanged", v
     assert any("a=10" in k and "t" in k for k in v.keys), v.keys
+
+
+# A search for the best design whose every evaluation FI's trial runner made: ten designs of ``x``, two trials each on the
+# same seeds (paired), the baseline ``x=5`` and the best ``x=1`` named in the search's own record.
+SEARCH_SIM = ("def run_trial(cell, trial_id, seed):" + NL
+              + "    return {'f': cell['x'] * 1.0 + (seed % 97) / 1000.0}" + NL)
+SEARCH_EXPERIMENT = """import json, os
+t = json.load(open(os.environ["FI_TRIALS"], encoding="utf-8"))
+by = {c["key"]: sum(c["metrics"]["f"]["values"]) / len(c["metrics"]["f"]["values"]) for c in t["cells"] if c["ok"]}
+assert os.path.isfile("raw/optimisation_ledger.jsonl")  # the analysis of a search reads the search's record too
+os.makedirs("data/results", exist_ok=True)
+json.dump({"derived": {"f": {"status": "ok", "by_setting": by}}}, open("data/results/derived.json", "w"))
+"""
+SEARCH = {"optimisation": {"objective": {"quantity": "f", "direction": "minimise"}}, "runs_per_setting": 2,
+          "metrics": [{"id": "f"}]}
+
+
+def _delivered_search(tmp_path: Path, sim: str = SEARCH_SIM) -> Path:
+    import os
+    import subprocess
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(sim, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(SEARCH_EXPERIMENT, encoding="utf-8")
+    designs = [{"x": x} for x in range(1, 11)]
+    asyncio.run(trial_runner.run_trials(_executor(), sys.executable, root, "code/simulate.py", {}, runs_per_setting=2,
+                                        base_seed=0, deterministic=False, timeout_s=120, paired=True, at_once=4,
+                                        cell_list=designs, kind="search"))
+    events = [{"event": "search", "objective": {"quantity": "f", "direction": "minimise"}}]
+    events += [{"event": "evaluation", "n": i + 1, "stage": "baseline" if d["x"] == 5 else "scan", "design": d,
+                "objective": float(d["x"]), "feasible": True} for i, d in enumerate(designs)]
+    (root / "raw" / "optimisation_ledger.jsonl").write_text(NL.join(json.dumps(e) for e in events) + NL, encoding="utf-8")
+    subprocess.run([sys.executable, "-B", "code/experiment.py"], cwd=root, check=True,
+                   env={**os.environ, "FI_TRIALS": "raw/trials.json"})
+    return root
+
+
+def test_a_change_a_sample_of_a_searchs_designs_shows_is_the_answer_without_the_search(tmp_path: Path) -> None:
+    """A search's repair is judged first on a sample of the designs the delivered search evaluated, each evaluated alone
+    with its recorded seeds: the baseline and the best the search's record names, then designs spread over the rest. Old
+    code: never sampled, the whole search ran (here there is no run.py, so a whole run could not even start)."""
+    root = _delivered_search(tmp_path)
+    assert rerun_check.parallel(root, SEARCH) is None  # a search is not rerun through the trial runner as a whole
+    moved = _repaired(root, tmp_path, "c1", SEARCH_SIM.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, SEARCH, 120, None))
+    assert (v.status, v.mode, v.sampled, v.metrics) == ("changed", rerun_check.SAMPLE_MODE, 3, ["f"]), v
+    record = {c["key"]: c for c in json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))["cells"]}
+    picked = rerun_check._design_order(root, SEARCH["optimisation"], [f"x={x}" for x in range(1, 11)], 3, record)
+    assert picked[:2] == ["x=5", "x=1"], picked
+
+
+def test_a_sample_of_a_searchs_designs_that_shows_no_change_runs_the_whole_search(tmp_path: Path) -> None:
+    """No change on the sample says nothing of the designs a repaired search would evaluate: the whole search runs."""
+    root = _delivered_search(tmp_path)
+    same = _repaired(root, tmp_path, "c0", SEARCH_SIM + "# repaired, numbers unchanged" + NL)
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, same, SEARCH, 120, None))
+    assert (v.status, v.mode) == ("could_not", "whole study"), v
+    assert "run.py" in v.why, v.why
+
+
+def test_a_search_whose_designs_alone_do_not_give_the_delivered_numbers_is_not_sampled(tmp_path: Path) -> None:
+    """When the delivered code's designs evaluated alone move a number the probe cannot set aside (here at one design of the
+    three only), a sample of the designs is no evidence: the whole search runs, even for a repair that moves everything."""
+    sim = ("import time" + NL + "def run_trial(cell, trial_id, seed):" + NL
+           + "    noise = time.perf_counter() % 1.0 if cell['x'] == 5 else 0.0" + NL
+           + "    return {'f': cell['x'] * 1.0 + (seed % 97) / 1000.0 + noise}" + NL)
+    root = _delivered_search(tmp_path, sim)
+    moved = _repaired(root, tmp_path, "c1", sim.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, SEARCH, 120, None))
+    assert (v.status, v.mode, v.sampled) == ("could_not", "whole study", 0), v
+
+
+def test_a_searchs_sample_whose_analysis_fails_after_writing_its_numbers_is_no_evidence(tmp_path: Path) -> None:
+    """The analysis of a sample reads the search's own record beside the replaced designs: numbers it wrote before it
+    failed may come from that mix, so they are not the answer and the whole search runs (old code read them: "changed")."""
+    root = _delivered_search(tmp_path)
+    moved = _repaired(root, tmp_path, "c1", SEARCH_SIM.replace("* 1.0", "* 1.5"))
+    (moved / "experiment.py").write_text(SEARCH_EXPERIMENT + "raise SystemExit(1)" + NL, encoding="utf-8")
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, SEARCH, 120, None))
+    assert (v.status, v.mode) == ("could_not", "whole study"), v
+
+
+def test_a_design_the_time_limit_cut_some_trials_of_is_not_in_a_searchs_sample(tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evaluated alone, a design whose delivered trials the time limit partly cut off would run them all, and its numbers
+    would differ for that reason only: it is not sampled (old code sampled it, the baseline first)."""
+    root = _delivered_search(tmp_path)
+    cut = {"event": "trial", "run_id": "", "cell": "x=5", "trial": 1, "seed": trial_runner.trial_seed(0, "", 1),
+           "status": "failed", "reason": trial_runner.OUT_OF_TIME}
+    with (root / "raw" / "ledger.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(cut) + NL)
+    seen: list[list[str]] = []
+    real = rerun_check._design_order
+
+    def spy(base_root: Path, block: Any, keys: list[str], n: int, cells: Any) -> list[str]:
+        seen.append(list(keys))
+        return real(base_root, block, keys, n, cells)
+
+    monkeypatch.setattr(rerun_check, "_design_order", spy)
+    moved = _repaired(root, tmp_path, "c1", SEARCH_SIM.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, SEARCH, 120, None))
+    assert seen and all("x=5" not in keys and "x=1" in keys for keys in seen), seen
+    assert v.status == "changed", v
+
+
+def test_no_time_left_after_the_delivered_codes_run_starts_nothing_more(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the delivered code's run before the sample took all the time, the repaired code is not started (old code gave
+    the sample one second, then the whole study what was left)."""
+    root = _delivered_search(tmp_path)
+    started: list[Any] = []
+
+    async def fake_varying(*a: Any, report: Any = None, **k: Any) -> tuple[set[str], float]:
+        if report is not None:
+            report["unexplained"] = False
+        return set(), 119.5
+
+    async def no_run(*a: Any, **k: Any) -> Any:
+        started.append(k.get("sample"))
+        raise AssertionError("the repaired code was started")
+
+    monkeypatch.setattr(rerun_check, "_varying", fake_varying)
+    monkeypatch.setattr(rerun_check, "run_copy", no_run)
+    moved = _repaired(root, tmp_path, "c1", SEARCH_SIM.replace("* 1.0", "* 1.5"))
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, moved, SEARCH, 120, None))
+    assert (v.status, v.mode, started) == ("could_not", rerun_check.SAMPLE_MODE, []), v
+    assert v.seconds == 119.5, v
 
 
 def _delivered_with(tmp_path: Path, sim: str) -> Path:
