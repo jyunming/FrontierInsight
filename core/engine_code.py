@@ -4813,7 +4813,8 @@ class CodeStageMixin:
                     ran = await self.executor.execute(
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=limit_s, env=env,
                     )
-                    reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
+                    reported, returncode, timed_out = (None if ran.timed_out else _oracle.parse(ran.stdout),
+                                                        ran.returncode, ran.timed_out)
                     if isinstance(reported, dict):
                         reported.pop("engine_measured", None)  # only the engine's own measurement carries this mark
                     # What could not be installed comes first: the repair then fixes the import, not a symptom.
@@ -5600,6 +5601,8 @@ class CodeStageMixin:
         printed its RESULT line. Decided once per run (``exec_result["results_produced"]``); the figure's repair keeps reading the
         return code and the figure statuses."""
         rc = result.returncode
+        if getattr(result, "timed_out", False):
+            return False  # stopped at its time limit (on Windows its exit code is 1, like a figure-only failure)
         return _analysis_frame.run_produced(
             rc, bool(rc != 0 and _extract_result_json(getattr(result, "stdout", "") or "")),
             _analysis_frame.read_record(self.quest_root) if rc == 1 else {}, rc == 1 and self._analysis_on())

@@ -44,10 +44,11 @@ def _confirm(engine, exec_result: dict, result_json: dict) -> dict:
 
 
 class _Ran:
-    def __init__(self, returncode: int, printed: bool = True) -> None:
+    def __init__(self, returncode: int, printed: bool = True, timed_out: bool = False) -> None:
         self.returncode = returncode
         self.stdout = 'RESULT_JSON: {"a": 1}\n' if printed else ""
         self.stderr = ""
+        self.timed_out = timed_out
 
 
 def _fis_experiment(engine, on: bool = True) -> None:
@@ -116,6 +117,10 @@ def test_run_produced_is_decided_from_fis_record_and_only_for_fis_own_analysis(t
     assert engine._run_produced(_Ran(1))  # only a figure failed
     assert not engine._run_produced(_Ran(2))  # FI's exit code for a crash or its own fault, although the record was written
     assert not engine._run_produced(_Ran(1, printed=False))  # no RESULT line
+    # Stopped at its time limit (exit code 1 on Windows), with the RESULT line it printed kept: not a run that produced.
+    assert not engine._run_produced(_Ran(1, timed_out=True))
+    from core.engine_run import _printed_result
+    assert _printed_result(_Ran(0, timed_out=True)) == "" and "RESULT_JSON" in _printed_result(_Ran(0))
     _record(engine.quest_root, figure="ok")
     assert not engine._run_produced(_Ran(1)), "exit 1 with a printed result and no failed figure in the record is a crash"
     _record(engine.quest_root, figure="failed", result="failed")

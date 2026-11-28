@@ -1044,6 +1044,8 @@ class ImproveStageMixin:
         code, out, err = await self._run_in_env([self._rel_to_quest(path)], timeout_s=_oracle_challenge.numeric_timeout(self.config.execution.timeout_s),
                                                 apart=True)
         value, how, error = _oracle_challenge.numeric_value(out)
+        if (err or "").rstrip().endswith("(timed out)"):
+            value, how, error = None, "the script ran out of time", None  # what a stopped script printed is not its value
         if value is None and code != 0:
             how = f"the script failed ({(err or '').strip().splitlines()[-1][:200] if (err or '').strip() else code})"
         self._log.info("[oracle] the numerical computation of %r from the definitions: %s", str(oracle.get("name")),

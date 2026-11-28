@@ -316,6 +316,17 @@ _NEVER_PASSED = frozenset({"FI_CHECKS_DIR"})
 _POST_KILL_READ_S = 30.0
 
 
+async def _read_into(stream: asyncio.StreamReader | None, buf: bytearray) -> None:
+    """Append everything ``stream`` gives to ``buf`` until it ends (what was read stays in ``buf`` if cancelled)."""
+    if stream is None:
+        return
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            return
+        buf.extend(chunk)
+
+
 @dataclass
 class ExecutionResult:
     returncode: int
@@ -524,41 +535,42 @@ class VenvExecutor:
         aborted = False
         peak = [0.0]
         watcher = asyncio.create_task(_watch_peak(proc.pid, peak))
+        # The output is read into buffers as it comes, so a command stopped at its time limit keeps what it had
+        # printed before then (a cancelled communicate() drops what it had read).
+        out_buf, err_buf = bytearray(), bytearray()
+        everything = asyncio.ensure_future(asyncio.gather(
+            _read_into(proc.stdout, out_buf), _read_into(proc.stderr, err_buf), proc.wait()))
         try:
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout_s
-                )
-                timed_out = False
-            except asyncio.TimeoutError:
+            done, _ = await asyncio.wait({everything}, timeout=timeout_s)
+            timed_out = not done
+            if timed_out:
                 if not await tree.kill():
                     _log.warning(
                         "[execute] a process started by the timed-out command was still running a few seconds "
                         "after it was stopped",
                     )
-                try:
-                    # Read the pipes to their end and reap the script. Bounded: a process that escaped the tree
-                    # could still hold the output pipe open.
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(), timeout=_POST_KILL_READ_S
-                    )
-                except asyncio.TimeoutError:
+                # Read the pipes to their end and reap the script. Bounded: a process that escaped the tree
+                # could still hold the output pipe open.
+                done, _ = await asyncio.wait({everything}, timeout=_POST_KILL_READ_S)
+                if not done:
                     _log.warning(
                         "[execute] the output of a timed-out command did not close %.0f s after it was stopped; "
-                        "its output is lost", _POST_KILL_READ_S,
+                        "what it printed after then is lost", _POST_KILL_READ_S,
                     )
-                    stdout, stderr = b"", b""
-                timed_out = True
+            if done:
+                everything.result()
         except asyncio.CancelledError:
             aborted = True  # the script may have exited while what it started still holds the output pipe
             raise
         finally:
+            if not everything.done():
+                everything.cancel()
             watcher.cancel()
             await tree.aclose(aborted=aborted)
         result = ExecutionResult(
             returncode=proc.returncode if proc.returncode is not None else -1,
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout=bytes(out_buf).decode("utf-8", errors="replace"),
+            stderr=bytes(err_buf).decode("utf-8", errors="replace"),
             duration_s=time.monotonic() - start,
             timed_out=timed_out,
             peak_mb=round(peak[0], 1) if peak[0] > 0 else None,

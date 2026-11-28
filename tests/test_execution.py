@@ -129,6 +129,17 @@ async def test_execute_simple_script(venv_quest: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_timed_out_command_keeps_what_it_printed_before_it_was_stopped(tmp_path: Path) -> None:
+    """Old code: the output a command had printed (and flushed) before its time limit was dropped with the
+    cancelled read, so a timed-out run returned no output at all."""
+    script = "import sys, time\nfor i in range(3):\n    print('LINE', i, flush=True)\nprint('ERR', file=sys.stderr, flush=True)\ntime.sleep(60)\n"
+    result = await VenvExecutor().execute([sys.executable, "-c", script], cwd=tmp_path, timeout_s=15)
+    assert result.timed_out is True
+    assert result.stdout.count("LINE") == 3, result.stdout
+    assert "ERR" in result.stderr
+
+
+@pytest.mark.asyncio
 async def test_execute_timeout(venv_quest: Path) -> None:
     exe = VenvExecutor()
     await exe.setup(venv_quest)

@@ -1091,6 +1091,83 @@ def test_a_run_that_ran_out_of_time_is_not_run_again(tmp_path):
     assert e["status"] == "unconfirmed" and "did not finish in time" in e["why"]
 
 
+def _stopped_after_two(root, seen):
+    """A run of the real comparison script whose output is cut as a time limit cuts it: two rows, then part of a third."""
+    async def run(argv, extra_s=0.0):
+        inputs = json.loads((root / argv[2]).read_text(encoding="utf-8"))
+        seen["n"] = len(inputs)
+        p = subprocess.run([sys.executable, "-B", "-c", argv[1], *argv[2:]], cwd=root, capture_output=True, text=True,
+                           timeout=120)
+        rows = [line for line in p.stdout.splitlines() if line.startswith("SECOND_IMPL_ROW: ")]
+        assert len(rows) == len(inputs), p.stdout[-400:]
+        kept = rows[:2] + [rows[2][:25]]   # stopped while it wrote the third
+        return -1, "noise\n" + "\n".join(kept), "partial\n" + si.TIMED_OUT
+    return run
+
+
+def test_a_comparison_stopped_by_its_time_limit_is_judged_on_the_inputs_it_compared(tmp_path):
+    """Old code: a comparison that ran out of time compared nothing ("did not finish in time"), however many inputs it
+    had already run. Now the inputs it compared are judged: agreement on only some of them is not a confirmation (it
+    stays unconfirmed and says how many of how many), and a disagreement on them is a disagreement."""
+    proto = protocol()
+    root = make_quest(tmp_path, GOOD_MAIN)
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    seen = {}
+    s = build(root, Fake(write=[fenced(GOOD_REF)]), [spec_for(proto)], proto)
+    s.run = _stopped_after_two(root, seen)
+    e = asyncio.run(s.run_all())["functions"]["activation_energy"]
+    assert seen["n"] > 2
+    assert e["status"] == "unconfirmed" and e["inputs_tried"] == 2 and e["inputs_planned"] == seen["n"], e
+    assert f"agree on the 2 of {seen['n']} inputs" in e["why"], e
+
+    bad = make_quest(tmp_path / "bad", MUTANT_MAIN)
+    (bad / ".fi" / "second_impl").mkdir(parents=True)
+    fake = Fake(write=[fenced(GOOD_REF)], adjudicate=[verdict("main_wrong", "the sign of the slope is lost")])
+    s = build(bad, fake, [spec_for(proto)], proto)
+    s.run = _stopped_after_two(bad, {})
+    rec = asyncio.run(s.run_all())
+    e = rec["functions"]["activation_energy"]
+    assert e["status"] != "agree" and e["disagreements"] and rec["calls"] >= 2, (e, rec["calls"])
+
+
+def test_the_rows_of_a_stopped_comparison_end_at_the_first_line_that_is_not_the_next_input():
+    row = lambda i, v: "SECOND_IMPL_ROW: " + json.dumps({"i": i, "row": {"main": v}, "setup": "ran"})
+    assert si.parse_rows("\n".join([row(0, 1), "printed by the function", row(1, 2)])) == {
+        "rows": [{"main": 1}, {"main": 2}], "setup": "ran"}
+    assert si.parse_rows("\n".join([row(0, 1), row(5, 9), row(1, 2)]))["rows"] == [{"main": 1}]  # out of order
+    assert si.parse_rows("\n".join([row(0, 1), row(1, 2)[:20]]))["rows"] == [{"main": 1}]  # cut short
+    assert si.parse_rows("SECOND_IMPL_ROW: {\"row\": {\"main\": 1}}") is None  # no index: not the harness's
+    assert si.parse_rows("nothing\n" + si.TIMED_OUT) is None
+
+
+def test_a_comparison_stopped_before_any_input_records_none_compared(tmp_path):
+    proto = protocol()
+    root = make_quest(tmp_path, GOOD_MAIN)
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+
+    async def run(argv, extra_s=0.0):
+        return -1, "", "loading\n" + si.TIMED_OUT
+
+    s = build(root, Fake(write=[fenced(GOOD_REF)]), [spec_for(proto)], proto)
+    s.run = run
+    e = asyncio.run(s.run_all())["functions"]["activation_energy"]
+    assert e["status"] == "unconfirmed" and e["inputs_tried"] == 0 and e["inputs_planned"] > 0, e
+
+
+def test_what_the_compared_functions_print_does_not_become_a_row(tmp_path):
+    root = make_quest(tmp_path, GOOD_MAIN.replace("def activation_energy(slope):",
+                                                  "def activation_energy(slope):\n    print('SECOND_IMPL_ROW: {}')"))
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    (root / ".fi" / "second_impl" / "activation_energy.py").write_text(GOOD_REF, encoding="utf-8")
+    (root / ".fi" / "second_impl" / "in.json").write_text(json.dumps([{"slope": -1.0}, {"slope": -2.0}]), encoding="utf-8")
+    script = si.compare_script(code_dir="code", module="pkg.model", name="activation_energy",
+                               reference=".fi/second_impl/activation_energy.py", inputs=".fi/second_impl/in.json", uses=[])
+    p = subprocess.run([sys.executable, "-B", "-c", script], cwd=root, capture_output=True, text=True, timeout=120,
+                       env={**os.environ, "PYTHONPATH": str(root / "code")})
+    assert len(si.parse_rows(p.stdout)["rows"]) == 2, p.stdout
+    assert len(si.parse_output(p.stdout)["rows"]) == 2
+
+
 # --- what is compared is what both versions return ----------------------------------------------------------------------
 
 
