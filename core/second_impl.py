@@ -1048,7 +1048,7 @@ def judge_rows(rows: list[dict[str, Any]], inputs: list[dict[str, Any]], rel: fl
 
 
 _SCRIPT = r'''
-import importlib, importlib.util, json, math, sys, traceback, warnings
+import importlib, importlib.util, json, math, sys, time, traceback, warnings
 sys.path.insert(0, @CODE@)
 try:
     import numpy as np
@@ -1180,7 +1180,10 @@ with open(@INPUTS@, encoding="utf-8") as fh:
     cases = json.load(fh)
 rows = []
 _fi_out = sys.stdout
+_fi_t0 = time.monotonic()
 for i, case in enumerate(cases):
+    if i < @START@:
+        continue  # compared by an earlier run that the time limit stopped
     row = {}
     sys.stdout = sys.stderr  # what the functions print is not read as a result
     try:
@@ -1194,32 +1197,37 @@ for i, case in enumerate(cases):
     finally:
         sys.stdout = _fi_out
     rows.append(row)
-    print("\nSECOND_IMPL_ROW: " + json.dumps({"i": i, "row": row, "setup": SETUP_STATE[0]}), flush=True)
+    print("\nSECOND_IMPL_ROW: " + json.dumps({"i": i, "row": row, "setup": SETUP_STATE[0],
+                                               "t": round(time.monotonic() - _fi_t0, 3)}), flush=True)
 done({"rows": rows, "setup": SETUP_STATE[0]})
 '''
 
 
 def compare_script(*, code_dir: str, module: str, name: str, reference: str, inputs: str, uses: list[str],
-                   own: dict[str, str] | None = None, study: str = "", setup: dict[str, Any] | None = None) -> str:
+                   own: dict[str, str] | None = None, study: str = "", setup: dict[str, Any] | None = None,
+                   start: int = 0) -> str:
     """The ``-c`` script that imports both versions and calls each on every input; it prints one ``SECOND_IMPL: {json}`` line.
     ``study``: the study's own file (``code/simulate.py``), loaded first the way the trial harness loads it. ``setup``:
     ``{"entry", "cell", "kind"}`` of a setting FI's own run of the study completed; the study's entry is called once on it
-    (as a trial is) so the study has set its constants, the same way, before either version is called."""
+    (as a trial is) so the study has set its constants, the same way, before either version is called. ``start``: the
+    first input to compare (those before it were compared by a run the time limit stopped)."""
     from .trial_runner import LOAD_STUDY_SOURCE
 
     text = LOAD_STUDY_SOURCE + _SCRIPT
     for token, value in (("@CODE@", code_dir), ("@MODULE@", module), ("@NAME@", name), ("@REF@", reference),
                          ("@STUDY@", study), ("@SETUP@", dict(setup or {})), ("@INPUTS@", inputs), ("@USES@", list(uses)),
-                         ("@OWN@", dict(own or {}))):
+                         ("@OWN@", dict(own or {})), ("@START@", int(start))):
         text = text.replace(token, repr(value))
     return text
 
 
-def parse_rows(out: str) -> dict[str, Any] | None:
+def parse_rows(out: str, start: int = 0) -> dict[str, Any] | None:
     """The inputs a comparison stopped before its end had compared, from its ``SECOND_IMPL_ROW`` lines, in order:
-    ``{"rows", "setup"}``, or ``None`` when it had compared none. The rows end at the first line that is not the next
-    input's (cut short by the stop, out of order, or not the harness's own)."""
+    ``{"rows", "setup", "t"}`` (``t``: seconds from the first call to each row's end), or ``None`` when it had compared
+    none. The rows start at input ``start`` and end at the first line that is not the next input's (cut short by the
+    stop, out of order, or not the harness's own)."""
     rows: list[dict[str, Any]] = []
+    times: list[float] = []
     setup = "none"
     for line in (out or "").splitlines():
         if not line.startswith("SECOND_IMPL_ROW: "):
@@ -1228,11 +1236,27 @@ def parse_rows(out: str) -> dict[str, Any] | None:
             data = json.loads(line[len("SECOND_IMPL_ROW: "):])
         except ValueError:
             break
-        if not isinstance(data, dict) or not isinstance(data.get("row"), dict) or data.get("i") != len(rows):
+        if not isinstance(data, dict) or not isinstance(data.get("row"), dict) or data.get("i") != start + len(rows):
             break
         rows.append(data["row"])
+        times.append(float(data["t"]) if isinstance(data.get("t"), (int, float)) else math.nan)
         setup = str(data.get("setup") or setup)
-    return {"rows": rows, "setup": setup} if rows else None
+    return {"rows": rows, "setup": setup, "t": times} if rows else None
+
+
+#: A comparison stopped at its time limit is run once more on the inputs left, with a limit from how long the slowest of
+#: those it finished took, this many times over.
+RETRY_MARGIN = 1.5
+#: The time a study's comparisons may add for that, together: this share of the study's time allowed
+#: (``execution.timeout_s``), never less than one comparison's base limit.
+MORE_TIME_FRACTION = 0.25
+
+
+def slowest_row_s(times: list[float]) -> float | None:
+    """The longest any one input took, from the end time of each (``parse_rows``'s ``t``); ``None`` when not known."""
+    if not times or any(not math.isfinite(t) for t in times):
+        return None
+    return max(b - a for a, b in zip([0.0, *times[:-1]], times))
 
 
 def parse_output(out: str) -> dict[str, Any] | None:
@@ -1489,11 +1513,14 @@ class SecondImpl:
                  passages: dict[str, str] | None = None, family_of: FamilyFn | None = None, topic_block: str = "",
                  cap: int = MAX_KEY, log: Any = None,
                  verify_package: Callable[[], Awaitable[str]] | None = None,
-                 captured: dict[str, list[dict[str, Any]]] | None = None, repair_by_writer: bool = False) -> None:
+                 captured: dict[str, list[dict[str, Any]]] | None = None, repair_by_writer: bool = False,
+                 more_time_s: float = 0.0) -> None:
         self.root, self.package, self.specs, self.protocol = Path(quest_root), package, list(specs), protocol
         #: The code's own writer (a coding agent) repairs a function the judge finds wrong: ``repair_main`` hands the
         #: finding over and does not return (it raises), FI writes nothing and sends no request of its own for it.
         self.repair_by_writer = bool(repair_by_writer)
+        # The time the study's comparisons may add, together, to compare the inputs a stopped comparison did not reach.
+        self.more_time_s = max(0.0, float(more_time_s or 0.0))
         self.prompts, self.chat, self.run = prompts, chat, run
         self.repair_main, self.still_passes = repair_main, still_passes
         #: ``verify_package()``: the model's other tests, run once on the package a repair left; ``""`` when none fails, else
@@ -1690,6 +1717,9 @@ class SecondImpl:
             # Stopped at its time limit: the inputs it compared before then are judged (a slow function is not left
             # without a verdict because all its inputs together did not fit), and the record says how many of how many.
             partial = parse_rows(text)
+            if partial is not None and len(partial["rows"]) < planned:
+                partial = await self._compare_the_rest(spec, entry, partial, planned, named, uses, own, study, setup,
+                                                       inputs_path)
             out = partial
             inputs = inputs[:len(partial["rows"])] if partial is not None else []
         entry["inputs_tried"] = len(inputs)
@@ -1724,6 +1754,47 @@ class SecondImpl:
                            why=f"the two versions agree on the {len(inputs)} of {planned} inputs compared before the time "
                                "ran out; the rest were not compared")
         return verdict
+
+    async def _compare_the_rest(self, spec: _fs.Spec, entry: dict[str, Any], partial: dict[str, Any], planned: int,
+                                named: list[str], uses: list[str], own: dict[str, str], study: str,
+                                setup: dict[str, Any] | None, inputs_path: Path) -> dict[str, Any]:
+        """A comparison stopped at its time limit after ``partial``'s rows: the inputs left are compared once more, with
+        a limit from how long the slowest finished input took (:data:`RETRY_MARGIN` times over, for each input left, plus
+        the setup trial), when that fits the time the study's comparisons may still add (:attr:`more_time_s`). The rows
+        of both runs, in order; ``partial`` as it was when it does not fit or the speed is not known."""
+        done = len(partial["rows"])
+        slowest = slowest_row_s(partial.get("t") or [])
+        setup_s = float((setup or {}).get("duration_s") or 0.0)
+        if slowest is None:
+            return partial
+        need = setup_s + slowest * (planned - done) * RETRY_MARGIN
+        need = max(1.0, need)
+        # The run's real limit is the comparison's base limit plus ``need``: both must fit what is left, so the study's
+        # comparisons never add more than they are given.
+        if need + COMPARE_BASE_S > self.more_time_s:
+            entry["more_time_needed_s"] = round(need, 1)
+            return partial
+        script = compare_script(code_dir="code", module=f"{self.package}.model", name=spec.name,
+                                reference=(DIR / f"{spec.name}.py").as_posix(), inputs=inputs_path.as_posix(), uses=uses,
+                                own=own, study=study, setup=setup, start=done)
+        began = time.monotonic()
+        try:
+            _rc, text, err = await self._run_script(script, named, need)
+        except Exception as e:  # noqa: BLE001
+            _rc, text, err = -1, "", repr(e)
+        # What the run really took is what it costs the study (its limit also has the comparison's base time in it).
+        took = time.monotonic() - began
+        self.more_time_s = max(0.0, self.more_time_s - took)
+        self.record["more_time_spent_s"] = float(self.record.get("more_time_spent_s") or 0.0) + took
+        self._save()  # kept at once: a quest resumed after this does not get the time again
+        entry["more_time_s"] = round(took, 1)
+        # Only rows that continue the first run's, by their index, finished or stopped alike; and only from a run whose
+        # study was set up as the first run's was (the rest are compared in a fresh process after the same setup trial).
+        got = parse_rows(text, start=done)
+        if got is None or str(got.get("setup")) != str(partial.get("setup")):
+            return partial
+        entry["inputs_in_a_second_run"] = len(got["rows"])
+        return {"rows": [*partial["rows"], *got["rows"]][:planned], "setup": partial.get("setup"), "t": []}
 
     def _return_keys(self, spec: _fs.Spec) -> list[str] | None:
         """Every key of the first version's dict results in the calls FI recorded when it ran the simulation; ``None`` when
@@ -1885,6 +1956,7 @@ class SecondImpl:
     async def run_all(self) -> dict[str, Any]:
         """Check the key functions and return (and save) the record."""
         self.record = load(self.root)
+        self.more_time_s = max(0.0, self.more_time_s - float(self.record.get("more_time_spent_s") or 0.0))
         sha = _sha(self.model_path)
         old = self.record.get("code_sha")
         stale = bool(old) and old != sha

@@ -1132,12 +1132,76 @@ def test_a_comparison_stopped_by_its_time_limit_is_judged_on_the_inputs_it_compa
 
 def test_the_rows_of_a_stopped_comparison_end_at_the_first_line_that_is_not_the_next_input():
     row = lambda i, v: "SECOND_IMPL_ROW: " + json.dumps({"i": i, "row": {"main": v}, "setup": "ran"})
-    assert si.parse_rows("\n".join([row(0, 1), "printed by the function", row(1, 2)])) == {
-        "rows": [{"main": 1}, {"main": 2}], "setup": "ran"}
+    got = si.parse_rows("\n".join([row(0, 1), "printed by the function", row(1, 2)]))
+    assert {k: got[k] for k in ("rows", "setup")} == {"rows": [{"main": 1}, {"main": 2}], "setup": "ran"}
     assert si.parse_rows("\n".join([row(0, 1), row(5, 9), row(1, 2)]))["rows"] == [{"main": 1}]  # out of order
     assert si.parse_rows("\n".join([row(0, 1), row(1, 2)[:20]]))["rows"] == [{"main": 1}]  # cut short
     assert si.parse_rows("SECOND_IMPL_ROW: {\"row\": {\"main\": 1}}") is None  # no index: not the harness's
     assert si.parse_rows("nothing\n" + si.TIMED_OUT) is None
+
+
+def _stopped_once(root, seen):
+    """The real comparison script; its first run is cut after two inputs as a time limit cuts it, later runs finish.
+    Records each run's extra time and the first input it compared."""
+    async def run(argv, extra_s=0.0):
+        p = subprocess.run([sys.executable, "-B", "-c", argv[1], *argv[2:]], cwd=root, capture_output=True, text=True,
+                           timeout=120)
+        rows = [line for line in p.stdout.splitlines() if line.startswith("SECOND_IMPL_ROW: ")]
+        seen.setdefault("runs", []).append({"extra_s": extra_s, "first": json.loads(rows[0][17:])["i"] if rows else None,
+                                            "n": len(json.loads((root / argv[2]).read_text(encoding="utf-8")))})
+        if len(seen["runs"]) == 1:
+            return -1, "\n".join(rows[:2]), "partial\n" + si.TIMED_OUT
+        return p.returncode, p.stdout, p.stderr
+    return run
+
+
+def test_a_comparison_the_time_limit_stopped_compares_the_inputs_left_once_more(tmp_path):
+    """Old code: a comparison stopped at its time limit was judged on the inputs it had finished and stayed unconfirmed,
+    however little time the rest needed. Now the inputs left are run once more, with a limit from how long the slowest
+    finished input took, and the comparison is judged on all of them."""
+    proto = protocol()
+    root = make_quest(tmp_path, GOOD_MAIN)
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    seen = {}
+    s = build(root, Fake(write=[fenced(GOOD_REF)]), [spec_for(proto)], proto, more_time_s=600)
+    s.run = _stopped_once(root, seen)
+    rec = asyncio.run(s.run_all())
+    e = rec["functions"]["activation_energy"]
+    first, second = seen["runs"][0], seen["runs"][1]
+    assert first["first"] == 0 and second["first"] == 2, seen  # the second run starts where the first stopped
+    assert 1 <= second["extra_s"] < 600, seen
+    assert e["status"] == "agree" and e["inputs_tried"] == first["n"] and "inputs_planned" not in e, e
+    assert e["inputs_in_a_second_run"] == first["n"] - 2
+    # what the second run really took is charged to the study, and kept for a resumed quest
+    assert 0 < rec["more_time_spent_s"] and s.more_time_s == pytest.approx(600 - e["more_time_s"], abs=0.2), (rec, s.more_time_s)
+
+    assert si.load(root).get("more_time_spent_s") == rec["more_time_spent_s"]
+    resumed = build(root, Fake(), [spec_for(proto)], proto, more_time_s=rec["more_time_spent_s"])
+    resumed.record = si.load(root)
+    resumed.more_time_s = max(0.0, resumed.more_time_s - float(resumed.record.get("more_time_spent_s") or 0.0))
+    assert resumed.more_time_s == 0.0  # a resumed quest does not get the time again
+
+
+def test_the_inputs_left_are_not_run_again_when_the_study_has_no_time_left_for_it(tmp_path):
+    proto = protocol()
+    root = make_quest(tmp_path, GOOD_MAIN)
+    (root / ".fi" / "second_impl").mkdir(parents=True)
+    seen = {}
+    s = build(root, Fake(write=[fenced(GOOD_REF)]), [spec_for(proto)], proto, more_time_s=0)
+    s.run = _stopped_once(root, seen)
+    e = asyncio.run(s.run_all())["functions"]["activation_energy"]
+    assert len(seen["runs"]) == 1 and e["status"] == "unconfirmed" and e["inputs_tried"] == 2, (seen, e)
+    assert e["more_time_needed_s"] >= 0
+
+
+def test_the_slowest_input_is_read_from_when_each_ended():
+    assert si.slowest_row_s([1.0, 1.5, 4.0]) == 2.5
+    assert si.slowest_row_s([3.0]) == 3.0
+    assert si.slowest_row_s([]) is None and si.slowest_row_s([1.0, float("nan")]) is None
+    row = lambda i: "SECOND_IMPL_ROW: " + json.dumps({"i": i, "row": {"main": i}, "setup": "ran", "t": 0.5 * i})
+    assert si.parse_rows("\n".join([row(3), row(4)]), start=3) == {
+        "rows": [{"main": 3}, {"main": 4}], "setup": "ran", "t": [1.5, 2.0]}
+    assert si.parse_rows(row(0), start=3) is None
 
 
 def test_a_comparison_stopped_before_any_input_records_none_compared(tmp_path):

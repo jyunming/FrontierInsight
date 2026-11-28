@@ -3260,6 +3260,8 @@ class CodeStageMixin:
                 prompts={"write": self._prompts["second_impl_write"], "adjudicate": self._prompts["second_impl_adjudicate"]},
                 chat=chat, run=self._run_apart_from_study(exec_env, comparison=True), repair_main=repair_main, still_passes=still_passes, passages=passages,
                 repair_by_writer=agent,
+                more_time_s=max(_second_impl.COMPARE_BASE_S,
+                                _second_impl.MORE_TIME_FRACTION * float(self.config.execution.timeout_s)),
                 family_of=self._family_of_node, topic_block=self._topic_block(), log=self._log)
             for name, e in (result.get("functions") or {}).items():
                 if not isinstance(e, dict):
