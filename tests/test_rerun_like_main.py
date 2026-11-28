@@ -710,6 +710,19 @@ def test_a_result_that_moves_on_any_run_is_not_compared(tmp_path: Path, monkeypa
     assert v.status == "changed" and "t" in v.metrics, v
 
 
+def test_a_number_a_repair_loses_is_compared_even_of_a_result_that_moves_on_any_run(tmp_path: Path) -> None:
+    """A result that moves on any run is set aside only where it moved: a number of it the repaired code no longer gives
+    is a failure of the repair, not a variation (old code set every key of the result aside and said "unchanged")."""
+    root = _delivered_with(tmp_path, TIMED)
+    protocol = {**TEN, "metrics": [{"id": "y"}, {"id": "t"}]}
+    lost = TIMED.replace("'t': time.perf_counter() % 1.0}", "**({} if cell['a'] == 10 else {'t': time.perf_counter() % 1.0})}")
+    assert lost != TIMED
+    repaired = _repaired(root, tmp_path, "c2", lost)
+    v = asyncio.run(rerun_check.judge(_executor(), sys.executable, root, repaired, protocol, 120, None, at_once=4))
+    assert v.status != "unchanged", v
+    assert any("a=10" in k and "t" in k for k in v.keys), v.keys
+
+
 def _delivered_with(tmp_path: Path, sim: str) -> Path:
     import os
     import subprocess

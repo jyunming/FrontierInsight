@@ -1322,10 +1322,15 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
         # a quantity a reader's claim is about is always compared: a move of it is never set aside as variation
         varying = {m for m in (varying or set()) if not any(_names(m, q) or _names(q, m) or m == q for q in disputed or [])}
         if varying:
-            # a result that moves when the delivered code itself runs again is no evidence of the repair (:func:`_varying`)
-            noise = sorted({m for c in keep for m in [metric_of(c["key"])[0]] if m} & varying)
+            # a result that moves when the delivered code itself runs again is no evidence of the repair (:func:`_varying`):
+            # only its move at a setting is set aside; a number of it the repair lost, or one not read at a setting, is compared
+            def noisy(c: dict[str, Any]) -> bool:
+                metric, setting = metric_of(c["key"])
+                return bool(metric in varying and setting and c["new"] is not None and c["old"] is not None)
+
+            noise = sorted({metric_of(c["key"])[0] for c in keep if noisy(c)})
             if noise:
-                keep = [c for c in keep if metric_of(c["key"])[0] not in varying]
+                keep = [c for c in keep if not noisy(c)]
                 notes = [*notes, ", ".join(noise[:4]) + " moves when the delivered code itself runs again (a timing or an "
                                  "unseeded draw), so it is not compared"]
         if cut:
