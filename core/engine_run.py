@@ -47,6 +47,12 @@ def _said_on_bounds(warned: list[Any]) -> list[Any]:
     return said
 
 
+
+def _printed_result(result: Any) -> str:
+    """What a run printed, to read its result from: nothing for a run stopped at its time limit (its output is kept for
+    the repair and the log, but numbers a stopped run printed are not its result)."""
+    return "" if getattr(result, "timed_out", False) else (getattr(result, "stdout", "") or "")
+
 class RunStageMixin:
     """Methods of :class:`core.engine.Engine`; see the module docstring."""
 
@@ -606,7 +612,7 @@ class RunStageMixin:
             manifest_attempts = int(state.get("run_manifest_failures", 0) or 0)
         from core import job_watch as _job_watch
 
-        _job = _job_watch.job_of(_extract_result_json(result.stdout or ""))
+        _job = _job_watch.job_of(_extract_result_json(_printed_result(result)))
         if _job is not None and _job["status"] == _job_watch.PENDING and result.returncode == 0:
             # A job still running has recorded nothing yet: its record is checked when it is done.
             manifest_status, manifest_found, self._manifest_note = "pending", [], ""
@@ -743,7 +749,7 @@ class RunStageMixin:
         ) if (self.quest_root / "figures").is_dir() else [])
         # What the primary run's figures say of themselves; the replicates below write derived.json again.
         primary_record = self._primary_figure_record = _analysis_frame.read_record(self.quest_root)
-        raw_result_json = _extract_result_json(result.stdout)
+        raw_result_json = _extract_result_json(_printed_result(result))
         self._note_typed_values(raw_result_json)
         result_json = self._without_typed_results(raw_result_json)
         self._log.info(
@@ -859,7 +865,7 @@ class RunStageMixin:
                     timeout_s=self.config.execution.timeout_s,
                     env=rep_env,
                 )
-                rep_rj = self._without_typed_results(_extract_result_json(rep_result.stdout))
+                rep_rj = self._without_typed_results(_extract_result_json(_printed_result(rep_result)))
                 if self._run_produced(rep_result) and rep_rj is not None:
                     result_json_replicates.append({"_seed": seed, **rep_rj})
                     self._log.info(
