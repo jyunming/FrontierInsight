@@ -507,7 +507,12 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
         # mean() / sd() over the trials: the measure is worked out on all the trials together, never trial by trial.
         return pooled_summary(rows, measure, expected, limit, proportions, repeated)
     used = measure_names(measure, first)
-    stat = summarise(rows, measure) if used and set(used) <= set(means or ()) else per_trial_summary(rows, measure)
+    # How far one quantity falls beyond a limit, expecting 0 (the check FI writes for a commission's limit) is a
+    # statement about the quantity's mean: the shortfall of the mean, never the mean of each trial's shortfall (a rate's
+    # trials fall 0 or the whole limit short).
+    limited = (shortfall_of(measure) if measure not in first and _number(expected) and float(expected) == 0.0 else None)
+    stat = (summarise(rows, measure) if used and (set(used) <= set(means or ()) or limited) else
+            per_trial_summary(rows, measure))
     if stat is None:
         return None
     # A 0/1 outcome the plan declares a proportion, in a random simulation: its uncertainty is its binomial interval,
@@ -526,7 +531,42 @@ def statistic(rows: list[dict[str, Any]], measure: str, means: Any = (), expecte
     if values and all(v in (0.0, 1.0) for v in values) and random and declared:
         lo, hi = wilson(int(sum(values)), len(values))
         stat.update(binary=True, successes=int(sum(values)), interval=[lo, hi], se=(hi - lo) / (2 * BAND_SE))
+    elif limited is not None and not exact and limited[0] in {str(p) for p in proportions or ()}:
+        # A declared proportion against a limit: its uncertainty is its binomial interval, carried to the signed
+        # distance from the limit the check is judged on (ten ones in ten trials do not show a rate of 0.9 or more).
+        name, at, side = limited
+        outcomes = [float(r[name]) for r in rows if isinstance(r, dict) and _number(r.get(name))]
+        if outcomes and all(v in (0.0, 1.0) for v in outcomes) and (len(set(outcomes)) > 1 or random):
+            lo, hi = wilson(int(sum(outcomes)), len(outcomes))
+            signed = sorted(at - p if side == "at_least" else p - at for p in (lo, hi))
+            stat.update(binary=True, successes=int(sum(outcomes)), interval=signed, se=(signed[1] - signed[0]) / (2 * BAND_SE))
     return stat
+
+
+def shortfall_of(measure: str) -> tuple[str, float, str] | None:
+    """``(name, limit, "at_least" | "at_most")`` for a measure that is how far one returned name falls beyond a limit,
+    ``max(0, limit - (name))`` or ``max(0, (name) - limit)`` (core/known_values.py writes it); else ``None``."""
+    try:
+        body = ast.parse(str(measure or "").strip(), mode="eval").body
+    except (SyntaxError, ValueError):
+        return None
+    if not (isinstance(body, ast.Call) and isinstance(body.func, ast.Name) and body.func.id == "max" and not body.keywords
+            and len(body.args) == 2 and isinstance(body.args[0], ast.Constant) and body.args[0].value == 0
+            and isinstance(body.args[1], ast.BinOp) and isinstance(body.args[1].op, ast.Sub)):
+        return None
+
+    def number(node: ast.AST) -> float | None:
+        sign = -1.0 if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) else 1.0
+        node = node.operand if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)) else node
+        ok = isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+        return sign * float(node.value) if ok else None  # type: ignore[union-attr]
+
+    left, right = body.args[1].left, body.args[1].right
+    if number(left) is not None and isinstance(right, ast.Name):
+        return right.id, number(left), "at_least"  # type: ignore[return-value]
+    if isinstance(left, ast.Name) and number(right) is not None:
+        return left.id, number(right), "at_most"  # type: ignore[return-value]
+    return None
 
 
 def _outcome_values(rows: list[dict[str, Any]], stat: dict[str, Any]) -> list[float]:

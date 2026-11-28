@@ -328,7 +328,7 @@ Every study starts from a commission: one YAML file that says what FI is asked t
 | `method` | how the study gets its evidence: `simulate` (FI runs an experiment; the default when left out, so every earlier commission stays valid), `analyze_data` (you put the data in the study's `data/` folder) or `review_literature` (no experiment and no data: a review of the sources you give). `fi check` refuses any other word. A config that sets `engine.no_simulation: true` or `engine.survey_mode: true` is refused unless the commission's `method` says the same |
 | `scope` | what the study covers and leaves out |
 | `limits` | `hours` and `model_calls` the study may use |
-| `known_values` | values already known, each with `name`, `value`, `tolerance`, `case` (the situation it applies to), `passage` (the sentence of the source that states it) and `source` (`title`, `file`: the full text as .pdf, .md or .txt, and `doi` when it has one). A bound ("at least 0.9") is not a known value: write it as a success or failure condition |
+| `known_values` | values already known, each with `name`, `value`, `tolerance`, `case` (the situation it applies to), `passage` (the sentence of the source that states it) and `source` (`title`, `file`: the full text as .pdf, .md or .txt, and `doi` when it has one). When the source gives only a limit ("exceeds 0.9"), add `bound: at_least` (or `at_most`): FI then checks that the result is not below (above) the value by more than the tolerance |
 | `no_known_values` | `true` when `known_values` is `[]` because none is known |
 | `success`, `failure` | lists of a `condition` and how to `verify` it |
 | `doubts` | what you already doubt, one sentence each; `[]` when none |
