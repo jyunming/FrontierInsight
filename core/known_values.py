@@ -213,23 +213,35 @@ def _g(x: float) -> str:
     return f"{x:.6g}"
 
 
-def judge(routes: list[dict[str, Any]], value: float | Decimal, tolerance: float) -> tuple[str, str]:
+def judge(routes: list[dict[str, Any]], value: float | Decimal, tolerance: float, bound: str = "") -> tuple[str, str]:
     """``(verdict, why)``: ``match``, ``no_match`` or ``cannot_judge``. Two routes of one program disagree when they are
     further apart than three times their combined error (plus half a unit of the value's last digit); a route reproduces
-    the value within the larger of the tolerance and three times its own error. One route alone is a match only for a
-    :func:`decisive` value."""
+    the value within the larger of the tolerance and three times its own error, and a limit (``bound``: ``at_least`` /
+    ``at_most``) when it is not beyond that on the wrong side: any number above a floor agrees with it, so a floor's match
+    says only that the result does not fall short. One route alone is a match only for a :func:`decisive` value."""
+    def beyond(r: dict[str, Any]) -> bool:
+        gap = r["value"] - float(value)
+        side = -gap if bound == "at_least" else gap if bound == "at_most" else abs(gap)
+        return side > max(tolerance, 3 * r["error"])
+
     for a, b in combinations(routes, 2):
         if abs(a["value"] - b["value"]) > 3 * math.hypot(a["error"], b["error"]) + _half_unit(value):
-            return "no_match", (f"its {a['route']} route gives {_g(a['value'])} (error {_g(a['error'])}) and its "
-                                f"{b['route']} route {_g(b['value'])} (error {_g(b['error'])}), further apart than their errors")
-    off = [r for r in routes if abs(r["value"] - float(value)) > max(tolerance, 3 * r["error"])]
+            said = (f"its {a['route']} route gives {_g(a['value'])} (error {_g(a['error'])}) and its "
+                    f"{b['route']} route {_g(b['value'])} (error {_g(b['error'])}), further apart than their errors")
+            if bound and not any(beyond(r) for r in routes):  # both within the limit: nothing found against it
+                return "cannot_judge", f"{said}, though neither is beyond the limit {_g(float(value))}"
+            return "no_match", said
+
+    off = [r for r in routes if beyond(r)]
     if off:
         r = off[0]
         return "no_match", (f"its {r['route']} route gives {_g(r['value'])} (error {_g(r['error'])}), not "
-                            f"{_g(float(value))} within {_g(tolerance)}")
+                            f"{_commission.stated(float(value), tolerance, bound)}")
     said = ", ".join(f"{r['route']} {_g(r['value'])}" for r in routes)
     if len(routes) < 2 and not decisive(value):
         return "cannot_judge", f"one route only ({said}), and the value is too round to tell a computed number from a typed one"
+    if bound:
+        return "match", f"{bound.replace('_', ' ')} {_g(float(value))} within {_g(tolerance)}, as the source states: {said}"
     return "match", f"reproduced: {said}"
 
 
@@ -256,7 +268,7 @@ def _source_text(quest_root: Path, name: str) -> str:
 async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any, ask: Ask, execute: Execute,
                    second: bool) -> dict[str, Any]:
     """One program for one value: asked (once more, with the reason, when it cannot be used), run, and judged."""
-    value, tolerance = written(kv), float(kv["tolerance"])
+    value, tolerance, bound = written(kv), float(kv["tolerance"]), _commission.bound_of(kv)
     given = " ".join(withhold(kv.get(k), value) for k in ("case", "passage")) + " " + withhold(shown, value)
     note = _SECOND if second else ""
     script, why = "", ""
@@ -285,13 +297,14 @@ async def _program(kv: dict[str, Any], shown: str, path: Path, *, template: Any,
                f"the program printed no `{LINE}` value ({failed})")
         return {**ran, "routes": [], "printed_before_it_stopped": routes if code != 0 else [], "verdict": "cannot_judge",
                 "why": why, "crashed": code != 0 or not cannot}
-    verdict, why = judge(routes, value, tolerance)
+    verdict, why = judge(routes, value, tolerance, bound)
     return {**ran, "verdict": verdict, "why": why}
 
 
 async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[str, Any]:
     out = {"name": kv["name"], "value": float(kv["value"]), "tolerance": float(kv["tolerance"]), "case": kv["case"],
-           "passage": kv["passage"], "source": kv["source"], "programs": []}
+           "passage": kv["passage"], "source": kv["source"], "programs": [],
+           **({"bound": _commission.bound_of(kv)} if _commission.bound_of(kv) else {})}
     if not decisive(written(kv)):  # 0, 1, 0.5: no text can be shown without it, so no program would be blind to it
         return {**out, "verdict": "cannot_judge",
                 "why": "too common a number to hide from the program's writer (one digit, or 0 or 1), so it is not computed"}
@@ -310,10 +323,12 @@ async def _one(kv: dict[str, Any], text: str, folder: Path, **how: Any) -> dict[
                 "why": f"a first program gave no value ({first['why']}); a second one: {second['why']}"}
     if second["verdict"] == "no_match" and agree(first["routes"], second["routes"], out["tolerance"]):
         return {**out, "verdict": "no_match", "why": f"{first['why']}; a second, independent program gives the same numbers"}
-    said = ("reproduced it" if second["verdict"] == "match" else
+    met, missed = (("found it within the limit", "found it beyond the limit") if out.get("bound") else
+                   ("reproduced it", "did not reproduce it"))
+    said = (met if second["verdict"] == "match" else
             "gave other numbers" if second.get("routes") else f"could not compute it ({second['why']})")
     return {**out, "verdict": "cannot_judge",
-            "why": f"a first program did not reproduce it ({first['why']}), and a second, independent one {said}"}
+            "why": f"a first program {missed} ({first['why']}), and a second, independent one {said}"}
 
 
 async def check(data: dict[str, Any], quest_root: Path, *, template: Any, ask: Ask, execute: Execute) -> dict[str, Any]:
@@ -354,14 +369,15 @@ def mismatches(record: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def problem(wrong: list[dict[str, Any]]) -> str:
     """The return's sentence: which known value two programs found to be other than the commission says."""
-    return "; ".join(f"the known value {v['name']!r} ({_g(v['value'])} within {_g(v['tolerance'])}) was computed from "
+    return "; ".join(f"the known value {v['name']!r} ({_commission.stated(v['value'], v['tolerance'], v.get('bound') or '')}) "
+                     "was computed from "
                      f"its source by two independent programs, and {v['why']}" for v in wrong)
 
 
 def evidence(wrong: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """What QC needs to decide: per value the commission's number, tolerance, passage and source, and each program's
     file, hash and routes (value and error)."""
-    return [{k: v.get(k) for k in ("name", "value", "tolerance", "case", "passage", "source", "why")}
+    return [{k: v.get(k) for k in ("name", "value", "tolerance", "bound", "case", "passage", "source", "why") if k in v}
             | {"programs": [{k: p.get(k) for k in ("program", "sha256", "routes")} for p in v.get("programs") or []]}
             for v in wrong]
 
@@ -373,7 +389,8 @@ def plan_block(record: dict[str, Any] | None) -> str:
         return ""
     lines = ["\n\nWHAT FI COMPUTED OF THE KNOWN VALUES (before this plan, each from its source, by a program FI ran)"]
     for v in values:
-        lines.append(f"- {v['name']!r} ({_g(v['value'])}): " + (
+        said = (f"{str(v['bound']).replace('_', ' ')} " if v.get("bound") else "") + _g(v["value"])
+        lines.append(f"- {v['name']!r} ({said}): " + (
             f"confirmed: {v['why']}" if v["verdict"] == "match" else f"not confirmed by FI's own computation: {v['why']}"))
     return "\n".join(lines) + "\n"
 
@@ -391,6 +408,63 @@ def labels(literature: list[Any], data: dict[str, Any]) -> dict[str, str]:
             if meta.get("source") == "user_supplied" and Path(str(meta.get("path") or "")).name in by_name}
 
 
+def wrap(measure: str, value: float, bound: str) -> str:
+    """The number FI checks for a known value given as a limit: how far ``measure`` falls beyond ``value`` on the wrong
+    side (``max(0, value - (measure))`` for ``at_least``, ``max(0, (measure) - value)`` for ``at_most``), 0 when it
+    does not."""
+    from .oracle_forms import _literal
+
+    lit = _literal(value)
+    return f"max(0, {lit} - ({measure}))" if bound == "at_least" else f"max(0, ({measure}) - {lit})"
+
+
+def unwrap(measure: Any, value: float, bound: str) -> str | None:
+    """The quantity a check measures, with FI's own :func:`wrap` for this limit taken off (a plan written again keeps
+    the form FI gave it, which must not be wrapped twice); ``None`` when there is no measure."""
+    text = measure.strip() if isinstance(measure, str) else ""
+    if not text:
+        return None
+    try:
+        body = ast.parse(text, mode="eval").body
+    except (SyntaxError, ValueError):
+        return text
+    if (isinstance(body, ast.Call) and isinstance(body.func, ast.Name) and body.func.id == "max" and not body.keywords
+            and len(body.args) == 2 and isinstance(body.args[0], ast.Constant) and body.args[0].value == 0
+            and isinstance(body.args[1], ast.BinOp) and isinstance(body.args[1].op, ast.Sub)):
+        left, right = body.args[1].left, body.args[1].right
+        if bound == "at_least" and _same(left, value):
+            return _unclip(ast.unparse(right), value)
+        if bound == "at_most" and _same(right, value):
+            return _unclip(ast.unparse(left), value)
+    return _unclip(text, value)
+
+
+def _same(node: ast.AST, value: float) -> bool:
+    """Whether ``node`` is the number ``value`` written as a constant (a negative one is a minus sign before it)."""
+    sign = 1.0
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign, node = (-1.0 if isinstance(node.op, ast.USub) else 1.0), node.operand
+    return (isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+            and math.isclose(sign * float(node.value), value, rel_tol=1e-12, abs_tol=0.0))
+
+
+def _unclip(text: str, value: float) -> str:
+    """``text`` with an outer ``min(x, value)`` or ``max(x, value)`` taken off: a quantity already clipped at the limit
+    cannot show it crossed it (``min(x, 0.25)`` is never above 0.25), so the limit is checked on ``x`` itself."""
+    try:
+        body = ast.parse(text, mode="eval").body
+    except (SyntaxError, ValueError):
+        return text
+    if (isinstance(body, ast.Call) and isinstance(body.func, ast.Name) and body.func.id in ("min", "max")
+            and not body.keywords and len(body.args) == 2):
+        a, b = body.args
+        if _same(b, value) and not _same(a, value):
+            return ast.unparse(a)
+        if _same(a, value) and not _same(b, value):
+            return ast.unparse(b)
+    return text
+
+
 def fill_checks(design: dict[str, Any], data: dict[str, Any], source_labels: dict[str, str]) -> dict[str, Any]:
     """The plan's checks named for a known value, with FI writing their kind, expected value, tolerance and source
     from the commission: the plan's model gives only the case and the measure. A known value the plan has no check
@@ -403,11 +477,24 @@ def fill_checks(design: dict[str, Any], data: dict[str, Any], source_labels: dic
         return design
     by = {_fold(kv.get("name")): kv for kv in data.get("known_values") or []}
 
-    def fi_part(kv: dict[str, Any]) -> dict[str, Any]:
+    def fi_part(kv: dict[str, Any], measure: Any = None) -> dict[str, Any]:
         label = source_labels.get(str(kv["source"]["file"]))
         where = f"[{label}]" if label else f"the supplied full text {Path(str(kv['source']['file'])).name}"
-        return {"kind": "published_value", "expected": float(kv["value"]), "tolerance": float(kv["tolerance"]),
+        part = {"kind": "published_value", "expected": float(kv["value"]), "tolerance": float(kv["tolerance"]),
                 "tolerance_mode": "absolute", "reference": f"{where}, where it states: \"{kv['passage']}\""}
+        bound = _commission.bound_of(kv)
+        if not bound:
+            return part
+        # A limit is checked as how far the quantity falls on its wrong side, expecting 0 (the form a violation takes,
+        # core/oracle_forms.py): every check of a number then judges it one-sided, and the shortfall stays the number.
+        inner = unwrap(measure, float(kv["value"]), bound)
+        part["bound"] = bound
+        part["reference"] += (f" (a limit: FI checks that the quantity is {bound.replace('_', ' ')} "
+                              f"{float(kv['value']):g}; its number is how far it falls beyond, 0 when it does not)")
+        if inner is None:  # nothing to measure the quantity by: the check names no number FI can judge
+            del part["expected"]
+            return part
+        return {**part, "measure": wrap(inner, float(kv["value"]), bound), "expected": 0.0}
 
     oracles, named = [], set()
     for o in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
@@ -416,8 +503,37 @@ def fill_checks(design: dict[str, Any], data: dict[str, Any], source_labels: dic
         kv = by.get(_fold(o.get("name"))) if isinstance(o, dict) else None
         if kv is not None:
             named.add(_fold(kv.get("name")))
-            o = {**{k: v for k, v in o.items() if k not in (*_KIND_KEYS, *_REFERENCE_KEYS, "expected_formula")}, **fi_part(kv)}
+            part = fi_part(kv, o.get("measure"))
+            gone = ("expected", "measure") if _commission.bound_of(kv) and "expected" not in part else ()
+            o = {**{k: v for k, v in o.items()
+                    if k not in (*_KIND_KEYS, *_REFERENCE_KEYS, "expected_formula", "bound", *gone)}, **part}
         oracles.append(o)
     oracles += [{"name": kv["name"], "check": f"the commission's known value for {kv['case']}", **fi_part(kv)}
                 for key, kv in by.items() if key not in named]
+    criteria = protocol.get("criteria")
+    if isinstance(criteria, list) and any(_commission.bound_of(kv) for kv in by.values()):
+        kept, _left_out = limit_criteria(criteria, data)
+        return {**design, "protocol": {**protocol, "oracles": oracles, "criteria": kept}}
     return {**design, "protocol": {**protocol, "oracles": oracles}}
+
+
+def limit_criteria(criteria: list[Any], data: dict[str, Any]) -> tuple[list[Any], list[str]]:
+    """``(the criteria, the names of those left out)``: the check of a commission's limit measures how far the quantity
+    falls beyond it, so a criterion on the check's value would read that shortfall as the quantity. One that says the
+    limit itself (``higher`` than a floor, ``lower`` than a ceiling, at the limit) is read on the shortfall, lower is
+    better, met at 0; any other bar on the quantity's value cannot be read from the check and is left out."""
+    limits = {_fold(kv.get("name")): kv for kv in data.get("known_values") or [] if _commission.bound_of(kv)}
+    kept: list[Any] = []
+    left_out: list[str] = []
+    for c in criteria:
+        kv = limits.get(_fold(c.get("oracle"))) if isinstance(c, dict) and c.get("use") == "value" else None
+        if kv is None:
+            kept.append(c)
+            continue
+        same = c.get("direction") == ("higher" if _commission.bound_of(kv) == "at_least" else "lower")
+        target = _number(c.get("target"))
+        if same and target is not None and math.isclose(target, float(kv["value"]), rel_tol=1e-12, abs_tol=0.0):
+            kept.append({**c, "use": "error", "direction": "lower", "target": 0})
+        else:
+            left_out.append(str(c.get("name") or c.get("oracle")))
+    return kept, left_out

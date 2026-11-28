@@ -458,6 +458,138 @@ def test_a_known_value_the_plan_has_no_check_for_gets_one_from_fi() -> None:
     assert len(note) == 1 and "FI added one from the commission" in note[0]
 
 
+def test_a_value_the_source_gives_as_a_floor_is_matched_by_any_number_not_below_it() -> None:
+    """A source that states only a floor ("the constant exceeds 0.25") is met by a correct 0.31: it was 'not reproduced'
+    when every known value was a number to equal (old code), and a number below the floor still is not met."""
+    above = [{"route": "definition", "value": 0.31, "error": 1e-6, "how": ""}]
+    assert known_values.judge(above, 0.25, 0.01, "at_least")[0] == "match"
+    assert known_values.judge(above, 0.25, 0.01)[0] == "no_match", "a value to equal is still held to its tolerance"
+    below = [{"route": "definition", "value": 0.23, "error": 1e-6, "how": ""}]
+    verdict, why = known_values.judge(below, 0.25, 0.01, "at_least")
+    assert verdict == "no_match" and "at least 0.25" in why
+    assert known_values.judge(above, 0.25, 0.01, "at_most")[0] == "no_match"
+    assert known_values.judge(below, 0.25, 0.01, "at_most")[0] == "match"
+
+
+def test_the_studys_check_of_a_floor_is_its_shortfall_and_is_filled_once_however_often_the_plan_is_written() -> None:
+    """The check FI writes for a floor measures how far the quantity falls short of it, expecting 0, so every check of
+    a number judges it on one side; a plan written again with FI's form is not wrapped twice, and a check with nothing
+    to measure by has no expected value to be failed against."""
+    from core import oracle_check, trial_runner
+
+    data = {"known_values": [{"name": "drain constant", "value": 0.25, "tolerance": 0.01, "case": CASE, "bound": "at_least",
+                              "passage": "The drain constant exceeds 0.25 per hour", "source": {"file": "tank_note.md"}}]}
+    design = {"protocol": {"oracles": [{"name": "drain constant", "expected": 0.3, "tolerance": 0.2, "bound": "at_most",
+                                        "case": {"outlet": "open"}, "measure": "k"}]}}
+    once = known_values.fill_checks(design, data, {"tank_note.md": "2"})
+    (check,) = once["protocol"]["oracles"]
+    assert (check["measure"], check["expected"], check["tolerance"], check["bound"]) == ("max(0, 0.25 - (k))", 0.0, 0.01,
+                                                                                         "at_least")
+    assert "at least 0.25" in check["reference"]
+    again = known_values.fill_checks(once, data, {"tank_note.md": "2"})
+    assert again["protocol"]["oracles"][0]["measure"] == check["measure"]
+    verdicts = []
+    for k in (0.31, 0.245, 0.2):
+        measured, _why = trial_runner._check_from(check["name"], check["measure"], {"k": k}, {"outlet": "open"})
+        verdicts.append(oracle_check.judged([check], {"checks": [measured]})[0]["passed_by_engine"])
+    assert verdicts == [True, True, False]
+    added = known_values.fill_checks({"protocol": {}}, data, {})["protocol"]["oracles"][0]
+    assert "expected" not in added and oracle_check.limit_of(added)[1] is None
+    assert "at least 0.25" in commission.oracle_gaps(data, {"oracles": []})[0]
+
+
+def test_a_commission_names_a_floor_or_a_ceiling_only_in_the_words_fi_reads(tmp_path: Path) -> None:
+    path = _commission(tmp_path / "bound", 0.25, 0.01)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for word, ok in (("at_least", True), ("at most", True), ("above", False)):
+        data["known_values"][0]["bound"] = word
+        path.write_text(json.dumps(data), encoding="utf-8")
+        found = [p for p in commission.problems(path) if "`bound`" in p]
+        assert (found == []) is ok, (word, found)
+    block = commission.prompt_block({**data, "known_values": [{**data["known_values"][0], "bound": "at_least"}]}, {})
+    assert "at least 0.25" in block and "the quantity itself" in block
+
+
+def test_a_limits_check_keeps_one_form_for_a_negative_limit_and_a_quantity_the_plan_already_clipped() -> None:
+    """Review of the limit checks: a negative limit was wrapped twice when the plan was written again (a ceiling of
+    -0.25 then failed a correct -1), and a quantity the plan clipped at the limit (``min(k, 0.25)``) hid a crossing."""
+    for value, bound in ((-0.25, "at_least"), (-0.25, "at_most"), (0.25, "at_least")):
+        once = known_values.wrap("k", value, bound)
+        assert known_values.unwrap(once, value, bound) == "k", (value, bound)
+    assert known_values.unwrap("min(k, 0.25)", 0.25, "at_most") == "k"
+    assert known_values.unwrap("max(0.25, k)", 0.25, "at_least") == "k"
+    assert known_values.unwrap("min(k, 0.3)", 0.25, "at_most") == "min(k, 0.3)", "another number is the plan's own"
+
+
+def test_a_limits_check_with_nothing_to_measure_keeps_no_number_of_the_models_and_a_criterion_on_it_reads_the_shortfall(
+) -> None:
+    from core import oracle_check
+
+    data = {"known_values": [{"name": "drain constant", "value": 0.25, "tolerance": 0.01, "case": CASE, "bound": "at_least",
+                              "passage": "The drain constant exceeds 0.25 per hour", "source": {"file": "tank_note.md"}}]}
+    design = {"protocol": {"oracles": [{"name": "drain constant", "expected": 42}],
+                           "criteria": [{"name": "fast", "oracle": "drain constant", "use": "value", "direction": "higher",
+                                         "target": 0.25, "tolerance": 0.01},
+                                        {"name": "other", "oracle": "outlet", "use": "value", "direction": "higher",
+                                         "target": 1, "tolerance": 0.1}]}}
+    out = known_values.fill_checks(design, data, {})["protocol"]
+    assert "expected" not in out["oracles"][0] and oracle_check.limit_of(out["oracles"][0])[1] is None
+    assert {k: out["criteria"][0][k] for k in ("use", "direction", "target")} == {"use": "error", "direction": "lower",
+                                                                                   "target": 0}
+    assert out["criteria"][1] == design["protocol"]["criteria"][1]
+
+
+def test_two_ways_of_computing_a_floor_that_differ_but_both_clear_it_hand_nothing_back() -> None:
+    routes = [{"route": "formula", "value": 0.31, "error": 0.0, "how": ""},
+              {"route": "definition", "value": 0.40, "error": 0.0, "how": ""}]
+    assert known_values.judge(routes, 0.25, 0.01, "at_least")[0] == "cannot_judge"
+    assert known_values.judge(routes, 0.25, 0.01)[0] == "no_match", "a value to equal is still not reproduced"
+
+
+def test_a_proportions_shortfall_of_a_floor_is_judged_on_its_binomial_interval() -> None:
+    """Ten successes in ten trials fall 0 short of a floor of 0.9 every time, a spread of 0 that passed the check; the
+    proportion's interval says ten trials cannot show the rate is 0.9 or more."""
+    from core import mc_error
+
+    measure = known_values.wrap("hit", 0.9, "at_least")
+    verdicts = []
+    for n, hits in ((10, 10), (400, 400), (400, 300)):
+        rows = [{"hit": 1.0}] * hits + [{"hit": 0.0}] * (n - hits)
+        stat = mc_error.statistic(rows, measure, (), 0.0, 0.01, ["hit"], repeated=True)
+        verdicts.append(mc_error.mean_verdict(stat, 0.0, 0.01))
+    assert verdicts == [None, "pass", "fail"]
+
+
+def test_a_floor_on_a_random_quantity_is_judged_on_the_shortfall_of_its_mean() -> None:
+    """Trials of 0 and 0.06 have a mean of 0.03, above a floor of 0.02; the mean of each trial's shortfall (0.01) is
+    not how far the mean falls short, and failed the check (second review of the limit checks)."""
+    from core import mc_error
+
+    rows = [{"share": 0.0}, {"share": 0.06}] * 200
+    measure = known_values.wrap("share", 0.02, "at_least")
+    stat = mc_error.statistic(rows, measure, (), 0.0, 0.0005, [], repeated=True)
+    assert stat["on"] == "means" and abs(stat["inner_mean"] - (0.02 - 0.03)) < 1e-12
+    assert mc_error.mean_verdict(stat, 0.0, 0.0005) == "pass"
+    low = mc_error.statistic([{"share": 0.0}, {"share": 0.024}] * 200, measure, (), 0.0, 0.0005, [], repeated=True)
+    assert mc_error.mean_verdict(low, 0.0, 0.0005) == "fail"
+    plan = mc_error.statistic([{"hit": 1.0}, {"hit": 0.0}] * 200, "max(0, 0.9 - hit)", (), 0.45, 0.01, ["hit"], repeated=True)
+    assert plan["on"] == "trials", "a formula the plan wrote expecting another number is still read trial by trial"
+
+
+def test_a_criterion_with_another_bar_on_a_limits_value_is_left_out_and_said() -> None:
+    data = {"known_values": [{"name": "drain constant", "value": 0.25, "tolerance": 0.01, "case": CASE, "bound": "at_least",
+                              "passage": "The drain constant exceeds 0.25 per hour", "source": {"file": "tank_note.md"}}]}
+    criteria = [{"name": "not too fast", "oracle": "drain constant", "use": "value", "direction": "lower", "target": 0.3,
+                 "tolerance": 0.01},
+                {"name": "well above", "oracle": "drain constant", "use": "value", "direction": "higher", "target": 0.4,
+                 "tolerance": 0.01}]
+    design = {"protocol": {"oracles": [{"name": "drain constant", "case": {"outlet": "open"}, "measure": "k"}],
+                           "criteria": criteria}}
+    assert known_values.fill_checks(design, data, {})["protocol"]["criteria"] == []
+    notes = commission.oracle_gaps(data, design["protocol"])
+    assert len(notes) == 2 and all("FI left it out" in n for n in notes)
+
+
 @pytest.mark.asyncio
 async def test_a_value_done_on_a_resume_is_kept_beside_the_values_already_on_disk(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
