@@ -924,7 +924,7 @@ async def run_trials(
     in_each_run: dict[str, list[Any]] | None = None, log: Any = None, at_once: int = 1, cost: Any = None,
     first_cells: int | None = None, per_process: int = 1, groups: list[list[str]] | None = None,
     group_allowance_s: float | None = None, reuse: "GroupedRun | None" = None,
-    cell_list: list[dict[str, Any]] | None = None, order: str = "plan",
+    cell_list: list[dict[str, Any]] | None = None, order: str = "plan", kind: str = "scan",
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
@@ -939,7 +939,8 @@ async def run_trials(
     of the study delivered numbers for, :mod:`core.rerun_check`); not with ``first_cells`` or ``reuse``. ``order``:
     :data:`ORDER_PLAN` (the plan's order, as always) or :data:`ORDER_SPREAD` for a study cut at the time limit: the
     settings start in an order that reaches every value of every setting early (:func:`core.optimise_search.iter_spread_cells`;
-    with ``first_cells`` the first of that order are planned, lazily). The ledger and the summary keep the plan's order."""
+    with ``first_cells`` the first of that order are planned, lazily). The ledger and the summary keep the plan's order.
+    ``kind``: what each trial is told it is (``"scan"``; ``"search"`` for the designs of a search evaluated again)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -976,7 +977,7 @@ async def run_trials(
     if not lazy and not reused:
         plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                      deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
-                     thresholds=thresholds, in_each_run=in_each_run, cell_list=cell_list)
+                     thresholds=thresholds, in_each_run=in_each_run, cell_list=cell_list, kind=kind)
         if on_plan is not None:
             on_plan(plan)
     results: dict[int, Any] = {}
