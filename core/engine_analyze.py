@@ -2075,18 +2075,22 @@ class AnalyzeStageMixin:
             try:
                 if rerun is not None and rerun.status == "changed" and reach is not None:
                     # The numbers the rerun showed changed are what is left out, and the main result among them stops the paper.
-                    how = how + "; the study run again with a repair of it reports other numbers for " + ", ".join(rerun.metrics)[:160]
+                    on = f" on a sample of {rerun.sampled} settings" if getattr(rerun, "sampled", 0) else ""
+                    how = (how + f"; the study run again{on} with a repair of it reports other numbers for "
+                           + ", ".join(rerun.metrics)[:160])
                     placed = reach.effect_of_changes(rerun.metrics)
                     # Only these keys were shown to change; what else is left out (results worked out from them, what the
                     # finding's test reaches) is left out without that having been shown.
                     rerun_keys = reach.changed_keys([m for m in (_rerun_check.metric_of(k)[0] for k in rerun.keys) if m])
-                    if not (rerun.unplaced or rerun.unwritten or "failed trials" in rerun.metrics):
+                    sampled = bool(getattr(rerun, "sampled", 0))
+                    if not (rerun.unplaced or rerun.unwritten or "failed trials" in rerun.metrics or sampled):
                         # every delivered number was compared: a declared result that did not move is not left out for the
                         # likeness of its name to one that did
                         unmoved = reach.unmoved(rerun.metrics, rerun.mode == "analysis only")
-                    if rerun.unplaced or "failed trials" in rerun.metrics:
-                        # A changed number that belongs to no result FI can name has not been cleared by the rerun: the finding
-                        # is also placed as it was before a rerun (what its test reaches), in addition to the results that moved
+                    if rerun.unplaced or "failed trials" in rerun.metrics or sampled:
+                        # A changed number that belongs to no result FI can name has not been cleared by the rerun, and a rerun
+                        # of a sample of the settings compared nothing at the others: the finding is also placed as it was
+                        # before a rerun (what its test reaches), in addition to the results that moved
                         other = reach.effect(record, issue, result)
                         placed = None if other is None else _shown_reach.union(placed, other)
                     if placed is not None and not (placed.stop or placed.left_out or self._in_results(placed.extra_keys, result)):

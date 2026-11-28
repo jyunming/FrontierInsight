@@ -10,6 +10,8 @@ the analysis on the trials it recorded (:func:`run_copy`); only the analysis aga
 analysis changed. Only the settings the delivered run ran are run again: a setting the study's time limit cut off has no
 delivered number, is not run and is not compared (it is neither a change nor a failure). A search for the best design, and a
 study FI does not run through its trial runner, run through the study's own entry (``code/run.py``), one setting after another.
+Through the trial runner, a sample of the settings is run first (:func:`judge`, :func:`sample_size`): a change it shows is the
+answer, with the verdict marked as a sample's; a sample that shows none is followed by the whole study.
 
 * A number counts as changed only when it moves by more than its Monte Carlo uncertainty. The uncertainty is read from FI's
   own record of the trials (``raw/trials.json``): a mean's spread over the trials divided by their square root, a share's
@@ -69,6 +71,16 @@ REL_TOL = 5e-4
 #: The same, when the repair draws no random number differently: the rerun then repeats the delivered run, so only rounding
 #: can differ.
 EXACT_TOL = 1e-9
+#: A whole-study rerun first runs a sample of the settings (:func:`sample_size`): this share of the settings the delivered run
+#: ran, spread over the plan, and never fewer than ``SAMPLE_MIN``. Measured on the reruns kept in 7 stored studies: a sample of
+#: a tenth showed a change in each of the 8 whole-study reruns that found one (3 settings: 6 of 8).
+SAMPLE_SHARE = 0.10
+SAMPLE_MIN = 3
+#: The mode of a rerun of a sample of the settings (:func:`judge`).
+SAMPLE_MODE = "sample of settings"
+#: Before a sample, the delivered code itself is run again on this many of its settings (:func:`_varying`): a result that
+#: moves there moves on any run (a timing the study measures, a draw from an unseeded source) and is not compared.
+VARYING_SETTINGS = 3
 #: Files whose repair cannot change the trials: only the analysis is run again, on the recorded trials.
 ANALYSIS_FILES = frozenset({"derive.py", "experiment.py", "fi_figures.py", "fi_table.py", "fi_frame.py", "fi_figure_calls.py"})
 _SKIP_KEYS = frozenset({"seconds", "bodies", "figures", "figures_said", "fi_faults", "notes", "wall_s", "elapsed_s", "elapsed",
@@ -96,12 +108,13 @@ class Verdict:
     carried: list[str] = field(default_factory=list)  # delivered result files the repaired run did not write and no changed code writes: kept as delivered
     redrawn: bool = False  # the repair changes how random numbers are drawn (changes are judged against their uncertainty)
     timed_out: bool = False  # could_not because the rerun ran out of the time it was given (not the estimate made before it)
+    sampled: int = 0  # changed on a sample of this many settings (mode SAMPLE_MODE): numbers were not compared at the others
 
     def record(self) -> dict[str, Any]:
         return {"status": self.status, "why": self.why, "metrics": self.metrics[:20], "keys": self.keys[:12],
                 "notes": self.notes[:6], "mode": self.mode, "seconds": round(self.seconds, 1), "source": self.source,
                 "files": self.files, "crashed": self.crashed, "unplaced": self.unplaced[:8], "unwritten": self.unwritten[:8], "carried": self.carried[:8],
-                "redrawn": self.redrawn, "timed_out": self.timed_out}
+                "redrawn": self.redrawn, "timed_out": self.timed_out, "sampled": self.sampled}
 
 
 # ---- how long ---------------------------------------------------------------------------------------------------------
@@ -837,10 +850,47 @@ def _ended(ran: Any, out: Path, names: list[str], timeout_s: float, mode: str, s
     return mode, out, "", secs, False
 
 
+def sample_size(settings: int) -> int:
+    """How many of ``settings`` a sample rerun runs (:data:`SAMPLE_SHARE`, at least :data:`SAMPLE_MIN`); 0 when that would be
+    half of them or more, where a sample saves too little to be worth a second run."""
+    k = max(SAMPLE_MIN, math.ceil(SAMPLE_SHARE * settings))
+    return k if 2 * k <= settings else 0
+
+
+def spliced(delivered: Any, sample: dict[str, Any], keys: set[str]) -> dict[str, Any]:
+    """The record of the trials the analysis reads after a sample rerun: the delivered record, with the settings in ``keys``
+    (and every record of a value their runs compared inside them, :func:`core.in_run.record_key`) replaced by the sample's
+    (``sample``, the summary of the sampled settings). The settings not sampled keep the delivered run's numbers, so a number
+    that differs from the delivered one was moved by the repair."""
+    from . import in_run as _in_run
+
+    def owned(c: Any) -> bool:
+        key = c.get("key") if isinstance(c, dict) else None
+        if key in keys:
+            return True
+        level = c.get("level") if isinstance(c, dict) else None
+        return isinstance(level, dict) and any(key == _in_run.record_key(k, _in_run.level_key(level)) for k in keys)
+
+    doc = dict(delivered) if isinstance(delivered, dict) else {"schema": "fi.trials/v1", "cells": []}
+    new = {c.get("key"): c for c in sample.get("cells") or [] if isinstance(c, dict)}
+    cells: list[Any] = []
+    for c in doc.get("cells") or []:
+        key = c.get("key") if isinstance(c, dict) else None
+        if owned(c):
+            if key in new:
+                cells.append(new.pop(key))
+            continue  # a record the repaired run no longer gives
+        cells.append(c)
+    cells.extend(new.values())
+    doc["cells"] = cells
+    return doc
+
+
 async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, files: list[str], timeout_s: float,
                    env: dict[str, str] | None, work: Path, results_root: Path | str | None = None, *, say: Any = None,
                    finding: str = "", derived: str = "data/results/derived.json", protocol: Any = None,
-                   at_once: int | None = None, info: dict[str, Any] | None = None) -> tuple[str, Path | None, str, float, bool]:
+                   at_once: int | None = None, info: dict[str, Any] | None = None,
+                   sample: int = 0) -> tuple[str, Path | None, str, float, bool]:
     """Run the study of a copy of ``code/``: ``(mode, folder holding data/ and raw/ it wrote or None, why not, seconds, crashed)``.
     Only the analysis, on the recorded trials, when the changed ``files`` are all analysis files (:func:`analysis_only`). Else
     the whole study: with ``at_once`` (:func:`parallel`) as the delivered run ran it, through FI's trial runner with that many
@@ -851,7 +901,9 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
     way). The run wrote results when it wrote what the delivered run's numbers are read from (:func:`result_names`), not a
     file name this module fixes: an older study writes ``result.json``, and a study whose delivered run left no result file FI
     reads is read, through FI's trial runner, from FI's record of its trials alone. ``info`` gets ``timed_out`` when the run ran out of
-    its time."""
+    its time. ``sample``: run only that many of the delivered run's settings, spread over the plan, and the analysis on the
+    delivered record of the trials with those settings replaced (:func:`spliced`); only through FI's trial runner (mode
+    :data:`SAMPLE_MODE`)."""
     began = time.monotonic()
     quest_root = Path(quest_root)
     base_root = Path(results_root or quest_root)
@@ -864,7 +916,7 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         ran = await _analysis(executor, python, copy, raw_trials, out, timeout_s, env)
         return _ended(ran, out, names, timeout_s, mode, time.monotonic() - began, info)
     mode = "whole study"
-    why = too_long(quest_root, at_once, timeout_s)
+    why = "" if sample else too_long(quest_root, at_once, timeout_s)
     if why:
         return mode, None, why, 0.0, False
     if at_once is not None and isinstance(protocol, dict):
@@ -873,7 +925,10 @@ async def run_copy(executor: Any, python: Path | str, quest_root: Path | str, co
         # copies the delivered record, so there the analysis's own result file is still required)
         trials_only = raw_trials.is_file() and not wrote_results(base_root, names)
         return await _run_like_main(executor, python, quest_root, base_root, copy, protocol, timeout_s, env, work, int(at_once),
-                                    [] if trials_only else names, say=say, finding=finding, info=info, began=began)
+                                    [] if trials_only else names, say=say, finding=finding, info=info, began=began,
+                                    sample=sample)
+    if sample:
+        return SAMPLE_MODE, None, "a sample of the settings is run only through FI's trial runner", 0.0, False
     out = copy / "output"
     if not (copy / "run.py").is_file():
         return mode, None, "the code has no run.py to run the study again with", time.monotonic() - began, False
@@ -915,14 +970,16 @@ def _plan_progress(root: Path, seen: list[Any], elapsed_s: float) -> str:
 
 async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, base_root: Path, copy: Path, protocol: dict[str, Any],
                          timeout_s: float, env: dict[str, str] | None, work: Path, at_once: int, names: list[str], *,
-                         say: Any, finding: str, info: dict[str, Any], began: float) -> tuple[str, Path | None, str, float, bool]:
+                         say: Any, finding: str, info: dict[str, Any], began: float,
+                         sample: int = 0) -> tuple[str, Path | None, str, float, bool]:
     """The whole study of ``copy`` run as the delivered run ran it (the settings, the seeds and the trial runner of
     ``core.trial_runner.TrialsRunner``, with as many settings at once and, when it shared processes after FI's check that
     sharing gives the same numbers, the same groups of settings to a process), in a folder of its own under ``work``: never
     in the quest, whose record of the trials stays as it is. Only the settings the delivered run planned are run, and of them
     not the ones its time limit cut off whole; a trial it cut off is recorded the same way in the rerun's record of the
     trials, so the analysis reads the same settings as the delivered one did. The seeds are checked against FI's ledger
-    before anything runs."""
+    before anything runs. ``sample``: only that many of those settings, the first of the plan's spread-out order
+    (:func:`core.optimise_search.iter_spread_cells`), and the analysis on the delivered record with them replaced."""
     from . import in_run as _in_run
     from . import mc_error as _mc
     from . import optimise_search as _search
@@ -932,7 +989,7 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
     from . import trial_runner as _tr
     from .split_run import SIMULATE_NAME
 
-    mode = "whole study"
+    mode = SAMPLE_MODE if sample else "whole study"
     ledger = ledger_of(base_root)
     if ledger is None or not ledger.planned:
         return mode, None, "FI has no ledger of the delivered run's trials to run them again from", 0.0, False
@@ -970,6 +1027,19 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
                 return mode, None, ("the rerun would give its trials other seeds than the delivered run gave them (trial "
                                     f"{t} of {key or 'its one setting'})"), 0.0, False
     cut = ledger.cut_settings()
+    run_keys = [k for k in cells if k not in cut]
+    if sample:
+        picked: list[str] = []
+        for listed, cell in enumerate(_search.iter_spread_cells(grid)):
+            key = _tr.cell_key(cell)
+            if key in cells and key not in cut and key not in picked:
+                picked.append(key)
+            if len(picked) >= sample or listed >= _search.MAX_LISTED_SETTINGS:
+                break
+        if len(picked) < sample:
+            return mode, None, "FI could not spread a sample over the delivered run's settings", 0.0, False
+        run_keys = [k for k in run_keys if k in set(picked)]
+        info["sampled_keys"] = list(run_keys)
     root = work / "trials"
     root.mkdir(parents=True)
 
@@ -994,7 +1064,7 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
         deterministic=deterministic, timeout_s=max(1, int(timeout_s)), env=env, thresholds=thresholds, paired=paired,
         on_plan=seen.append, in_each_run=inside, at_once=max(1, int(at_once)), per_process=shared or 1, groups=groups,
         # in the order the delivered run queued them (``cells`` was filled in that order: the spread-out one of a cut)
-        group_allowance_s=allowance, cell_list=[cell for k, cell in cells.items() if k not in cut]))
+        group_allowance_s=allowance, cell_list=[cells[k] for k in run_keys]))
     if say is not None:
         run = await _say_while(task, lambda elapsed: _plan_progress(root, seen, elapsed), say, finding)
     else:
@@ -1019,6 +1089,8 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
     levels = _in_run.level_cells(inside or {})
     every: list[Any] = []
     for key, planned in ledger.planned.items():
+        if sample and key not in set(run_keys):
+            continue
         lost = ledger.cut.get(key, set())
         cell_run = ran.get(key) or _tr.CellRun(key=key, cell=dict(cells[key]), planned=planned, levels=levels)
         rows = {r.get("trial"): r for r in cell_run.rows}
@@ -1026,7 +1098,10 @@ async def _run_like_main(executor: Any, python: Path | str, quest_root: Path, ba
                          if t in lost or t not in rows else rows[t] for t in range(planned)]
         every.append(cell_run)
     trials = root / "raw" / "trials.json"
-    trials.write_text(json.dumps(_tr.summary_of(every, thresholds), indent=1, allow_nan=True), encoding="utf-8")
+    summary = _tr.summary_of(every, thresholds)
+    if sample:
+        summary = spliced(_json(base_root / "raw" / "trials.json"), summary, set(run_keys))
+    trials.write_text(json.dumps(summary, indent=1, allow_nan=True), encoding="utf-8")
     left = timeout_s - (time.monotonic() - began)
     if left < 1:
         info["timed_out"] = True
@@ -1063,6 +1138,69 @@ def affected_files(root: Path | str, names: set[str], mode: str) -> set[str]:
     return {n for n in names if wrote.get(n) is None or wrote[n] in reran}
 
 
+async def _varying(executor: Any, python: Path | str, quest_root: Path | str, protocol: Any, timeout_s: float,
+                   env: dict[str, str] | None, results_root: Path | str | None, derived: str,
+                   at_once: int | None) -> tuple[set[str], float]:
+    """The results that move when the delivered code itself runs again (on :data:`VARYING_SETTINGS` of the settings a sample
+    runs, the first of the same spread-out order): a timing the study measures, a draw from an unseeded source. No repair
+    moves them or keeps them still, so they are not compared. A result counts only when it moves at every one of those
+    settings (a timing does; a result that moved at one setting is not known to move at another), and only from a run of them
+    that lost no number and no trial (a lost one is a failure, not a variation). ``(names, seconds)``; no names when the run
+    could not be made."""
+    from .split_run import SIMULATE_NAME
+
+    work = Path(tempfile.mkdtemp(prefix="fi_varying_"))
+    began = time.monotonic()
+    names: set[str] = set()
+    try:
+        probe = await asyncio.to_thread(copy_code, quest_root, work / "p")
+        info: dict[str, Any] = {}
+        mode, out, _why, _secs, _crashed = await run_copy(
+            executor, python, quest_root, probe, [SIMULATE_NAME], timeout_s, env, work / "w", results_root, derived=derived,
+            protocol=protocol, at_once=at_once, sample=VARYING_SETTINGS, info=info)
+        probed = set(info.get("sampled_keys") or [])
+        if out is not None and mode == SAMPLE_MODE and probed:
+            base_root = Path(results_root or quest_root)
+            cut = await asyncio.to_thread(cut_settings, base_root)
+            base = without_settings(await asyncio.to_thread(results_of, base_root, derived), cut)
+            new = without_settings(await asyncio.to_thread(results_of, out, derived), cut)
+            moved = compare(base, new, EXACT_TOL)
+            lost = any(c["new"] is None or c["old"] is None or c["key"].endswith(("/ok", "/failed")) for c in moved)
+            if not lost:
+                at: dict[str, set[str]] = {}
+                for c in moved:
+                    metric, setting = metric_of(c["key"])
+                    if metric and setting in probed:
+                        at.setdefault(metric, set()).add(setting)
+                names = {m for m, settings in at.items() if settings == probed}
+    except Exception as exc:  # noqa: BLE001 - without it every result is compared, as before
+        _LOG.warning("the delivered code could not be run again to see which results vary (%r)", exc)
+        names = set()
+    finally:
+        await asyncio.to_thread(shutil.rmtree, work, True)
+    return names, time.monotonic() - began
+
+
+def _sample_of(quest_root: Path | str, copy: Path, protocol: Any, at_once: int | None, results_root: Path | str | None) -> int:
+    """How many settings a sample rerun of the repair in ``copy`` runs first (:func:`sample_size`), or 0 when the rerun is not
+    one of the whole study through FI's trial runner (only the analysis changed, no record of the trials, a study run
+    through its own entry), the study has too few settings for a sample to save time, or the delivered run shared processes
+    between settings (FI's check before sharing compared a whole group with some of its settings alone, so a part of a group
+    is not known to give the delivered numbers)."""
+    from . import run_facts as _run_facts
+
+    if at_once is None or not isinstance(protocol, dict):
+        return 0
+    if _run_facts.settings_shared(Path(results_root or quest_root)):
+        return 0
+    if analysis_only(sorted(changed_files(quest_root, copy))):
+        return 0
+    ledger = ledger_of(Path(results_root or quest_root))
+    if ledger is None or not ledger.planned:
+        return 0
+    return sample_size(len([k for k in ledger.planned if k not in ledger.cut_settings()]))
+
+
 async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                 env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
                 derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "",
@@ -1072,8 +1210,37 @@ async def judge(executor: Any, python: Path | str, quest_root: Path | str, copy:
     (:func:`core.code_project.keep_rerun`), so a later case can be replayed on the very repair the gate judged. Keeping it
     never changes the verdict."""
     seen: dict[str, Any] = {}
-    verdict = await _judge(executor, python, quest_root, copy, protocol, timeout_s, env, source=source, results_root=results_root,
-                           derived=derived, disputed=disputed, finding=finding, seen=seen, at_once=at_once)
+    verdict = None
+    size = await asyncio.to_thread(_sample_of, quest_root, copy, protocol, at_once, results_root)
+    varying: set[str] = set()
+    probe_s = 0.0
+    if size and timeout_s is not None:
+        varying, probe_s = await _varying(executor, python, quest_root, protocol, timeout_s, env, results_root, derived,
+                                          at_once)
+    if size and timeout_s is not None:
+        # A sample of the settings first: a change it shows is the answer, and the whole study is not run. A sample that shows
+        # none says nothing of the settings it did not run, so the whole study is run then, in the time left.
+        tried = await _judge(executor, python, quest_root, copy, protocol, max(1.0, timeout_s - probe_s), env, source=source,
+                             results_root=results_root, derived=derived, disputed=disputed, finding=finding, seen=seen,
+                             at_once=at_once, sample=size, varying=varying)
+        tried.seconds += probe_s  # the time of the rerun's sample stage: the delivered code's run and the repaired one's
+        if tried.status == "changed" or tried.crashed:
+            verdict = tried  # a repaired code that does not run on the sample does not run on the whole study either
+        else:
+            timeout_s = timeout_s - tried.seconds
+            seen.pop("derived", None)  # what is kept with the answer is the whole study's record, not the sample's
+            if timeout_s < FLOOR_S:
+                # the whole study was not started: no rerun of it ran out of its time
+                said = ("showed no change" if tried.status == "unchanged"
+                        else f"could not be compared ({tried.why[:200]})")
+                verdict = Verdict("could_not", f"a sample of {size} settings {said} and no time is left to run the "
+                                  "whole study", mode=SAMPLE_MODE, seconds=tried.seconds, source=source, files=tried.files)
+    if verdict is None:
+        verdict = await _judge(executor, python, quest_root, copy, protocol, timeout_s, env, source=source,
+                               results_root=results_root, derived=derived, disputed=disputed, finding=finding, seen=seen,
+                               at_once=at_once, varying=varying)
+        if size and timeout_s is not None:
+            verdict.seconds += tried.seconds  # the sample's time is part of the rerun's
     if seen.get("files"):
         from . import code_project as _project
 
@@ -1095,7 +1262,8 @@ KEEP_DERIVED_BYTES = 4_000_000
 async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy: Path, protocol: Any, timeout_s: float | None,
                  env: dict[str, str] | None, *, source: str = "", results_root: Path | str | None = None,
                  derived: str = "data/results/derived.json", disputed: list[str] | None = None, finding: str = "",
-                 seen: dict[str, Any] | None = None, at_once: int | None = None) -> Verdict:
+                 seen: dict[str, Any] | None = None, at_once: int | None = None, sample: int = 0,
+                 varying: set[str] | None = None) -> Verdict:
     """Run the study of ``copy`` (the quest's code with a repair applied) and compare what it reports with what the quest
     delivered (``results_root``, the quest folder by default). ``finding``: the id of the finding the repair is for; while the whole study runs, the quest's run.log says
     every 30 s which finding is being rerun, how many settings are done and about how long is left. ``disputed``: the quantities a reader's claim is about; with it, a repair that leaves a delivered number
@@ -1116,7 +1284,8 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
         info: dict[str, Any] = {}
         mode, out, why, secs, crashed = await run_copy(executor, python, quest_root, copy, files, timeout_s, env, work, results_root,
                                                        say=lambda line: logger.info("[evidence_gate] %s", line), finding=finding,
-                                                       derived=derived, protocol=protocol, at_once=at_once, info=info)
+                                                       derived=derived, protocol=protocol, at_once=at_once, info=info,
+                                                       sample=sample)
         if out is None:
             return Verdict("could_not", why, mode=mode, seconds=secs, source=source, files=files, crashed=crashed,
                            timed_out=bool(info.get("timed_out")))
@@ -1150,6 +1319,20 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
         redrawn = draws_changed({r: o for r, (o, _n) in changed.items()}, {r: n for r, (_o, n) in changed.items()})
         keep, notes = counted(compare(base, new, REL_TOL if redrawn else EXACT_TOL), protocol,
                               _json(base_root / "raw" / "trials.json"), bool(redrawn))
+        # a quantity a reader's claim is about is always compared: a move of it is never set aside as variation
+        varying = {m for m in (varying or set()) if not any(_names(m, q) or _names(q, m) or m == q for q in disputed or [])}
+        if varying:
+            # a result that moves when the delivered code itself runs again is no evidence of the repair (:func:`_varying`):
+            # only its move at a setting is set aside; a number of it the repair lost, or one not read at a setting, is compared
+            def noisy(c: dict[str, Any]) -> bool:
+                metric, setting = metric_of(c["key"])
+                return bool(metric in varying and setting and c["new"] is not None and c["old"] is not None)
+
+            noise = sorted({metric_of(c["key"])[0] for c in keep if noisy(c)})
+            if noise:
+                keep = [c for c in keep if not noisy(c)]
+                notes = [*notes, ", ".join(noise[:4]) + " moves when the delivered code itself runs again (a timing or an "
+                                 "unseeded draw), so it is not compared"]
         if cut:
             notes = [*notes, f"{len(cut)} setting(s) the delivered run did not run because the study's time ran out are not "
                              "compared: they have no delivered number"]
@@ -1195,8 +1378,12 @@ async def _judge(executor: Any, python: Path | str, quest_root: Path | str, copy
             return Verdict("could_not", "the rerun did not write " + ", ".join(left_alone[:4])
                            + ", so the numbers delivered in it were not compared", notes=notes, mode=mode, seconds=secs,
                            source=source, files=files, unwritten=sorted(unwritten), carried=sorted(carried))
+        if sample:
+            notes = [*notes, f"only {sample} of the settings were run again (a sample spread over the plan); the numbers of the "
+                             "others are the delivered run's"]
         return Verdict("changed" if keep else "unchanged", "", metrics=metrics, keys=keys, notes=notes, mode=mode, seconds=secs,
-                       source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), carried=sorted(carried), redrawn=bool(redrawn))
+                       source=source, files=files, unplaced=loose, unwritten=sorted(unwritten), carried=sorted(carried), redrawn=bool(redrawn),
+                       sampled=sample if keep else 0)
     finally:
         shutil.rmtree(work, ignore_errors=True)
         if work.exists():

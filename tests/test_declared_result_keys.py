@@ -103,7 +103,10 @@ def _rerun_says(engine: Any, verdict: Verdict) -> None:
     Verdict("changed", metrics=["corr_ab_spread"], keys=["derived/derived/corr_ab_spread"], mode="analysis only",
             unwritten=["data/results/other.json"]),
     Verdict("changed", metrics=["corr_ab_spread", "failed trials"], keys=["derived/derived/corr_ab_spread"], mode="whole study"),
-], ids=["could_not", "unwritten", "failed_trials"])
+    # a change seen on a sample of the settings: nothing was compared at the others, so no result is cleared as unmoved
+    Verdict("changed", metrics=["corr_ab_spread"], keys=["derived/derived/corr_ab_spread"], mode="sample of settings",
+            sampled=3),
+], ids=["could_not", "unwritten", "failed_trials", "sampled"])
 def test_a_rerun_that_did_not_compare_everything_sets_nothing_apart(tmp_path: Path, spread_study: None, verdict: Verdict) -> None:
     engine = base._engine(tmp_path)
     _rerun_says(engine, verdict)
