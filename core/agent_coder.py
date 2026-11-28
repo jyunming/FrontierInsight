@@ -470,14 +470,15 @@ class ClaudeCliRunner:
         tree = await AsyncProcessTree.start(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if self.mode == "host" else None, env=env, **_no_window())
-        done = False
+        done = killed = False
         try:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(tree.proc.communicate(prompt.encode("utf-8")),
                                                             timeout=timeout_s)
             except asyncio.TimeoutError:
                 if name:
-                    await self._docker_run("kill", name, timeout_s=30.0)   # the container itself, not just the client
+                    await self._kill_container(name)   # the container itself, not just the client
+                    killed = True
                 await tree.kill()
                 done = True
                 return RunnerOutput(exit_code=-1, timed_out=True, duration_s=time.monotonic() - started,
@@ -492,9 +493,35 @@ class ClaudeCliRunner:
                                 duration_s=time.monotonic() - started,
                                 stderr_tail=stderr_b.decode("utf-8", "replace")[-_TAIL:])
         finally:
-            # Cancelled or failed mid-call: stop the tree even when the CLI itself has exited (a helper it started can
-            # still hold the pipe the call waited on).
-            await tree.aclose(aborted=not done)
+            try:
+                if name and not done and not killed:
+                    # Cancelled or failed mid-call: the container is stopped too. Stopping the local `docker` client
+                    # alone leaves the container running, still writing the mounted copy of code/.
+                    await self._kill_container(name)
+            finally:
+                # Cancelled or failed mid-call: stop the tree even when the CLI itself has exited (a helper it started
+                # can still hold the pipe the call waited on). Reached even when the kill above is cancelled.
+                await tree.aclose(aborted=not done)
+
+    async def _kill_container(self, name: str) -> None:
+        """``docker kill <name>``, said when it could not be confirmed (the container may still be running). The kill goes
+        on when the caller is cancelled while it waits, and its outcome is still said."""
+        def said(task: asyncio.Future) -> None:
+            if task.cancelled():
+                rc, err = -1, "the kill was cancelled"
+            elif task.exception() is not None:
+                rc, err = -1, repr(task.exception())
+            else:
+                rc, _out, err = task.result()
+            if rc != 0 and "no such container" not in err.lower() and "is not running" not in err.lower():
+                logging.getLogger(__name__).warning(
+                    "[implement] the coding agent's container %s could not be confirmed stopped (%s); it may still be "
+                    "running", name, (err or "").strip()[:200] or f"exit code {rc}")
+
+        kill = asyncio.ensure_future(self._docker_run("kill", name, timeout_s=30.0))
+        kill.add_done_callback(said)
+        with contextlib.suppress(Exception):   # said by the callback, not raised: the round's own outcome is returned
+            await asyncio.shield(kill)
 
 
 #: The one line said when the agent runs without Docker (information, not a warning).

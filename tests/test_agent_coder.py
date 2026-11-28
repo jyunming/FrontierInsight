@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -432,6 +433,62 @@ async def test_in_a_container_the_agent_works_in_code_and_fis_files_are_put_back
     assert "{'x': 1.0}" in (quest / "code" / "simulate.py").read_text(encoding="utf-8")
     call = standin.calls()[0]
     assert call["token"] == "tok-123" and "tok-123" not in " ".join(call["argv"])
+
+
+HANGING_DOCKER = r'''
+import json, os, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+log = Path(os.environ["FI_STANDIN_LOG"])
+with log.open("a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": args}) + "\n")
+if args[:1] == ["kill"] and os.environ.get("FI_STANDIN_KILL_FAILS"):
+    sys.stderr.write("Error response from daemon: cannot kill container\n")
+    sys.exit(1)
+if args[:1] == ["run"]:
+    time.sleep(60)
+'''
+
+
+async def _cancel_a_round_in_a_container(tmp_path: Path) -> list[list[str]]:
+    """Start a round with a stand-in docker whose `run` hangs, cancel it once the container is running, and return every
+    docker command the round gave."""
+    docker = _fake(tmp_path, "docker_hangs", HANGING_DOCKER)
+    runner = ac.ClaudeCliRunner(mode="docker", home_dir=tmp_path / "home", docker=docker,
+                                environ={ac.TOKEN_ENV: "tok-123"})
+    runner._built = True
+    log = Path(os.environ["FI_STANDIN_LOG"])
+
+    def calls() -> list[list[str]]:   # a line the stand-in is still writing is not read
+        text = log.read_text(encoding="utf-8") if log.is_file() else ""
+        return [json.loads(x)["argv"] for x in text.splitlines()[: text.count("\n")] if x.strip()]
+
+    task = asyncio.create_task(runner.run("task", cwd=tmp_path / "code", session_id=None, timeout_s=120))
+    for _ in range(1200):
+        if any(c[:1] == ["run"] for c in calls()):
+            break
+        await asyncio.sleep(0.1)
+    assert any(c[:1] == ["run"] for c in calls()), "the stand-in docker did not start within 120 s"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return calls()
+
+
+async def test_a_kill_the_daemon_refuses_is_said(tmp_path: Path, standin, monkeypatch, caplog) -> None:
+    monkeypatch.setenv("FI_STANDIN_KILL_FAILS", "1")
+    with caplog.at_level(logging.WARNING, logger="core.agent_coder"):
+        calls = await _cancel_a_round_in_a_container(tmp_path)
+    assert any(c[:1] == ["kill"] for c in calls)
+    assert "could not be confirmed stopped" in caplog.text and "cannot kill container" in caplog.text, caplog.text
+
+
+async def test_a_cancelled_round_in_a_container_stops_the_container_too(tmp_path: Path, standin) -> None:
+    """Old code: a cancelled round stopped only the local `docker` client; the container was stopped (`docker kill`) only
+    at the time limit, so after a cancel it could keep running and writing the mounted copy of code/."""
+    calls = await _cancel_a_round_in_a_container(tmp_path)
+    name = next(a[a.index("--name") + 1] for a in calls if a[:1] == ["run"])
+    assert ["kill", name] in calls, calls
 
 
 # --- the real daemon ----------------------------------------------------------------------------------------------------------
